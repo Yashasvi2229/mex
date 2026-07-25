@@ -1,14 +1,12 @@
 <div align="center">
 
-<img src="mascot/mex-mascot.svg" alt="Mex 吉祥物" width="80">
+<img src="mascot/mex-mascot.svg" alt="mex 吉祥物" width="80">
 
 <br>
 
 <img src="mascot/mex-ascii.svg" alt="MEX ASCII 标志" width="520">
 
-<h1 align="center">Mex：面向 AI 编程代理的项目记忆层</h1>
-
-**为 AI 编程代理提供持久化的项目记忆。**
+**由 AI 编程代理维护的代码库动态 Wiki。**
 
 [English](README.md) | **简体中文** | [Español](README.es.md) | [Português (Brasil)](README.pt-BR.md)
 
@@ -21,18 +19,20 @@
 [![CI](https://github.com/mex-memory/mex/actions/workflows/ci.yml/badge.svg)](https://github.com/mex-memory/mex/actions/workflows/ci.yml)
 [![Node.js >=22.5](https://img.shields.io/badge/node-%3E%3D22.5-339933)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6)](package.json)
-[![Agent memory](https://img.shields.io/badge/agent%20memory-compatible-6f8cff)](README.md)
+[![Agent memory](https://img.shields.io/badge/agent%20memory-compatible-6f8cff)](#代理记忆模式)
 [![MCP](https://img.shields.io/badge/MCP-compatible-6f8cff)](#mcp-服务器)
 
 </div>
 
 ---
 
-AI 编程代理会在会话之间遗忘一切。Mex 为它们提供持久、可导航的项目记忆，让每次会话都能从正确的项目上下文开始，而不是面对一大段毫无头绪的提示。它帮助代理理解代码库、保留决策，并通过结构化的开发者工具保持记忆与真实代码同步。
+mex 为代码建立地图，把代理学到的知识整理成结构化 Markdown，并让这些知识始终连接到它所描述的实现。
 
-> **v0.7.0 新功能：** 确定性的本地代码图谱、符号级记忆锚定、面向代理的紧凑检索，以及在 TypeScript 和 JavaScript 之外新增的 Python 与 Rust 支持。
+每次编程会话都从相关的架构上下文开始，而不是重新扫描整个仓库。
 
-💬 **加入 Mex Discord 社区** — 讨论想法、获取帮助、分享反馈并参与项目贡献。
+> **v0.7.0 新功能：** 确定性的本地代码图谱、符号级知识锚定、面向代理的紧凑检索，以及在 TypeScript 和 JavaScript 之外新增的 Python 与 Rust 支持。
+
+💬 **加入 mex Discord 社区** — 讨论想法、获取帮助、分享反馈并参与项目贡献。
 
 [加入 Discord →](https://discord.gg/VG7ySSMQM)
 
@@ -41,60 +41,199 @@ npx mex-agent setup
 ```
 
 <p align="center">
-  <img src="screenshots/mex-DashNew.jpg" alt="Mex 项目记忆操作面板" width="640">
+  <img src="screenshots/mex-DashNew.jpg" alt="mex 项目记忆操作面板" width="640">
 </p>
 
-## 为什么选择 Mex？
+## 你的代码库知道的远比文档更多
 
-大多数代理记忆方案最终都会变成一个庞大的指令文件。短期内这或许可行，但随后它会挤占上下文窗口、浪费 token，并逐渐偏离真实代码库。
+架构、约定、边界情况和历史决策散落在源代码、Pull Request、聊天记录以及每位贡献者的脑海中。
 
-| 不使用 Mex | 使用 Mex |
-|-------------|----------|
-| 庞大的 `CLAUDE.md` / 规则文件 | 小型锚点文件与按需路由的上下文 |
-| 代理会忘记决策和约定 | 决策、模式和项目状态得以保留 |
-| 文档悄然偏离代码 | `mex check` 可发现过时或损坏的脚手架声明 |
-| 每次会话都从零开始 | 代理只加载与当前任务有关的文件 |
-| 重复工作依赖口口相传 | 可复用模式从真实任务中持续积累 |
+AI 编程代理会在每次会话中重新发现这些知识。一个巨大的指令文件起初可能有用，但它最终会挤占上下文窗口、逐渐过时，并与真实实现脱节。
 
-## Mex 的作用
+mex 创建一个位于仓库内、持续演进的 Wiki，并随代理的工作不断成长：
 
-Mex 为代理记忆创建结构化的 Markdown 脚手架：
+- 代理把学到的知识写成可读的 Markdown
+- 确定性代码图谱将知识连接到精确的代码符号
+- 基于任务的路由只加载当前工作需要的上下文
+- 漂移检查找出可能受代码变更影响的知识
+- 工作完成后，决策、模式和当前项目状态会被写回 Wiki
 
-- `AGENTS.md` / `CLAUDE.md` — 由工具自动加载的小型锚点文件
-- `ROUTER.md` — 将任务路由到特定上下文的路由表
-- `context/` — 架构、技术栈、配置、决策和约定
-- `patterns/` — 包含注意事项与验证步骤的可复用任务指南
-- `.mex/events/decisions.jsonl` — 通过 `mex log` 追加记录的笔记
+代码仍然是真实来源，Wiki 则成为由代理持续维护的解释层。
 
-CLI 会确保这套脚手架保持可靠。它无需消耗 AI token，即可检查路径、命令、依赖项、模式索引、陈旧程度、脚本覆盖率和代码节点锚定。确定性的 SQLite 代码图谱让记忆能够指向精确符号，并在重构后保持关联。
+| 普通项目文档 | mex 动态 Wiki |
+|---|---|
+| 写完一次后逐渐被遗忘 | 从真实的编程工作中持续成长 |
+| 与实现脱节 | 声明可以指向精确的代码符号 |
+| 以一个巨大指令文件整体加载 | 根据任务路由上下文 |
+| 重构会悄悄让文档失效 | 检测已变更、移动或消失的符号 |
+| 每个代理都重新理解架构 | 代理继承已有发现和决策 |
+| 知识在会话之间丢失 | 决策和可复用模式保留在仓库中 |
+
+## 工作原理
+
+### 1. 为代码库建立地图
+
+mex 使用 Tree-sitter 和 SQLite 构建确定性的本地代码图谱。它索引 TypeScript、TSX、JavaScript、JSX、Python 和 Rust 中的符号及关系，并支持识别 Express 路由到处理器的框架级关系。
+
+```bash
+mex graph
+```
+
+### 2. 构建 Wiki
+
+设置过程中，编程代理使用图谱理解项目，并填充结构化的 Markdown Wiki：
+
+```text
+.mex/
+├── AGENTS.md
+├── ROUTER.md
+├── context/
+│   ├── architecture.md
+│   ├── stack.md
+│   ├── setup.md
+│   ├── decisions.md
+│   └── conventions.md
+├── patterns/
+│   ├── INDEX.md
+│   └── ...
+└── events/
+    └── decisions.jsonl
+```
+
+这些都是普通的 Markdown 文件：人类和代理都能阅读、审查、版本控制和编辑。
+
+### 3. 路由正确的上下文
+
+代理从一个很小的锚点文件开始，而不是加载整个 Wiki。锚点指向 `ROUTER.md`，由它选择当前任务相关的架构说明、决策、约定和任务模式。
+
+```text
+代理任务
+    ↓
+始终加载的小型锚点
+    ↓
+ROUTER.md
+    ↓
+相关 Wiki 页面
+    ↓
+紧凑的代码图谱邻域
+    ↓
+按需展开源代码
+```
+
+![mex 上下文路由流程](docs/diagrams/context-routing.svg)
+
+可编辑源文件：[docs/diagrams/context-routing.excalidraw](docs/diagrams/context-routing.excalidraw)
+
+### 4. 持续保持更新
+
+完成有意义的工作后，代理会更新项目状态、记录决策并提炼可复用模式。mex 检查 Wiki 是否仍与仓库一致：
+
+```bash
+mex check
+mex sync
+```
+
+`mex check` 无需消耗 AI token 即可验证路径、命令、依赖、链接、索引、时效性、工具配置和锚定的代码符号。需要修复时，`mex sync` 会向代理提供定向上下文，无需重新理解整个项目。
+
+![mex 漂移检测与同步循环](docs/diagrams/drift-sync.svg)
+
+可编辑源文件：[docs/diagrams/drift-sync.excalidraw](docs/diagrams/drift-sync.excalidraw)
+
+## 锚定于代码
+
+Wiki 页面可以把重要声明连接到精确的图谱节点。行为声明可以通过 frontmatter 进行锚定：
+
+```yaml
+---
+grounds_to:
+  - node: "function:a3f8...c21"
+    fingerprint: "mh:64:9f2a..."
+---
+```
+
+关键符号引用也可以在正文中直接导航：
+
+```markdown
+身份验证由
+[`requireSession()`](mex://function:a3f8...c21) 执行。
+```
+
+当函数发生变化、移动或消失时，mex 可以找到受影响的知识。同步时，可信的重命名和移动会被重新绑定；不确定的变化则交由代理判断。
+
+这样，代理可以广泛阅读以理解行为，同时只锚定真正支撑其声明的少量符号。
+
+## 面向编程代理的紧凑检索
+
+代码图谱同时也是一个紧凑的代理检索层：
+
+```bash
+mex graph scope "追踪身份验证流程"
+```
+
+mex 不会返回大段源代码，而是在严格的估算 token 预算内给出经过评分的相关符号邻域。默认结果包含紧凑签名、关系、节点 ID 和选择理由。
+
+代理随后只需展开真正需要的符号：
+
+```bash
+mex graph get <node-id>
+```
+
+还可以直接执行结构查询和影响分析：
+
+```bash
+mex graph query where-defined authenticate
+mex graph query who-calls requireSession
+mex graph query what-calls createServer
+mex impact requireSession
+```
+
+面向代理的图谱命令使用确定性的 JSONL 信封，使工具能够可靠地区分元数据、结果和摘要。
+
+## 测试结果
+
+在 mex 仓库基准测试中：
+
+| 指标 | 结果 |
+|---|---:|
+| 完整仓库语料 ÷ 图谱 scope | **916.38×** |
+| grep 前 3 条输出 ÷ 图谱 scope | **10.74×** |
+| 预期符号召回率 | **100%** |
+| 最小上下文模式完成的代理任务 | **5/5** |
+| 最小上下文模式需要回退到 Read/Grep 的任务 | **0/5** |
+| 内联源代码模式需要回退到 Read/Grep 的任务 | **4/5** |
+
+被测仓库包含：
+
+- 252 个语料文件
+- 约 733,605 个估算 token
+- 154 个进入图谱索引的源文件
+- 1,867 个代码节点
+- 2,892 条关系
+- 构建图谱约需 7.2 秒
+
+这些是来自单个仓库、六个脚本化检索任务和五个真实代理任务的方向性结果。它们验证的是紧凑检索行为，而不是普遍适用的端到端“有图谱与无图谱”token 节省结论。
+
+请参阅[基准测试结果](evaluate/RESULTS.md)和[评估工具](evaluate/README.md)，了解方法、原始结果、局限及复现命令。
 
 ## 快速开始
 
-请使用 Node.js 22.5 或更高版本安装 Mex：
-
-npm 包名为 `mex-agent`，因为 `mex` 已被占用。CLI 命令仍然是 `mex`。
+mex 需要 Node.js 22.5 或更高版本。npm 包名为 `mex-agent`，因为 `mex` 已被占用；CLI 命令仍然是 `mex`。
 
 ```bash
 npx mex-agent setup
 ```
 
-安装流程会创建 `.mex/` 脚手架，询问你使用哪种 AI 工具，构建代码图谱，并用图谱事实填充记忆。整个过程大约需要五分钟。
+设置会扫描仓库、构建本地代码图谱、创建 Markdown Wiki、让编程代理依据图谱证据填充内容、安装对应的项目锚点，并验证结果。
 
-安装结束时，你可以全局安装 Mex：
-
-```bash
-mex check        # 漂移评分
-mex sync         # 修复漂移
-```
-
-如果跳过全局安装，请使用 npx：
+设置完成后：
 
 ```bash
-npx mex-agent check
-npx mex-agent sync
+mex check                    # 检查 Wiki 健康状况和代码锚定
+mex sync                     # 使用定向代理提示修复漂移
+mex graph scope "<task>"     # 检索紧凑的任务上下文
 ```
 
-你也可以随时在之后进行全局安装：
+如果未全局安装，请使用 `npx mex-agent` 代替 `mex`。也可以随时全局安装：
 
 ```bash
 npm install -g mex-agent
@@ -102,240 +241,112 @@ npm install -g mex-agent
 
 ### Windows
 
-推荐的 `npx mex-agent setup` 流程可在任意终端中运行（命令提示符、PowerShell 或 WSL），且不需要 bash，因此大多数 Windows 用户无需特别处理本节内容。
+推荐的 `npx mex-agent setup` 流程可直接在命令提示符、PowerShell 或 WSL 中运行，无需 bash。
 
-> **Windows 用户（旧版 `setup.sh` 流程）：** 请在 WSL 或 Git Bash 中运行所有命令，不要混用环境。
+如果使用旧版 `setup.sh` 流程，请在同一个环境中执行安装、构建和 CLI 命令。不要在 WSL 中构建后再从 Windows 原生终端运行 CLI。背景信息见 [issue #10](https://github.com/mex-memory/mex/issues/10)。
 
-如果你之前通过旧版 `setup.sh` 脚本安装，在 WSL 中构建后又从 Windows 原生终端运行 CLI，会因两个文件系统之间的 `node_modules` 和路径解析差异而出现“module not found”错误。请在同一环境内完成安装、构建和 CLI 命令：要么全部使用 WSL / Git Bash，要么全部在 Windows 原生环境中通过 `npx mex-agent` 完成。
+## 核心命令
 
-背景信息请参阅 [issue #10](https://github.com/mex-memory/mex/issues/10)。
-
-## 工作原理
-
-![Mex 上下文路由流程](docs/diagrams/context-routing.svg)
-
-代理从一个自动加载的小文件开始。该文件指向 `ROUTER.md`，路由器只加载当前任务所需的上下文。完成有意义的工作后，GROW 步骤会更新项目状态、决策和任务模式，让脚手架随着使用不断变得更有价值。
-
-可编辑源文件：[docs/diagrams/context-routing.excalidraw](docs/diagrams/context-routing.excalidraw)
-
-## 漂移检测
-
-十二个检查器会根据真实代码库验证脚手架。零 token，零 AI。
-
-| 检查器 | 检测内容 |
-|---------|----------|
-| **path** | 磁盘上不存在的引用文件路径 |
-| **edges** | 指向缺失文件的 YAML frontmatter 边目标 |
-| **index-sync** | `patterns/INDEX.md` 与实际模式文件不同步 |
-| **staleness** | 超过 30 天或 50 次提交未更新的脚手架文件 |
-| **command** | 引用了不存在脚本的 `npm run X` / `make X` |
-| **dependency** | `package.json` 中缺失的声明依赖项 |
-| **cross-file** | 不同文件对同一依赖项声明了不同版本 |
-| **script-coverage** | 未在任何脚手架文件中提及的 `package.json` 脚本 |
-| **tool-config-sync** | 已安装 AI 工具的配置文件（如 `CLAUDE.md`、`.cursorrules`）彼此不同步 |
-| **todo-fixme** | 脚手架 Markdown 中尚未处理的 `TODO` / `FIXME` 标记 |
-| **broken-link** | 指向磁盘上不存在文件的本地 Markdown 链接 |
-| **grounding** | 已锚定代码节点的函数体发生变化、被模糊移动或消失 |
-
-评分从 100 开始。每个错误扣 10 分，每个警告扣 3 分，每条信息扣 1 分。
-
-![Mex 漂移检测与同步循环](docs/diagrams/drift-sync.svg)
-
-可编辑源文件：[docs/diagrams/drift-sync.excalidraw](docs/diagrams/drift-sync.excalidraw)
-
-## 命令
-
-所有命令都从项目根目录运行。如果未全局安装，请将 `mex` 替换为 `npx mex-agent`。
+所有命令都在项目根目录运行。如果没有全局安装，请将 `mex` 替换为 `npx mex-agent`。
 
 | 命令 | 作用 |
-|------|------|
-| `mex` | 打开交互式终端面板 |
-| `mex tui` | 显式打开交互式终端面板 |
-| `mex setup` | 首次设置：创建 `.mex/` 脚手架并使用 AI 填充 |
-| `mex setup --mode agent-memory` | 为持久代理 / 家庭实验室记忆工作区创建模板 |
-| `mex setup --dry-run` | 预览设置操作，但不实际修改 |
-| `mex check` | 运行漂移检查器并输出评分报告 |
-| `mex check --quiet` | 单行输出：`mex: drift score 92/100 (1 warning)` |
-| `mex check --json` | 以 JSON 输出完整报告 |
-| `mex check --fix` | 检查并在发现错误后直接进入同步 |
-| `mex sync` | 检测漂移、选择模式、让 AI 修复、验证并重复 |
-| `mex sync --dry-run` | 预览定向提示，但不执行 |
-| `mex sync --warnings` | 在同步中包含仅有警告的文件 |
-| `mex init` | 预扫描代码库并为 AI 构建结构化摘要 |
-| `mex init --json` | 原始扫描器摘要 JSON |
-| `mex graph` | 构建或重建本地代码图谱 |
-| `mex graph scope <任务>` | 以 JSONL 返回经过评分的紧凑任务邻域 |
-| `mex graph get <id...>` | 以 JSONL 展开指定节点的源码 |
-| `mex graph query <关系> <符号>` | 结构查询：`who-calls`、`what-calls` 或 `where-defined` |
-| `mex graph ground` | 在不重写内容的情况下锚定 v0.7 之前的脚手架 |
-| `mex impact <符号\|文件>` | 显示代码和记忆的影响范围 |
-| `mex log <message>` | 追加笔记、决策、风险或待办事项 |
-| `mex timeline` | 查看最近的事件日志条目 |
-| `mex heartbeat` | 运行一次轻量级持久代理健康检查 |
-| `mex doctor` | 显示易读的脚手架健康摘要 |
-| `mex watch` | 安装 post-commit hook |
-| `mex watch --interval` | 在前台重复运行 heartbeat |
-| `mex watch --uninstall` | 移除 hook |
-| `mex completion <shell>` | 输出 shell 补全 |
-| `mex commands` | 列出命令、脚本及其说明 |
+|---|---|
+| `mex` / `mex tui` | 打开交互式终端面板 |
+| `mex setup` | 创建并填充动态 Wiki |
+| `mex check` | 检查 Wiki 健康状况并计算漂移分数 |
+| `mex sync` | 修复过时或不一致的知识 |
+| `mex graph` | 构建或刷新本地代码图谱 |
+| `mex graph scope <task>` | 检索紧凑的任务相关上下文 |
+| `mex graph get <node-id...>` | 展开检索结果中的精确符号 |
+| `mex graph query <relation> <symbol>` | 查询结构化代码关系 |
+| `mex graph ground` | 将已有的 0.7 之前 Wiki 连接到图谱 |
+| `mex impact <symbol\|file>` | 查找受代码变更影响的代码和 Wiki 内容 |
+| `mex log <message>` | 记录决策、笔记、风险或待办 |
+| `mex timeline` | 查看最近的项目事件 |
+| `mex heartbeat` | 运行持久代理健康检查 |
+| `mex completion <shell>` | 输出 shell 补全脚本 |
+| `mex commands` | 列出所有命令和脚本 |
 
-v0.7.0 代码图谱支持 TypeScript、TSX、JavaScript、JSX、Python 和 Rust。测试矩阵与当前限制请参阅[代码图谱支持](docs/code-graph-support.md)。
+## 已有 mex 项目
+
+在 mex 0.7 之前创建的项目可以添加图谱锚定，而无需重新生成或改写现有文档：
+
+```bash
+mex graph
+mex graph ground
+```
+
+迁移代理会保留现有文本，同时添加精确的 `grounds_to` 条目和可导航的 `mex://` 引用，并且可以安全地重复运行。
+
+现有安装仍然兼容。没有图谱时，文件系统和词法检查器会继续运行。如果 SQLite 或某个语法无法加载，图谱检查会显示警告并跳过，CLI 的其余功能仍然可用。
+
+请参阅[代码图谱支持](docs/code-graph-support.md)，了解经过测试的语言与关系矩阵、优雅降级行为和当前限制。
 
 ## 支持的工具
 
-`mex setup` 会询问你使用的工具，并创建相应的配置文件。
+`mex setup` 会为你的编程代理安装对应的项目锚点：
 
-| 工具 | 配置文件 |
-|------|----------|
+| 工具 | 项目锚点 |
+|---|---|
 | Claude Code | `CLAUDE.md` |
+| Codex | `AGENTS.md` |
 | Cursor | `.cursorrules` |
 | Windsurf | `.windsurfrules` |
 | GitHub Copilot | `.github/copilot-instructions.md` |
 | OpenCode | `.opencode/opencode.json` |
-| Codex | `AGENTS.md` |
 
-Neovim 用户可以参阅 [docs/vim-neovim.md](docs/vim-neovim.md)，了解 Claude Code、Avante.nvim、Copilot.vim 和通用插件的配置方法。
+Neovim 用户可以参考 [Neovim 集成指南](docs/vim-neovim.md)，其中包括 Claude Code、Avante.nvim、Copilot.vim 和通用插件的配置方式。
 
 ## MCP 服务器
 
-`packages/mex-mcp` 通过 [Model Context Protocol](https://modelcontextprotocol.io) 将 Mex 以原生工具调用形式提供给 AI 代理，无需启动 shell，并返回结构化 JSON。它直接导入 `mex-agent`，因此工具与 CLI 运行相同代码，永远不会产生功能偏差。
+`packages/mex-mcp` 通过 Model Context Protocol 工具公开现有 Wiki 与事件日志功能，并复用与 CLI 相同的实现。
 
-| 工具 | 对应的 CLI | 返回内容 |
-|------|------------|----------|
-| `mex_check` | `mex check --json` | 漂移报告：评分、问题和已检查文件 |
-| `mex_log` | `mex log` / `mex timeline` | 追加事件（`decision`/`note`/`risk`/`todo`）或读取近期事件 |
-| `mex_timeline` | `mex timeline` | 按类型/日期筛选的事件，最新优先 |
-| `mex_heartbeat` | `mex heartbeat` | 健康检查：陈旧文件和待执行的记忆清理 |
-| `mex_read_file` | — | 脚手架文件内容，限制在 `.mex/` 中 |
+MCP 包尚未发布。本地开发时请运行：
 
-每个工具都接受可选的 `projectRoot`（默认使用当前目录），因此一个服务器可以面向任意项目。请先运行 `mex setup`，这些工具需要 `.mex/` 脚手架。
-
-配置客户端（Claude Code / Cursor 的 `.mcp.json`）：
-
-```json
-{
-  "mcpServers": {
-    "mex": {
-      "command": "node",
-      "args": ["packages/mex-mcp/dist/index.js"]
-    }
-  }
-}
+```bash
+npm run build --workspace mex-mcp
 ```
 
-请先使用 `npm run build --workspace mex-mcp` 构建。发布后，配置将变为 `"command": "npx", "args": ["mex-mcp"]`。
-
-会话开始时，代理通过两个调用进行定向：
-
-```
-mex_check()                   # 脚手架是否正在漂移？
-mex_read_file("ROUTER.md")    # 加载路由器，然后只读取所需上下文
-```
-
-## 使用前后对比
-
-以下是 Mex 在 AI 驱动的农业语音帮助热线 Agrow 上测试时的真实输出。
-
-**设置前的脚手架：**
-
-```markdown
-## Current Project State
-<!-- What is working. What is not yet built. Known issues.
-     Update this section whenever significant work is completed. -->
-```
-
-**设置后的脚手架：**
-
-```markdown
-## Current Project State
-
-**Working:**
-- Voice call pipeline (Twilio -> STT -> LLM -> TTS -> response)
-- Multi-provider STT with configurable selection
-- RAG system with Supabase pgvector
-- Streaming pipeline with barge-in support
-
-**Not yet built:**
-- Admin dashboard for call monitoring
-- Automated test suite
-- Multi-turn conversation memory across calls
-
-**Known issues:**
-- Sarvam AI STT bypass active; ElevenLabs fallback in use
-```
-
-**设置后的模式目录：**
-
-```text
-patterns/
-├── add-api-client.md
-├── add-language-support.md
-├── debug-pipeline.md
-└── add-rag-documents.md
-```
-
-## 真实场景结果
-
-一位社区成员在 **OpenClaw** 上独立进行了测试，覆盖 Ubuntu 24.04、Kubernetes、Docker、Ansible、Terraform、网络和监控等 10 个结构化家庭实验室场景。10/10 项测试全部通过，漂移评分为 100/100。
-
-| 场景 | 不使用 Mex | 使用 Mex | 节省 |
-|------|------------|----------|------|
-| “K8s 如何工作？” | ~3,300 tokens | ~1,450 tokens | 56% |
-| “开放 UFW 端口” | ~3,300 tokens | ~1,050 tokens | 68% |
-| “解释 Docker” | ~3,300 tokens | ~1,100 tokens | 67% |
-| 多上下文查询 | ~3,300 tokens | ~1,650 tokens | 50% |
-
-**每次会话平均减少约 60% 的 token。**
+v0.7.0 的主要发布内容仍然是 `mex-agent` CLI。
 
 ## 代理记忆模式
 
-`mex setup --mode agent-memory` 为持久代理创建脚手架。这类代理的“项目”是一个运行环境，而不是代码仓库。该模式会添加 `HEARTBEAT.md` 约定和模板，将 Mex 作为结构化、按任务路由的记忆：
+mex 的主要体验是代码库动态 Wiki。同样的路由和维护模型也可用于以运维环境为“项目”的持久代理：
 
-- `ROUTER.md` 跟踪当前运行状态，并将代理路由到正确的记忆文件。
-- `context/` 存储架构、技术栈、约定、设置和决策。
-- `patterns/` 存储重复使用的运行手册。
-- `.mex/events/decisions.jsonl` 通过 `mex log` 存储只追加的笔记和决策依据。
-
-`mex heartbeat` 有意设计得比 `mex check` 更轻量：它读取 `last_updated` frontmatter 和记忆清理元数据，状态正常时输出 `HEARTBEAT_OK`，仅在代理需要检查陈旧上下文或记忆文件时报告。使用 `mex watch --interval` 可在持久代理工作区中重复运行 heartbeat。
-
-## 配置
-
-可选设置位于 `.mex/config.json`。缺失的值将使用默认配置。
-
-```json
-{
-  "staleness": {
-    "warnDays": 30,
-    "errorDays": 90,
-    "warnCommits": 50,
-    "errorCommits": 200
-  },
-  "heartbeat": {
-    "staleDays": 7,
-    "memoryCleanupDays": 7,
-    "dailyMemoryRetentionDays": 14
-  },
-  "watch": {
-    "intervalMinutes": 30
-  }
-}
+```bash
+mex setup --mode agent-memory
 ```
+
+代理记忆模式为家庭实验室、基础设施工作区和长期运行的运维代理添加 `HEARTBEAT.md` 协议与清理约定。
+
+在社区成员对 OpenClaw 的独立测试中，mex 通过了 10/10 个结构化家庭实验室场景，平均减少约 60% 的加载上下文。这些结果描述的是代理记忆模式，与上面的代码图谱基准测试相互独立。
+
+## 设计理念
+
+- **Markdown 是持久接口。** 人类和代理都能阅读和编辑。
+- **代码是真实来源。** 重要声明始终连接到实现。
+- **上下文应该路由，而不是倾倒。** 代理只加载任务需要的内容。
+- **知识应从真实工作中成长。** 有用的模式来自已完成的任务。
+- **维护应持续进行。** 文档随仓库一起演进。
+- **检索应具有确定性。** 机械性工作不应消耗 AI token。
 
 ## 遥测
 
-Mex 会收集匿名且可退出的使用数据（命令名称、版本和操作系统，但绝不会收集路径、参数、文件内容、IP 或个人数据），用于了解产品的使用方式。可通过 `mex telemetry inspect` 审核实际载荷，并随时使用 `DO_NOT_TRACK=1`、`MEX_TELEMETRY=0` 或 `mex config set telemetry off` 退出。完整说明请参阅 [TELEMETRY.md](TELEMETRY.md)。
+mex 收集匿名、可选择退出的使用数据——命令名称、版本和操作系统——以了解工具的使用方式。它绝不会收集路径、参数、文件内容、IP 地址或个人数据。
+
+使用 `mex telemetry inspect` 审查确切的数据载荷。可通过 `DO_NOT_TRACK=1`、`MEX_TELEMETRY=0` 或 `mex config set telemetry off` 退出。详情见 [TELEMETRY.md](TELEMETRY.md)。
 
 ## 生态系统
 
-Mex 不依赖特定提供商。集成指南、赞助示例和社区方案本身应具备实用价值，并应清晰标注且放在文档中，而不是悄然改变默认体验。
+mex 不绑定任何供应商。集成指南、赞助示例和社区方案应当本身有用、明确标注，并放在文档中，而不是悄悄改变默认体验。
 
 ## 参与贡献
 
-欢迎贡献。设置方法和贡献指南请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)。
+欢迎贡献。开发设置和贡献指南见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 更新日志
 
-发布历史请参阅 [CHANGELOG.md](CHANGELOG.md)。
+发布历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 
