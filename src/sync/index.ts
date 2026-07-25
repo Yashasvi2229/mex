@@ -107,14 +107,16 @@ export async function runSync(
 
     const scaffoldFiles = findScaffoldFiles(config.projectRoot, config.scaffoldRoot);
     if (!opts.dryRun) {
-      try {
-        const repairRuntime = await loadGroundingRuntime(config);
-        if (repairRuntime) {
+      const repairRuntime = await loadGroundingRuntime(config).catch(() => null);
+      if (repairRuntime) {
+        try {
           persistMovedGroundings(config, scaffoldFiles, repairRuntime);
+        } catch {
+          // Drift check owns the user-facing degradation warning; sync continues.
+        } finally {
+          // Always release the SQLite handle, even if persistence threw.
           repairRuntime.close();
         }
-      } catch {
-        // Drift check owns the user-facing degradation warning; sync continues.
       }
     }
     const report = await runDriftCheck(config);
