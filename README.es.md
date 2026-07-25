@@ -1,40 +1,38 @@
-<!-- Translated from README.md at commit: 735e38a -->
-
 <div align="center">
 
-<img src="mascot/mex-mascot.svg" alt="Mascota de Mex" width="80">
+<img src="mascot/mex-mascot.svg" alt="Mascota de mex" width="80">
 
 <br>
 
 <img src="mascot/mex-ascii.svg" alt="Logotipo ASCII de MEX" width="520">
 
-<h1 align="center">Mex: capa de memoria de proyectos para agentes de programación con IA</h1>
-
-**Memoria persistente de proyectos para agentes de programación con IA.**
+**Una wiki viva para tu código, mantenida por tus agentes de programación con IA.**
 
 [English](README.md) | [简体中文](README.zh-CN.md) | **Español** | [Português (Brasil)](README.pt-BR.md)
 
 [![npm version](https://img.shields.io/npm/v/mex-agent.svg)](https://www.npmjs.com/package/mex-agent)
 [![npm downloads](https://img.shields.io/npm/dm/mex-agent.svg)](https://www.npmjs.com/package/mex-agent)
-[![GitHub stars](https://img.shields.io/badge/stars-1.2K%2B-111111)](https://github.com/theDakshJaitly/mex/stargazers)
+[![GitHub stars](https://img.shields.io/badge/stars-1.2K%2B-111111)](https://github.com/mex-memory/mex/stargazers)
 [![Website](https://img.shields.io/badge/website-mexmemory.com-4f7cff)](https://mexmemory.com)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/VG7ySSMQM)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/theDakshJaitly/mex/actions/workflows/ci.yml/badge.svg)](https://github.com/theDakshJaitly/mex/actions/workflows/ci.yml)
-[![Node.js >=20](https://img.shields.io/badge/node-%3E%3D20-339933)](package.json)
+[![CI](https://github.com/mex-memory/mex/actions/workflows/ci.yml/badge.svg)](https://github.com/mex-memory/mex/actions/workflows/ci.yml)
+[![Node.js >=22.5](https://img.shields.io/badge/node-%3E%3D22.5-339933)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6)](package.json)
-[![Agent memory](https://img.shields.io/badge/agent%20memory-compatible-6f8cff)](README.md)
+[![Agent memory](https://img.shields.io/badge/agent%20memory-compatible-6f8cff)](#modo-de-memoria-del-agente)
 [![MCP](https://img.shields.io/badge/MCP-compatible-6f8cff)](#servidor-mcp)
 
 </div>
 
 ---
 
-Los agentes de programación con IA olvidan todo entre sesiones. Mex les proporciona una memoria de proyecto permanente y navegable para que cada sesión comience con el contexto adecuado, en lugar de un bloque de instrucciones sin orientación. Ayuda a comprender el código, conservar decisiones y mantener el contexto del proyecto alineado con el repositorio mediante herramientas para desarrolladores.
+mex crea un mapa de tu código, convierte lo que aprenden los agentes en Markdown estructurado y mantiene ese conocimiento conectado con la implementación que describe.
 
-> **Estado de la versión:** npm y `main` permanecen en la versión estable v0.6.3. El grafo de código basado en AST/Tree-sitter es una vista previa para desarrolladores de la versión v0.7.0 aún no publicada, disponible en `code-graph-preview`; todavía no se ha publicado en npm.
+Cada sesión de programación comienza con el contexto arquitectónico relevante, no con otro escaneo completo del repositorio.
 
-💬 **Únete a la comunidad de Mex en Discord** — comenta ideas, obtén ayuda, comparte tus opiniones y contribuye al proyecto.
+> **Nuevo en v0.7.0:** grafos de código locales y deterministas, conocimiento vinculado a símbolos, recuperación compacta para agentes y compatibilidad con Python y Rust además de TypeScript y JavaScript.
+
+💬 **Únete a la comunidad de mex en Discord** — comenta ideas, obtén ayuda, comparte tus opiniones y contribuye al proyecto.
 
 [Unirse a Discord →](https://discord.gg/VG7ySSMQM)
 
@@ -43,70 +41,192 @@ npx mex-agent setup
 ```
 
 <p align="center">
-  <img src="screenshots/mex-DashNew.jpg" alt="Panel operativo de memoria de proyectos de Mex" width="640">
+  <img src="screenshots/mex-DashNew.jpg" alt="Panel operativo de memoria de proyectos de mex" width="640">
 </p>
 
-## ¿Por qué Mex?
+## Tu código sabe más que su documentación
 
-La mayoría de las soluciones de memoria para agentes terminan convertidas en un enorme archivo de instrucciones. Eso funciona durante un tiempo, pero después satura la ventana de contexto, consume tokens y se aleja del código real.
+La arquitectura, las convenciones, los casos límite y las decisiones históricas están dispersos entre el código fuente, los pull requests, los chats y las personas que contribuyen al proyecto.
 
-| Sin Mex | Con Mex |
-|---------|---------|
-| Archivos enormes de `CLAUDE.md` / reglas | Un pequeño archivo de anclaje y contexto dirigido |
-| Los agentes olvidan decisiones y convenciones | Las decisiones, patrones y el estado del proyecto persisten |
-| La documentación se desvía del código en silencio | `mex check` detecta afirmaciones obsoletas o rotas en el scaffold |
-| Cada sesión comienza desde cero | Los agentes cargan solo los archivos relevantes para la tarea |
-| El trabajo repetido depende del conocimiento informal | Los nuevos patrones surgen de tareas reales |
+Los agentes de programación con IA redescubren ese conocimiento en cada sesión. Un enorme archivo de instrucciones puede ayudar al principio, pero termina saturando la ventana de contexto, quedándose obsoleto y alejándose de la implementación real.
 
-## Qué hace
+mex crea una wiki viva dentro del repositorio que crece mientras trabajan los agentes:
 
-Mex crea un scaffold estructurado en Markdown para la memoria del agente:
+- los agentes documentan lo aprendido en Markdown legible
+- un grafo de código determinista conecta ese conocimiento con símbolos exactos
+- el enrutamiento por tarea carga solo el contexto necesario
+- las comprobaciones de desviación detectan conocimiento afectado por cambios en el código
+- el trabajo completado incorpora decisiones, patrones y el estado actual del proyecto a la wiki
 
-- `AGENTS.md` / `CLAUDE.md` — pequeño archivo de anclaje cargado por la herramienta
-- `ROUTER.md` — tabla que dirige cada tarea a su contexto específico
-- `context/` — arquitectura, stack, configuración, decisiones y convenciones
-- `patterns/` — guías reutilizables con consideraciones y pasos de verificación
-- `.mex/events/decisions.jsonl` — notas de solo anexado mediante `mex log`
+El código sigue siendo la fuente de verdad. La wiki se convierte en su explicación mantenida.
 
-La CLI mantiene ese scaffold en orden. Comprueba rutas, comandos, dependencias, índices de patrones, antigüedad y cobertura de scripts sin consumir tokens de IA. Cuando aparece una desviación, `mex sync` genera instrucciones específicas para que el agente corrija únicamente las partes obsoletas.
+| Documentación de proyecto convencional | Wiki viva de mex |
+|---|---|
+| Se escribe una vez y se olvida gradualmente | Crece a partir del trabajo real |
+| Está desconectada de la implementación | Sus afirmaciones apuntan a símbolos exactos |
+| Se carga como un enorme archivo de instrucciones | El contexto se enruta según la tarea |
+| Las refactorizaciones invalidan documentos en silencio | Detecta símbolos modificados, movidos o eliminados |
+| Cada agente redescubre la arquitectura | Los agentes heredan descubrimientos y decisiones |
+| El conocimiento desaparece entre sesiones | Las decisiones y los patrones permanecen en el repositorio |
+
+## Cómo funciona
+
+### 1. Crea un mapa del código
+
+mex construye un grafo de código local y determinista con Tree-sitter y SQLite. Indexa símbolos y relaciones en TypeScript, TSX, JavaScript, JSX, Python y Rust, incluidas relaciones de rutas a manejadores de Express.
+
+```bash
+mex graph
+```
+
+### 2. Construye la wiki
+
+Durante la configuración, tu agente usa el grafo para comprender el proyecto y completar una wiki Markdown estructurada:
+
+```text
+.mex/
+├── AGENTS.md
+├── ROUTER.md
+├── context/
+│   ├── architecture.md
+│   ├── stack.md
+│   ├── setup.md
+│   ├── decisions.md
+│   └── conventions.md
+├── patterns/
+│   ├── INDEX.md
+│   └── ...
+└── events/
+    └── decisions.jsonl
+```
+
+Siguen siendo archivos Markdown normales: legibles, revisables, versionados y editables por personas o agentes.
+
+### 3. Enruta el contexto adecuado
+
+Los agentes comienzan con un pequeño archivo de anclaje en lugar de cargar toda la wiki. Este apunta a `ROUTER.md`, que selecciona la arquitectura, decisiones, convenciones y patrones relevantes para la tarea.
+
+```text
+Tarea del agente
+    ↓
+Pequeño anclaje siempre cargado
+    ↓
+ROUTER.md
+    ↓
+Páginas relevantes de la wiki
+    ↓
+Vecindario compacto del grafo
+    ↓
+Expansión específica del código fuente
+```
+
+![Flujo de enrutamiento de contexto de mex](docs/diagrams/context-routing.svg)
+
+Fuente editable: [docs/diagrams/context-routing.excalidraw](docs/diagrams/context-routing.excalidraw)
+
+### 4. Mantenla actualizada
+
+Después de un trabajo significativo, el agente actualiza el estado del proyecto, registra decisiones y captura patrones reutilizables. mex comprueba que la wiki siga coincidiendo con el repositorio:
+
+```bash
+mex check
+mex sync
+```
+
+`mex check` valida rutas, comandos, dependencias, enlaces, índices, antigüedad, configuración de herramientas y símbolos vinculados sin gastar tokens de IA. Cuando hay que reparar algo, `mex sync` entrega contexto dirigido al agente en vez de pedirle que redescubra todo el proyecto.
+
+![Ciclo de detección y sincronización de mex](docs/diagrams/drift-sync.svg)
+
+Fuente editable: [docs/diagrams/drift-sync.excalidraw](docs/diagrams/drift-sync.excalidraw)
+
+## Vinculada al código
+
+Las páginas de la wiki pueden conectar afirmaciones importantes con nodos exactos del grafo:
+
+```yaml
+---
+grounds_to:
+  - node: "function:a3f8...c21"
+    fingerprint: "mh:64:9f2a..."
+---
+```
+
+Las referencias importantes también pueden ser navegables dentro del texto:
+
+```markdown
+La autenticación la aplica
+[`requireSession()`](mex://function:a3f8...c21).
+```
+
+Cuando esa función cambia, se mueve o desaparece, mex identifica el conocimiento afectado. Los cambios de nombre y movimientos seguros se vuelven a vincular durante la sincronización; los casos ambiguos se presentan al agente.
+
+Así, el agente puede leer ampliamente para comprender un comportamiento y vincular solo los pocos símbolos que realmente respaldan lo que escribe.
+
+## Recuperación compacta para agentes
+
+El grafo también funciona como capa de recuperación compacta:
+
+```bash
+mex graph scope "seguir el flujo de autenticación"
+```
+
+En lugar de devolver grandes bloques de código, mex produce un vecindario puntuado de símbolos relevantes con un límite estricto de tokens estimados. La respuesta predeterminada contiene firmas compactas, relaciones, IDs de nodo y motivos de selección.
+
+El agente expande únicamente los símbolos necesarios:
+
+```bash
+mex graph get <node-id>
+```
+
+También hay consultas estructurales y análisis de impacto:
+
+```bash
+mex graph query where-defined authenticate
+mex graph query who-calls requireSession
+mex graph query what-calls createServer
+mex impact requireSession
+```
+
+Los comandos para agentes usan envolturas JSONL deterministas para separar metadatos, resultados y resúmenes de forma fiable.
+
+## Resultados
+
+En el benchmark del repositorio de mex:
+
+| Medición | Resultado |
+|---|---:|
+| Corpus completo ÷ alcance del grafo | **916.38×** |
+| Salida de los 3 primeros resultados de grep ÷ alcance | **10.74×** |
+| Recuperación de símbolos esperados | **100%** |
+| Tareas completadas con contexto mínimo | **5/5** |
+| Tareas mínimas que necesitaron Read/Grep | **0/5** |
+| Tareas con fuente incluida que necesitaron Read/Grep | **4/5** |
+
+El repositorio medido contenía 252 archivos de corpus, unos 733 605 tokens estimados, 154 archivos indexados, 1867 nodos y 2892 relaciones. El grafo tardó aproximadamente 7,2 segundos en construirse.
+
+Son resultados orientativos de un repositorio, seis tareas de recuperación automatizadas y cinco tareas con agentes reales. Demuestran una recuperación compacta, no un ahorro universal de tokens de extremo a extremo frente a no utilizar un grafo.
+
+Consulta los [resultados del benchmark](evaluate/RESULTS.md) y el [sistema de evaluación](evaluate/README.md) para ver la metodología, los datos, las limitaciones y los comandos de reproducción.
 
 ## Inicio rápido
 
-La versión estable de npm es v0.6.3. Instálala con Node.js 20 o posterior:
-
-El paquete de npm se llama `mex-agent` porque `mex` ya estaba ocupado. El comando de la CLI sigue siendo `mex`.
+mex requiere Node.js 22.5 o posterior. El paquete npm se llama `mex-agent` porque `mex` ya estaba ocupado; el comando de la CLI sigue siendo `mex`.
 
 ```bash
 npx mex-agent setup
 ```
 
-Para probar o contribuir a la vista previa del grafo de código, usa Node.js 22.5 o posterior y compila `code-graph-preview` desde el código fuente:
+La configuración inspecciona el repositorio, construye el grafo local, crea la wiki Markdown, pide al agente que la complete usando evidencia del grafo, instala el anclaje correcto y valida el resultado.
+
+Después:
 
 ```bash
-git clone https://github.com/theDakshJaitly/mex.git
-cd mex
-git switch code-graph-preview
-npm install
-npm run build
+mex check                    # Comprueba la wiki y sus vínculos con el código
+mex sync                     # Repara desviaciones con instrucciones dirigidas
+mex graph scope "<task>"     # Recupera contexto compacto para una tarea
 ```
 
-La configuración crea el scaffold `.mex/`, pregunta qué herramienta de IA utilizas, preanaliza el repositorio y genera una instrucción específica para completar los archivos de memoria. Tarda unos cinco minutos.
-
-Al terminar, puedes instalar Mex globalmente:
-
-```bash
-mex check        # puntuación de desviación
-mex sync         # corregir desviaciones
-```
-
-Si omites la instalación global, usa npx:
-
-```bash
-npx mex-agent check
-npx mex-agent sync
-```
-
-También puedes instalarlo globalmente más adelante:
+Si no está instalado globalmente, usa `npx mex-agent` en lugar de `mex`. Puedes instalarlo globalmente con:
 
 ```bash
 npm install -g mex-agent
@@ -114,231 +234,106 @@ npm install -g mex-agent
 
 ### Windows
 
-El flujo recomendado, `npx mex-agent setup`, funciona en cualquier terminal (Símbolo del sistema, PowerShell o WSL) y no necesita bash. Por tanto, la mayoría de los usuarios de Windows no tienen que preocuparse por esta sección.
+El flujo recomendado `npx mex-agent setup` funciona en Símbolo del sistema, PowerShell o WSL y no necesita bash.
 
-> **Usuarios de Windows (flujo antiguo con `setup.sh`):** ejecuten todos los comandos dentro de WSL o Git Bash. No mezclen entornos.
+Con el flujo antiguo `setup.sh`, ejecuta instalación, compilación y CLI en el mismo entorno. No compiles en WSL para después ejecutar la CLI desde una terminal nativa de Windows. Consulta el [issue #10](https://github.com/mex-memory/mex/issues/10).
 
-Si instalaste mediante el script antiguo `setup.sh`, compilar dentro de WSL y ejecutar después la CLI desde una terminal nativa de Windows provoca errores de “module not found”, porque `node_modules` y la resolución de rutas difieren entre ambos sistemas de archivos. Ejecuta la instalación, compilación y comandos de la CLI en un único entorno: todo en WSL / Git Bash, o todo en Windows nativo mediante `npx mex-agent`.
+## Comandos principales
 
-Consulta el [issue #10](https://github.com/theDakshJaitly/mex/issues/10) para conocer el contexto.
+| Comando | Función |
+|---|---|
+| `mex` / `mex tui` | Abre el panel interactivo de terminal |
+| `mex setup` | Crea y completa la wiki viva |
+| `mex check` | Comprueba la wiki y calcula su puntuación de desviación |
+| `mex sync` | Repara conocimiento obsoleto o incoherente |
+| `mex graph` | Construye o actualiza el grafo local |
+| `mex graph scope <task>` | Recupera contexto compacto para una tarea |
+| `mex graph get <node-id...>` | Expande símbolos exactos |
+| `mex graph query <relation> <symbol>` | Consulta relaciones estructurales |
+| `mex graph ground` | Conecta una wiki anterior a 0.7 con el grafo |
+| `mex impact <symbol\|file>` | Encuentra código y wiki afectados por un cambio |
+| `mex log <message>` | Registra una decisión, nota, riesgo o tarea |
+| `mex timeline` | Muestra eventos recientes |
+| `mex heartbeat` | Ejecuta comprobaciones para agentes persistentes |
+| `mex completion <shell>` | Imprime autocompletado de shell |
+| `mex commands` | Enumera todos los comandos y scripts |
 
-## Cómo funciona
+## Proyectos mex existentes
 
-![Flujo de enrutamiento de contexto de Mex](docs/diagrams/context-routing.svg)
+Los proyectos anteriores a mex 0.7 pueden añadir vínculos con el grafo sin regenerar ni reescribir su documentación:
 
-El agente comienza con un pequeño archivo cargado automáticamente. Este archivo apunta a `ROUTER.md`, y el router carga únicamente el contexto necesario para la tarea actual. Después de un trabajo significativo, el paso GROW actualiza el estado del proyecto, las decisiones y los patrones de tareas para que el scaffold resulte más útil con el tiempo.
+```bash
+mex graph
+mex graph ground
+```
 
-Fuente editable: [docs/diagrams/context-routing.excalidraw](docs/diagrams/context-routing.excalidraw)
+El agente de migración conserva el texto y añade entradas `grounds_to` precisas y referencias `mex://` navegables. Es seguro volver a ejecutarlo.
 
-## Detección de desviaciones
+Sin un grafo, los comprobadores de archivos y texto siguen funcionando. Si SQLite o una gramática no se carga, las comprobaciones del grafo se omiten con una advertencia y el resto de la CLI continúa disponible.
 
-Once verificadores validan el scaffold frente al código real. Cero tokens, cero IA.
-
-| Verificador | Qué detecta |
-|-------------|-------------|
-| **path** | Rutas de archivos referenciadas que no existen en el disco |
-| **edges** | Destinos de aristas en el frontmatter YAML que apuntan a archivos inexistentes |
-| **index-sync** | `patterns/INDEX.md` no sincronizado con los archivos de patrones reales |
-| **staleness** | Archivos del scaffold sin actualizar durante más de 30 días o 50 commits |
-| **command** | Referencias `npm run X` / `make X` a scripts inexistentes |
-| **dependency** | Dependencias declaradas que faltan en `package.json` |
-| **cross-file** | Una misma dependencia con versiones distintas entre archivos |
-| **script-coverage** | Scripts de `package.json` no mencionados en ningún archivo del scaffold |
-| **tool-config-sync** | Archivos de configuración de herramientas de IA instaladas (p. ej., `CLAUDE.md`, `.cursorrules`) sin sincronizar entre sí |
-| **todo-fixme** | Marcadores `TODO` / `FIXME` sin resolver en el Markdown del scaffold |
-| **broken-link** | Enlaces Markdown locales a archivos que no existen en el disco |
-
-La puntuación comienza en 100. Mex resta 10 por error, 3 por advertencia y 1 por información.
-
-![Bucle de detección y sincronización de desviaciones de Mex](docs/diagrams/drift-sync.svg)
-
-Fuente editable: [docs/diagrams/drift-sync.excalidraw](docs/diagrams/drift-sync.excalidraw)
-
-## Comandos
-
-Todos los comandos se ejecutan desde la raíz del proyecto. Si no hiciste una instalación global, sustituye `mex` por `npx mex-agent`.
-
-| Comando | Qué hace |
-|---------|----------|
-| `mex` | Abre el panel interactivo de terminal |
-| `mex tui` | Abre explícitamente el panel interactivo de terminal |
-| `mex setup` | Configuración inicial: crea el scaffold `.mex/` y lo completa con IA |
-| `mex setup --mode agent-memory` | Crea plantillas para espacios de memoria de agentes persistentes / homelab |
-| `mex setup --dry-run` | Previsualiza la configuración sin realizar cambios |
-| `mex check` | Ejecuta los verificadores de desviación y muestra un informe con puntuación |
-| `mex check --quiet` | Una línea: `mex: drift score 92/100 (1 warning)` |
-| `mex check --json` | Informe completo en JSON |
-| `mex check --fix` | Comprueba y pasa directamente a la sincronización si encuentra errores |
-| `mex sync` | Detecta desviaciones, elige un modo, permite que la IA corrija, verifica y repite |
-| `mex sync --dry-run` | Previsualiza instrucciones específicas sin ejecutarlas |
-| `mex sync --warnings` | Incluye en la sincronización archivos que solo tienen advertencias |
-| `mex init` | Preanaliza el repositorio y crea un resumen estructurado para la IA |
-| `mex init --json` | Resumen bruto del analizador en JSON |
-| `mex log <message>` | Añade una nota, decisión, riesgo o tarea pendiente |
-| `mex timeline` | Muestra las entradas recientes del registro de eventos |
-| `mex heartbeat` | Ejecuta una vez las comprobaciones ligeras de salud para agentes persistentes |
-| `mex doctor` | Resumen legible del estado del scaffold |
-| `mex watch` | Instala un hook post-commit |
-| `mex watch --interval` | Ejecuta heartbeat repetidamente en primer plano |
-| `mex watch --uninstall` | Elimina el hook |
-| `mex completion <shell>` | Imprime el autocompletado para el shell |
-| `mex commands` | Enumera comandos y scripts con sus descripciones |
+Consulta [Compatibilidad del grafo](docs/code-graph-support.md) para conocer la matriz de lenguajes y relaciones, la degradación gradual y las limitaciones actuales.
 
 ## Herramientas compatibles
 
-`mex setup` pregunta qué herramienta utilizas y crea el archivo de configuración correspondiente.
-
-| Herramienta | Archivo de configuración |
-|-------------|--------------------------|
+| Herramienta | Anclaje del proyecto |
+|---|---|
 | Claude Code | `CLAUDE.md` |
+| Codex | `AGENTS.md` |
 | Cursor | `.cursorrules` |
 | Windsurf | `.windsurfrules` |
 | GitHub Copilot | `.github/copilot-instructions.md` |
 | OpenCode | `.opencode/opencode.json` |
-| Codex | `AGENTS.md` |
 
-Los usuarios de Neovim pueden consultar [docs/vim-neovim.md](docs/vim-neovim.md) para configurar Claude Code, Avante.nvim, Copilot.vim y plugins genéricos.
+Los usuarios de Neovim pueden seguir la [guía de integración](docs/vim-neovim.md).
 
 ## Servidor MCP
 
-`packages/mex-mcp` expone Mex a agentes de IA mediante llamadas nativas del [Model Context Protocol](https://modelcontextprotocol.io): sin invocar un shell y con respuestas JSON estructuradas. Importa `mex-agent` directamente, por lo que las herramientas ejecutan el mismo código que la CLI y nunca se desvían de ella.
+`packages/mex-mcp` expone la wiki y el registro de eventos mediante herramientas Model Context Protocol y reutiliza la misma implementación que la CLI.
 
-| Herramienta | CLI equivalente | Devuelve |
-|-------------|-----------------|----------|
-| `mex_check` | `mex check --json` | Informe de desviación: puntuación, problemas y archivos comprobados |
-| `mex_log` | `mex log` / `mex timeline` | Añade un evento (`decision`/`note`/`risk`/`todo`) o lee los recientes |
-| `mex_timeline` | `mex timeline` | Eventos filtrados por tipo/fecha, los más recientes primero |
-| `mex_heartbeat` | `mex heartbeat` | Comprobación de salud: archivos obsoletos y limpieza de memoria pendiente |
-| `mex_read_file` | — | Contenido de un archivo del scaffold, restringido a `.mex/` |
+El paquete MCP todavía no está publicado. Para desarrollo local:
 
-Cada herramienta acepta un `projectRoot` opcional (el directorio actual de forma predeterminada), por lo que un servidor puede trabajar con cualquier proyecto. Ejecuta primero `mex setup`: las herramientas necesitan un scaffold `.mex/`.
-
-Configura tu cliente (Claude Code / `.mcp.json` de Cursor):
-
-```json
-{
-  "mcpServers": {
-    "mex": {
-      "command": "node",
-      "args": ["packages/mex-mcp/dist/index.js"]
-    }
-  }
-}
+```bash
+npm run build --workspace mex-mcp
 ```
 
-Compílalo primero con `npm run build --workspace mex-mcp`. Una vez publicado, se convertirá en `"command": "npx", "args": ["mex-mcp"]`.
-
-Al comenzar una sesión, el agente se orienta con dos llamadas:
-
-```
-mex_check()                   # ¿se está desviando el scaffold?
-mex_read_file("ROUTER.md")    # carga el router y después solo el contexto necesario
-```
-
-## Antes y después
-
-Salida real de las pruebas de Mex en Agrow, una línea de ayuda agrícola por voz basada en IA.
-
-**Scaffold antes de la configuración:**
-
-```markdown
-## Current Project State
-<!-- What is working. What is not yet built. Known issues.
-     Update this section whenever significant work is completed. -->
-```
-
-**Scaffold después de la configuración:**
-
-```markdown
-## Current Project State
-
-**Working:**
-- Voice call pipeline (Twilio -> STT -> LLM -> TTS -> response)
-- Multi-provider STT with configurable selection
-- RAG system with Supabase pgvector
-- Streaming pipeline with barge-in support
-
-**Not yet built:**
-- Admin dashboard for call monitoring
-- Automated test suite
-- Multi-turn conversation memory across calls
-
-**Known issues:**
-- Sarvam AI STT bypass active; ElevenLabs fallback in use
-```
-
-**Directorio de patrones después de la configuración:**
-
-```text
-patterns/
-├── add-api-client.md
-├── add-language-support.md
-├── debug-pipeline.md
-└── add-rag-documents.md
-```
-
-## Resultados en el mundo real
-
-Un miembro de la comunidad lo probó de forma independiente en **OpenClaw** con 10 escenarios estructurados de homelab que abarcan Ubuntu 24.04, Kubernetes, Docker, Ansible, Terraform, redes y monitorización. Las 10 pruebas fueron satisfactorias. Puntuación de desviación: 100/100.
-
-| Escenario | Sin Mex | Con Mex | Ahorro |
-|-----------|---------|---------|--------|
-| «¿Cómo funciona K8s?» | ~3,300 tokens | ~1,450 tokens | 56% |
-| «Abrir un puerto UFW» | ~3,300 tokens | ~1,050 tokens | 68% |
-| «Explicar Docker» | ~3,300 tokens | ~1,100 tokens | 67% |
-| Consulta multicontexto | ~3,300 tokens | ~1,650 tokens | 50% |
-
-**Reducción media de tokens de aproximadamente un 60 % por sesión.**
+La publicación principal de v0.7.0 sigue siendo la CLI `mex-agent`.
 
 ## Modo de memoria del agente
 
-`mex setup --mode agent-memory` crea un scaffold para agentes persistentes cuyo «proyecto» es un entorno operativo y no un repositorio de código. Añade un contrato `HEARTBEAT.md` y plantillas que presentan Mex como memoria estructurada y dirigida por tareas:
+La experiencia principal de mex es la wiki viva del código. El mismo modelo también sirve para agentes persistentes cuyo “proyecto” es un entorno operativo:
 
-- `ROUTER.md` registra el estado operativo actual y dirige al agente a los archivos de memoria correctos.
-- `context/` almacena arquitectura, stack, convenciones, configuración y decisiones.
-- `patterns/` almacena procedimientos reutilizables.
-- `.mex/events/decisions.jsonl` almacena notas y razonamientos de solo anexado mediante `mex log`.
-
-`mex heartbeat` es intencionadamente más ligero que `mex check`: lee el frontmatter `last_updated` y los metadatos de limpieza de memoria, imprime `HEARTBEAT_OK` cuando todo está correcto y solo informa cuando el agente debe revisar archivos de contexto o memoria obsoletos. Usa `mex watch --interval` para ejecutar heartbeat repetidamente en un espacio de trabajo de agente persistente.
-
-## Configuración
-
-Los ajustes opcionales se encuentran en `.mex/config.json`. Los valores ausentes usan los predeterminados.
-
-```json
-{
-  "staleness": {
-    "warnDays": 30,
-    "errorDays": 90,
-    "warnCommits": 50,
-    "errorCommits": 200
-  },
-  "heartbeat": {
-    "staleDays": 7,
-    "memoryCleanupDays": 7,
-    "dailyMemoryRetentionDays": 14
-  },
-  "watch": {
-    "intervalMinutes": 30
-  }
-}
+```bash
+mex setup --mode agent-memory
 ```
+
+Este modo añade un contrato `HEARTBEAT.md` y convenciones de limpieza para homelabs, infraestructura y agentes operativos de larga duración.
+
+En una prueba comunitaria independiente con OpenClaw, mex superó 10/10 escenarios estructurados y redujo el contexto cargado aproximadamente un 60 % de media. Estos resultados corresponden al modo de memoria y son independientes del benchmark del grafo.
+
+## Principios
+
+- **Markdown es la interfaz duradera.** Personas y agentes pueden leerlo y editarlo.
+- **El código es la fuente de verdad.** Las afirmaciones importantes permanecen conectadas a la implementación.
+- **El contexto debe enrutarse, no volcarse.** Los agentes cargan lo necesario.
+- **El conocimiento debe crecer del trabajo real.**
+- **El mantenimiento debe ser continuo.**
+- **La recuperación debe ser determinista.**
 
 ## Telemetría
 
-Mex recopila datos de uso anónimos y opcionales (nombre del comando, versión y sistema operativo; nunca rutas, argumentos, contenido de archivos, IP ni datos personales) para comprender cómo se utiliza. Inspecciona la carga exacta con `mex telemetry inspect` y desactívala en cualquier momento con `DO_NOT_TRACK=1`, `MEX_TELEMETRY=0` o `mex config set telemetry off`. Consulta todos los detalles en [TELEMETRY.md](TELEMETRY.md).
+mex recopila datos anónimos y opcionales —nombre del comando, versión y sistema operativo—, nunca rutas, argumentos, contenido, direcciones IP ni datos personales. Inspecciona la carga con `mex telemetry inspect` y desactívala con `DO_NOT_TRACK=1`, `MEX_TELEMETRY=0` o `mex config set telemetry off`. Más información en [TELEMETRY.md](TELEMETRY.md).
 
 ## Ecosistema
 
-Mex es independiente del proveedor. Las guías de integración, los ejemplos patrocinados y las recetas de la comunidad deben ser útiles por sí mismos, estar claramente identificados y vivir en la documentación en lugar de modificar silenciosamente la experiencia predeterminada.
+mex es independiente del proveedor. Las integraciones, ejemplos patrocinados y recetas de la comunidad deben ser útiles por sí mismos, estar claramente identificados y vivir en la documentación.
 
 ## Contribuir
 
-Las contribuciones son bienvenidas. Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para ver la configuración y las directrices.
+Las contribuciones son bienvenidas. Consulta [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Registro de cambios
 
-Consulta [CHANGELOG.md](CHANGELOG.md) para conocer el historial de versiones.
+Consulta [CHANGELOG.md](CHANGELOG.md).
 
 ## Licencia
 

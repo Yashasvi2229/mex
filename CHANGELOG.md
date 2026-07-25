@@ -4,10 +4,48 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-25
+
+### Added
+- Deterministic local SQLite code graph for TypeScript, TSX, JavaScript, JSX, Python, and Rust, including cross-file resolution, body hashes, MinHash fingerprints, and LSH reconciliation.
+- Twelfth drift checker for `grounds_to` code-node grounding, with drift, gone, ambiguous, and durable moved-node repair behavior.
+- Inline `mex://<node-id>` anchors for navigable symbol mentions, including warning-only drift detection and durable sync repair.
+- `mex graph`, `mex graph scope`, `mex graph query`, `mex graph get`, and `mex impact` commands for graph building, compact task-neighborhood retrieval, structural lookup, targeted source expansion, and blast-radius analysis.
+- `mex graph ground` for idempotently retro-grounding populated pre-0.7 scaffolds while preserving their prose.
+- Express reference resolver that links route registrations to handler nodes.
+- Fresh setup now builds and consumes the graph, authors tight `grounds_to` entries and load-bearing inline anchors, and captures grounding baselines immediately.
+- A deterministic JSONL agent protocol with explicit detail levels, scored selection reasons, stable ordering, node quotas, and a hard estimated-output-token ceiling.
+- Reproducible retrieval and agent evaluation harnesses under `evaluate/`.
+
+### Changed
+- Minimum Node.js version is now 22.5 because the graph uses the built-in `node:sqlite` module.
+- The mex repository's own scaffold moved from the legacy root layout into `.mex/`; published user scaffolds continue to come from `templates/`.
+- Agent tool-config templates now explain graph queries, impact analysis, and ambiguous-grounding adjudication.
+- Setup, migration, and sync follow “read broad, ground tight”: broad context stays sparse while behavioral patterns ground to the specific implementing symbols.
+- Sync repairs prose and refreshes both frontmatter grounding and inline anchors after body drift, moves, deletions, or ambiguous reconciliation.
+- Telemetry delivery failures are silent so offline analytics cannot pollute JSON or JSONL command output.
+- Agent retrieval defaults to compact `minimal` facts; source is opt-in through `--detail source` or fetched for exact node ids with `mex graph get`.
+- The direct `glob` dependency is updated to v13, with patched minimatch and brace-expansion transitive releases.
+
+### Fixed
+- External-content FTS5 indexing remains consistent across duplicate node ids and clean installed-package builds, preventing graph-build corruption seen during real setup testing.
+- Grounding baselines are captured after setup and migration as well as sync, so the first post-authoring body edit emits `GROUNDING_DRIFT` without a hand-seeded snapshot.
+- Retrieval output now enforces its configured budget while emitting, avoids over-expanding broad symbols, and remains byte-deterministic across equivalent graph rebuilds.
+- Full graph builds and incremental change discovery now include registered Rust `.rs` files; the packed-install smoke test covers TypeScript, Python, and Rust.
+
+### Performance
+- On the mex benchmark corpus, the median grep-top-3-to-scope estimated-output ratio was **10.74×** while `mex graph scope` retained **1.0 expected-symbol recall** across six symbol tasks.
+- A five-task real-agent comparison answered all tasks correctly with both retrieval detail modes. The default `minimal` mode used targeted `graph get` expansion and required no Read/Grep fallback; `source` fell back on four of five tasks.
+- These are small-N, single-repository measurements. They do not establish an end-to-end graph-vs-no-graph token-savings claim.
+
+### Compatibility
+- Existing scaffolds without grounding or `.mex/graph.db` continue to run the original filesystem and lexical checks unchanged; upgrade with `mex graph` followed by `mex graph ground`.
+- Graph interfaces are source-level contribution seams, not public npm API exports.
+
 ## [0.6.3] - 2026-07-06
 
 ### Added
-- **MCP server** — new `packages/mex-mcp` package exposes mex to AI agents over the Model Context Protocol as native tool calls: `mex_check`, `mex_log`, `mex_timeline`, `mex_heartbeat`, and `mex_read_file`. It imports the `mex-agent` public API directly (no subprocess) and returns structured JSON, so agents in Claude Code, Cursor, and other MCP clients call mex as first-class tools instead of shelling out. Every tool takes an optional `projectRoot` (defaults to cwd) and `mex_read_file` is sandboxed to the `.mex/` scaffold. `mex_sync` is deferred until its structured return shape is settled. [#84](https://github.com/theDakshJaitly/mex/pull/84) [#81](https://github.com/theDakshJaitly/mex/issues/81)
+- **MCP server** — new `packages/mex-mcp` package exposes mex to AI agents over the Model Context Protocol as native tool calls: `mex_check`, `mex_log`, `mex_timeline`, `mex_heartbeat`, and `mex_read_file`. It imports the `mex-agent` public API directly (no subprocess) and returns structured JSON, so agents in Claude Code, Cursor, and other MCP clients call mex as first-class tools instead of shelling out. Every tool takes an optional `projectRoot` (defaults to cwd) and `mex_read_file` is sandboxed to the `.mex/` scaffold. `mex_sync` is deferred until its structured return shape is settled. [#84](https://github.com/mex-memory/mex/pull/84) [#81](https://github.com/mex-memory/mex/issues/81)
 
 ### Changed
 - README documents the MCP server, its five tools, and client (`.mcp.json`) configuration.
@@ -18,10 +56,10 @@ All notable changes to this project will be documented in this file.
 ## [0.6.2] - 2026-06-22
 
 ### Fixed
-- **Windows AI-CLI detection and launch** — `mex sync` and `mex setup` now detect an installed AI CLI on Windows and launch it correctly. Detection used `which` (absent on Windows), so every tool reported as not installed and interactive mode silently fell back to copy-paste even when Claude Code/Codex were present; it now probes with `where` on Windows. Launch used `spawn`/`spawnSync`, which threw `ENOENT` on the `claude.cmd` wrapper; it now uses `cross-spawn`. `runToolInteractive` also no longer treats a spawn failure or timeout as a successful session. [#85](https://github.com/theDakshJaitly/mex/issues/85)
-- **Cross-platform path output and global config** — drift issue paths, heartbeat stale files, scanner entries, and event-log paths are normalized to forward slashes on Windows (new `toPosix()` boundary), fixing a `patterns/` severity check that silently misfired; global config and telemetry id now respect Windows `USERPROFILE`, with a new `MEX_HOME` override. [#78](https://github.com/theDakshJaitly/mex/pull/78)
-- **checkPaths false positives** — `checkPaths` now only validates inline code paths from `ROUTER.md`, not all scaffold files. Eliminates false `MISSING_PATH` errors from context docs, pattern files, and tool config files where backtick-wrapped strings are config values, IPs, annotation keys, or other non-path content. [#79](https://github.com/theDakshJaitly/mex/issues/79)
-- **Package version metadata guard** — the CLI validates that `package.json` contains a non-empty string `version` before reading it at runtime. [#58](https://github.com/theDakshJaitly/mex/issues/58)
+- **Windows AI-CLI detection and launch** — `mex sync` and `mex setup` now detect an installed AI CLI on Windows and launch it correctly. Detection used `which` (absent on Windows), so every tool reported as not installed and interactive mode silently fell back to copy-paste even when Claude Code/Codex were present; it now probes with `where` on Windows. Launch used `spawn`/`spawnSync`, which threw `ENOENT` on the `claude.cmd` wrapper; it now uses `cross-spawn`. `runToolInteractive` also no longer treats a spawn failure or timeout as a successful session. [#85](https://github.com/mex-memory/mex/issues/85)
+- **Cross-platform path output and global config** — drift issue paths, heartbeat stale files, scanner entries, and event-log paths are normalized to forward slashes on Windows (new `toPosix()` boundary), fixing a `patterns/` severity check that silently misfired; global config and telemetry id now respect Windows `USERPROFILE`, with a new `MEX_HOME` override. [#78](https://github.com/mex-memory/mex/pull/78)
+- **checkPaths false positives** — `checkPaths` now only validates inline code paths from `ROUTER.md`, not all scaffold files. Eliminates false `MISSING_PATH` errors from context docs, pattern files, and tool config files where backtick-wrapped strings are config values, IPs, annotation keys, or other non-path content. [#79](https://github.com/mex-memory/mex/issues/79)
+- **Package version metadata guard** — the CLI validates that `package.json` contains a non-empty string `version` before reading it at runtime. [#58](https://github.com/mex-memory/mex/issues/58)
 
 ## [0.6.1] - 2026-06-14
 

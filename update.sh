@@ -18,7 +18,7 @@ for arg in "$@"; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_URL="https://github.com/theDakshJaitly/mex.git"
+REPO_URL="https://github.com/mex-memory/mex.git"
 TMP_DIR=""
 
 # ─────────────────────────────────────────────────────────────

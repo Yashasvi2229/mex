@@ -1,13 +1,13 @@
 ---
 name: New language extractor
-about: Propose a bounded Tree-sitter language extractor for the code-graph preview
+about: Propose a bounded Tree-sitter language extractor for the code graph
 title: '[Language] Add code-graph extractor'
-labels: 'code-graph, developer-preview, language-support, tree-sitter'
+labels: 'code-graph, language-support, tree-sitter'
 assignees: ''
 
 ---
 
-> Target branch: `code-graph-preview`
+> Target branch: `main`
 
 ## Language
 
@@ -31,7 +31,7 @@ List the graph relationships the fixture should prove.
 
 ## Required proof
 
-- [ ] I have read [Extending the code graph](https://github.com/mex-memory/mex/blob/code-graph-preview/docs/extractors.md)
+- [ ] I have read [Extending the code graph](https://github.com/mex-memory/mex/blob/main/docs/extractors.md)
 - [ ] The language exists in the shared `Language` vocabulary, or I have called out the required addition
 - [ ] The extractor will use the frozen `LanguageExtractor` interface
 - [ ] A compatible grammar WASM file will be vendored and registered

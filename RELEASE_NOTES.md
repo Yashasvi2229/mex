@@ -1,275 +1,92 @@
-# mex v0.3
+# mex 0.7.0 — Code-aware project memory
 
-This release turns mex from a drift-aware scaffold CLI into a small operational memory layer for agents.
+mex 0.7.0 adds a deterministic code knowledge graph beneath the existing markdown scaffold. Memory can now ground itself to exact code nodes instead of relying only on file paths, so mex can tell an agent precisely which symbol changed and which surrounding code or scaffold memory is affected.
 
-The original goal of mex is still the same: keep agent context useful, navigable, and honest without dumping an entire project into the prompt. v0.3 keeps the stable v0.2 scaffold architecture, then adds the pieces that make mex work better for persistent agents, homelabs, OpenClaw-style operational workspaces, and long-running project memory.
+The graph is local, zero-AI infrastructure: tree-sitter extraction writes SQLite in `.mex/graph.db`, body hashes detect edits, and MinHash fingerprints reconcile confident renames and moves.
 
-npm package: `mex-agent@0.3.5`
+## What is included
 
-Package rename: the npm package is now `mex-agent`. The binary command remains `mex`.
+- TypeScript, TSX, JavaScript, JSX, Python, and Rust extraction.
+- Cross-file calls, imports, inheritance, containment, and reference edges.
+- An Express reference resolver linking route registrations to handler nodes.
+- Grounding checker #12 for changed, moved, ambiguous, or removed code nodes.
+- Compact, scored task neighborhoods through `mex graph scope`, with deterministic ordering, explicit selection reasons, and hard estimated-token budgets.
+- Targeted source expansion through `mex graph get`, with source remaining opt-in for scope, query, and impact commands.
+- Setup-time grounding plus an idempotent migration path for existing scaffolds.
+- Durable re-grounding of frontmatter and inline anchors during `mex sync`.
+- A contributor-facing extractor test pattern in the source repository.
 
-## Highlights
-
-- **Agent memory mode** for persistent agents and operational workspaces.
-- **Heartbeat checks** for scheduled agent health review.
-- **Event log and timeline** for decisions, risks, todos, and notes.
-- **Interactive TUI dashboard** included in the release.
-- **Better check/doctor output** for humans and scripts.
-- **Tunable config** for staleness, heartbeat, and watch intervals.
-- **Shell completions** for bash, zsh, and fish.
-
-## Agent Memory Layer
-
-v0.3 adds a first-class agent-memory setup mode:
+## New commands
 
 ```bash
-npx mex-agent setup --mode agent-memory
+mex graph
+mex graph --json
+mex graph scope <task>
+mex graph get <node-id>
+mex graph ground
+mex graph query where-defined <symbol>
+mex graph query who-calls <symbol>
+mex graph query what-calls <symbol>
+mex impact <symbol-or-file>
 ```
 
-This is for projects where the "codebase" is not necessarily the main thing being remembered. Examples:
+`mex graph scope`, `mex graph query`, `mex graph get`, and `mex impact` emit a framed JSONL protocol intended for coding agents to call during setup, repair, and implementation tasks. The default `minimal` detail returns compact structural facts and relationship counts. Use `--detail standard` for returned-node edges, `--detail source` for inline source, or `mex graph get <node-id>` to expand only the exact nodes needed.
 
-- a persistent local agent
-- a homelab or server environment
-- OpenClaw-style operational workspaces
-- Kubernetes/Docker/Ansible/Terraform runbooks
-- long-running personal or team automation contexts
+## Retrieval results
 
-Agent-memory mode creates templates that treat mex as structured memory:
+The release harness measured `mex graph scope` against a grep top-3 baseline on six symbol tasks in this repository:
 
-- `AGENTS.md` gives the agent a compact operating contract.
-- `ROUTER.md` routes tasks to the right memory files.
-- `HEARTBEAT.md` defines scheduled health checks.
-- `context/` stores durable current-state memory.
-- `patterns/` stores repeatable runbooks.
-- `.mex/events/decisions.jsonl` stores append-only decisions and notes.
+- The median grep-top-3-to-scope output ratio was **10.74×** by the documented `ceil(chars/4)` estimate.
+- Expected-symbol recall remained **1.0**.
+- The former `runDriftCheck` over-expansion case improved from 32 source-bearing facts and 0.26× grep efficiency to 9 compact facts and 5.90× grep efficiency.
 
-The GROW loop was updated for this use case:
+In a five-task real-agent comparison, both `minimal` and `source` modes answered 5/5 correctly. `minimal` used targeted `graph get` calls and never fell back to Read/Grep; `source` needed Read/Grep fallback on four tasks. That is why `minimal` is the default.
 
-- **Ground** what changed.
-- **Record** the current truth in scaffold files.
-- **Orient** by adding or refining patterns.
-- **Write** `last_updated` and log rationale with `mex log` when it matters.
+These measurements are intentionally narrow: one mid-size repository, six symbol tasks, five natural-language tasks, and one model. They compare graph output with a synthetic grep baseline and compare two graph detail modes; they do **not** measure end-to-end graph-versus-no-graph token savings.
 
-## Heartbeat and Scheduled Checks
+## Grounded scaffold memory
 
-New command:
+Setup now authors grounding as it populates memory. It follows **read broad, ground tight**: read the relevant scope neighborhood, then ground only prose claims that depend on specific behavior. Broad architecture, stack, and convention files remain sparse; pattern and deep-domain files ground tightly.
+
+Behavioral assertions use frontmatter with both a node id and fingerprint:
+
+```yaml
+grounds_to:
+  - node: "function:a3f8...c21"
+    fingerprint: "mh:64:9f2a..."
+```
+
+Load-bearing symbol mentions use readable inline navigation anchors containing only the node id:
+
+```markdown
+[`calculateCheckoutTotal()`](mex://function:a3f8...c21)
+```
+
+An unchanged node is clean. A body edit produces a grounding warning with old/new source for sync. Sync repairs the prose when needed, refreshes the frontmatter fingerprint, and updates or removes stale anchors. A high-confidence rename is rebound automatically; an uncertain candidate is surfaced for agent adjudication. Broken inline navigation remains warning-only.
+
+## Installation and upgrades
+
+mex 0.7.0 requires Node.js 22.5 or newer because the graph uses Node's built-in SQLite module.
 
 ```bash
-mex heartbeat
+npx mex-agent@0.7.0 setup
 ```
 
-Heartbeat is intentionally lighter than `mex check`. It is meant for persistent-agent setups where an agent may be woken up on a schedule and asked, "Is anything stale or due for review?"
+Fresh `mex setup` runs build the graph before population, and the setup agent consumes it through the hydrated retrieval commands while authoring grounding.
 
-It checks:
-
-- optional `last_updated` frontmatter in scaffold files
-- stale context files
-- memory cleanup due dates
-- old daily memory files in agent-memory workspaces
-
-Clean output:
+Existing populated scaffolds remain valid, but need a one-time pointer migration to participate in graph drift detection:
 
 ```bash
-HEARTBEAT_OK
+mex graph
+mex graph ground
 ```
 
-JSON output:
+`mex graph ground` preserves the existing prose and adds tight `grounds_to` entries plus load-bearing `mex://` anchors. It is safe to rerun. Scaffolds that have not migrated continue to behave as before under the original eleven checkers.
 
-```bash
-mex heartbeat --json
-```
+## Graceful degradation
 
-Scheduled foreground loop:
+The graph is additive. If no graph exists, a grammar is unavailable, or SQLite cannot load on a platform, mex skips graph grounding and continues running the rest of `mex check`. Unsupported-language files are skipped rather than crashing graph construction.
 
-```bash
-mex watch --interval
-mex watch --interval 15
-```
+## What comes next
 
-This runs heartbeat repeatedly instead of installing a post-commit hook. The existing `mex watch` hook behavior still works.
-
-## Event Log and Timeline
-
-v0.3 adds a tiny append-only event layer:
-
-```bash
-mex log "rotated API keys after provider incident"
-mex log --type decision "keep OpenClaw ingress behind Cloudflare tunnel"
-mex log --type risk --file .mex/context/setup.md "backup restore path is not tested yet"
-```
-
-Events are stored at:
-
-```text
-.mex/events/decisions.jsonl
-```
-
-Read them back with:
-
-```bash
-mex timeline
-mex timeline --limit 20
-mex timeline --json
-```
-
-This gives agents a lightweight way to preserve rationale without changing the scaffold schema or requiring a full event-sourcing architecture.
-
-## TUI Dashboard
-
-Bare `mex` now opens an interactive terminal dashboard:
-
-```bash
-mex
-mex tui
-```
-
-The TUI shows:
-
-- current scaffold path
-- drift score
-- error/warning counts
-- files checked
-- heartbeat status
-- stale file count
-- recent event activity
-- latest timeline signal
-
-Available actions:
-
-- refresh dashboard
-- run check summary
-- run heartbeat
-- run doctor summary
-- view timeline
-- log event
-- exit
-
-This is additive. All existing CLI commands still work the same and remain script-friendly.
-
-## Better Health and Check Output
-
-`mex check` now has clearer grouped output and script support:
-
-```bash
-mex check
-mex check --quiet
-mex check --json
-```
-
-Issues are easier to scan by severity, and remediation hints are clearer.
-
-New doctor command:
-
-```bash
-mex doctor
-```
-
-`doctor` gives a friendly health summary across drift, heartbeat, config, and events.
-
-## Tunable Config
-
-Optional settings live in `.mex/config.json`.
-
-Example:
-
-```json
-{
-  "staleness": {
-    "warnDays": 30,
-    "errorDays": 90,
-    "warnCommits": 50,
-    "errorCommits": 200
-  },
-  "watch": {
-    "intervalMinutes": 30
-  },
-  "heartbeat": {
-    "staleDays": 7,
-    "memoryCleanupDays": 7,
-    "dailyMemoryRetentionDays": 14
-  }
-}
-```
-
-Missing values use defaults, so existing scaffolds do not need a migration.
-
-## Shell Completions
-
-Generate completions with:
-
-```bash
-mex completion bash
-mex completion zsh
-mex completion fish
-```
-
-## OpenClaw / Persistent Agent Use Case
-
-The release is heavily informed by OpenClaw-style usage: an agent operating over a homelab-like environment with Kubernetes, Docker, Ansible, Terraform, networking, monitoring, and long-lived operational state.
-
-For that workflow, mex v0.3 is useful because it separates three kinds of memory:
-
-- **State memory:** current truth in `ROUTER.md` and `context/`.
-- **Procedural memory:** repeatable runbooks in `patterns/`.
-- **Event memory:** decisions, risks, and notes in `.mex/events/decisions.jsonl`.
-
-A persistent agent can now:
-
-1. Start by reading `ROUTER.md`.
-2. Load only the memory files relevant to the task.
-3. Run the right playbook from `patterns/`.
-4. Log decisions with `mex log`.
-5. Run `mex heartbeat` on a schedule to catch stale memory.
-
-This expands mex beyond code repositories while keeping the original scaffold model intact.
-
-## Compatibility
-
-No scaffold migration is required.
-
-v0.3 deliberately avoids the shelved routing/schema architecture work. Existing v0.2 scaffolds continue to work, and new features are additive:
-
-- `last_updated` is optional.
-- `.mex/config.json` is optional.
-- `.mex/events/` is created when events are logged.
-- TUI is additive and does not replace CLI commands.
-
-## Not Included
-
-The following remain intentionally deferred:
-
-- context routing command
-- full schema migration with ids/requires fields
-- federation / hierarchical scaffolds
-- bidirectional state-event references
-- dynamic domain nodes via Tree-sitter
-
-Those need a bigger architecture story and are not part of this stable v0.3 release.
-
-## Upgrade
-
-Install or update:
-
-```bash
-npm install -g mex-agent@latest
-```
-
-Or use directly:
-
-```bash
-npx mex-agent@latest setup
-```
-
-For an existing project, no scaffold reset is needed. Update the package, then run:
-
-```bash
-mex doctor
-mex check
-```
-
-For an agent-memory workspace:
-
-```bash
-npx mex-agent@latest setup --mode agent-memory
-mex heartbeat
-```
+The 0.7.x series will broaden language and framework coverage through bounded extractor and resolver contributions, tune reconciliation and retrieval on larger repositories, and add a controlled graph-vs-no-graph agent benchmark.

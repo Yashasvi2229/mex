@@ -18,7 +18,7 @@
         {
           default = pkgs.buildNpmPackage {
             pname = "mex";
-            version = "0.3.2";
+            version = "0.7.0";
 
             src = ./.;
 
@@ -35,8 +35,8 @@
             '';
 
             meta = with pkgs.lib; {
-              description = "CLI engine for mex scaffold — drift detection, pre-analysis, and targeted sync";
-              homepage = "https://github.com/theDakshJaitly/mex";
+              description = "Persistent project memory and deterministic local code graphs for AI coding agents";
+              homepage = "https://github.com/mex-memory/mex";
               license = licenses.mit;
               mainProgram = "mex";
               platforms = supportedSystems;
