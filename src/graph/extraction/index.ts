@@ -12,7 +12,14 @@ import type { ExtractedEdge, ExtractedNode, TSNode } from "./types.js";
 import { detectLanguage, parse } from "./grammars.js";
 import { getExtractor } from "./languages/index.js";
 
-export { detectLanguage, isSupportedSourceFile, loadGrammars, supportedLanguages, disposeParsers } from "./grammars.js";
+export {
+  detectLanguage,
+  isSupportedSourceFile,
+  loadGrammars,
+  supportedLanguages,
+  disposeParsers,
+  SUPPORTED_SOURCE_GLOB,
+} from "./grammars.js";
 export { getExtractor, EXTRACTORS } from "./languages/index.js";
 export { generateNodeId } from "./node-id.js";
 

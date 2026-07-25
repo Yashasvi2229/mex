@@ -1,5 +1,3 @@
-<!-- Translated from README.md at commit: 735e38a -->
-
 <div align="center">
 
 <img src="mascot/mex-mascot.svg" alt="Mex 吉祥物" width="80">
@@ -16,12 +14,12 @@
 
 [![npm version](https://img.shields.io/npm/v/mex-agent.svg)](https://www.npmjs.com/package/mex-agent)
 [![npm downloads](https://img.shields.io/npm/dm/mex-agent.svg)](https://www.npmjs.com/package/mex-agent)
-[![GitHub stars](https://img.shields.io/badge/stars-1.2K%2B-111111)](https://github.com/theDakshJaitly/mex/stargazers)
+[![GitHub stars](https://img.shields.io/badge/stars-1.2K%2B-111111)](https://github.com/mex-memory/mex/stargazers)
 [![Website](https://img.shields.io/badge/website-mexmemory.com-4f7cff)](https://mexmemory.com)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/VG7ySSMQM)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/theDakshJaitly/mex/actions/workflows/ci.yml/badge.svg)](https://github.com/theDakshJaitly/mex/actions/workflows/ci.yml)
-[![Node.js >=20](https://img.shields.io/badge/node-%3E%3D20-339933)](package.json)
+[![CI](https://github.com/mex-memory/mex/actions/workflows/ci.yml/badge.svg)](https://github.com/mex-memory/mex/actions/workflows/ci.yml)
+[![Node.js >=22.5](https://img.shields.io/badge/node-%3E%3D22.5-339933)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6)](package.json)
 [![Agent memory](https://img.shields.io/badge/agent%20memory-compatible-6f8cff)](README.md)
 [![MCP](https://img.shields.io/badge/MCP-compatible-6f8cff)](#mcp-服务器)
@@ -32,7 +30,7 @@
 
 AI 编程代理会在会话之间遗忘一切。Mex 为它们提供持久、可导航的项目记忆，让每次会话都能从正确的项目上下文开始，而不是面对一大段毫无头绪的提示。它帮助代理理解代码库、保留决策，并通过结构化的开发者工具保持记忆与真实代码同步。
 
-> **发布状态：** npm 和 `main` 目前仍为稳定版 v0.6.3。基于 AST/Tree-sitter 的代码图谱位于 `code-graph-preview`，是尚未发布的 v0.7.0 开发者预览版；目前尚未发布到 npm。
+> **v0.7.0 新功能：** 确定性的本地代码图谱、符号级记忆锚定、面向代理的紧凑检索，以及在 TypeScript 和 JavaScript 之外新增的 Python 与 Rust 支持。
 
 💬 **加入 Mex Discord 社区** — 讨论想法、获取帮助、分享反馈并参与项目贡献。
 
@@ -68,11 +66,11 @@ Mex 为代理记忆创建结构化的 Markdown 脚手架：
 - `patterns/` — 包含注意事项与验证步骤的可复用任务指南
 - `.mex/events/decisions.jsonl` — 通过 `mex log` 追加记录的笔记
 
-CLI 会确保这套脚手架保持可靠。它无需消耗 AI token，即可检查路径、命令、依赖项、模式索引、陈旧程度和脚本覆盖率。当出现漂移时，`mex sync` 会生成有针对性的提示，让代理只修复过时的部分。
+CLI 会确保这套脚手架保持可靠。它无需消耗 AI token，即可检查路径、命令、依赖项、模式索引、陈旧程度、脚本覆盖率和代码节点锚定。确定性的 SQLite 代码图谱让记忆能够指向精确符号，并在重构后保持关联。
 
 ## 快速开始
 
-npm 当前稳定版本为 v0.6.3。请使用 Node.js 20 或更高版本安装：
+请使用 Node.js 22.5 或更高版本安装 Mex：
 
 npm 包名为 `mex-agent`，因为 `mex` 已被占用。CLI 命令仍然是 `mex`。
 
@@ -80,17 +78,7 @@ npm 包名为 `mex-agent`，因为 `mex` 已被占用。CLI 命令仍然是 `mex
 npx mex-agent setup
 ```
 
-如需测试代码图谱预览版或参与贡献，请使用 Node.js 22.5 或更高版本，并从源码构建 `code-graph-preview`：
-
-```bash
-git clone https://github.com/theDakshJaitly/mex.git
-cd mex
-git switch code-graph-preview
-npm install
-npm run build
-```
-
-安装流程会创建 `.mex/` 脚手架，询问你使用哪种 AI 工具，预扫描代码库，并生成有针对性的提示来填充记忆文件。整个过程大约需要五分钟。
+安装流程会创建 `.mex/` 脚手架，询问你使用哪种 AI 工具，构建代码图谱，并用图谱事实填充记忆。整个过程大约需要五分钟。
 
 安装结束时，你可以全局安装 Mex：
 
@@ -120,7 +108,7 @@ npm install -g mex-agent
 
 如果你之前通过旧版 `setup.sh` 脚本安装，在 WSL 中构建后又从 Windows 原生终端运行 CLI，会因两个文件系统之间的 `node_modules` 和路径解析差异而出现“module not found”错误。请在同一环境内完成安装、构建和 CLI 命令：要么全部使用 WSL / Git Bash，要么全部在 Windows 原生环境中通过 `npx mex-agent` 完成。
 
-背景信息请参阅 [issue #10](https://github.com/theDakshJaitly/mex/issues/10)。
+背景信息请参阅 [issue #10](https://github.com/mex-memory/mex/issues/10)。
 
 ## 工作原理
 
@@ -132,7 +120,7 @@ npm install -g mex-agent
 
 ## 漂移检测
 
-十一个检查器会根据真实代码库验证脚手架。零 token，零 AI。
+十二个检查器会根据真实代码库验证脚手架。零 token，零 AI。
 
 | 检查器 | 检测内容 |
 |---------|----------|
@@ -147,6 +135,7 @@ npm install -g mex-agent
 | **tool-config-sync** | 已安装 AI 工具的配置文件（如 `CLAUDE.md`、`.cursorrules`）彼此不同步 |
 | **todo-fixme** | 脚手架 Markdown 中尚未处理的 `TODO` / `FIXME` 标记 |
 | **broken-link** | 指向磁盘上不存在文件的本地 Markdown 链接 |
+| **grounding** | 已锚定代码节点的函数体发生变化、被模糊移动或消失 |
 
 评分从 100 开始。每个错误扣 10 分，每个警告扣 3 分，每条信息扣 1 分。
 
@@ -174,6 +163,12 @@ npm install -g mex-agent
 | `mex sync --warnings` | 在同步中包含仅有警告的文件 |
 | `mex init` | 预扫描代码库并为 AI 构建结构化摘要 |
 | `mex init --json` | 原始扫描器摘要 JSON |
+| `mex graph` | 构建或重建本地代码图谱 |
+| `mex graph scope <任务>` | 以 JSONL 返回经过评分的紧凑任务邻域 |
+| `mex graph get <id...>` | 以 JSONL 展开指定节点的源码 |
+| `mex graph query <关系> <符号>` | 结构查询：`who-calls`、`what-calls` 或 `where-defined` |
+| `mex graph ground` | 在不重写内容的情况下锚定 v0.7 之前的脚手架 |
+| `mex impact <符号\|文件>` | 显示代码和记忆的影响范围 |
 | `mex log <message>` | 追加笔记、决策、风险或待办事项 |
 | `mex timeline` | 查看最近的事件日志条目 |
 | `mex heartbeat` | 运行一次轻量级持久代理健康检查 |
@@ -183,6 +178,8 @@ npm install -g mex-agent
 | `mex watch --uninstall` | 移除 hook |
 | `mex completion <shell>` | 输出 shell 补全 |
 | `mex commands` | 列出命令、脚本及其说明 |
+
+v0.7.0 代码图谱支持 TypeScript、TSX、JavaScript、JSX、Python 和 Rust。测试矩阵与当前限制请参阅[代码图谱支持](docs/code-graph-support.md)。
 
 ## 支持的工具
 

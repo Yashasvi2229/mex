@@ -1,18 +1,17 @@
-# mex 0.7.0 Developer Preview — Code-aware project memory
+# mex 0.7.0 — Code-aware project memory
 
-> **Unreleased:** These are preview notes for `code-graph-preview`. npm and `main` remain on stable v0.6.3. Do not use this document as an announcement of a GitHub or npm release.
-
-The upcoming mex 0.7.0 adds a deterministic code knowledge graph beneath the existing markdown scaffold. Memory can now ground itself to exact code nodes instead of relying only on file paths, so mex can tell an agent precisely which symbol changed and which surrounding code or scaffold memory is affected.
+mex 0.7.0 adds a deterministic code knowledge graph beneath the existing markdown scaffold. Memory can now ground itself to exact code nodes instead of relying only on file paths, so mex can tell an agent precisely which symbol changed and which surrounding code or scaffold memory is affected.
 
 The graph is local, zero-AI infrastructure: tree-sitter extraction writes SQLite in `.mex/graph.db`, body hashes detect edits, and MinHash fingerprints reconcile confident renames and moves.
 
-## What is in the preview
+## What is included
 
-- TypeScript, TSX, JavaScript, and JSX extraction.
+- TypeScript, TSX, JavaScript, JSX, Python, and Rust extraction.
 - Cross-file calls, imports, inheritance, containment, and reference edges.
 - An Express reference resolver linking route registrations to handler nodes.
 - Grounding checker #12 for changed, moved, ambiguous, or removed code nodes.
-- Query-time task neighborhoods through `mex graph scope`, hydrated with signatures, callers, callees, source, ids, and fingerprints.
+- Compact, scored task neighborhoods through `mex graph scope`, with deterministic ordering, explicit selection reasons, and hard estimated-token budgets.
+- Targeted source expansion through `mex graph get`, with source remaining opt-in for scope, query, and impact commands.
 - Setup-time grounding plus an idempotent migration path for existing scaffolds.
 - Durable re-grounding of frontmatter and inline anchors during `mex sync`.
 - A contributor-facing extractor test pattern in the source repository.
@@ -23,6 +22,7 @@ The graph is local, zero-AI infrastructure: tree-sitter extraction writes SQLite
 mex graph
 mex graph --json
 mex graph scope <task>
+mex graph get <node-id>
 mex graph ground
 mex graph query where-defined <symbol>
 mex graph query who-calls <symbol>
@@ -30,7 +30,19 @@ mex graph query what-calls <symbol>
 mex impact <symbol-or-file>
 ```
 
-`mex graph scope`, `mex graph query`, and `mex impact` emit compact hydrated JSONL intended for coding agents to call during setup, repair, and implementation tasks.
+`mex graph scope`, `mex graph query`, `mex graph get`, and `mex impact` emit a framed JSONL protocol intended for coding agents to call during setup, repair, and implementation tasks. The default `minimal` detail returns compact structural facts and relationship counts. Use `--detail standard` for returned-node edges, `--detail source` for inline source, or `mex graph get <node-id>` to expand only the exact nodes needed.
+
+## Retrieval results
+
+The release harness measured `mex graph scope` against a grep top-3 baseline on six symbol tasks in this repository:
+
+- The median grep-top-3-to-scope output ratio was **10.74×** by the documented `ceil(chars/4)` estimate.
+- Expected-symbol recall remained **1.0**.
+- The former `runDriftCheck` over-expansion case improved from 32 source-bearing facts and 0.26× grep efficiency to 9 compact facts and 5.90× grep efficiency.
+
+In a five-task real-agent comparison, both `minimal` and `source` modes answered 5/5 correctly. `minimal` used targeted `graph get` calls and never fell back to Read/Grep; `source` needed Read/Grep fallback on four tasks. That is why `minimal` is the default.
+
+These measurements are intentionally narrow: one mid-size repository, six symbol tasks, five natural-language tasks, and one model. They compare graph output with a synthetic grep baseline and compare two graph detail modes; they do **not** measure end-to-end graph-versus-no-graph token savings.
 
 ## Grounded scaffold memory
 
@@ -54,7 +66,11 @@ An unchanged node is clean. A body edit produces a grounding warning with old/ne
 
 ## Installation and upgrades
 
-The preview is not published to npm. Test it by building the `code-graph-preview` branch from source. The upcoming 0.7.0 requires Node.js 22.5 or newer because the graph uses Node's built-in SQLite module.
+mex 0.7.0 requires Node.js 22.5 or newer because the graph uses Node's built-in SQLite module.
+
+```bash
+npx mex-agent@0.7.0 setup
+```
 
 Fresh `mex setup` runs build the graph before population, and the setup agent consumes it through the hydrated retrieval commands while authoring grounding.
 
@@ -73,4 +89,4 @@ The graph is additive. If no graph exists, a grammar is unavailable, or SQLite c
 
 ## What comes next
 
-The 0.7.x series is intended to broaden language and framework coverage through bounded extractor and resolver contributions. The developer preview starts with a thin complete base—TS/JS plus Express—so that contributor testing can improve it before the stable 0.7.0 release.
+The 0.7.x series will broaden language and framework coverage through bounded extractor and resolver contributions, tune reconciliation and retrieval on larger repositories, and add a controlled graph-vs-no-graph agent benchmark.

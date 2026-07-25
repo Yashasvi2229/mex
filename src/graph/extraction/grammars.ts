@@ -3,11 +3,10 @@
 // ============================================================================
 //
 // Wraps web-tree-sitter (WASM) — the same universal, native-build-free runtime
-// CodeGraph used. 0.7.0 ships extraction for TS/JS/TSX/JSX ONLY, so only those
-// three grammars are vendored (`src/graph/wasm/`) and lazily loaded. The lazy-
-// load infra is deliberately general (a `Language → wasm` map) so the 0.7.x
-// contributor program can slot new grammars in without touching the core; the
-// base simply doesn't ship them.
+// CodeGraph used. 0.7.0 ships five vendored grammars for TypeScript/TSX,
+// JavaScript/JSX, Python, and Rust. The lazy-load infrastructure is deliberately
+// general (a `Language → wasm` map) so the 0.7.x contributor program can slot
+// new grammars in without touching the core.
 //
 // Grammars are loaded on demand — only languages actually present in the project
 // are compiled — keeping WASM heap pressure low on large repos.
@@ -44,6 +43,10 @@ const EXTENSION_MAP: Record<string, Language> = {
   ".py": "python",
   ".rs": "rust",
 };
+
+/** Glob pattern for every extension registered above. */
+export const SUPPORTED_SOURCE_GLOB =
+  `**/*.{${Object.keys(EXTENSION_MAP).map((extension) => extension.slice(1)).join(",")}}`;
 
 const parserCache = new Map<Language, Parser>();
 const languageCache = new Map<Language, WasmLanguage>();

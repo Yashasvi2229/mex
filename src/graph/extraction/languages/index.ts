@@ -3,9 +3,8 @@
 // ============================================================================
 //
 // The single place a language id maps to its `LanguageExtractor`. 0.7.0 wires
-// TS/JS/TSX/JSX only (spec §2 — ship the framework's multi-language SHAPE, but
-// only the TS/JS extractor). A 0.7.x contributor adds a language by importing
-// their extractor and adding one line here.
+// TypeScript/TSX, JavaScript/JSX, Python, and Rust. A 0.7.x contributor adds a
+// language by importing its extractor and adding one line here.
 
 import type { Language } from "../../types.js";
 import type { LanguageExtractor } from "../types.js";

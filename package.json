@@ -1,7 +1,7 @@
 {
   "name": "mex-agent",
-  "version": "0.7.0-dev.0",
-  "description": "CLI engine for mex scaffold — drift detection, pre-analysis, and targeted sync",
+  "version": "0.7.0",
+  "description": "Persistent project memory and deterministic local code graphs for AI coding agents",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -31,6 +31,9 @@
     "scaffold",
     "drift-detection",
     "documentation",
+    "code-graph",
+    "tree-sitter",
+    "sqlite",
     "cli",
     "claude",
     "cursor",
@@ -38,11 +41,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/theDakshJaitly/mex.git"
+    "url": "git+https://github.com/mex-memory/mex.git"
   },
   "author": "Daksh Jaitly",
   "license": "MIT",
-  "homepage": "https://github.com/theDakshJaitly/mex#readme",
+  "homepage": "https://github.com/mex-memory/mex#readme",
   "engines": {
     "node": ">=22.5"
   },
@@ -60,7 +63,7 @@
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "cross-spawn": "^7.0.6",
-    "glob": "^11.0.1",
+    "glob": "^13.0.6",
     "ink": "^7.0.3",
     "posthog-node": "^5.21.2",
     "react": "^19.2.6",

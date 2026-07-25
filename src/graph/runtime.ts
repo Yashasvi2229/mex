@@ -6,6 +6,7 @@ import { extractGroundings, findMexAnchors, rewriteMexAnchor, writeGroundings } 
 import { createGroundingChecker, type GroundingChecker, type GroundedSource } from "./grounding.js";
 import { createGraphEngine } from "./engine-impl.js";
 import type { GraphEngine } from "./engine.js";
+import { SUPPORTED_SOURCE_GLOB } from "./extraction/grammars.js";
 import { openGraphDatabase } from "./db/database.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
 import { FingerprintStore } from "./fingerprint-store.js";
@@ -13,7 +14,6 @@ import { deserializeFingerprint, serializeFingerprint } from "./fingerprint.js";
 import { MinHashReconciler } from "./reconcile-engine.js";
 import type { Fingerprint, Reconciler } from "./reconcile.js";
 
-const SOURCE_GLOB = "**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs,py}";
 const SOURCE_IGNORE = ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.mex/**", "**/coverage/**", "**/.next/**", "**/out/**"];
 
 export interface GroundingRuntime {
@@ -100,7 +100,7 @@ export function findChangedSourceFiles(projectRoot: string, db: SqliteDatabase):
     path: string; size: number; modified_at: number;
   }>;
   const tracked = new Map(rows.map((row) => [row.path, row]));
-  const current = globSync(SOURCE_GLOB, { cwd: projectRoot, ignore: SOURCE_IGNORE, nodir: true })
+  const current = globSync(SUPPORTED_SOURCE_GLOB, { cwd: projectRoot, ignore: SOURCE_IGNORE, nodir: true })
     .map((path) => path.replaceAll("\\", "/"));
   const changed: string[] = [];
   for (const path of current) {

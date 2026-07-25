@@ -2,7 +2,7 @@
 
 ## Runtime requirement
 
-The unreleased mex 0.7.0 developer preview requires Node.js 22.5 or newer. The code graph uses the built-in `node:sqlite` module; older Node releases are unsupported. Stable mex v0.6.3 remains available on npm and supports Node.js 20 or newer.
+mex 0.7.0 requires Node.js 22.5 or newer. The code graph uses the built-in `node:sqlite` module; older Node releases are unsupported. Users who cannot upgrade Node can remain on mex v0.6.3, which supports Node.js 20 or newer.
 
 This document defines `mex-agent`'s public contract: what's stable, what isn't,
 and what counts as a breaking change. It is intended for embedders — tools that
@@ -150,11 +150,11 @@ When a public export is going to be removed:
    deprecation warning in place.
 3. The next major version removes it.
 
-Concrete example: if `foo` is deprecated in 0.5.0, it still works in 0.5.x and
-0.6.x. It may be removed in 0.7.0 or 1.0.0.
+Concrete example: if `foo` is deprecated in 0.7.0, it still works in 0.7.x. It
+may be removed in 0.8.0 or 1.0.0.
 
 ## Reporting compatibility issues
 
 If you find behaviour that diverges from this document — an undocumented
 breaking change, an unclear case, or a contract you need that isn't covered —
-open an issue at <https://github.com/theDakshJaitly/mex/issues>.
+open an issue at <https://github.com/mex-memory/mex/issues>.

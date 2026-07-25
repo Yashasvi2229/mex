@@ -12,11 +12,11 @@
 
 [![npm version](https://img.shields.io/npm/v/mex-agent.svg)](https://www.npmjs.com/package/mex-agent)
 [![npm downloads](https://img.shields.io/npm/dm/mex-agent.svg)](https://www.npmjs.com/package/mex-agent)
-[![GitHub stars](https://img.shields.io/badge/stars-1.2K%2B-111111)](https://github.com/theDakshJaitly/mex/stargazers)
+[![GitHub stars](https://img.shields.io/badge/stars-1.2K%2B-111111)](https://github.com/mex-memory/mex/stargazers)
 [![Website](https://img.shields.io/badge/website-mexmemory.com-4f7cff)](https://mexmemory.com)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/VG7ySSMQM)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/theDakshJaitly/mex/actions/workflows/ci.yml/badge.svg)](https://github.com/theDakshJaitly/mex/actions/workflows/ci.yml)
+[![CI](https://github.com/mex-memory/mex/actions/workflows/ci.yml/badge.svg)](https://github.com/mex-memory/mex/actions/workflows/ci.yml)
 [![Node.js >=22.5](https://img.shields.io/badge/node-%3E%3D22.5-339933)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6)](package.json)
 [![Agent memory](https://img.shields.io/badge/agent%20memory-compatible-6f8cff)](README.md)
@@ -28,7 +28,7 @@
 
 AI agents forget everything between sessions. mex gives them permanent, navigable project memory so every session starts with the right context instead of a cold prompt dump.
 
-> **Release status:** npm and `main` remain on stable v0.6.3. The AST/Tree-sitter code graph described below is an unreleased v0.7.0 developer preview on `code-graph-preview`; it is not published to npm yet.
+> **New in v0.7.0:** deterministic local code graphs, symbol-grounded memory, compact agent retrieval, and Python/Rust support alongside TypeScript and JavaScript.
 
 💬 **Join the Mex community on Discord** — discuss ideas, get help, share feedback, and contribute to the project.
 
@@ -68,7 +68,7 @@ The CLI keeps that scaffold honest. It checks paths, commands, dependencies, pat
 
 ## Quick Start
 
-The stable npm release is v0.6.3. Install it with Node.js 20 or newer:
+Install mex with Node.js 22.5 or newer:
 
 The npm package is named `mex-agent` because `mex` was already taken. The CLI command is still `mex`.
 
@@ -76,17 +76,7 @@ The npm package is named `mex-agent` because `mex` was already taken. The CLI co
 npx mex-agent setup
 ```
 
-To test or contribute to the code-graph preview, use Node.js 22.5 or newer and build `code-graph-preview` from source:
-
-```bash
-git clone https://github.com/theDakshJaitly/mex.git
-cd mex
-git switch code-graph-preview
-npm install
-npm run build
-```
-
-Stable setup creates the `.mex/` scaffold and asks which AI tool you use. On the source-built code-graph preview, setup also builds the graph by default and populates memory from hydrated graph facts. The setup agent reads broad graph neighborhoods for context, then grounds only the specific claims it writes. It takes about five minutes.
+Setup creates the `.mex/` scaffold, asks which AI tool you use, builds the code graph, and populates memory from graph facts. The setup agent reads broad graph neighborhoods for context, then grounds only the specific claims it writes. It takes about five minutes.
 
 At the end of setup, you can install mex globally:
 
@@ -116,7 +106,7 @@ The recommended `npx mex-agent setup` flow runs in any terminal (Command Prompt,
 
 If you previously installed via the legacy `setup.sh` script, building inside WSL and then running the CLI from a native Windows terminal causes "module not found" errors because `node_modules` and path resolution differ between the two filesystems. Run install, build, and CLI commands inside the same environment: either entirely in WSL / Git Bash, or entirely in native Windows via `npx mex-agent`.
 
-See [issue #10](https://github.com/theDakshJaitly/mex/issues/10) for context.
+See [issue #10](https://github.com/mex-memory/mex/issues/10) for context.
 
 ## How It Works
 
@@ -171,9 +161,10 @@ All commands run from your project root. If you did not install globally, replac
 | `mex sync --warnings` | Include warning-only files in sync |
 | `mex init` | Pre-scan codebase and build a structured brief for AI |
 | `mex init --json` | Raw scanner brief as JSON |
-| `mex graph` | Build or rebuild the TS/JS code graph in `.mex/graph.db` |
+| `mex graph` | Build or rebuild the local code graph in `.mex/graph.db` |
 | `mex graph --json` | Emit the graph build summary as JSON |
-| `mex graph scope <task>` | Retrieve hydrated FTS seeds plus their one-hop callers and callees as JSONL |
+| `mex graph scope <task>` | Retrieve a scored, compact task neighborhood as budgeted JSONL |
+| `mex graph get <node-id...>` | Expand source for exact node ids as budgeted JSONL |
 | `mex graph ground` | Retro-ground an existing populated pre-0.7 scaffold without rewriting its prose |
 | `mex graph query <relation> <symbol>` | JSONL structural lookup: `who-calls`, `what-calls`, or `where-defined` |
 | `mex impact <symbol\|file>` | JSONL transitive caller and scaffold-memory blast radius |
@@ -189,9 +180,9 @@ All commands run from your project root. If you did not install globally, replac
 
 ## Code Graph and Grounding
 
-The upcoming 0.7.0 preview graphs TypeScript, TSX, JavaScript, and JSX with tree-sitter. Express route registrations receive framework-aware route-to-handler edges. More languages and framework resolvers are planned as the preview matures through its contributor program.
+mex 0.7.0 graphs TypeScript, TSX, JavaScript, JSX, Python, and Rust with tree-sitter. Express route registrations receive framework-aware route-to-handler edges. More languages and framework resolvers can be added through the documented contributor interfaces.
 
-See [Code graph preview support](docs/code-graph-support.md) for the tested language and relationship matrix, graceful-degradation behavior, and current limitations.
+See [Code graph support](docs/code-graph-support.md) for the tested language and relationship matrix, graceful-degradation behavior, and current limitations.
 
 Fresh setup uses the graph while populating the scaffold. The authoring rule is **read broad, ground tight**: an agent reads the complete `mex graph scope` neighborhood needed to understand a behavior, but points prose only at the few symbols that actually embody its claims. Broad architecture, stack, and convention files stay sparse or ungrounded; patterns and deep-domain files carry tighter grounding.
 
@@ -213,6 +204,8 @@ Inline anchors make load-bearing symbol mentions navigable without putting finge
 
 `mex check` compares authored grounding with its saved body and fingerprint. A body edit produces `GROUNDING_DRIFT`; `mex sync` repairs the prose when needed, refreshes `grounds_to`, and updates or removes stale inline anchors. Confident renames and moves are durably rebound, while uncertain matches produce `GROUNDING_AMBIGUOUS` for agent adjudication. Check remains read-only; sync performs durable re-grounding.
 
+Agent-facing retrieval is compact and source-free by default. `mex graph scope`, `mex graph query`, and `mex impact` emit `meta`, data, and `summary` JSONL records under a hard estimated-token ceiling. Use `--detail standard` for returned-node edges, `--detail source` for inline source, or follow the response’s suggested `mex graph get <node-id>` command to expand only the symbols needed.
+
 For an existing populated scaffold created before 0.7.0, connect it without regenerating its prose:
 
 ```bash
@@ -220,9 +213,15 @@ mex graph
 mex graph ground
 ```
 
-The migration agent preserves existing content, adds tight `grounds_to` entries and load-bearing `mex://` anchors, and is safe to rerun. After either setup or migration, `mex graph scope`, `mex graph query`, and `mex impact` provide hydrated signatures, callers/callees, source, ids, and fingerprints as terse JSONL for coding agents.
+The migration agent preserves existing content, adds tight `grounds_to` entries and load-bearing `mex://` anchors, and is safe to rerun. After either setup or migration, the graph commands provide compact signatures, relationship counts, ids, selection reasons, and targeted source expansion for coding agents.
 
 Existing installations remain compatible. If no graph exists, the eleven filesystem/lexical checkers still run and mex suggests building the graph and running `mex graph ground`. If SQLite or a grammar cannot load, graph checks are skipped with a warning while the rest of the CLI continues normally. Unsupported-language files are skipped rather than failing the build.
+
+### Retrieval benchmark
+
+On the mex repository benchmark, the median **grep-top-3-to-scope estimated-output ratio was 10.74×** while `mex graph scope` retained **1.0 expected-symbol recall** across six symbol tasks. In a separate five-task real-agent comparison, both detail modes answered 5/5 correctly; the default `minimal` mode used targeted `graph get` expansion with no Read/Grep fallback, while inline `source` mode fell back on four tasks.
+
+These are small-N results from one mid-size repository. They validate compact retrieval behavior, not an end-to-end graph-versus-no-graph token-savings claim. See [the benchmark results](evaluate/RESULTS.md) and [evaluation harness](evaluate/README.md) for methodology, caveats, and reproduction commands.
 
 ## Supported Tools
 

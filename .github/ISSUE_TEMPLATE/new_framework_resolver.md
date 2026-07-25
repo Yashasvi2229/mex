@@ -1,13 +1,13 @@
 ---
 name: New framework resolver
-about: Propose framework-specific graph relationships for the developer preview
+about: Propose framework-specific graph relationships for the code graph
 title: '[Framework] Add code-graph resolver'
-labels: 'code-graph, developer-preview'
+labels: 'code-graph'
 assignees: ''
 
 ---
 
-> Target branch: `code-graph-preview`
+> Target branch: `main`
 
 ## Framework
 
@@ -30,8 +30,8 @@ Describe the source-to-target relationship and the confidence conditions for bin
 
 ## Required proof
 
-- [ ] I have read [Extending the code graph](https://github.com/mex-memory/mex/blob/code-graph-preview/docs/extractors.md)
-- [ ] The required language extractor is already merged into `code-graph-preview`
+- [ ] I have read [Extending the code graph](https://github.com/mex-memory/mex/blob/main/docs/extractors.md)
+- [ ] The required language extractor is already merged into `main`
 - [ ] The resolver will use the frozen `FrameworkResolver` interface
 - [ ] Positive and negative framework detection will be tested
 - [ ] A minimal framework fixture will be added

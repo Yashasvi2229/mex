@@ -1,5 +1,3 @@
-<!-- Translated from README.md at commit: 735e38a -->
-
 <div align="center">
 
 <img src="mascot/mex-mascot.svg" alt="Mascote do Mex" width="80">
@@ -16,12 +14,12 @@
 
 [![npm version](https://img.shields.io/npm/v/mex-agent.svg)](https://www.npmjs.com/package/mex-agent)
 [![npm downloads](https://img.shields.io/npm/dm/mex-agent.svg)](https://www.npmjs.com/package/mex-agent)
-[![GitHub stars](https://img.shields.io/badge/stars-1.2K%2B-111111)](https://github.com/theDakshJaitly/mex/stargazers)
+[![GitHub stars](https://img.shields.io/badge/stars-1.2K%2B-111111)](https://github.com/mex-memory/mex/stargazers)
 [![Website](https://img.shields.io/badge/website-mexmemory.com-4f7cff)](https://mexmemory.com)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/VG7ySSMQM)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/theDakshJaitly/mex/actions/workflows/ci.yml/badge.svg)](https://github.com/theDakshJaitly/mex/actions/workflows/ci.yml)
-[![Node.js >=20](https://img.shields.io/badge/node-%3E%3D20-339933)](package.json)
+[![CI](https://github.com/mex-memory/mex/actions/workflows/ci.yml/badge.svg)](https://github.com/mex-memory/mex/actions/workflows/ci.yml)
+[![Node.js >=22.5](https://img.shields.io/badge/node-%3E%3D22.5-339933)](package.json)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6)](package.json)
 [![Agent memory](https://img.shields.io/badge/agent%20memory-compatible-6f8cff)](README.md)
 [![MCP](https://img.shields.io/badge/MCP-compatible-6f8cff)](#servidor-mcp)
@@ -32,7 +30,7 @@
 
 Agentes de programação com IA esquecem tudo entre as sessões. O Mex oferece uma memória de projeto permanente e navegável para que cada sessão comece com o contexto certo, em vez de um bloco de instruções sem direção. Ele ajuda a compreender o código, preservar decisões e manter o contexto do projeto alinhado ao repositório por meio de ferramentas para desenvolvedores.
 
-> **Status da versão:** o npm e a `main` permanecem na versão estável v0.6.3. O grafo de código baseado em AST/Tree-sitter é uma prévia para desenvolvedores da versão v0.7.0 ainda não lançada, disponível em `code-graph-preview`; ele ainda não foi publicado no npm.
+> **Novidade na v0.7.0:** grafos de código locais e determinísticos, memória vinculada a símbolos, recuperação compacta para agentes e suporte a Python e Rust além de TypeScript e JavaScript.
 
 💬 **Entre na comunidade do Mex no Discord** — discuta ideias, peça ajuda, compartilhe feedback e contribua com o projeto.
 
@@ -68,11 +66,11 @@ O Mex cria um scaffold estruturado em Markdown para a memória do agente:
 - `patterns/` — guias de tarefas reutilizáveis com observações e etapas de verificação
 - `.mex/events/decisions.jsonl` — notas somente para acréscimo por meio de `mex log`
 
-A CLI mantém esse scaffold confiável. Ela verifica caminhos, comandos, dependências, índices de padrões, desatualização e cobertura de scripts sem gastar tokens de IA. Quando encontra divergências, `mex sync` cria instruções direcionadas para que o agente corrija apenas as partes desatualizadas.
+A CLI mantém esse scaffold confiável. Ela verifica caminhos, comandos, dependências, índices de padrões, desatualização, cobertura de scripts e vínculos com nós de código sem gastar tokens de IA. Um grafo SQLite determinístico permite que a memória aponte para símbolos exatos e sobreviva a refatorações.
 
 ## Início rápido
 
-A versão estável no npm é a v0.6.3. Instale-a com Node.js 20 ou mais recente:
+Instale o Mex com Node.js 22.5 ou mais recente:
 
 O pacote npm se chama `mex-agent` porque `mex` já estava em uso. O comando da CLI continua sendo `mex`.
 
@@ -80,17 +78,7 @@ O pacote npm se chama `mex-agent` porque `mex` já estava em uso. O comando da C
 npx mex-agent setup
 ```
 
-Para testar ou contribuir com a prévia do grafo de código, use Node.js 22.5 ou mais recente e compile `code-graph-preview` a partir do código-fonte:
-
-```bash
-git clone https://github.com/theDakshJaitly/mex.git
-cd mex
-git switch code-graph-preview
-npm install
-npm run build
-```
-
-A configuração cria o scaffold `.mex/`, pergunta qual ferramenta de IA você usa, pré-analisa o repositório e gera uma instrução direcionada para preencher os arquivos de memória. O processo leva cerca de cinco minutos.
+A configuração cria o scaffold `.mex/`, pergunta qual ferramenta de IA você usa, constrói o grafo de código e preenche a memória com fatos do grafo. O processo leva cerca de cinco minutos.
 
 Ao final da configuração, você pode instalar o Mex globalmente:
 
@@ -120,7 +108,7 @@ O fluxo recomendado, `npx mex-agent setup`, funciona em qualquer terminal (Promp
 
 Se você instalou anteriormente pelo script antigo `setup.sh`, compilar dentro do WSL e depois executar a CLI em um terminal nativo do Windows provoca erros de “module not found”, pois `node_modules` e a resolução de caminhos diferem entre os dois sistemas de arquivos. Execute instalação, compilação e comandos da CLI no mesmo ambiente: tudo no WSL / Git Bash ou tudo no Windows nativo por meio de `npx mex-agent`.
 
-Consulte a [issue #10](https://github.com/theDakshJaitly/mex/issues/10) para mais contexto.
+Consulte a [issue #10](https://github.com/mex-memory/mex/issues/10) para mais contexto.
 
 ## Como funciona
 
@@ -132,7 +120,7 @@ Fonte editável: [docs/diagrams/context-routing.excalidraw](docs/diagrams/contex
 
 ## Detecção de divergências
 
-Onze verificadores validam o scaffold em relação ao código real. Zero tokens, zero IA.
+Doze verificadores validam o scaffold em relação ao código real. Zero tokens, zero IA.
 
 | Verificador | O que detecta |
 |-------------|---------------|
@@ -147,6 +135,7 @@ Onze verificadores validam o scaffold em relação ao código real. Zero tokens,
 | **tool-config-sync** | Arquivos de configuração de ferramentas de IA instaladas (por exemplo, `CLAUDE.md`, `.cursorrules`) fora de sincronia entre si |
 | **todo-fixme** | Marcadores `TODO` / `FIXME` não resolvidos no Markdown do scaffold |
 | **broken-link** | Links Markdown locais para arquivos que não existem no disco |
+| **grounding** | Nós de código vinculados cujo corpo mudou, foi movido de forma ambígua ou desapareceu |
 
 A pontuação começa em 100. O Mex desconta 10 por erro, 3 por aviso e 1 por informação.
 
@@ -174,6 +163,12 @@ Todos os comandos são executados a partir da raiz do projeto. Se você não fez
 | `mex sync --warnings` | Inclui na sincronização arquivos que têm apenas avisos |
 | `mex init` | Pré-analisa o repositório e cria um resumo estruturado para a IA |
 | `mex init --json` | Resumo bruto do analisador em JSON |
+| `mex graph` | Constrói ou reconstrói o grafo de código local |
+| `mex graph scope <tarefa>` | Recupera uma vizinhança compacta e pontuada em JSONL |
+| `mex graph get <id...>` | Expande o código-fonte de nós exatos em JSONL |
+| `mex graph query <relação> <símbolo>` | Consulta estrutural: `who-calls`, `what-calls` ou `where-defined` |
+| `mex graph ground` | Vincula um scaffold anterior à v0.7 sem reescrever o conteúdo |
+| `mex impact <símbolo\|arquivo>` | Mostra o raio de impacto no código e na memória |
 | `mex log <message>` | Acrescenta uma nota, decisão, risco ou tarefa pendente |
 | `mex timeline` | Exibe entradas recentes do log de eventos |
 | `mex heartbeat` | Executa uma vez verificações leves de integridade para agentes persistentes |
@@ -183,6 +178,8 @@ Todos os comandos são executados a partir da raiz do projeto. Se você não fez
 | `mex watch --uninstall` | Remove o hook |
 | `mex completion <shell>` | Exibe o autocompletar para o shell |
 | `mex commands` | Lista comandos e scripts com descrições |
+
+O grafo de código da v0.7.0 oferece suporte a TypeScript, TSX, JavaScript, JSX, Python e Rust. Consulte [Suporte ao grafo de código](docs/code-graph-support.md) para a matriz testada e as limitações atuais.
 
 ## Ferramentas compatíveis
 

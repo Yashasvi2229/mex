@@ -22,7 +22,14 @@ import type { BuildResult, GraphEngine, NodeSearchOptions } from "./engine.js";
 import { openGraphDatabase } from "./db/database.js";
 import { GraphStore, type FileRecord, type UnresolvedRefRecord } from "./db/store.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
-import { detectLanguage, extractFile, isSupportedSourceFile, loadGrammars, normalizedAstTokens } from "./extraction/index.js";
+import {
+  detectLanguage,
+  extractFile,
+  isSupportedSourceFile,
+  loadGrammars,
+  normalizedAstTokens,
+  SUPPORTED_SOURCE_GLOB,
+} from "./extraction/index.js";
 import { resolveReferences } from "./resolution/resolver.js";
 import { createResolutionContext } from "./resolution/context.js";
 import { FRAMEWORK_RESOLVERS } from "./resolution/frameworks/index.js";
@@ -351,7 +358,7 @@ interface DiscoveredFile {
 
 /** Every indexable source file under `root`, as project-relative posix paths. */
 function discoverSourceFiles(root: string): DiscoveredFile[] {
-  const matches = globSync("**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs,py}", {
+  const matches = globSync(SUPPORTED_SOURCE_GLOB, {
     cwd: root,
     ignore: IGNORE_GLOBS,
     nodir: true,

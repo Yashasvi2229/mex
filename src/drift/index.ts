@@ -136,7 +136,7 @@ export async function runDriftCheck(
   // Run checkers that work on claims
   // Only check paths in ROUTER.md — other scaffold files use backticks for
   // non-path content (config values, IPs, annotation keys) that produces
-  // false MISSING_PATH errors. See https://github.com/theDakshJaitly/mex/issues/79
+  // false MISSING_PATH errors. See https://github.com/mex-memory/mex/issues/79
   const routerClaims = allClaims.filter((c) => basename(c.source) === "ROUTER.md");
   const pathIssues = checkPaths(routerClaims, projectRoot, scaffoldRoot);
   allIssues.push(...pathIssues);

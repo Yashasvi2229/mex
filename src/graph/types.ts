@@ -20,8 +20,8 @@
 /**
  * Kinds of nodes in the graph. Declared as a runtime-iterable `as const` array
  * so the same source of truth backs both the TS union and runtime validation.
- * 0.7.0 extracts TS/JS only, but the full kind vocabulary is frozen up front so
- * contributor extractors (0.7.x) emit into a stable set.
+ * The full kind vocabulary is frozen up front so contributor extractors in the
+ * 0.7.x series emit into a stable set.
  */
 export const NODE_KINDS = [
   "file",
@@ -76,10 +76,10 @@ export type EdgeKind =
 export type ReferenceKind = EdgeKind | "function_ref";
 
 /**
- * Languages the graph can represent. 0.7.0 ships extraction for TS/JS/TSX/JSX
- * only (see `EXTRACTORS` wiring in Track A); the rest are reserved so
- * contributor extractors slot in without widening this union (0.7.x program).
- * Runtime-iterable for the same reason as {@link NODE_KINDS}.
+ * Languages the graph can represent. 0.7.0 ships extraction for TypeScript/TSX,
+ * JavaScript/JSX, Python, and Rust (see `EXTRACTORS`); the rest are reserved so
+ * contributor extractors slot in without widening this union. Runtime-iterable
+ * for the same reason as {@link NODE_KINDS}.
  */
 export const LANGUAGES = [
   "typescript",

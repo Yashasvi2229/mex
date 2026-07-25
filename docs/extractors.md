@@ -1,24 +1,20 @@
 # Extending the code graph
 
-The v0.7.0 developer preview exposes two source-level contribution seams:
+mex v0.7.0 exposes two source-level contribution seams:
 
 - `LanguageExtractor` turns one parsed source file into normalized graph nodes and references.
 - `FrameworkResolver` adds framework-specific nodes and relationships that a plain syntax walk cannot infer.
 
-The [code graph preview support reference](code-graph-support.md) records which language and framework behavior is fixture-backed today, which wiring is only partially covered, and which work remains unsupported.
+The [code graph support reference](code-graph-support.md) records which language and framework behavior is fixture-backed today, which wiring is only partially covered, and which work remains unsupported.
 
-These interfaces are frozen for the 0.7.x contributor program. They are not public npm exports. Contributions target `code-graph-preview`; do not open code-graph pull requests against `main`.
+These interfaces are frozen for the 0.7.x contributor program. They are not public npm exports. Contributions target `main`.
 
 ## Before starting
 
-Use an issue labeled `code-graph` and `developer-preview` that states:
-
-> Target branch: `code-graph-preview`
-
-Create your branch from the preview branch:
+Use an issue labeled `code-graph`, agree on a bounded fixture-backed scope, and create your branch from `main`:
 
 ```bash
-git switch code-graph-preview
+git switch main
 git pull
 git switch -c <feature-or-fix-branch>
 ```
@@ -131,11 +127,11 @@ npm run build
 
 Your pull request must:
 
-- Target `code-graph-preview`.
+- Target `main`.
 - Link the approved issue.
 - Include a fixture and focused node/edge assertions.
 - Keep changes inside the extractor or resolver boundary plus its registrations and tests.
 - Document the grammar source and version when adding a language.
 - Avoid core identity, reconciliation, schema, and drift changes unless the linked issue was explicitly approved for that scope.
 
-New community-contributed language and framework support begins as developer-preview functionality. Maintainers may mark support experimental if fixtures, upstream grammars, or active maintenance are insufficient.
+Maintainers may mark new community-contributed language and framework support experimental if fixtures, upstream grammars, or active maintenance are insufficient.

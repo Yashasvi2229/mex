@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, code-graph-preview]
+    branches: [main]
 
 jobs:
   check:
@@ -33,5 +33,9 @@ jobs:
           npm init -y >/dev/null
           npm install "$GITHUB_WORKSPACE/$TARBALL" --ignore-scripts >/dev/null
           printf 'export function greet(name: string): string { return `hello ${name}`; }\n' > src/sample.ts
+          printf 'class Vehicle:\n    def drive(self):\n        return True\n' > src/sample.py
+          printf 'pub struct User { pub name: String }\npub fn create_user() -> User { User { name: String::new() } }\n' > src/sample.rs
           MEX_TELEMETRY=0 ./node_modules/.bin/mex graph --json | grep '"nodesCreated"'
           MEX_TELEMETRY=0 ./node_modules/.bin/mex graph query where-defined greet | grep '"type":"result"'
+          MEX_TELEMETRY=0 ./node_modules/.bin/mex graph query where-defined Vehicle | grep '"type":"result"'
+          MEX_TELEMETRY=0 ./node_modules/.bin/mex graph query where-defined User | grep '"type":"result"'
