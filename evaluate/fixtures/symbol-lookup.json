@@ -1,0 +1,12 @@
+[
+  { "id": "store", "query": "GraphStore", "expect": "GraphStore" },
+  { "id": "ledger", "query": "BudgetLedger", "expect": "BudgetLedger" },
+  { "id": "reconciler", "query": "MinHashReconciler", "expect": "MinHashReconciler" },
+  { "id": "fingerprints", "query": "FingerprintStore", "expect": "FingerprintStore" },
+  { "id": "scope", "query": "selectScope", "expect": "selectScope" },
+  { "id": "fact", "query": "compactFact", "expect": "compactFact" },
+  { "id": "database", "query": "openGraphDatabase", "expect": "openGraphDatabase" },
+  { "id": "callers", "query": "transitiveCallers", "expect": "transitiveCallers" },
+  { "id": "source", "query": "readNodeSource", "expect": "readNodeSource" },
+  { "id": "emitter", "query": "runGraphScope", "expect": "runGraphScope" }
+]

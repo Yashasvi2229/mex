@@ -41,6 +41,12 @@ function checkGates(thresholds, efficiency, search) {
   if (search.summary.foundRate < thresholds.searchQuality.whereDefinedFoundRate.min) {
     failures.push(`whereDefinedFoundRate ${search.summary.foundRate} < ${thresholds.searchQuality.whereDefinedFoundRate.min}`);
   }
+  if (search.summary.symbolLookupTopRate < thresholds.searchQuality.symbolLookupTopRate.min) {
+    failures.push(`symbolLookupTopRate ${search.summary.symbolLookupTopRate} < ${thresholds.searchQuality.symbolLookupTopRate.min}`);
+  }
+  if (search.summary.fragmentSymbolRate < thresholds.searchQuality.fragmentSymbolRate.min) {
+    failures.push(`fragmentSymbolRate ${search.summary.fragmentSymbolRate} < ${thresholds.searchQuality.fragmentSymbolRate.min}`);
+  }
   return failures;
 }
 
@@ -57,6 +63,10 @@ console.log("summary:", efficiency.summary);
 
 console.log("\n== Category 2: search quality ==");
 console.table(search.rows);
+console.log("\n-- symbol lookup (expected symbol's rank among scope facts) --");
+console.table(search.symbolLookup);
+console.log("\n-- fragment lookup (file: nodes among the leading facts) --");
+console.table(search.fragmentLookup);
 console.log("summary:", search.summary);
 
 const failures = checkGates(thresholds, efficiency, search);

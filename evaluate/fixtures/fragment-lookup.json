@@ -1,0 +1,7 @@
+[
+  { "id": "store", "query": "Store" },
+  { "id": "reconcile", "query": "Reconcile" },
+  { "id": "checker", "query": "Checker" },
+  { "id": "fingerprint", "query": "Fingerprint" },
+  { "id": "grounding", "query": "Grounding" }
+]
