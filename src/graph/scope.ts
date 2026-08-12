@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { GraphEngine } from "./engine.js";
+import { isTestPath } from "./search/rank.js";
 import type { GraphNode, NodeKind } from "./types.js";
 
 export type DetailLevel = "minimal" | "standard" | "source";
@@ -74,8 +75,9 @@ interface Candidate {
   category: SelectionCategory;
 }
 
+/** Test-file membership, shared with search ranking so both agree on it. */
 function isTestNode(node: GraphNode): boolean {
-  return /(^|\/)(__tests__|tests?)\//.test(node.filePath) || /\.(test|spec)\./.test(node.filePath);
+  return isTestPath(node.filePath);
 }
 
 /** Identifier-like tokens in a task string (drops trivial 1-char fragments). */
