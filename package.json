@@ -56,6 +56,8 @@
     "test:watch": "vitest",
     "eval": "node evaluate/index.mjs",
     "eval:e2e": "node evaluate/agent-e2e.mjs",
+    "eval:compare": "node evaluate/compare/index.mjs",
+    "eval:compare:test": "node --test evaluate/compare/test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "prepare": "npm run build"
   },
