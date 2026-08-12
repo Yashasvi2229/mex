@@ -7,6 +7,7 @@ import { openSqlite } from "../db/sqlite.js";
 import { createGraphEngine } from "../index.js";
 import type { GraphEngine } from "../engine.js";
 import { findChangedSourceFiles } from "../runtime.js";
+import cases from "./fixtures/symbol-lookup-cases.json" with { type: "json" };
 
 const FIXTURE = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -38,6 +39,24 @@ describe("Rust graph discovery", () => {
       node.name === "create_user" && node.language === "rust"
     ))).toBe(true);
   });
+
+  // The Rust half of the shared symbol-lookup control (see
+  // `store-search.test.ts`). `Order` is the interesting one: its own fields and
+  // methods carry `Order` in their qualified names, and used to outrank it.
+  it.each(cases.filter((testCase) => testCase.corpus === "rust"))(
+    "$id: $query returns $expect.name first",
+    (testCase) => {
+      const results = engine.searchNodes(testCase.query, { limit: 20 });
+      const rank =
+        results.findIndex(
+          (node) =>
+            node.name === testCase.expect.name &&
+            (testCase.expect.kind === undefined || node.kind === testCase.expect.kind),
+        ) + 1;
+      expect(rank, `${testCase.expect.name} not found for "${testCase.query}"`).toBeGreaterThan(0);
+      expect(rank).toBeLessThanOrEqual(testCase.maxRank);
+    },
+  );
 
   it("includes new Rust files in incremental change discovery", () => {
     writeFileSync(join(root, "added.rs"), "pub fn added() {}\n");

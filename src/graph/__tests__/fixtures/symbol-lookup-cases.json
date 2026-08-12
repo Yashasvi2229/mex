@@ -1,0 +1,13 @@
+[
+  { "id": "ts-class", "corpus": "typescript", "query": "PaymentProcessor", "expect": { "name": "PaymentProcessor", "kind": "class" }, "maxRank": 1 },
+  { "id": "ts-prefix-sibling", "corpus": "typescript", "query": "PaymentProcessorFactory", "expect": { "name": "PaymentProcessorFactory", "kind": "class" }, "maxRank": 1 },
+  { "id": "ts-function", "corpus": "typescript", "query": "getUserById", "expect": { "name": "getUserById", "kind": "function" }, "maxRank": 1 },
+  { "id": "ts-arrow", "corpus": "typescript", "query": "makeGreeter", "expect": { "name": "makeGreeter" }, "maxRank": 1 },
+  { "id": "ts-test-helper", "corpus": "typescript", "query": "checkCharge", "expect": { "name": "checkCharge", "kind": "function" }, "maxRank": 1 },
+  { "id": "py-class", "corpus": "python", "query": "Widget", "expect": { "name": "Widget", "kind": "class" }, "maxRank": 1 },
+  { "id": "py-function", "corpus": "python", "query": "build_widget", "expect": { "name": "build_widget", "kind": "function" }, "maxRank": 1 },
+  { "id": "py-file-named-after-symbol", "corpus": "python", "query": "widget_factory", "expect": { "name": "widget_factory", "kind": "function" }, "maxRank": 1 },
+  { "id": "rs-struct", "corpus": "rust", "query": "Order", "expect": { "name": "Order", "kind": "class" }, "maxRank": 1 },
+  { "id": "rs-function", "corpus": "rust", "query": "create_user", "expect": { "name": "create_user", "kind": "function" }, "maxRank": 1 },
+  { "id": "rs-const", "corpus": "rust", "query": "MAX_AGE", "expect": { "name": "MAX_AGE", "kind": "constant" }, "maxRank": 1 }
+]

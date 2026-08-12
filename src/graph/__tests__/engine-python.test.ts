@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { openSqlite } from "../db/sqlite.js";
 import { createGraphEngine } from "../index.js";
 import type { GraphEngine } from "../engine.js";
+import cases from "./fixtures/symbol-lookup-cases.json" with { type: "json" };
 
 const FIXTURE = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -26,6 +27,27 @@ beforeAll(async () => {
 afterAll(() => {
   engine.close();
   rmSync(root, { recursive: true, force: true });
+});
+
+// The Python half of the shared symbol-lookup control (see
+// `store-search.test.ts` for the whole story). It runs here rather than there
+// because the corpus a test process builds has to stay small, and this one is
+// already built.
+describe("Python symbol lookup", () => {
+  it.each(cases.filter((testCase) => testCase.corpus === "python"))(
+    "$id: $query returns $expect.name first",
+    (testCase) => {
+      const results = engine.searchNodes(testCase.query, { limit: 20 });
+      const rank =
+        results.findIndex(
+          (node) =>
+            node.name === testCase.expect.name &&
+            (testCase.expect.kind === undefined || node.kind === testCase.expect.kind),
+        ) + 1;
+      expect(rank, `${testCase.expect.name} not found for "${testCase.query}"`).toBeGreaterThan(0);
+      expect(rank).toBeLessThanOrEqual(testCase.maxRank);
+    },
+  );
 });
 
 describe("Python graph resolution", () => {
