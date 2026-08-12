@@ -7,6 +7,14 @@
 // edges), and the bulk reads resolution uses. Rows are snake_case in SQLite and
 // decoded to the camelCase `GraphNode`/`GraphEdge` value types here.
 
+import { planQuery, toMatchExpression, type QueryPlan } from "../search/query.js";
+import {
+  exactLookupTerms,
+  normalizeQueryPath,
+  rankCandidates,
+  unmatchedTerms,
+  type SearchCandidate,
+} from "../search/rank.js";
 import type { EdgeKind, GraphEdge, GraphNode, Language, NodeKind, ReferenceKind } from "../types.js";
 import type { SqliteDatabase } from "./sqlite.js";
 
@@ -118,6 +126,30 @@ function rowToNode(row: NodeRow): GraphNode {
     bodyHash: row.body_hash ?? undefined,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * How far past the caller's `limit` the candidate pool is fetched before it is
+ * ranked. Ranking can only reorder rows the fetch returned, so the pool has to
+ * be wider than the page; the floor matters as much as the multiplier, since a
+ * `limit: 1` lookup would otherwise rank a pool of five.
+ */
+const FETCH_MULTIPLIER = 5;
+const MIN_FETCH = 100;
+
+/**
+ * Cap on the rows one term may contribute to the exact-name tier. A name is
+ * rarely ambiguous; the cap only bounds the degenerate case (`constructor`),
+ * where the bm25 tier has already supplied the ranked candidates anyway.
+ */
+const EXACT_NAME_LIMIT = 20;
+
+/** Shortest term the substring tier will scan for — below this it matches everything. */
+const MIN_SUBSTRING_TERM = 2;
+
+interface Filters {
+  clause: string;
+  params: Array<string | number>;
 }
 
 function rowToEdge(row: EdgeRow): GraphEdge {
@@ -384,59 +416,155 @@ export class GraphStore {
   }
 
   /**
-   * Full-text search over node name/qualified-name/docstring/signature (FTS5),
-   * with a LIKE fallback for substrings FTS's prefix match misses. Backs
-   * `searchNodes` on the engine surface.
+   * Search nodes by free text. Backs `searchNodes` on the engine surface.
+   *
+   * Three tiers feed one candidate pool, which is then ranked (see
+   * `../search/rank.ts`) and sliced to `limit`:
+   *
+   *   1. **bm25 over FTS5** — the primary tier, over-fetched so the ranking has
+   *      something to reorder.
+   *   2. **exact name** — every identifier-shaped term is looked up directly
+   *      against `nodes.name`. bm25 can bury a short exact name under longer
+   *      compounds that share its prefix, past any fetch window, where no
+   *      amount of re-ranking reaches it. This tier makes symbol lookup
+   *      independent of how deep the pool went.
+   *   3. **substring** — for terms nothing in the pool contains, a LIKE scan
+   *      catches fragments FTS's prefix match cannot (`serby` in `getUserById`).
+   *      It used to run only when FTS returned *nothing at all*, so a query that
+   *      returned one bad row never reached it.
+   *
+   * Ordering is total and stable (match class, score, name length, node id), so
+   * the same index and query return byte-identical results on every run.
    */
   search(
     query: string,
     options: { kinds?: NodeKind[]; languages?: Language[]; limit?: number } = {},
   ): GraphNode[] {
     const { kinds, languages, limit = 100 } = options;
-    const ftsQuery = query
-      .replace(/[."'*():^-]/g, " ")
-      .split(/\s+/)
-      .filter((t) => t.length > 0 && !/^(AND|OR|NOT|NEAR)$/i.test(t))
-      .map((t) => `"${t}"*`)
-      .join(" OR ");
+    const plan = planQuery(query);
+    if (plan.terms.length === 0) return [];
 
-    const filterSql: string[] = [];
-    const filterParams: Array<string | number> = [];
-    if (kinds && kinds.length > 0) {
-      filterSql.push(`nodes.kind IN (${kinds.map(() => "?").join(",")})`);
-      filterParams.push(...kinds);
-    }
-    if (languages && languages.length > 0) {
-      filterSql.push(`nodes.language IN (${languages.map(() => "?").join(",")})`);
-      filterParams.push(...languages);
-    }
-    const filterClause = filterSql.length > 0 ? ` AND ${filterSql.join(" AND ")}` : "";
+    const filters = buildFilters(kinds, languages);
+    const fetch = Math.max(limit * FETCH_MULTIPLIER, MIN_FETCH);
 
-    let rows: NodeRow[] = [];
-    if (ftsQuery) {
-      // bm25 column weights bias toward name matches over incidental docstring
-      // mentions. bm25 returns negative scores (more negative = better).
-      rows = this.db
-        .prepare(
-          `SELECT nodes.* FROM nodes_fts
-             JOIN nodes ON nodes_fts.id = nodes.id
-             WHERE nodes_fts MATCH ?${filterClause}
-             ORDER BY bm25(nodes_fts, 0, 20, 5, 1, 2), nodes.id LIMIT ?`,
-        )
-        .all(ftsQuery, ...filterParams, limit) as NodeRow[];
+    // Pool keyed by node id; a node found by several tiers keeps its best score.
+    const pool = new Map<string, { row: NodeRow; base: number }>();
+    const admit = (row: NodeRow, base: number): void => {
+      const existing = pool.get(row.id);
+      if (existing) existing.base = Math.max(existing.base, base);
+      else pool.set(row.id, { row, base });
+    };
+
+    for (const hit of this.ftsCandidates(plan, filters, fetch)) admit(hit.row, hit.base);
+    for (const row of this.exactNameCandidates(plan, filters)) admit(row, 0);
+
+    const candidates: SearchCandidate[] = [...pool.values()].map(toCandidate);
+    const missing = unmatchedTerms(plan, candidates).filter((term) => term.length >= MIN_SUBSTRING_TERM);
+    if (missing.length > 0) {
+      for (const row of this.substringCandidates(missing, filters, fetch)) admit(row, 0);
     }
 
-    if (rows.length === 0 && query.trim().length >= 2) {
-      const like = `%${query.trim()}%`;
-      rows = this.db
-        .prepare(
-          `SELECT * FROM nodes
-             WHERE (name LIKE ? OR qualified_name LIKE ?)${filterClause}
-             ORDER BY length(name), name, id LIMIT ?`,
-        )
-        .all(like, like, ...filterParams, limit) as NodeRow[];
-    }
-
-    return rows.map(rowToNode);
+    const ranked = rankCandidates([...pool.values()].map(toCandidate), plan);
+    return ranked.slice(0, limit).map((entry) => rowToNode(pool.get(entry.id)!.row));
   }
+
+  /** Tier 1: weighted bm25 over the FTS index, over-fetched. */
+  private ftsCandidates(
+    plan: QueryPlan,
+    filters: Filters,
+    fetch: number,
+  ): Array<{ row: NodeRow; base: number }> {
+    // bm25 column weights bias toward name matches over incidental docstring
+    // mentions. bm25 returns negative scores (more negative = better), so the
+    // pool carries `-rank` and treats higher as better throughout.
+    try {
+      const rows = this.db
+        .prepare(
+          // Aliased `bm25_rank`, not `rank`: `rank` is a hidden FTS5 column, and
+          // ordering by the bare name would silently use its default weights.
+          `SELECT nodes.*, bm25(nodes_fts, 0, 20, 5, 1, 2) AS bm25_rank FROM nodes_fts
+             JOIN nodes ON nodes_fts.id = nodes.id
+             WHERE nodes_fts MATCH ?${filters.clause}
+             ORDER BY bm25_rank, nodes.id LIMIT ?`,
+        )
+        .all(toMatchExpression(plan), ...filters.params, fetch) as Array<NodeRow & { bm25_rank: number }>;
+      return rows.map((row) => ({ row, base: -row.bm25_rank }));
+    } catch {
+      // A MATCH expression the tokenizer rejects is a recoverable no-match: the
+      // caller asked a question, and "nothing" is a legitimate answer to it.
+      return [];
+    }
+  }
+
+  /**
+   * Tier 2: exact `name` matches for the terms allowed to claim one. Uses the
+   * `lower(name)` expression index, so it stays a keyed lookup rather than a
+   * scan even on a large index.
+   */
+  private exactNameCandidates(plan: QueryPlan, filters: Filters): NodeRow[] {
+    const rows: NodeRow[] = [];
+    const statement = this.db.prepare(
+      `SELECT * FROM nodes WHERE lower(name) = ?${filters.clause} ORDER BY id LIMIT ?`,
+    );
+    const seen = new Set<string>();
+    for (const term of exactLookupTerms(plan)) {
+      if (seen.has(term)) continue;
+      seen.add(term);
+      rows.push(...(statement.all(term, ...filters.params, EXACT_NAME_LIMIT) as NodeRow[]));
+    }
+    // A query that names a file wants that file, and demoting `file:` nodes in
+    // the ranking means bm25 alone can no longer be trusted to have kept it.
+    const path = normalizeQueryPath(plan.raw);
+    if (/[./\\]/.test(plan.raw)) {
+      rows.push(
+        ...(this.db
+          .prepare(
+            `SELECT * FROM nodes WHERE kind = 'file'
+               AND (lower(name) = ? OR lower(qualified_name) = ?)${filters.clause}
+               ORDER BY id LIMIT ?`,
+          )
+          .all(path, path, ...filters.params, EXACT_NAME_LIMIT) as NodeRow[]),
+      );
+    }
+    return rows;
+  }
+
+  /** Tier 3: substring scan for terms the pool does not already contain. */
+  private substringCandidates(terms: readonly string[], filters: Filters, fetch: number): NodeRow[] {
+    const patterns = terms.map((term) => `%${term}%`);
+    const clause = terms.map(() => "(name LIKE ? OR qualified_name LIKE ?)").join(" OR ");
+    const params = patterns.flatMap((pattern) => [pattern, pattern]);
+    return this.db
+      .prepare(
+        `SELECT * FROM nodes WHERE (${clause})${filters.clause}
+           ORDER BY length(name), name, id LIMIT ?`,
+      )
+      .all(...params, ...filters.params, fetch) as NodeRow[];
+  }
+}
+
+/** Assemble the optional kind/language filter, and only the params it names. */
+function buildFilters(kinds: NodeKind[] | undefined, languages: Language[] | undefined): Filters {
+  const sql: string[] = [];
+  const params: Array<string | number> = [];
+  if (kinds && kinds.length > 0) {
+    sql.push(`nodes.kind IN (${kinds.map(() => "?").join(",")})`);
+    params.push(...kinds);
+  }
+  if (languages && languages.length > 0) {
+    sql.push(`nodes.language IN (${languages.map(() => "?").join(",")})`);
+    params.push(...languages);
+  }
+  return { clause: sql.length > 0 ? ` AND ${sql.join(" AND ")}` : "", params };
+}
+
+function toCandidate(entry: { row: NodeRow; base: number }): SearchCandidate {
+  return {
+    id: entry.row.id,
+    kind: entry.row.kind as NodeKind,
+    name: entry.row.name,
+    qualifiedName: entry.row.qualified_name,
+    filePath: entry.row.file_path,
+    base: entry.base,
+  };
 }
