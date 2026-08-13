@@ -95,9 +95,13 @@ describe("corroboration", () => {
     expect(third).toBeGreaterThan((1 / 3) ** 2 * 0.2);
   });
 
-  it("takes the stronger charge where the demotion is the stronger one", () => {
-    // Above ~0.45 coverage, squaring alone is too gentle for a one-word match.
-    expect(corroboration(0.7, false)).toBe(0.2);
+  it("charges partial agreement once, with no floor of its own", () => {
+    // The plain-word demotion that used to clamp this to a flat 0.2 was deleted
+    // as measurably inert: at its value it never bound, because coverage damping
+    // always landed below it first. What is left is one charge for one
+    // measurement, which is the property that matters.
+    expect(corroboration(0.7, false)).toBeCloseTo(0.49, 6);
+    expect(corroboration(0.7, false)).toBeGreaterThan(corroboration(0.3, false));
   });
 
   it("is monotonic in coverage", () => {

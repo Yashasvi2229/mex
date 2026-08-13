@@ -53,8 +53,11 @@ export function runImpact(
 
     // Definitions (roots) and transitive callers share one `maxNodes` cap on returned nodes.
     const rootsSorted = roots.sort(byId);
-    const ctx = beginResponse("impact", opts, undefined,
-      rootsSorted.length > 0 ? [`mex graph get ${rootsSorted[0]!.id} --detail source`] : []);
+    const widen = widenCommand(`graph impact ${quoteArg(target)}`, opts);
+    const ctx = beginResponse("impact", opts, undefined, [
+      ...(rootsSorted.length > 0 ? [`mex graph get ${rootsSorted[0]!.id} --detail source`] : []),
+      widen("max-output-tokens"),
+    ]);
     const ledger = ctx.ledger;
     const meta = ctx.meta;
 
@@ -109,6 +112,8 @@ export function runImpact(
       returnedNodes: emittedNodes.length,
       returnedEdges: 0,
       truncated,
+      maxNodes: opts.maxNodes,
+      widen,
       suggestedNextCommands: emittedNodes.length > 0 ? [`mex graph get ${emittedNodes[0]!.id} --detail source`] : [],
     })));
   } catch (error) {
@@ -163,8 +168,11 @@ export function runGraphQuery(
       }
     }
 
-    const anticipated = pairs.length > 0 && opts.detail !== "source"
-      ? [`mex graph get ${pairs[0]!.node.id} --detail source`] : [];
+    const widen = widenCommand(`graph query ${relation} ${quoteArg(target)}`, opts);
+    const anticipated = [
+      ...(pairs.length > 0 && opts.detail !== "source" ? [`mex graph get ${pairs[0]!.node.id} --detail source`] : []),
+      widen("max-output-tokens"),
+    ];
     const ctx = beginResponse(`graph query ${relation}`, opts, undefined, anticipated);
     const ledger = ctx.ledger;
     const meta = ctx.meta;
@@ -188,6 +196,8 @@ export function runGraphQuery(
       returnedNodes: entries.length,
       returnedEdges: 0,
       truncated,
+      maxNodes: opts.maxNodes,
+      widen,
       suggestedNextCommands: entries.length > 0 && opts.detail !== "source" ? [`mex graph get ${entries[0]!.node.id} --detail source`] : [],
     })));
   } catch (error) {
@@ -211,7 +221,11 @@ export function runGraphScope(
   try {
     const { candidates, matchedCount } = selectScope(session.graph, task, opts.maxNodes);
     const firstNode = candidates.length > 0 ? session.graph.getNode(candidates[0]!.id) : null;
-    const ctx = beginResponse("graph scope", opts, task, buildScopeSuggestions(firstNode ? [firstNode] : [], opts.detail));
+    const widen = widenCommand(`graph scope ${quoteArg(task)}`, opts);
+    const ctx = beginResponse("graph scope", opts, task, [
+      ...buildScopeSuggestions(firstNode ? [firstNode] : [], opts.detail),
+      widen("max-output-tokens"),
+    ]);
     const ledger = ctx.ledger;
     const meta = ctx.meta;
 
@@ -248,6 +262,8 @@ export function runGraphScope(
       returnedNodes: facts.length,
       returnedEdges: edgeRecords.length,
       truncated,
+      maxNodes: opts.maxNodes,
+      widen,
       suggestedNextCommands: buildScopeSuggestions(facts.map((f) => f.node), opts.detail),
     })));
   } catch (error) {
@@ -304,6 +320,7 @@ export function runGraphGet(
       returnedNodes: sourcedIds.size,
       returnedEdges: 0,
       truncated,
+      maxNodes: ids.length,
       suggestedNextCommands: [],
     })));
   } catch (error) {
@@ -350,8 +367,27 @@ function beginResponse(command: string, opts: AgentOptions, task: string | undef
 function summarySkeleton(suggestions: string[]): Rec {
   return {
     type: "summary", matchedNodes: SIZE_PROBE, returnedNodes: SIZE_PROBE, returnedEdges: SIZE_PROBE,
-    maxOutputTokens: SIZE_PROBE, truncated: true, suggestedNextCommands: suggestions, estimatedOutputTokens: SIZE_PROBE,
+    maxOutputTokens: SIZE_PROBE, truncated: true, truncatedBy: "max-output-tokens",
+    suggestedNextCommands: suggestions, estimatedOutputTokens: SIZE_PROBE,
   };
+}
+
+/**
+ * Which ceiling actually withheld results, or undefined when nothing was.
+ *
+ * `truncated: true` on its own tells an agent that it did not get everything and
+ * nothing about how to get more — so an agent that reads the signal and retries
+ * with a bigger `--max-nodes` pays for a second identical response when the
+ * binding limit was the token budget. At default settings that is the common
+ * case: 11 facts is roughly 1,500 tokens, so a request for 30 is bound by the
+ * ledger long before it is bound by `--max-nodes`.
+ *
+ * The ledger is checked first because it is the outer ceiling: when both bind,
+ * raising `--max-nodes` alone changes nothing.
+ */
+function truncationCause(ctx: ResponseCtx, returned: number, maxNodes: number): string | undefined {
+  if (ctx.ledger.droppedAny || ctx.ledger.overBudget || ctx.effectiveMax > ctx.requested) return "max-output-tokens";
+  return returned >= maxNodes ? "max-nodes" : undefined;
 }
 
 function metaRecord(command: string, opts: AgentOptions, task?: string): Rec {
@@ -364,16 +400,29 @@ function metaRecord(command: string, opts: AgentOptions, task?: string): Rec {
 
 function summaryRecord(
   ctx: ResponseCtx,
-  fields: { matchedNodes: number; returnedNodes: number; returnedEdges: number; truncated: boolean; suggestedNextCommands: string[] },
+  fields: {
+    matchedNodes: number; returnedNodes: number; returnedEdges: number; truncated: boolean;
+    suggestedNextCommands: string[];
+    /** The caller's node cap, so truncation can name which ceiling bound. */
+    maxNodes: number;
+    /** The same command, widened — suggested only when a ceiling actually bound. */
+    widen?: (cause: string) => string;
+  },
 ): Rec {
+  const truncated = fields.truncated || ctx.ledger.droppedAny || ctx.ledger.overBudget || ctx.effectiveMax > ctx.requested;
+  const cause = truncated ? truncationCause(ctx, fields.returnedNodes, fields.maxNodes) : undefined;
+  const widened = cause !== undefined && fields.widen ? [fields.widen(cause)] : [];
   const base: Rec = {
     type: "summary",
     matchedNodes: fields.matchedNodes,
     returnedNodes: fields.returnedNodes,
     returnedEdges: fields.returnedEdges,
     maxOutputTokens: ctx.effectiveMax,
-    truncated: fields.truncated || ctx.ledger.droppedAny || ctx.ledger.overBudget || ctx.effectiveMax > ctx.requested,
-    suggestedNextCommands: fields.suggestedNextCommands,
+    truncated,
+    // Which ceiling withheld the rest, so the retry that follows can be the one
+    // that actually changes the answer. Absent when nothing was withheld.
+    ...(cause !== undefined ? { truncatedBy: cause } : {}),
+    suggestedNextCommands: [...fields.suggestedNextCommands, ...widened],
   };
   return { ...base, estimatedOutputTokens: ctx.ledger.estimatedTokens + estimateTokens({ ...base, estimatedOutputTokens: SIZE_PROBE }) };
 }
@@ -420,6 +469,27 @@ function planSource(
 function emitAll(write: (line: string) => void, meta: Rec, records: Rec[]): void {
   write(JSON.stringify(meta));
   for (const record of records) write(JSON.stringify(record));
+}
+
+/** Quote an argument that may carry spaces, so a suggested command is runnable. */
+function quoteArg(value: string): string {
+  return /\s/.test(value) ? `"${value.replaceAll('"', '\\"')}"` : value;
+}
+
+/**
+ * The same call, widened along whichever axis actually bound it.
+ *
+ * Raising `--max-nodes` when the ledger was the binding ceiling buys nothing,
+ * and that is the retry an agent makes when all it is told is `truncated: true`.
+ * The multipliers are deliberately modest: this is a suggestion the agent may
+ * take, not a new default, and doubling twice is cheaper to reason about than
+ * an estimate of how much budget the withheld records would have needed.
+ */
+function widenCommand(command: string, opts: AgentOptions): (cause: string) => string {
+  return (cause) =>
+    cause === "max-output-tokens"
+      ? `mex ${command} --max-nodes ${opts.maxNodes} --max-output-tokens ${opts.maxOutputTokens * 4}`
+      : `mex ${command} --max-nodes ${opts.maxNodes * 2}`;
 }
 
 function buildScopeSuggestions(nodes: GraphNode[], detail: DetailLevel): string[] {

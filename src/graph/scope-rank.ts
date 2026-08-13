@@ -28,20 +28,26 @@
 //   2. **the identifier exemption** — when the user plainly typed a symbol
 //      name, the other words of the sentence are context, not evidence against
 //      it, and the boost applies at full weight;
-//   3. **the plain-word demotion** — the same test read the other way. An exact
-//      match on an ordinary dictionary word, with the rest of the task
-//      corroborating nothing, is a coincidence and is pushed down.
 //
-// **One charge per property.** Signals 1 and 3 are two readings of one
-// measurement — "how much of this task does the node agree with" — so they are
-// combined by taking the stronger, never by multiplying. Multiplying bills a
-// node twice for a single observation and lands a genuinely correct answer at a
-// few percent of its base, which buries it under nodes that matched nothing in
-// particular. The test-file demotion measures something else entirely (where
-// the node lives, not what it matched), so it composes as its own multiplier.
+// There was a third signal here — a flat 0.2 demotion for an exact match on an
+// ordinary dictionary word — and it was **deleted as measurably inert**, twice
+// confirmed. Setting it to 1.0 (switched off entirely) produces byte-identical
+// output over a 25-task, ~490-fact probe, while setting it to 0.05 moves six
+// facts, so the instrument can see the constant when it binds and reports that
+// at 0.2 it never does. The arithmetic says why, and the condition is worth
+// recording in case a later change reopens it: coverage damping alone always
+// lands below the demotion's floor, because the exact-name ceiling (1.0) is
+// only ~1.7x the whole-task ceiling (`SEED_SCORE_MAX`). Raise that ratio — or
+// raise `TERM_SEARCH_LIMIT`, which caps how small coverage can get — and a
+// plain-word demotion starts to bind again.
+//
+// **One charge per property** still governs what is left: the test-file demotion
+// measures something else entirely (where the node lives, not what it matched),
+// so it composes as its own multiplier rather than being folded in.
 
 import type { QueryTerm } from "./search/query.js";
 import { planQuery } from "./search/query.js";
+import { termWeight } from "./search/rank.js";
 import type { GraphNode } from "./types.js";
 
 /**
@@ -69,18 +75,6 @@ const MIN_TERM_LENGTH = 2;
  * the tier is a demotion throughout, so no value here can drop a node out.
  */
 const COVERAGE_EXPONENT = 2;
-
-/**
- * Multiplier for an exact name match on a plain word the task did not
- * corroborate.
- *
- * Harder than coverage damping alone because the failure it prevents is worse:
- * without it, "authentication guard" is answered by a two-line local named
- * `guard` in a spec file on the strength of one incidental word. It binds only
- * where it is stronger than coverage damping — above ~0.45 coverage — which is
- * exactly the short-task case coverage handles least well.
- */
-const COMMON_WORD_DEMOTION = 0.2;
 
 /**
  * Multiplier for a node declared in a test file.
@@ -130,25 +124,15 @@ export function taskTerms(task: string): QueryTerm[] {
 }
 
 /**
- * How much of a task one word carries, from the number of declarations that
- * bear its name.
+ * How much of a task one word carries, from how many declarations bear its name.
  *
- * This is the half the mechanism this was modelled on leaves out, and leaving it
- * out has a cost: weighting only *how many* words matched treats a task carrying
- * one word that names half the codebase exactly like one carrying a word that
- * names a single function, so a node is charged the same for failing to account
- * for a word that could not have discriminated anything. A saturating inverse of
- * the bearer count fixes that with no corpus statistics to plumb through — 0
- * bearers scores 1.0, one bearer 0.63, twelve 0.26, twenty 0.23. The spread is
- * about 4x across the observable range, which is enough to reorder two words of
- * a task and never enough to let one word stand in for the whole of it.
- *
- * Saturation is a feature, not a limitation of the fetch: past a couple of dozen
- * declarations sharing a name, "how common is this" has already been answered.
+ * Re-exported from the search ranker rather than defined twice: both layers weigh
+ * a word by how common it is, and the two must agree about what makes a word
+ * informative. Scope feeds it a count of declarations NAMED by the word, search
+ * feeds it the number of nodes the term reaches in the index — the same question
+ * asked of the evidence each layer has.
  */
-export function termWeight(bearers: number): number {
-  return 1 / Math.log2(2 + Math.max(0, bearers));
-}
+export { termWeight };
 
 /** Attach bearer counts and weights to planned task terms. */
 export function weighTerms(terms: readonly QueryTerm[], bearersOf: (term: QueryTerm) => number): TaskTerm[] {
@@ -200,11 +184,7 @@ export function taskCoverage(node: GraphNode, terms: readonly TaskTerm[]): numbe
  */
 export function corroboration(coverage: number, distinctiveExact: boolean): number {
   if (distinctiveExact) return 1;
-  const covered = coverage ** COVERAGE_EXPONENT;
-  // One charge per property: `commonWord` is `coverage < 1` plus a name test, so
-  // it and coverage damping read the same measurement. Take the stronger.
-  const commonWord = coverage < 1 ? COMMON_WORD_DEMOTION : 1;
-  return Math.min(covered, commonWord);
+  return coverage ** COVERAGE_EXPONENT;
 }
 
 /**
