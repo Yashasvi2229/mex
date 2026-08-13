@@ -18,8 +18,11 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { openGraphDatabase } from "../db/database.js";
 import { GraphStore } from "../db/store.js";
-import { planQuery } from "../search/query.js";
-import { isTestPath, rankCandidates, unmatchedTerms, type SearchCandidate } from "../search/rank.js";
+import { planQuery, type QueryPlan } from "../search/query.js";
+import {
+  isTestPath, rankCandidates, unmatchedTerms,
+  type QueryEvidence, type SearchCandidate,
+} from "../search/rank.js";
 import type { GraphNode, NodeKind } from "../types.js";
 
 const SOURCE = "src/payments/PaymentProcessor.ts";
@@ -182,33 +185,37 @@ describe("ranking rules", () => {
     id: "id", kind: "function", name: "charge", qualifiedName: "charge", filePath: "src/a.ts", base: 1, ...over,
   });
 
+  /** Evidence saying every candidate matched every term: coverage is then 1 for
+   *  all of them, which isolates the rule under test from the coverage factor. */
+  const covered = (candidates: readonly SearchCandidate[], plan: QueryPlan): QueryEvidence => ({
+    matched: new Map(candidates.map((c) => [c.id, new Set(plan.terms.map((t) => t.term))])),
+    reach: new Map(plan.terms.map((t) => [t.term, 1])),
+  });
+
   it("keeps a plain word in a multi-term query out of the exact-name class", () => {
     // Classified from the token as typed: `order` in a sentence is a word, and
     // a symbol that happens to spell it may not claim the top slot outright.
-    const ranked = rankCandidates(
-      [candidate({ id: "plain", name: "order", base: 0.1 }), candidate({ id: "strong", base: 5 })],
-      planQuery("refund the order twice"),
-    );
+    const pool = [candidate({ id: "plain", name: "order", base: 0.1 }), candidate({ id: "strong", base: 5 })];
+    const plan = planQuery("refund the order twice");
+    const ranked = rankCandidates(pool, plan, covered(pool, plan));
     expect(ranked[0]?.id).toBe("strong");
   });
 
   it("gives a one-word query its exact match regardless of score", () => {
-    const ranked = rankCandidates(
-      [candidate({ id: "plain", name: "order", base: 0.1 }), candidate({ id: "strong", base: 5 })],
-      planQuery("order"),
-    );
+    const pool = [candidate({ id: "plain", name: "order", base: 0.1 }), candidate({ id: "strong", base: 5 })];
+    const plan = planQuery("order");
+    const ranked = rankCandidates(pool, plan, covered(pool, plan));
     expect(ranked[0]?.id).toBe("plain");
   });
 
   it("orders equal candidates by name length then id, so ties are stable", () => {
-    const ranked = rankCandidates(
-      [
-        candidate({ id: "z", name: "chargeCard", base: 0 }),
-        candidate({ id: "a", name: "chargeCardTwice", base: 0 }),
-        candidate({ id: "b", name: "chargeCard", base: 0 }),
-      ],
-      planQuery("charge"),
-    );
+    const pool = [
+      candidate({ id: "z", name: "chargeCard", base: 0 }),
+      candidate({ id: "a", name: "chargeCardTwice", base: 0 }),
+      candidate({ id: "b", name: "chargeCard", base: 0 }),
+    ];
+    const plan = planQuery("charge");
+    const ranked = rankCandidates(pool, plan, covered(pool, plan));
     expect(ranked.map((entry) => entry.id)).toEqual(["b", "z", "a"]);
   });
 
