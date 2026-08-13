@@ -219,6 +219,92 @@ describe("ranking rules", () => {
     expect(ranked.map((entry) => entry.id)).toEqual(["b", "z", "a"]);
   });
 
+  /** Evidence in the shape the store builds it: who matched what, and reach. */
+  const evidence = (
+    matched: Record<string, string[]>,
+    reach: Record<string, number> = {},
+  ): QueryEvidence => ({
+    matched: new Map(Object.entries(matched).map(([id, terms]) => [id, new Set(terms)])),
+    reach: new Map(Object.entries(reach)),
+  });
+
+  it("ranks a candidate that covers the whole query above one that covers a third", () => {
+    // The defect this milestone exists for: under an OR-join both nodes are in
+    // the pool, and bm25 alone decides between them on field-length arithmetic.
+    const pool = [
+      candidate({ id: "partial", name: "emailBox", base: 1.05 }),
+      candidate({ id: "whole", name: "sendEmailNotification", base: 1 }),
+    ];
+    const plan = planQuery("email notification sending");
+    const ranked = rankCandidates(pool, plan, evidence({
+      partial: ["email"],
+      whole: ["email", "notification", "sending"],
+    }));
+    expect(ranked[0]?.id).toBe("whole");
+  });
+
+  it("damps a candidate that covers nothing without ever scoring it exactly zero", () => {
+    // The annihilation property. A zero-coverage candidate is reachable through
+    // the substring tier, and a coverage factor of 0 would not damp it — it
+    // would delete every signal above it and drop the whole tier onto the
+    // name-length tie-break.
+    const pool = [
+      candidate({ id: "none", name: "unrelated", base: 4 }),
+      candidate({ id: "some", name: "emailer", base: 1 }),
+    ];
+    const plan = planQuery("email notification sending");
+    const ranked = rankCandidates(pool, plan, evidence({ some: ["email", "notification"] }));
+    const none = ranked.find((entry) => entry.id === "none")!;
+    expect(none.coverage).toBe(0);
+    expect(none.score).toBeGreaterThan(0);
+    expect(ranked[0]?.id).toBe("some");
+  });
+
+  it("leaves a fully covered candidate scored exactly as it was before coverage existed", () => {
+    // What keeps identifier lookup intact: a one-word query, and any query a
+    // node accounts for in full, both have coverage 1 and are multiplied by 1.
+    const pool = [candidate({ id: "one", name: "chargeCard", base: 3 })];
+    for (const query of ["chargeCard", "charge the card twice"]) {
+      const plan = planQuery(query);
+      const ranked = rankCandidates(pool, plan, evidence(
+        { one: plan.terms.map((t) => t.term) },
+        Object.fromEntries(plan.terms.map((t) => [t.term, 5])),
+      ));
+      expect(ranked[0]?.coverage).toBe(1);
+      expect(ranked[0]?.score).toBe(3);
+    }
+  });
+
+  it("weighs a rare term above a common one when deciding what was covered", () => {
+    const pool = [
+      candidate({ id: "rare", name: "reconcileLedger", base: 1 }),
+      candidate({ id: "common", name: "serviceHelper", base: 1 }),
+    ];
+    const plan = planQuery("reconcile service");
+    const ranked = rankCandidates(pool, plan, evidence(
+      { rare: ["reconcile"], common: ["service"] },
+      { reconcile: 2, service: 900 },
+    ));
+    expect(ranked[0]?.id).toBe("rare");
+  });
+
+  it("cannot promote a symbol match above an exact-name match, whatever the coverage", () => {
+    // The safety property for the whole milestone: coverage orders WITHIN a
+    // match class. An exact-name match with the worst possible coverage still
+    // outranks a fully covering ordinary match with a far better base score.
+    const pool = [
+      candidate({ id: "exact", name: "chargeCard", base: 0.001 }),
+      candidate({ id: "broad", name: "chargeCardTwiceAndRefund", base: 500 }),
+    ];
+    const plan = planQuery("chargeCard billing retry");
+    const ranked = rankCandidates(pool, plan, evidence({
+      broad: ["chargecard", "billing", "retry"],
+    }));
+    expect(ranked[0]?.id).toBe("exact");
+    expect(ranked[0]?.matchClass).toBe("exact-symbol");
+    expect(ranked[0]?.coverage).toBe(0);
+  });
+
   it("recognises test paths across the languages the graph indexes", () => {
     for (const path of [
       "src/__tests__/a.ts", "src/a.spec.ts", "src/a.test.tsx",
