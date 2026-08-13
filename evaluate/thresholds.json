@@ -8,5 +8,9 @@
     "whereDefinedFoundRate": { "min": 0.95 },
     "symbolLookupTopRate": { "min": 1.0 },
     "fragmentSymbolRate": { "min": 1.0 }
+  },
+  "scopeQuality": {
+    "scopeTopSourceRate": { "min": 0.9 },
+    "scopeLimitResponseRate": { "min": 1.0 }
   }
 }

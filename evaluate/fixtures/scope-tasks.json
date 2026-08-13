@@ -1,0 +1,12 @@
+[
+  { "id": "scope-selection", "query": "graph scope selection" },
+  { "id": "source-range", "query": "source range reading" },
+  { "id": "compact-fact", "query": "compact fact building" },
+  { "id": "search-ranking", "query": "node search ranking" },
+  { "id": "engine-build", "query": "graph engine build" },
+  { "id": "drift-check", "query": "scaffold drift check" },
+  { "id": "config-discovery", "query": "config file discovery" },
+  { "id": "agent-output", "query": "cli agent output" },
+  { "id": "extractor-language", "query": "python extractor class" },
+  { "id": "stopword-planning", "query": "query stopword planning" }
+]

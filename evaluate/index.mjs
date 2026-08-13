@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runEfficiency } from "./efficiency.mjs";
 import { runSearchQuality } from "./search-quality.mjs";
+import { runScopeQuality } from "./scope-quality.mjs";
 import { REPO_ROOT } from "./lib/run-cli.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -28,7 +29,7 @@ function parseArgs(argv) {
   return args;
 }
 
-function checkGates(thresholds, efficiency, search) {
+function checkGates(thresholds, efficiency, search, scope) {
   const failures = [];
   const eff = thresholds.efficiency;
   if (efficiency.summary.medianBaselineToGraphRatio < eff.medianGrepTop3ToScope.min) {
@@ -47,6 +48,13 @@ function checkGates(thresholds, efficiency, search) {
   if (search.summary.fragmentSymbolRate < thresholds.searchQuality.fragmentSymbolRate.min) {
     failures.push(`fragmentSymbolRate ${search.summary.fragmentSymbolRate} < ${thresholds.searchQuality.fragmentSymbolRate.min}`);
   }
+  const sq = thresholds.scopeQuality;
+  if (scope.summary.scopeTopSourceRate < sq.scopeTopSourceRate.min) {
+    failures.push(`scopeTopSourceRate ${scope.summary.scopeTopSourceRate} < ${sq.scopeTopSourceRate.min}`);
+  }
+  if (scope.summary.scopeLimitResponseRate < sq.scopeLimitResponseRate.min) {
+    failures.push(`scopeLimitResponseRate ${scope.summary.scopeLimitResponseRate} < ${sq.scopeLimitResponseRate.min}`);
+  }
   return failures;
 }
 
@@ -56,6 +64,7 @@ const thresholds = JSON.parse(readFileSync(join(HERE, "thresholds.json"), "utf-8
 console.log(`\n[eval] subject: ${args.root}`);
 const efficiency = runEfficiency({ root: args.root, rebuild: args.rebuild });
 const search = runSearchQuality({ root: args.root });
+const scope = runScopeQuality({ root: args.root });
 
 console.log("\n== Category 1: retrieval efficiency ==");
 console.table(efficiency.rows);
@@ -69,7 +78,14 @@ console.log("\n-- fragment lookup (file: nodes among the leading facts) --");
 console.table(search.fragmentLookup);
 console.log("summary:", search.summary);
 
-const failures = checkGates(thresholds, efficiency, search);
+console.log("\n== Category 3: task-scope quality ==");
+console.log("-- top-1 (is the first fact real source, or a local in a test file?) --");
+console.table(scope.topRows);
+console.log("\n-- limit responsiveness (facts returned at --max-nodes 5 / 10 / 30) --");
+console.table(scope.limitRows);
+console.log("summary:", scope.summary);
+
+const failures = checkGates(thresholds, efficiency, search, scope);
 if (failures.length === 0) {
   console.log("\n[eval] all gates passed.\n");
 } else {

@@ -1,0 +1,6 @@
+[
+  { "id": "engine-build", "query": "graph engine build" },
+  { "id": "node-identity", "query": "graph node identity" },
+  { "id": "search-ranking", "query": "node search ranking" },
+  { "id": "grounding-resolve", "query": "grounding source resolve" }
+]
