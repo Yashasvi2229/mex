@@ -82,6 +82,61 @@ end-to-end graph-vs-no-graph token-savings claim. That requires a controlled
 three-arm experiment with raw usage aggregation, wider task coverage, and repeated
 runs.
 
+## Controlled three-arm comparison
+
+`evaluate/compare/` supplies that controlled comparison as a separate,
+repository-agnostic runner. A JSON suite defines the subject revision, exactly
+three arms, natural-language tasks, and expected symbols. The runner never clones
+a subject repository: pass an existing checkout with `--repo`.
+
+The preserved TypeScript pilot is only a suite definition; it does not contain a
+checkout or index:
+
+```bash
+# Schema/config validation only: no repo access, graph build, or model call.
+npm run eval:compare -- --validate \
+  --suite evaluate/compare/suites/typescript.json
+
+# Prepare an existing checkout. Build dist/ first.
+npm run build
+npm run eval:compare -- --prepare \
+  --suite evaluate/compare/suites/typescript.json \
+  --repo /path/to/an/existing/TypeScript-checkout
+
+# Run 18 fresh sessions; --resume skips run IDs already on disk.
+npm run eval:compare -- --run --model sonnet --resume \
+  --suite evaluate/compare/suites/typescript.json \
+  --repo /path/to/an/existing/TypeScript-checkout
+```
+
+Use `--output <dir>` to isolate multiple pilots and `--timeout-ms <n>` to change
+the per-session limit. `--prepare` verifies the subject SHA and expected symbols,
+builds one graph index per graph arm, snapshots those indices, and restores any
+pre-existing subject graph. It never invokes Claude. `--no-index` is available
+for configuration/gold-evidence diagnostics, but its output cannot be used for a
+graph-arm run.
+
+The TypeScript suite builds the released control from the already-present mex
+Git object using `git archive` and the local dependency installation. It does not
+make another clone. Supplying `--baseline-cli` skips that small local build.
+
+Each run uses safe mode, no session persistence, a fixed model, structured JSON
+output, and arm-specific tools. Policy violations invalidate the pilot. Results
+include raw JSONL, usage/cache accounting, unique tool-result payload size,
+paired per-task deltas, and deterministically shuffled blind-review/reveal files
+under the ignored `evaluate/results/compare/` directory.
+
+Execution validity and pilot validity are separate. After a run, fill the
+`manual` fields in `blind-review.json`, leaving the reveal file unopened. Then run
+`--report`; the pilot becomes valid only after every answer is scored and every
+automatic/manual disagreement is marked `adjudicated: true`.
+
+To target another repository, copy the suite JSON and change `subject`, `tasks`,
+and (if needed) arm CLI commands. CLI tokens support `{harnessRoot}`,
+`{subjectRoot}`, and `{suiteDir}`. Any graph arm without `cli` must be supplied as
+`--arm-cli id=/path/to/cli.js`; the `--baseline-cli` and `--patched-cli` flags are
+convenience aliases for those conventional IDs.
+
 ## Current release result
 
 On the mex repository (six symbol tasks), the post-M2 compact retrieval surface
