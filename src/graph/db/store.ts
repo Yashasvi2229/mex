@@ -15,6 +15,7 @@ import {
   unmatchedTerms,
   type SearchCandidate,
 } from "../search/rank.js";
+import { segmentsFor } from "../search/segments.js";
 import type { EdgeKind, GraphEdge, GraphNode, Language, NodeKind, ReferenceKind } from "../types.js";
 import type { SqliteDatabase } from "./sqlite.js";
 
@@ -147,6 +148,28 @@ const EXACT_NAME_LIMIT = 20;
 /** Shortest term the substring tier will scan for — below this it matches everything. */
 const MIN_SUBSTRING_TERM = 2;
 
+/**
+ * bm25 column weights, in `nodes_fts` column order:
+ * `(id, name, qualified_name, docstring, signature, segments)`.
+ *
+ * `id` is weighted 0 — it is a content hash and matching one is not evidence of
+ * anything. The rest bias toward a name match over an incidental docstring
+ * mention, and they are unchanged from the weights this ranking was measured on.
+ *
+ * `segments` (schema v2) is the one new weight. It sits BELOW `name` and
+ * `qualified_name` and ABOVE `signature` and `docstring`: matching `money`
+ * inside `formatMoney` is real evidence, and weaker evidence than matching
+ * `formatMoney` itself. That ordering is what stops segment reachability from
+ * costing exact-name lookups — a query naming a symbol still wins on the `name`
+ * column, at nearly seven times the weight.
+ *
+ * Sensitivity, swept on a 22,506-node index at 2 / 3 / 5 / 8 (see the handoff):
+ * the ordering constraint is what matters, not the value. Raising it past
+ * `qualified_name` is the change that would hurt, because it would let a node
+ * that merely contains the word outrank one whose qualified name is about it.
+ */
+const BM25_WEIGHTS = "0, 20, 5, 1, 2, 3";
+
 interface Filters {
   clause: string;
   params: Array<string | number>;
@@ -182,8 +205,8 @@ export class GraphStore {
            start_line, end_line, start_column, end_column,
            docstring, signature, visibility,
            is_exported, is_async, is_static, is_abstract,
-           decorators, type_parameters, return_type, body_hash, updated_at
-         ) VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?)
+           decorators, type_parameters, return_type, body_hash, updated_at, segments
+         ) VALUES (?,?,?,?,?,?, ?,?,?,?, ?,?,?, ?,?,?,?, ?,?,?,?,?, ?)
          ON CONFLICT(id) DO UPDATE SET
            kind = excluded.kind,
            name = excluded.name,
@@ -205,7 +228,8 @@ export class GraphStore {
            type_parameters = excluded.type_parameters,
            return_type = excluded.return_type,
            body_hash = excluded.body_hash,
-           updated_at = excluded.updated_at`,
+           updated_at = excluded.updated_at,
+           segments = excluded.segments`,
       )
       .run(
         node.id,
@@ -230,6 +254,10 @@ export class GraphStore {
         node.returnType ?? null,
         node.bodyHash ?? null,
         node.updatedAt,
+        // Derived, never authored: the caller cannot supply it and nothing reads
+        // it back into a `GraphNode`. Written here so the one write path and the
+        // FTS 'rebuild' path index the same bytes.
+        segmentsFor(node.name),
       );
   }
 
@@ -474,15 +502,14 @@ export class GraphStore {
     filters: Filters,
     fetch: number,
   ): Array<{ row: NodeRow; base: number }> {
-    // bm25 column weights bias toward name matches over incidental docstring
-    // mentions. bm25 returns negative scores (more negative = better), so the
-    // pool carries `-rank` and treats higher as better throughout.
+    // bm25 returns negative scores (more negative = better), so the pool carries
+    // `-rank` and treats higher as better throughout. See `BM25_WEIGHTS`.
     try {
       const rows = this.db
         .prepare(
           // Aliased `bm25_rank`, not `rank`: `rank` is a hidden FTS5 column, and
           // ordering by the bare name would silently use its default weights.
-          `SELECT nodes.*, bm25(nodes_fts, 0, 20, 5, 1, 2) AS bm25_rank FROM nodes_fts
+          `SELECT nodes.*, nodes.rowid AS row_id, bm25(nodes_fts, ${BM25_WEIGHTS}) AS bm25_rank FROM nodes_fts
              JOIN nodes ON nodes_fts.id = nodes.id
              WHERE nodes_fts MATCH ?${filters.clause}
              ORDER BY bm25_rank, nodes.id LIMIT ?`,

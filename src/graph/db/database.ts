@@ -16,10 +16,11 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { schemaPath } from "../assets.js";
+import { segmentsFor } from "../search/segments.js";
 import { openSqlite, type SqliteDatabase } from "./sqlite.js";
 
 /** The schema version this build writes/expects (matches schema.sql's seed). */
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 function configureConnection(db: SqliteDatabase): void {
   db.pragma("busy_timeout = 5000"); // MUST be first
@@ -43,7 +44,14 @@ export function openGraphDatabase(dbPath: string): SqliteDatabase {
 
   // Load + apply the frozen schema (creates tables/indexes/triggers, and — via
   // its own INSERT OR IGNORE — seeds the schema_versions row).
-  db.exec(readFileSync(schemaPath(), "utf-8"));
+  const schema = readFileSync(schemaPath(), "utf-8");
+  db.exec(schema);
+
+  // Bring a database written under an older schema up to this one. Every
+  // statement above is `IF NOT EXISTS`, which adds new TABLES to an old file for
+  // free but never adds a COLUMN to a table that already exists, and never
+  // replaces a virtual table whose definition changed.
+  migrateSchema(db, schema);
 
   // Belt-and-suspenders: guarantee the version row exists even if the SQL seed
   // is ever changed, so the schema_versions table is never dead (migration
@@ -51,6 +59,90 @@ export function openGraphDatabase(dbPath: string): SqliteDatabase {
   writeSchemaVersion(db, CURRENT_SCHEMA_VERSION);
 
   return db;
+}
+
+/** Does `nodes` already carry the v2 derived `segments` column? */
+function hasSegmentsColumn(db: SqliteDatabase): boolean {
+  const columns = db.prepare("PRAGMA table_info(nodes)").all() as Array<{ name: string }>;
+  return columns.some((column) => column.name === "segments");
+}
+
+/**
+ * Does the live `nodes_fts` definition match the one this build would create?
+ *
+ * Compared on the stored DDL text rather than on a version counter, so the check
+ * is derived from the schema itself and cannot drift out of step with it. This
+ * asks "is it the RIGHT index", which is a different failure from "is it
+ * POPULATED" with the same symptom: an index written under v1 is perfectly full
+ * and simply cannot answer a segment or a stemmed query.
+ */
+function ftsShapeIsCurrent(db: SqliteDatabase): boolean {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'nodes_fts'")
+    .get() as { sql: string | null } | undefined;
+  if (row?.sql == null) return false;
+  const live = row.sql.replace(/\s+/g, " ");
+  return live.includes("segments") && live.includes("porter unicode61");
+}
+
+/**
+ * Is the inverted index empty while `nodes` holds rows?
+ *
+ * Detected through the `nodes_fts_docsize` shadow table, which holds one row per
+ * INDEXED document. The two obvious alternatives are both blind to an empty
+ * external-content index, verified on this build of SQLite: `SELECT COUNT(*)
+ * FROM nodes_fts` reads THROUGH to the content table and reports the full node
+ * count, and `INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check')`
+ * PASSES. Only `docsize` distinguishes populated from empty.
+ */
+function ftsIsUnpopulated(db: SqliteDatabase): boolean {
+  const nodes = (db.prepare("SELECT count(*) AS c FROM nodes").get() as { c: number }).c;
+  if (nodes === 0) return false; // a fresh database has nothing to index
+  const indexed = (db.prepare("SELECT count(*) AS c FROM nodes_fts_docsize").get() as { c: number }).c;
+  return indexed < nodes;
+}
+
+/**
+ * Migrate an existing database to the current schema, in place. Idempotent, and
+ * a no-op (three cheap reads) on a database this build just created.
+ *
+ * v1 → v2 adds `nodes.segments` and re-shapes `nodes_fts` around it. The column
+ * is a pure function of `name`, so it is BACK-FILLED rather than left empty:
+ * leaving it blank would mean a migrated index silently lost half of every
+ * camelCase name until someone happened to re-index, which is the same
+ * silent-degradation failure the FTS triggers exist to prevent. Nothing is
+ * re-extracted and no other column is written, so no node's `id` or `body_hash`
+ * moves.
+ */
+export function migrateSchema(db: SqliteDatabase, schema: string): void {
+  const addedColumn = !hasSegmentsColumn(db);
+  if (addedColumn) {
+    db.exec("ALTER TABLE nodes ADD COLUMN segments TEXT NOT NULL DEFAULT ''");
+  }
+  if (!addedColumn && ftsShapeIsCurrent(db) && !ftsIsUnpopulated(db)) return;
+
+  db.transaction(() => {
+    // Drop the triggers before the back-fill: they exist to keep the index in
+    // step with single-row writes, and firing 20,000 delete+insert pairs into an
+    // index that is about to be rebuilt wholesale is pure cost. Dropping the
+    // table too is what forces the new DDL to be applied — `CREATE VIRTUAL TABLE
+    // IF NOT EXISTS` would see the old definition and leave it exactly as it is.
+    db.exec(`
+      DROP TRIGGER IF EXISTS nodes_ai;
+      DROP TRIGGER IF EXISTS nodes_ad;
+      DROP TRIGGER IF EXISTS nodes_au;
+      DROP TABLE IF EXISTS nodes_fts;
+    `);
+    if (addedColumn) {
+      const rows = db.prepare("SELECT id, name FROM nodes").all() as Array<{ id: string; name: string }>;
+      const update = db.prepare("UPDATE nodes SET segments = ? WHERE id = ?");
+      for (const row of rows) update.run(segmentsFor(row.name), row.id);
+    }
+    // Re-running the whole schema is safe (every statement is IF NOT EXISTS) and
+    // keeps one canonical definition of the index: the file the build ships.
+    db.exec(schema);
+    db.exec("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')");
+  });
 }
 
 /** Ensure a `schema_versions` row for `version` exists (no-op if already there). */

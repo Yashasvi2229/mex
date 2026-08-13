@@ -25,6 +25,13 @@
 -- real demo→OSS adaptation (spec §3). The demo's `units` table is intentionally
 -- NOT ported.
 --
+-- Schema v2 (retrieval) adds ONE derived column, `nodes.segments`, and rebuilds
+-- `nodes_fts` around it with a stemming tokenizer. It is additive: no existing
+-- column changes type or meaning, `id` and `body_hash` are untouched, and node
+-- identity therefore does not move. `db/database.ts` migrates a v1 file in place
+-- (ALTER TABLE + a back-fill computed from `name` + an FTS rebuild) — no
+-- re-extraction, so an existing index does not have to be rebuilt from source.
+--
 -- Connection-level PRAGMAs (WAL, foreign_keys=ON, busy_timeout, synchronous)
 -- are applied in code at open time by the DB adapter (Track A, ported from
 -- `.demo/engine/cg/src/db/`). journal_mode=WAL persists into the db file
@@ -41,6 +48,9 @@ CREATE TABLE IF NOT EXISTS schema_versions (
 
 INSERT OR IGNORE INTO schema_versions (version, applied_at, description)
 VALUES (1, strftime('%s', 'now') * 1000, 'Initial mex code-graph schema (CG base + node.body_hash + fingerprints + grounded source)');
+
+INSERT OR IGNORE INTO schema_versions (version, applied_at, description)
+VALUES (2, strftime('%s', 'now') * 1000, 'nodes.segments + segmented, stemmed nodes_fts (retrieval)');
 
 -- =============================================================================
 -- Core tables (ported from CodeGraph — kept as-is except node.body_hash)
@@ -82,7 +92,16 @@ CREATE TABLE IF NOT EXISTS nodes (
     -- is a real edit -> drift. Nullable so non-body kinds (imports, parameters)
     -- need not populate it.
     body_hash TEXT,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    -- segments (schema v2): the name's identifier segments, lowercased and
+    -- space-joined (`formatMoney` -> "format money"). DERIVED, never authored:
+    -- nothing outside the FTS index reads it, it is absent from every public
+    -- shape (GraphNode, the JSONL fact, an edge), it does not participate in
+    -- `id` or `body_hash`, and it is rewritten wholesale from `name` on every
+    -- write. Stored on the row rather than computed inside the trigger because
+    -- core SQLite has no case-aware split, and storing it is what makes the
+    -- trigger path and the 'rebuild' path index the same bytes by construction.
+    segments TEXT NOT NULL DEFAULT ''
 );
 
 -- Edges: relationships between nodes (calls, imports, extends, ...).
@@ -130,31 +149,55 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
 -- =============================================================================
 -- Full-text search (ported from CG — feeds searchNodes / scope selection)
 -- =============================================================================
+-- schema v2 adds the `segments` column and a `tokenize=` clause.
+--
+--   * `segments` carries the name's identifier segments so a word INSIDE a
+--     camelCase name is reachable at all (`money` -> `formatMoney`). It sits
+--     below `name` and `qualified_name` in the bm25 weights (see `store.ts`):
+--     matching `money` inside `formatMoney` is real evidence and weaker
+--     evidence than matching `formatMoney` itself, and keeping that order is
+--     what stops segment reachability from costing exact-name lookups.
+--   * `tokenize='porter unicode61'` — `unicode61` still does the segmenting
+--     (punctuation and `_`, so `get_user_by_id` -> get/user/by/id) and `porter`
+--     stems what it produces, on BOTH sides of every comparison: the same
+--     stemmer runs over the MATCH terms, so a query for `rounding` reaches text
+--     that says `rounded`. The standing objection to porter is that it mangles
+--     identifiers (`Params` -> `param`); it does, and it mangles the query the
+--     same way, so a name is only ever compared against itself through one
+--     tokenizer. The exact-name guarantee does not run through FTS at all — it
+--     is a `lower(name) = ?` lookup — so stemming cannot reach it.
+--
+-- A database written under v1 has a five-column, non-stemming index that is
+-- fully populated and simply cannot answer a segment or a stemmed query, and
+-- `CREATE VIRTUAL TABLE IF NOT EXISTS` leaves it exactly as it found it. The
+-- migration in `db/database.ts` detects the SHAPE and rebuilds.
 CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
     id,
     name,
     qualified_name,
     docstring,
     signature,
+    segments,
     content='nodes',
-    content_rowid='rowid'
+    content_rowid='rowid',
+    tokenize='porter unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
-    INSERT INTO nodes_fts(rowid, id, name, qualified_name, docstring, signature)
-    VALUES (NEW.rowid, NEW.id, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature);
+    INSERT INTO nodes_fts(rowid, id, name, qualified_name, docstring, signature, segments)
+    VALUES (NEW.rowid, NEW.id, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature, NEW.segments);
 END;
 
 CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
-    INSERT INTO nodes_fts(nodes_fts, rowid, id, name, qualified_name, docstring, signature)
-    VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature);
+    INSERT INTO nodes_fts(nodes_fts, rowid, id, name, qualified_name, docstring, signature, segments)
+    VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature, OLD.segments);
 END;
 
 CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE ON nodes BEGIN
-    INSERT INTO nodes_fts(nodes_fts, rowid, id, name, qualified_name, docstring, signature)
-    VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature);
-    INSERT INTO nodes_fts(rowid, id, name, qualified_name, docstring, signature)
-    VALUES (NEW.rowid, NEW.id, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature);
+    INSERT INTO nodes_fts(nodes_fts, rowid, id, name, qualified_name, docstring, signature, segments)
+    VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.qualified_name, OLD.docstring, OLD.signature, OLD.segments);
+    INSERT INTO nodes_fts(rowid, id, name, qualified_name, docstring, signature, segments)
+    VALUES (NEW.rowid, NEW.id, NEW.name, NEW.qualified_name, NEW.docstring, NEW.signature, NEW.segments);
 END;
 
 -- =============================================================================

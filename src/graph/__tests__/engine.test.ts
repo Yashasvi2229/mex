@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createGraphEngine } from "../index.js";
 import type { GraphEngine } from "../engine.js";
 import { openSqlite } from "../db/sqlite.js";
-import { readSchemaVersion } from "../db/database.js";
+import { CURRENT_SCHEMA_VERSION, readSchemaVersion } from "../db/database.js";
 
 let root: string;
 let engine: GraphEngine;
@@ -114,7 +114,7 @@ describe("GraphEngine build + reads", () => {
   it("writes a schema_versions row (migration safety)", () => {
     const db = openSqlite(join(root, ".mex", "graph.db"));
     try {
-      expect(readSchemaVersion(db)).toBe(1);
+      expect(readSchemaVersion(db)).toBe(CURRENT_SCHEMA_VERSION);
     } finally {
       db.close();
     }
