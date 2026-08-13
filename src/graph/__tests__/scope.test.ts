@@ -88,11 +88,16 @@ describe("query-time graph scope", () => {
 });
 
 describe("scored scope selection", () => {
-  it("ranks an exact identifier match first with reasons and category", () => {
+  it("ranks a matched node first, recording every reason it was selected", () => {
+    // `seed` is named by one word of a two-word task and by nothing else in it,
+    // so its exact-name match is corroborated by half the question and scores
+    // well under the flat 1.0 it used to get; the whole-task match is the
+    // stronger evidence and is what carries it to the top. Both reasons are
+    // still reported — the score is a maximum over the evidence, not a sum.
     const { graph } = fixture();
     const { candidates, matchedCount } = selectScope(graph, "seed task", 10);
     expect(matchedCount).toBe(3);
-    expect(candidates[0]).toMatchObject({ id: "function:seed", score: 1, category: "direct" });
+    expect(candidates[0]).toMatchObject({ id: "function:seed", score: 0.6, category: "direct" });
     expect(candidates[0].reasons).toEqual(["exact-name-match", "semantic-match"]);
     const neighbors = candidates.filter((c) => c.category === "neighbor").map((c) => c.id).sort();
     expect(neighbors).toEqual(["function:callee", "function:caller"]);
