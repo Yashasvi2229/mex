@@ -142,9 +142,16 @@ export function runGraphQuery(
     }
 
     // Preserve (queried target, result) pairs; dedupe by that pair, not by result id alone.
+    //
+    // `nodes` is emitted in the order `resolveSymbol` returned it, which is the
+    // search ranking. It used to be re-sorted by node id here — a content hash —
+    // which discarded every ordering decision the ranker made on the way out, and
+    // is why no gate on this command could observe a ranking defect. Callers and
+    // callees below KEEP their id sort: they come from traversal, carry no rank,
+    // and the id order is what makes them a total order at all.
     const pairs: Array<{ targetId: string; node: GraphNode }> = [];
     const seen = new Set<string>();
-    for (const queried of nodes.sort(byId)) {
+    for (const queried of nodes) {
       const related = relation === "where-defined"
         ? [queried]
         : (relation === "who-calls" ? session.graph.getCallers(queried.id) : session.graph.getCallees(queried.id)).sort(byId);
