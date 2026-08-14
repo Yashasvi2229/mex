@@ -9,7 +9,7 @@
 --   * Track B (fingerprint /  WRITES node_fingerprints / lsh_buckets and reads
 --     reconcile / grounding)  _mex_grounded_source; reconciles on Tier-1 miss.
 --
--- Base = CodeGraph's schema (ported verbatim from `.demo/engine/schema.sql`)
+-- Base = the schema this was ported from (verbatim, `.demo/engine/schema.sql`)
 -- for nodes / edges / files / unresolved_refs / nodes_fts (FTS5), taken as-is
 -- except one delta carried over from the demo:
 --   * `body_hash` column on `nodes` — the drift-detector trigger (demo A4).
@@ -53,7 +53,7 @@ INSERT OR IGNORE INTO schema_versions (version, applied_at, description)
 VALUES (2, strftime('%s', 'now') * 1000, 'nodes.segments + segmented, stemmed nodes_fts (retrieval)');
 
 -- =============================================================================
--- Core tables (ported from CodeGraph — kept as-is except node.body_hash)
+-- Core tables (ported verbatim — kept as-is except node.body_hash)
 -- =============================================================================
 
 -- Nodes: code symbols (functions, classes, methods, ...).

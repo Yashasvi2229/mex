@@ -9,7 +9,7 @@
 //             expands specific ids with `graph get` (fewer initial tokens, an
 //             extra round-trip).
 //   source  — one-shot: scope returns grouped source inline (more initial tokens,
-//             no expansion round-trip; the CodeGraph-style answer-ready mode).
+//             no expansion round-trip; the answer-ready shape this was modelled on).
 
 export const VARIANTS = {
   minimal: { id: "minimal", detail: "minimal" },

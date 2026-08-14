@@ -190,8 +190,16 @@ export function runGraphQuery(
     // by exactly that string, and the summary then overruns a budget the ledger
     // has already reported as honoured. Node ids are fixed-width, so the id used
     // to size it need not be the one finally emitted.
+    // Anticipated unconditionally, because every branch below can emit it: a
+    // populated response points at its first result, a fallthrough points at the
+    // declaration an evidence row came from, and a `none-recorded` response
+    // points at the target itself — that last one even at `--detail source`,
+    // where nothing was emitted for the target to have carried source. The
+    // reserve has to cover the widest branch, not the likeliest, or the summary
+    // overruns a ceiling the ledger has already reported as honoured. Node ids
+    // are fixed-width, so the id used to size it need not be the one emitted.
     const anticipated = [
-      ...(opts.detail !== "source" ? [`mex graph get ${(pairs[0]?.node ?? nodes[0]!).id} --detail source`] : []),
+      `mex graph get ${(pairs[0]?.node ?? nodes[0]!).id} --detail source`,
       widen("max-output-tokens"),
     ];
     const ctx = beginResponse(`graph query ${relation}`, opts, undefined, anticipated);
@@ -237,7 +245,39 @@ export function runGraphQuery(
       }
     }
 
-    emitAll(write, meta, [...entries.map((e) => e.record), ...sourceRecords, ...evidenceRecords]);
+    // The last silent path. The target resolved, the relation returned nothing,
+    // and the fallthrough found nothing either — 2,279 of the 4,552 dead ends on
+    // the measured index land here, the largest single population in this work.
+    // Until now it emitted a `meta` and a `summary` and no statement at all,
+    // which is the one shape this milestone exists to remove: it reports a clean
+    // result and omits the reason the clean result is not proof.
+    //
+    // It is deliberately NOT `not-found`. The declaration WAS found, and a
+    // consumer has to be able to tell "no such symbol" from "that symbol,
+    // nothing recorded" — they call for opposite next moves. So the outcome
+    // vocabulary grows a third value rather than overloading either of the two.
+    const silent = entries.length === 0 && evidenceRecords.length === 0 && nodes.length > 0;
+    const noneRecorded: Rec[] = [];
+    if (silent) {
+      const target = nodes[0]!;
+      const record: Rec = {
+        type: "none-recorded",
+        relation,
+        target: target.id,
+        name: target.name,
+        // Where the declaration lives, so an agent that wants to check this for
+        // itself has somewhere to start. It is the useful thing to hand over
+        // here precisely because no mex command can answer the question that
+        // remains open.
+        filePath: target.filePath,
+        line: target.startLine,
+        message: `\`${target.name}\` is indexed, and the graph recorded no ${relationNoun(relation)} for it.`,
+        caveat: "No recorded relation is not proof there is none: the graph holds the references extraction could resolve, not every construct that reaches a declaration. Search for the name from the file above before concluding it is unused.",
+      };
+      if (ledger.tryAdd(record)) noneRecorded.push(record); else truncated = true;
+    }
+
+    emitAll(write, meta, [...entries.map((e) => e.record), ...sourceRecords, ...evidenceRecords, ...noneRecorded]);
     write(JSON.stringify(summaryRecord(ctx, {
       matchedNodes: pairs.length,
       returnedNodes: entries.length,
@@ -246,11 +286,14 @@ export function runGraphQuery(
       maxNodes: opts.maxNodes,
       widen,
       ...(evidenceSummary ? { evidence: evidenceSummary } : {}),
+      ...(silent ? { outcome: "none-recorded" as const } : {}),
       suggestedNextCommands: entries.length > 0 && opts.detail !== "source"
         ? [`mex graph get ${entries[0]!.node.id} --detail source`]
         : evidenceRecords.length > 0
           ? [`mex graph get ${String(evidenceRecords[0]!.fromId)} --detail source`]
-          : [],
+          : silent
+            ? [`mex graph get ${nodes[0]!.id} --detail source`]
+            : [],
     })));
   } catch (error) {
     unavailable(write, error);
@@ -425,8 +468,22 @@ export function runGraphGet(
 // script branching on exit status sees exactly what it saw before. The
 // distinction lives in the records, where it always did.
 
-/** What a command found, when what it found was not results. */
-type Outcome = "not-found" | "ambiguous";
+/**
+ * What a command found, when what it found was not results.
+ *
+ * Three values, and the distinction between the first and the last is the one
+ * that matters most to a consumer: `not-found` means the index has no such
+ * declaration, `none-recorded` means it has exactly that declaration and holds
+ * nothing linking anything to it. The next move is opposite in each case — fix
+ * the name, or go and look outside the graph — so they may never be collapsed.
+ */
+type Outcome = "not-found" | "ambiguous" | "none-recorded";
+
+/** The relation's result set, named for a sentence about what was not found. */
+function relationNoun(relation: QueryRelation): string {
+  if (relation === "who-calls") return "callers";
+  return relation === "what-calls" ? "callees" : "definitions";
+}
 
 /**
  * Emit a full, success-shaped response whose payload is one recoverable outcome.

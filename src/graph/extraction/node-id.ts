@@ -15,10 +15,11 @@ import type { TSNode } from "./types.js";
 /**
  * Generate a node id — LINE-INDEPENDENT (Tier-1 identity, spec §1).
  *
- * CodeGraph hashed `${filePath}:${kind}:${name}:${line}`. The line is the bug:
- * any edit ABOVE a symbol shifts its start line → new id → every grounded anchor
- * silently detaches. We drop the line, so a body edit or a comment-above no
- * longer changes the id. This is THE custom change that makes grounding survive
+ * The extractor this was modelled on hashed
+ * `${filePath}:${kind}:${name}:${line}`. The line is the bug: any edit ABOVE a
+ * symbol shifts its start line → new id → every grounded anchor silently
+ * detaches. We drop the line, so a body edit or a comment-above no longer
+ * changes the id. This is THE custom change that makes grounding survive
  * line-shifts and same-file edits.
  *
  * Coarse on purpose: rename (`name` changes) and move (`filePath` changes) still

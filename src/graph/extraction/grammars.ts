@@ -3,10 +3,10 @@
 // ============================================================================
 //
 // Wraps web-tree-sitter (WASM) — the same universal, native-build-free runtime
-// CodeGraph used. 0.7.0 ships five vendored grammars for TypeScript/TSX,
-// JavaScript/JSX, Python, and Rust. The lazy-load infrastructure is deliberately
-// general (a `Language → wasm` map) so the 0.7.x contributor program can slot
-// new grammars in without touching the core.
+// the extractor this was modelled on used. 0.7.0 ships five vendored grammars
+// for TypeScript/TSX, JavaScript/JSX, Python, and Rust. The lazy-load
+// infrastructure is deliberately general (a `Language → wasm` map) so the 0.7.x
+// contributor program can slot new grammars in without touching the core.
 //
 // Grammars are loaded on demand — only languages actually present in the project
 // are compiled — keeping WASM heap pressure low on large repos.

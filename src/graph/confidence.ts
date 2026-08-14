@@ -133,6 +133,38 @@ export const CONFIDENCE_CONFIRM_DEPTH = 50;
  * grows quieter still; above it, genuine short stems (`user`/`users`,
  * `role`/`roles`) stop matching and it grows louder — toward false positives.
  * Both directions measured; see the handoff.
+ *
+ * KNOWN LIMITATION, measured and deliberately left open. The prefix arm closes
+ * only half the gap it was built for. It catches a suffix ADDED to a shared
+ * stem — `standard`/`standards`, `send`/`sending` — because the shorter word is
+ * still a prefix of the longer. It does not catch a suffix SUBSTITUTED for
+ * another: `"invalidation".startsWith("invalidate")` is false at the tenth
+ * character, while porter stems both to `invalid`. So a task about "cache
+ * invalidation" does not see `Cache.invalidate`, and is declared
+ * low-confidence although the codebase answers it.
+ *
+ * This is not a bug to fix here, and the reason is measured rather than
+ * assumed: relaxing this to a shared-prefix test (which does catch
+ * invalidate/invalidation) holds the false-positive gate at 0/16 and drops true
+ * positives from 6/9 to 3/9. Reaching for a real porter stemmer lands in the
+ * same place for the same reason — both make the matcher looser, and a looser
+ * matcher finds a second term on almost anything, which is what "strong" was
+ * defined to be rare enough to mean. This is a precision/recall frontier, not a
+ * defect, and any change that recovers this one case without paying that price
+ * would be fitted to the handful of sentences it was tested on — which is
+ * exactly what the top of this file refuses to do.
+ *
+ * One thing to be precise about, because the two directions are easy to
+ * conflate. What this ARM does is safe: it can only add matches to containment,
+ * so every match it finds makes a candidate look stronger and the predicate
+ * quieter — it can never manufacture a false positive. What its INCOMPLETENESS
+ * does is not safe in the same way: a pair it fails to unify leaves a candidate
+ * looking weaker than the index considers it, and that is a false positive on an
+ * answerable task, which is the one error this module is gated on.
+ * `cache invalidation` is exactly that, and it is the honest cost of holding
+ * true positives at 6/9. The frontier is real; which side of it to sit on is a
+ * judgement, and this constant is where to revisit it if the balance ever
+ * changes.
  */
 const MIN_STEM_PREFIX = 4;
 

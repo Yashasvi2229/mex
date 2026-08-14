@@ -156,6 +156,37 @@ describe("recoverable outcomes and unresolved-reference evidence", () => {
     expect(ambiguous[0]!.referenceKind).toBe("calls");
   });
 
+  it("says so when the declaration is indexed and nothing at all is recorded", () => {
+    // The last silent path: the target resolves, the relation is empty, and the
+    // fallthrough finds nothing either. It used to emit a `meta` and a `summary`
+    // and no statement — a clean result with the reason it is not proof left out.
+    const records = query("what-calls", "processBatch");
+    expect(records.some((record) => record.type === "result")).toBe(false);
+
+    const note = records.find((record) => record.type === "none-recorded")!;
+    expect(note).toBeDefined();
+    expect(note.name).toBe("processBatch");
+    // Where the declaration lives, so the agent can check outside the graph.
+    expect(note.filePath).toMatch(/batchRunner\.ts$/);
+    expect(typeof note.line).toBe("number");
+    expect(typeof note.message).toBe("string");
+    expect(typeof note.caveat).toBe("string");
+
+    const summary = records.at(-1)!;
+    expect(summary.outcome).toBe("none-recorded");
+    expect(summary.suggestedNextCommands).toHaveLength(1);
+  });
+
+  it("keeps `no such symbol` distinguishable from `that symbol, nothing recorded`", () => {
+    // Opposite next moves — fix the name, or go and look outside the graph — so
+    // a consumer must never have to guess which of the two it is holding.
+    const missing = query("what-calls", "noSuchSymbolAnywhere").at(-1)!;
+    const silent = query("what-calls", "processBatch").at(-1)!;
+    expect(missing.outcome).toBe("not-found");
+    expect(silent.outcome).toBe("none-recorded");
+    expect(missing.outcome).not.toBe(silent.outcome);
+  });
+
   it("never lets a partial answer be mistaken for a resolved edge", () => {
     for (const target of ["ShipmentAudit", "processBatch"]) {
       for (const record of query("who-calls", target)) {
