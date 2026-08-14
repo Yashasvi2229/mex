@@ -93,10 +93,19 @@ describe("runGraphScope", () => {
 });
 
 describe("runGraphGet", () => {
-  it("returns capped source for a known id and NODE_NOT_FOUND for an unknown one", () => {
+  it("returns capped source for a known id and a recoverable not-found for an unknown one", () => {
     const records = capture(() => runGraphGet([idOf("run"), "function:missing"], root, deps, {}));
     expect(records.some((r) => r.type === "source" && JSON.stringify(r).includes("helper(41)"))).toBe(true);
-    expect(records.some((r) => r.type === "error" && r.code === "NODE_NOT_FOUND")).toBe(true);
+    // An id that is not in the index used to be `{ type: "error", code:
+    // "NODE_NOT_FOUND" }` — an error record in a stream that also carried real
+    // results, which tells an agent the tool is broken when the tool worked and
+    // the answer is that the id has moved. It is a recoverable outcome, and it
+    // carries the guidance for acting on it.
+    const missing = records.find((r) => r.type === "not-found")!;
+    expect(missing).toBeDefined();
+    expect(missing.id).toBe("function:missing");
+    expect(typeof missing.hint).toBe("string");
+    expect(records.some((r) => r.type === "error")).toBe(false);
   });
 
   it("keeps a hard ceiling: an undersized budget is clamped to the framing floor and flagged", () => {
