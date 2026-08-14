@@ -29,8 +29,19 @@ const MODULE_EXTENSIONS = [
   ".cjs",
 ];
 
-/** Node kinds a reference of a given kind is allowed to bind to. */
-const TARGET_KINDS: Record<string, NodeKind[]> = {
+/**
+ * Node kinds a reference of a given kind is allowed to bind to.
+ *
+ * Exported because it is the ONLY definition of what "the resolver could have
+ * bound this to" means, and a second consumer now needs the same answer: the
+ * evidence labeller (`../evidence.ts`) replays this table to say whether a
+ * reference went unbound because nothing eligible existed (`unresolved`) or
+ * because several eligible declarations did and this pass declined to choose
+ * (`ambiguous`). Sharing the table is what keeps those labels honest — widen
+ * what `calls` may bind to here, and the label changes with it rather than
+ * going quietly stale. An empty list means "any kind".
+ */
+export const TARGET_KINDS: Record<string, NodeKind[]> = {
   calls: ["function", "method"],
   extends: ["class", "interface"],
   implements: ["interface", "class"],
