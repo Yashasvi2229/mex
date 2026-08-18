@@ -1,171 +1,312 @@
-# MEX Graph Eval Harness
+# MEX graph evaluation
 
-Black-box evaluation of the `mex graph` agent surface. Every measurement shells
-out to the built CLI (`dist/cli.js`) exactly as an agent would — no internals are
-imported.
+The default MEX evaluation now measures the product problem directly: whether the built CLI can
+retrieve exact, answer-bearing graph evidence for natural-language questions.
 
-## Run
+The evaluation has two layers:
+
+1. `evaluate/graph/` is deterministic, cheap, and the primary development/CI loop.
+2. `evaluate/compare/` is an optional repeated agent experiment using a locally authenticated
+   headless Claude or Codex CLI. It never requires a direct model API key.
+
+The older compactness and scripted-agent scripts remain available as historical benchmarks under
+`npm run eval:legacy` and `npm run eval:e2e`. They are not evidence that natural-language graph
+retrieval works.
+
+## Deterministic graph evaluation
+
+Build the CLI, then run the native MEX suite:
 
 ```bash
-npm run build      # harness runs against dist/cli.js, so build first
+npm run build
 npm run eval
 ```
 
-Flags (pass after `--`, e.g. `npm run eval -- --no-rebuild`):
+`npm run eval` is equivalent to `npm run eval:graph -- --all` and creates an immutable timestamped
+run under `.mex/eval-results/graph/`. This location is deliberate: graph scanning does not consult
+`.gitignore`, while `.mex/**` is excluded by the scanner. The harness rejects an output directory
+inside the subject if archived source there could contaminate the graph.
 
-- `--root <dir>` — evaluate a different subject repo (default: this repo).
-- `--no-rebuild` — reuse the existing `.mex/graph.db` instead of rebuilding.
-- `--no-gate` — report only; don't exit non-zero on gate failure.
-
-Results are written to `evaluate/results/` (gitignored): `efficiency.{json,csv}`
-and `search-quality.{json,csv}`.
-
-## Categories
-
-**Category 1 — retrieval efficiency** (`efficiency.mjs`). For each task, compares
-`graph scope` output size against the grep top-3 baseline and the whole source
-corpus, and checks expected-symbol recall. The grep baseline, corpus enumeration,
-recall rule, and `ceil(chars/4)` token count are reproduced bit-for-bit from the
-prior ad-hoc benchmark so numbers stay comparable (see
-`claude-talks/graph/EVAL_HARNESS_BUILD_PLAN.md` §3).
-
-**Category 2 — search quality** (`search-quality.mjs`). `where-defined` foundRate
-and rank (the committed gate); who-calls / what-calls fan-out counts for
-visibility. Labeled caller/callee recall + MRR are a documented follow-up.
-
-**Category 3 — end-to-end agent** (`agent-e2e.mjs`, `npm run eval:e2e`). Runs each
-variant against the natural-language tasks and estimates accumulated CLI-output
-tokens across scope and follow-up `graph get` calls. It also records fallback
-calls exposed by a driver and rubric correctness. Reduced from the plan's A–D:
-variant A (old all-source scope) was removed in the M2 redesign, and C/D
-(flow-spine source, skeletonization) were deferred — so the buildable comparison
-is `minimal` vs `source`, which sets the shipped default `--detail`.
-
-Model-agnostic: the default **scripted reference driver** is a perfectly
-disciplined agent (scope first; expand ids via `graph get`; never grep). It gives
-an idealized token baseline but cannot reveal Read/Grep fallback — plug a real
-model with `--driver <module>` (default-exports `(variant) => driver`) for a
-correctness/fallback verdict.
-
-**Real-model runner** (`agent-e2e-model.mjs`, `node evaluate/agent-e2e-model.mjs`):
-drives a real headless agent (`claude -p`) per variant×task using the actual graph
-CLI, and parses the stream-json transcript for tool calls, fallbacks, reported
-cost, turns, and rubric correctness. It does not currently aggregate raw transcript
-tokens. Requires the `claude` CLI on PATH. Flags: `--root`, `--limit <n>`,
-`--model <name>`.
-
-Real-model result (opus-4-8, 5 NL tasks, this repo):
-
-| variant | correct | mean cost | mean turns | mean get | mean Read/Grep fallback |
-|---|---|---|---|---|---|
-| minimal | 5/5 | $0.20 | 4.4 | 2.2 | 0.0 |
-| source  | 5/5 | $0.17 | 3.0 | 0.0 | 1.0 |
-
-Both variants answered every task correctly — the real model navigates the compact
-manifest fine (the scripted driver's ~0.6 NL "recall" was a grading artifact, not a
-real recall gap). `source` is answer-ready (fewer turns, marginally cheaper) but
-falls back to Read/Grep ~once/task when its inline source is insufficient;
-`minimal` is self-sufficient (zero fallback) at the cost of extra `get` round-trips.
-Cost numbers are cache-dominated and noisy at N=5, so correctness and fallback are
-the robust signals. `minimal` is the v0.7.0 default; `source` remains available for
-one-shot use.
-
-The scripted driver reports `minimal` at about 1,871 estimated output tokens per
-task with one `get` round-trip and `source` at about 1,433 in one shot. Its 0.6
-correctness score is a grading artifact: it grades retrieved text without model
-reasoning. The real-agent run answered all five tasks correctly with both modes
-and is the correctness source of truth.
-
-The current harness does **not** compare an agent with the graph against the same
-agent using only Read/Grep/Glob. Therefore these results do not support an
-end-to-end graph-vs-no-graph token-savings claim. That requires a controlled
-three-arm experiment with raw usage aggregation, wider task coverage, and repeated
-runs.
-
-## Controlled three-arm comparison
-
-`evaluate/compare/` supplies that controlled comparison as a separate,
-repository-agnostic runner. A JSON suite defines the subject revision, exactly
-three arms, natural-language tasks, and expected symbols. The runner never clones
-a subject repository: pass an existing checkout with `--repo`.
-
-The preserved TypeScript pilot is only a suite definition; it does not contain a
-checkout or index:
+Useful commands:
 
 ```bash
-# Schema/config validation only: no repo access, graph build, or model call.
-npm run eval:compare -- --validate \
-  --suite evaluate/compare/suites/typescript.json
+# Validate suite structure and exact source gold without building a graph.
+npm run eval:graph -- --validate
 
-# Prepare an existing checkout. Build dist/ first.
-npm run build
-npm run eval:compare -- --prepare \
-  --suite evaluate/compare/suites/typescript.json \
-  --repo /path/to/an/existing/TypeScript-checkout
+# Run the multilingual synthetic fixture.
+npm run eval:graph -- --all \
+  --suite evaluate/suites/native/graph/synthetic.json \
+  --repo evaluate/fixtures/repositories/graph-synthetic
 
-# Run 18 fresh sessions; --resume skips run IDs already on disk.
-npm run eval:compare -- --run --model sonnet --resume \
-  --suite evaluate/compare/suites/typescript.json \
-  --repo /path/to/an/existing/TypeScript-checkout
+# Prepare and run into a named output directory.
+npm run eval:graph -- --all \
+  --output .mex/eval-results/graph/my-run
+
+# Continue an interrupted run only when its full identity is unchanged.
+npm run eval:graph -- --all \
+  --output .mex/eval-results/graph/my-run \
+  --resume
+
+# Rebuild a report from an existing run.
+npm run eval:graph -- --report \
+  --output .mex/eval-results/graph/my-run
 ```
 
-Use `--output <dir>` to isolate multiple pilots and `--timeout-ms <n>` to change
-the per-session limit. `--prepare` verifies the subject SHA and expected symbols,
-builds one graph index per graph arm, snapshots those indices, and restores any
-pre-existing subject graph. It never invokes Claude. `--no-index` is available
-for configuration/gold-evidence diagnostics, but its output cannot be used for a
-graph-arm run.
+Modes are `--validate`, `--prepare`, `--run`, `--report`, and `--all`. `--all` is the default.
+Preparation and execution can be separated when artifact building is expensive.
 
-The TypeScript suite builds the released control from the already-present mex
-Git object using `git archive` and the local dependency installation. It does not
-make another clone. Supplying `--baseline-cli` skips that small local build.
+### Suites
 
-Each run uses safe mode, no session persistence, a fixed model, structured JSON
-output, and arm-specific tools. Policy violations invalidate the pilot. Results
-include raw JSONL, usage/cache accounting, unique tool-result payload size,
-paired per-task deltas, and deterministically shuffled blind-review/reveal files
-under the ignored `evaluate/results/compare/` directory.
+- `evaluate/suites/native/graph/mex.json` evaluates the active CLI against MEX.
+- `evaluate/suites/native/graph/synthetic.json` covers TypeScript, Python, Rust, duplicate symbol
+  names, multi-symbol flows, relationships, negative queries, and paraphrases.
+- `evaluate/suites/native/graph/mex-branches.json` builds `main`,
+  `feat/code-graph-retrieval`, and `origin/fix/graph-symbol-lookup` from local Git objects and runs
+  the same task file against all three.
+- `evaluate/suites/native/graph/mex-tasks.json` is the single reusable MEX gold task set. The
+  current and branch suites do not copy it.
 
-Execution validity and pilot validity are separate. After a run, fill the
-`manual` fields in `blind-review.json`, leaving the reveal file unopened. Then run
-`--report`; the pilot becomes valid only after every answer is scored and every
-automatic/manual disagreement is marked `adjudicated: true`.
+Run the three-branch comparison with:
 
-To target another repository, copy the suite JSON and change `subject`, `tasks`,
-and (if needed) arm CLI commands. CLI tokens support `{harnessRoot}`,
-`{subjectRoot}`, and `{suiteDir}`. Any graph arm without `cli` must be supplied as
-`--arm-cli id=/path/to/cli.js`; the `--baseline-cli` and `--patched-cli` flags are
-convenience aliases for those conventional IDs.
+```bash
+npm run eval:graph -- --all \
+  --suite evaluate/suites/native/graph/mex-branches.json \
+  --repo . \
+  --output .mex/eval-results/graph/branch-comparison
+```
 
-## Current release result
+Branch artifacts are produced with `git archive` into the ignored output directory. The active
+worktree is not switched, reset, or overwritten. Existing `node_modules` may be shared read-only by
+the archived builds.
 
-On the mex repository (six symbol tasks), the post-M2 compact retrieval surface
-measured:
+### Strict task evidence
 
-- median grep-top-3-to-scope ratio: **10.74×**;
-- median whole-corpus-to-scope ratio: **916.38×**;
-- expected-symbol recall: **1.0**;
-- `runDriftCheck`: **5.90×** grep efficiency with 9 facts, improved from 0.26×
-  and 32 source-bearing facts.
+Every non-negative task uses exact evidence:
 
-See [RESULTS.md](RESULTS.md) for the dated run, per-task table, real-agent
-transcript summary, and caveats.
+```json
+{
+  "id": "budget-enforcement",
+  "category": "natural-language-symbol",
+  "operation": "scope",
+  "query": "What prevents a retrieval payload from overflowing its allowance?",
+  "gold": [
+    {
+      "symbol": "BudgetLedger",
+      "kind": "class",
+      "path": "src/graph/agent-protocol.ts"
+    }
+  ]
+}
+```
 
-## Gates
+Preparation fails for missing files, stale declarations, duplicate task IDs, ambiguous declarations,
+empty fixtures, absolute paths, or paths escaping the subject repository. Matching is exact on
+symbol, graph kind, and normalized repository-relative path. A substring in `qualifiedName` or
+serialized JSON is not a match.
 
-`thresholds.json` holds the hard CI gates (floors, not exact-match assertions,
-since numbers drift as the code evolves):
+Supported task operations are:
 
-- `medianGrepTop3ToScope >= 1.0`
-- `scopeExpectedRecall >= 0.85` (per task)
-- `whereDefinedFoundRate >= 0.95`
+- `scope` for exact-symbol, natural-language, paraphrase, multi-symbol, ambiguity, and language
+  retrieval;
+- `query` for `where-defined`, `who-calls`, and `what-calls`; and
+- `impact` for hand-labeled blast-radius results.
 
-Historical baseline (prior benchmark on `cg-main`): median grep-top3 ratio 1.35,
-median corpus ratio 120.55, mean recall 1.0, `runDriftCheck` = 32 facts (the
-known over-expansion case).
+Negative tasks declare `expect.noResult` and, where appropriate, accepted structured error codes.
+Unexpected error records, malformed JSONL, empty output, nonzero exit, timeout, and output overflow
+make a run invalid rather than an empty successful result.
 
-## Determinism
+### Metrics and gates
 
-Graph reads are ordered deterministically (stable `ORDER BY` in
-`src/graph/db/store.ts`), so a rebuilt graph yields byte-identical query output.
-Unit coverage: `src/graph/__tests__/store-determinism.test.ts`.
+The report includes:
+
+- exact evidence Recall@1, Recall@5, and Recall@10;
+- MRR with every miss scored as zero;
+- nDCG@10, Precision@5, irrelevant-result rate, and complete-evidence rate;
+- negative-query accuracy and prohibited-result hits;
+- worst paraphrase-family recall, rank, and miss count;
+- output size, approximate tokens, latency, truncation, hard-budget compliance, and relevant facts
+  per 1,000 tokens;
+- extracted declarations versus stored nodes;
+- likely node overwrite/loss, dangling edges, duplicate identities, FTS row mismatch, call edges,
+  unresolved call references, callable-node isolation, and extraction errors; and
+- normalized graph-content hashes across repeated rebuilds.
+
+Quality gates run before efficiency gates. The branch suite applies overall, per-category,
+critical-task, and graph-integrity no-regression checks, so exact lookup cannot hide a
+natural-language regression.
+
+### Reproducibility and output
+
+Each prepared run records:
+
+- subject Git identity, dirty entries, and exact worktree/tree hash;
+- suite and shared task-file hashes;
+- CLI command and complete runtime-bundle hash;
+- graph database byte and normalized-content hashes;
+- build summary, integrity report, and repeated-rebuild hashes;
+- Node/platform/runtime details and an environment allowlist; and
+- immutable preparation and run identities.
+
+Each task stores its result row plus raw stdout and stderr. Reports are written as:
+
+- `prepare.json`
+- `run-manifest.json`
+- `runs/*.json`
+- `raw/builds/*`
+- `raw/queries/*`
+- `report.json`
+- `report.md`
+- `rows.csv`
+
+Resume validates the suite, tasks, subject tree, CLI bundle, graph snapshots, timeout, and schedule.
+Partial or stale rows cannot silently attach to a new run.
+
+## Repeated headless-agent comparison
+
+The controlled agent suite has three matched arms:
+
+1. repository files only;
+2. graph built by `main`; and
+3. graph built by the active checkout.
+
+Prepare it once:
+
+```bash
+npm run eval:compare -- --prepare \
+  --suite evaluate/compare/suites/mex-graph.json \
+  --repo . \
+  --output .mex/eval-results/compare/mex-graph-pilot
+```
+
+Run through the locally authenticated Claude CLI:
+
+```bash
+npm run eval:compare -- --run \
+  --suite evaluate/compare/suites/mex-graph.json \
+  --repo . \
+  --output .mex/eval-results/compare/mex-graph-pilot \
+  --agent claude \
+  --model <model-name> \
+  --policy forced-first \
+  --repetitions 3
+```
+
+Or use the locally authenticated Codex CLI:
+
+```bash
+npm run eval:compare -- --run \
+  --suite evaluate/compare/suites/mex-graph.json \
+  --repo . \
+  --output .mex/eval-results/compare/mex-graph-pilot-codex \
+  --agent codex \
+  --model <model-name> \
+  --policy forced-first \
+  --repetitions 3
+```
+
+No API SDK or direct API key is used. The adapters execute `claude -p` or `codex exec` and reuse the
+CLI's existing local authentication. Codex non-interactive JSONL behavior is documented in the
+[official Codex non-interactive guide](https://learn.chatgpt.com/docs/non-interactive-mode).
+
+Use a separate output directory for each agent, model, and policy. `--resume` is accepted only when
+all run-identity fields match.
+
+### Agent policies
+
+- `--policy forced-first` requires each graph arm to begin with `graph scope`. This diagnoses what
+  happens after a known graph attempt.
+- `--policy optional` makes graph retrieval available without forcing it. This measures whether the
+  agent naturally selects it.
+
+Report the policies separately; they answer different questions.
+
+Each session starts in a fresh neutral temporary directory. The subject repository is added as a
+readable directory, graph commands pass through a fixed wrapper into the prepared subject index,
+and the agent never inherits conversation state. Claude safe mode/no-session-persistence and Codex
+ephemeral/read-only modes are used. Policy validation distinguishes attempted, executed, failed,
+and denied tool calls and rejects raw SQLite, cross-arm binaries, shell composition, or an invalid
+forced-first sequence.
+
+### Token and prompt-cache accounting
+
+The two CLIs expose different usage fields. Every row preserves the raw provider/CLI usage object
+and maps only established fields into:
+
+```json
+{
+  "uncachedInput": 0,
+  "cacheWrite": 0,
+  "cacheRead": 0,
+  "output": 0,
+  "reportedInput": 0,
+  "reportedTotal": 0,
+  "reportedCostUsd": null,
+  "newTokens": 0,
+  "cacheUseRatio": 0,
+  "raw": []
+}
+```
+
+Unavailable fields remain `null`. In particular, Codex does not currently expose a cache-write
+count in its JSONL usage event, so the adapter preserves `cacheWrite: null` while computing new
+tokens from uncached input plus output. Claude reports cache creation/write separately.
+
+The primary comparison is paired within the same task and repetition:
+
+```text
+deltaNewTokens = newTokens(candidate) - newTokens(baseline)
+deltaCacheRead = cacheRead(candidate) - cacheRead(baseline)
+deltaTotal     = reportedTotal(candidate) - reportedTotal(baseline)
+deltaCost      = reportedCost(candidate) - reportedCost(baseline), when available
+```
+
+Absolute uncached input, cache writes, cache reads, output, totals, cost, and cache-use ratio remain
+visible per arm. Reports include distributions, totals, paired means, and deterministic bootstrap
+95% intervals. Missing fields never become zero-cost claims.
+
+Arm order is balanced across tasks and repetitions using all six three-arm permutations. This
+prevents one arm from always running after another has warmed a provider cache. Shared prompt text
+appears in the same prefix where the experiment permits, but the report does not assume cache reads
+cancel between arms.
+
+### Agent outcomes
+
+The agent report records:
+
+- exact structured answer symbols and evidence paths;
+- initial scope rank, Recall@5, MRR, and miss rate without dropping misses;
+- scope calls, semantically distinct scope retries, graph follow-ups, file-search fallbacks, tool
+  errors, denials, turns, latency, and tool-result characters;
+- complete absolute cache/token composition; and
+- all paired task/repetition deltas.
+
+`blind-review.json` and `blind-reveal.json` carry a review identity tied to the run and answer set.
+A stale review file cannot attach to new results. When manual review is complete and disagreements
+are adjudicated, manual correctness becomes the final decision label instead of merely unlocking a
+decision based on the old automatic label.
+
+## Harness tests
+
+Run all harness self-tests without invoking a model:
+
+```bash
+npm run eval:test
+```
+
+The tests use fake graph, Claude, and Codex processes. They cover nonzero exits, timeouts, malformed
+and empty JSONL, stale/ambiguous gold, exact identity matching, partial multi-symbol evidence,
+miss-preserving MRR, output and cache accounting, balanced repetitions, resume identity, stale
+manual reviews, graph loss metrics, index restoration, and policy violations.
+
+## Historical scripts
+
+These commands remain for comparison with old reports but are not graph-fix gates:
+
+```bash
+npm run eval:legacy
+npm run eval:e2e
+node evaluate/agent-e2e-model.mjs
+```
+
+Their original fixtures, thresholds, and reports are intentionally preserved. Do not combine their
+numbers with the strict graph-suite results without explicitly labeling the protocol difference.

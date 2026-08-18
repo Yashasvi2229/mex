@@ -2,7 +2,10 @@ import { constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve } from "node:path";
 import { runSync } from "./process.mjs";
-import { expandToken } from "./suite.mjs";
+import { expandToken, suiteHash } from "./suite.mjs";
+import { validateEvidenceInSource } from "../../graph/lib/fixture.mjs";
+import { commandBundleIdentity } from "../../core/hash.mjs";
+import { inspectGraphDatabase } from "../../graph/lib/integrity.mjs";
 
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
 
@@ -26,7 +29,7 @@ export function repositoryIdentity(root) {
   };
 }
 
-function worktreeDiffHash(root) {
+export function worktreeDiffHash(root) {
   const tracked = git(root, ["diff", "--binary", "HEAD"], true) ?? "";
   const untracked = (git(root, ["ls-files", "--others", "--exclude-standard"], true) ?? "").split("\n").filter(Boolean).sort();
   const hash = createHash("sha256").update(tracked);
@@ -57,12 +60,14 @@ function findSymbol(root, symbol) {
 export function collectGoldEvidence(root, tasks) {
   return tasks.map((task) => ({
     taskId: task.id,
-    symbols: task.expectedSymbols.map((symbol) => ({ symbol, ...findSymbol(root, symbol) })),
+    symbols: task.gold
+      ? task.gold.map((evidence, index) => validateEvidenceInSource(root, evidence, `${task.id}.gold[${index}]`))
+      : task.expectedSymbols.map((symbol) => ({ symbol, ...findSymbol(root, symbol), legacyDiscoveredGold: true })),
   }));
 }
 
 export function validateSubjectFixture(suite, subjectRoot) {
-  const subject = repositoryIdentity(subjectRoot);
+  const subject = { ...repositoryIdentity(subjectRoot), diffSha256: worktreeDiffHash(subjectRoot) };
   if (suite.subject.revision && subject.sha !== suite.subject.revision) {
     throw new Error(`subject SHA mismatch: expected ${suite.subject.revision}, found ${subject.sha}`);
   }
@@ -75,12 +80,16 @@ export function validateSubjectFixture(suite, subjectRoot) {
 /** Build configured control CLIs from local git objects. This uses git archive, never clone. */
 export function buildConfiguredArmArtifacts({ suite, context, outputDir, overrides }) {
   const generated = { ...overrides };
+  const metadata = {};
   const artifactsDir = join(outputDir, "artifacts");
   mkdirSync(artifactsDir, { recursive: true });
   for (const [armId, arm] of Object.entries(suite.arms)) {
-    if (arm.kind !== "graph" || generated[armId] || arm.cli || !arm.buildFromGit) continue;
+    if (arm.kind !== "graph" || !arm.buildFromGit) continue;
     const build = arm.buildFromGit;
     const sourceRoot = resolve(expandToken(build.root, context));
+    const revision = git(sourceRoot, ["rev-parse", `${build.revision}^{commit}`]);
+    metadata[armId] = { sourceRoot, declaredRevision: build.revision, revision };
+    if (generated[armId] || arm.cli) continue;
     const artifactRoot = join(artifactsDir, armId);
     const cliPath = join(artifactRoot, build.cli);
     if (existsSync(cliPath)) { generated[armId] = cliPath; continue; }
@@ -109,7 +118,7 @@ export function buildConfiguredArmArtifacts({ suite, context, outputDir, overrid
       throw error;
     }
   }
-  return generated;
+  return { overrides: generated, metadata };
 }
 
 function cloneCopy(source, target) {
@@ -149,7 +158,16 @@ export function buildArmIndices({ suite, subjectRoot, armCommands, outputDir }) 
       if (!existsSync(guard.db)) throw new Error(`${armId} did not create ${guard.db}`);
       const snapshot = join(indexDir, `${armId}.graph.db`);
       cloneCopy(guard.db, snapshot);
-      indices[armId] = { path: snapshot, sha256: fileHash(snapshot), buildOutput: result.stdout.trim() };
+      let buildSummary = null;
+      try { buildSummary = JSON.parse(result.stdout); } catch { /* legacy CLIs may not emit JSON here */ }
+      const sqlite = readFileSync(snapshot).subarray(0, 15).toString("utf8") === "SQLite format 3";
+      indices[armId] = {
+        path: snapshot,
+        sha256: fileHash(snapshot),
+        buildOutput: result.stdout.trim(),
+        buildSummary,
+        integrity: sqlite ? inspectGraphDatabase(snapshot, buildSummary) : null,
+      };
     }
   } finally {
     guard.restore();
@@ -158,17 +176,25 @@ export function buildArmIndices({ suite, subjectRoot, armCommands, outputDir }) 
   return indices;
 }
 
-export function prepareEvaluation({ suite, subjectRoot, harnessRoot, armCommands, outputDir, index = true, subjectFixture }) {
+export function prepareEvaluation({ suite, subjectRoot, harnessRoot, armCommands, outputDir, index = true, subjectFixture, artifactMetadata = {} }) {
   mkdirSync(outputDir, { recursive: true });
   const { subject, goldEvidence } = subjectFixture ?? validateSubjectFixture(suite, subjectRoot);
   const harness = repositoryIdentity(harnessRoot);
   const cli = Object.fromEntries(Object.entries(armCommands).map(([armId, command]) => {
-    const script = command[0] === process.execPath ? command[1] : command[0];
-    return [armId, { command, sha256: existsSync(script) ? fileHash(script) : null, declaredRevision: suite.arms[armId].revision ?? null }];
+    const bundle = commandBundleIdentity(command);
+    const script = bundle.entrypoint;
+    return [armId, {
+      command,
+      sha256: existsSync(script) ? fileHash(script) : null,
+      bundleSha256: bundle.bundleSha256,
+      bundleRoot: bundle.bundleRoot,
+      declaredRevision: artifactMetadata[armId]?.declaredRevision ?? suite.arms[armId].revision ?? null,
+      revision: artifactMetadata[armId]?.revision ?? suite.arms[armId].revision ?? null,
+    }];
   }));
   const indices = index ? buildArmIndices({ suite, subjectRoot, armCommands, outputDir }) : {};
   const manifest = {
-    schemaVersion: 1, suiteId: suite.id, preparedAt: new Date().toISOString(),
+    schemaVersion: 2, suiteId: suite.id, suiteSha256: suiteHash(suite), preparedAt: new Date().toISOString(),
     subject, harness: { ...harness, diffSha256: worktreeDiffHash(harnessRoot) }, cli, indices, goldEvidence,
   };
   writeFileSync(join(outputDir, "prepare.json"), `${JSON.stringify(manifest, null, 2)}\n`);

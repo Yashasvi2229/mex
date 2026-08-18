@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
+
 export const ANSWER_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -41,13 +44,36 @@ export function parseStructuredAnswer(value) {
   return { ok: true, value: answer };
 }
 
-export function gradeAnswer(answer, expectedSymbols) {
-  const haystack = `${answer.answer}\n${answer.symbols.join("\n")}`;
-  const ranks = expectedSymbols.map((symbol) => answer.symbols.indexOf(symbol)).filter((rank) => rank >= 0);
-  const matched = expectedSymbols.filter((symbol) => haystack.includes(symbol));
+export function gradeAnswer(answer, taskOrSymbols, subjectRoot = null) {
+  const expected = Array.isArray(taskOrSymbols)
+    ? taskOrSymbols
+    : (taskOrSymbols.gold?.map((entry) => entry.symbol) ?? taskOrSymbols.expectedSymbols ?? []);
+  const ranks = expected.map((symbol) => answer.symbols.indexOf(symbol));
+  const matched = expected.filter((symbol) => answer.symbols.includes(symbol));
+  const missing = expected.filter((symbol) => !answer.symbols.includes(symbol));
+  const expectedPaths = Array.isArray(taskOrSymbols)
+    ? []
+    : (taskOrSymbols.gold ?? []).map((entry) => entry.path.replace(/^\.\//, "").replaceAll("\\", "/"));
+  const citedPaths = new Set(answer.evidence.map((entry) => entry.path.replace(/^\.\//, "").replaceAll("\\", "/")));
+  const missingEvidencePaths = expectedPaths.filter((path) => !citedPaths.has(path));
+  const invalidEvidence = [];
+  if (!Array.isArray(taskOrSymbols) && taskOrSymbols.gold?.length && subjectRoot) {
+    const root = resolve(subjectRoot);
+    for (const evidence of answer.evidence) {
+      const path = resolve(root, evidence.path);
+      const rel = relative(root, path);
+      if (rel.startsWith("..") || isAbsolute(rel)) { invalidEvidence.push(`${evidence.path}:${evidence.line} escapes repository`); continue; }
+      if (!existsSync(path)) { invalidEvidence.push(`${evidence.path}:${evidence.line} does not exist`); continue; }
+      const lines = readFileSync(path, "utf8").split(/\r?\n/);
+      if (evidence.line > lines.length) invalidEvidence.push(`${evidence.path}:${evidence.line} is past end of file`);
+    }
+  }
   return {
-    correct: matched.length > 0,
+    correct: expected.length > 0 && missing.length === 0 && missingEvidencePaths.length === 0 && invalidEvidence.length === 0 && answer.complete === true,
     matchedSymbols: matched,
-    answerSymbolRank: ranks.length ? Math.min(...ranks) + 1 : null,
+    missingSymbols: missing,
+    missingEvidencePaths,
+    invalidEvidence,
+    answerSymbolRank: ranks.filter((rank) => rank >= 0).length ? Math.min(...ranks.filter((rank) => rank >= 0)) + 1 : null,
   };
 }

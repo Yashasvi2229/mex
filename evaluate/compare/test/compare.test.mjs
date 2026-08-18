@@ -8,13 +8,14 @@ import { spawnSync } from "node:child_process";
 import { parseStructuredAnswer } from "../lib/answer.mjs";
 import { validateTranscriptPolicy } from "../lib/policy.mjs";
 import { prepareEvaluation } from "../lib/prepare.mjs";
-import { pairedDeltas } from "../lib/report.mjs";
+import { generateReport, pairedDeltas } from "../lib/report.mjs";
 import { runEvaluation, runSession } from "../lib/runner.mjs";
 import { buildSchedule, SIX_ARM_ORDERS } from "../lib/schedule.mjs";
 import { parseTranscript } from "../lib/transcript.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FAKE = join(HERE, "fixtures", "fake-claude.mjs");
+const FAKE_CODEX = join(HERE, "fixtures", "fake-codex.mjs");
 const ARMS = { grep: { kind: "grep" }, baseline: { kind: "graph", vocabRetry: false }, patched: { kind: "graph", vocabRetry: true } };
 const COMMANDS = { baseline: ["node", "/tmp/baseline.js"], patched: ["node", "/tmp/patched.js"] };
 
@@ -23,6 +24,16 @@ test("six tasks use all six arm permutations exactly once", () => {
   const schedule = buildSchedule(tasks, Object.keys(ARMS));
   const orders = tasks.map((_, index) => schedule.slice(index * 3, index * 3 + 3).map((row) => Object.keys(ARMS).indexOf(row.armId)));
   assert.deepEqual(orders, SIX_ARM_ORDERS);
+});
+
+test("repetitions balance all arm orders without losing pair identity", () => {
+  const tasks = [{ id: "a" }, { id: "b" }];
+  const schedule = buildSchedule(tasks, Object.keys(ARMS), 3);
+  assert.equal(schedule.length, 18);
+  const orders = [];
+  for (let index = 0; index < schedule.length; index += 3) orders.push(schedule.slice(index, index + 3).map((row) => row.armId).join(","));
+  assert.equal(new Set(orders).size, 6);
+  assert.deepEqual(schedule.slice(0, 9).map((row) => row.repetition), [1, 1, 1, 2, 2, 2, 3, 3, 3]);
 });
 
 test("stream JSON accounting sums assistant usage and deduplicates tool payloads", () => {
@@ -55,6 +66,17 @@ test("paired deltas are matched within each task", () => {
   assert.equal(pairs[0].mean.processed, -6.5);
 });
 
+test("paired token accounting keeps cache reads separate from new-token deltas", () => {
+  const metrics = (newTokens, cacheRead) => ({ newTokens, cacheRead });
+  const rows = [
+    { taskId: "a", repetition: 1, arm: "grep", valid: true, metrics: metrics(100, 500) },
+    { taskId: "a", repetition: 1, arm: "baseline", valid: true, metrics: metrics(70, 900) },
+  ];
+  const pair = pairedDeltas(rows, ["grep", "baseline"])[0];
+  assert.equal(pair.mean.newTokens, -30);
+  assert.equal(pair.mean.cacheRead, 400);
+});
+
 test("fake agent exercises success, failure, and timeout without model usage", { concurrency: false }, async () => {
   const task = { id: "fake", question: "Where?", expectedSymbols: ["FakeSymbol"] };
   const original = process.env.FAKE_CLAUDE_MODE;
@@ -71,6 +93,34 @@ test("fake agent exercises success, failure, and timeout without model usage", {
   } finally {
     if (original === undefined) delete process.env.FAKE_CLAUDE_MODE; else process.env.FAKE_CLAUDE_MODE = original;
   }
+});
+
+test("fake Codex adapter runs headlessly with cached-token accounting", { concurrency: false }, async () => {
+  const task = { id: "fake", question: "Where?", expectedSymbols: ["FakeSymbol"] };
+  const result = await runSession({
+    agentCommand: [process.execPath, FAKE_CODEX], agentId: "codex", subjectRoot: tmpdir(), model: "fake",
+    task, armId: "patched", arm: ARMS.patched, armCommands: COMMANDS, timeoutMs: 2_000,
+  });
+  assert.equal(result.valid, true);
+  assert.equal(result.metrics.uncachedInput, 40);
+  assert.equal(result.metrics.cacheRead, 60);
+  assert.equal(result.metrics.newTokens, 50);
+});
+
+test("stale manual review files cannot attach to a different run", () => {
+  const output = mkdtempSync(join(tmpdir(), "mex-review-output-"));
+  const suite = { id: "review", arms: ARMS, tasks: [{ id: "task" }] };
+  const baseMetrics = { newTokens: 1, uncachedInput: 1, cacheWrite: 0, cacheRead: 1, output: 0, reportedTotal: 2, costUsd: 0, uniqueToolResultChars: 0, uniqueToolResultTokens: 0, elapsedMs: 1, turns: 1, toolCalls: 1, graphCalls: 1, scopeCalls: 1, distinctScopeQueries: 1, vocabularyRetries: 0, fallbacks: 0, cacheUseRatio: 0.5, expectedSymbolInitialScopeRank: 1 };
+  const rows = Object.keys(ARMS).map((arm) => ({ runIdentity: "run-1", runId: `task-${arm}`, taskId: "task", repetition: 1, arm, valid: true, metrics: baseMetrics, answer: { answer: "x", symbols: ["x"], evidence: [], complete: true }, grade: { correct: true } }));
+  writeFileSync(join(output, "run-manifest.json"), JSON.stringify({ runIdentity: "run-1", schedule: rows.map((row) => ({ runId: row.runId })) }));
+  generateReport({ suite, outputDir: output, rows });
+  const reviewPath = join(output, "blind-review.json");
+  const review = JSON.parse(readFileSync(reviewPath, "utf8"));
+  review.reviewIdentity = "stale";
+  writeFileSync(reviewPath, JSON.stringify(review));
+  const report = generateReport({ suite, outputDir: output, rows });
+  assert.equal(report.reviewIdentityValid, false);
+  assert.equal(report.manuallyScored, false);
 });
 
 test("resume skips completed run IDs", { concurrency: false }, async () => {

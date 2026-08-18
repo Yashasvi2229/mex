@@ -25,7 +25,17 @@ function startsWith(words, prefix) {
   return prefix.every((word, index) => words[index] === word);
 }
 
-export function validateTranscriptPolicy(toolCalls, armId, arm, armCommands) {
+function unwrapShell(words) {
+  const executable = words[0]?.split("/").at(-1);
+  if (["bash", "zsh", "sh"].includes(executable) && words[1] === "-lc" && words.length === 3) {
+    return shellWords(words[2]);
+  }
+  return words;
+}
+
+const FILE_COMMANDS = new Set(["rg", "grep", "find", "fd", "cat", "head", "tail", "sed", "awk", "ls", "pwd", "wc"]);
+
+export function validateTranscriptPolicy(toolCalls, armId, arm, armCommands, options = {}) {
   const violations = [];
   const graphCommandOwners = Object.entries(armCommands);
   const graphCalls = [];
@@ -34,11 +44,13 @@ export function validateTranscriptPolicy(toolCalls, armId, arm, armCommands) {
     if (SQLITE.test(serializedInput)) violations.push(`raw SQLite access through ${call.name}`);
     if (call.name !== "Bash") continue;
     const command = String(call.input?.command ?? "").trim();
-    if (arm.kind === "grep") { violations.push("grep arm used Bash"); continue; }
     if (CONTROL_OPERATOR.test(command)) { violations.push(`shell control operator: ${command}`); continue; }
     if (SQLITE.test(command)) { violations.push(`raw SQLite access: ${command}`); continue; }
     let words;
-    try { words = shellWords(command); } catch (error) { violations.push(error.message); continue; }
+    try { words = unwrapShell(shellWords(command)); } catch (error) { violations.push(error.message); continue; }
+    const executable = words[0]?.split("/").at(-1);
+    if (options.allowFileShell && FILE_COMMANDS.has(executable)) continue;
+    if (arm.kind === "grep") { violations.push("grep arm used non-file-search Bash"); continue; }
     const own = armCommands[armId];
     if (!startsWith(words, own)) {
       const crossArm = graphCommandOwners.find(([id, prefix]) => id !== armId && startsWith(words, prefix));
@@ -53,7 +65,7 @@ export function validateTranscriptPolicy(toolCalls, armId, arm, armCommands) {
     if (!allowed.has(commandKey)) violations.push(`disallowed graph command: ${command}`);
     else graphCalls.push(commandKey);
   }
-  if (arm.kind === "graph" && graphCalls[0] !== "graph scope") violations.push("graph arm did not start with graph scope");
+  if (arm.kind === "graph" && options.requireGraphFirst !== false && graphCalls[0] !== "graph scope") violations.push("graph arm did not start with graph scope");
   if (graphCalls.filter((command) => command === "graph vocab").length > 1) violations.push("more than one graph vocab call");
   if (!arm.vocabRetry && graphCalls.includes("graph vocab")) violations.push("baseline arm used graph vocab");
   return violations;

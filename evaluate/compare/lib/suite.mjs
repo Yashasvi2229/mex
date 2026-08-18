@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
+import { fileHash, objectHash } from "../../core/hash.mjs";
 
 const ARM_KINDS = new Set(["grep", "graph"]);
 
@@ -13,6 +14,19 @@ function stringArray(value, label, { min = 0 } = {}) {
     throw new Error(`${label} must be an array of at least ${min} non-empty strings`);
   }
   return value;
+}
+
+function validateGold(value, label) {
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`${label} must be a non-empty array`);
+  value.forEach((entry, index) => {
+    const item = `${label}[${index}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`${item} must be an object`);
+    requiredString(entry.symbol, `${item}.symbol`);
+    requiredString(entry.kind, `${item}.kind`);
+    requiredString(entry.path, `${item}.path`);
+    if (isAbsolute(entry.path)) throw new Error(`${item}.path must be repository-relative`);
+    if (entry.line !== undefined && (!Number.isInteger(entry.line) || entry.line < 1)) throw new Error(`${item}.line must be positive`);
+  });
 }
 
 export function validateSuite(raw, source = "suite") {
@@ -30,6 +44,10 @@ export function validateSuite(raw, source = "suite") {
     if (taskIds.has(task.id)) throw new Error(`${label}.id is duplicated: ${task.id}`);
     taskIds.add(task.id);
     requiredString(task.question, `${label}.question`);
+    if (task.gold !== undefined) {
+      validateGold(task.gold, `${label}.gold`);
+      if (task.expectedSymbols === undefined) task.expectedSymbols = task.gold.map((entry) => entry.symbol);
+    }
     stringArray(task.expectedSymbols, `${label}.expectedSymbols`, { min: 1 });
   }
 
@@ -66,6 +84,10 @@ export function loadSuite(path) {
   const suite = validateSuite(JSON.parse(readFileSync(absolutePath, "utf8")), absolutePath);
   Object.defineProperty(suite, "__path", { value: absolutePath, enumerable: false });
   return suite;
+}
+
+export function suiteHash(suite) {
+  return suite.__path ? fileHash(suite.__path) : objectHash(suite);
 }
 
 export function expandToken(token, context) {

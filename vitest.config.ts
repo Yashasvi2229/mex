@@ -12,6 +12,10 @@ export default defineConfig({
       // The comparison harness uses Node's built-in test runner and is run via
       // `npm run eval:compare:test`, so Vitest must not collect the same files.
       "evaluate/compare/test/**",
+      "evaluate/graph/test/**",
+      // Eval runs can contain archived revisions with their own test trees.
+      // Results are data, never part of the active repository test suite.
+      ".mex/eval-results/**",
     ],
     // Tests must NEVER emit real telemetry to PostHog. The dev-repo guard only
     // catches commands run from inside this repo; tests spawn the built CLI in
