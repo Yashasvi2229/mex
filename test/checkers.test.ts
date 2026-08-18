@@ -561,19 +561,22 @@ describe("checkStaleness", () => {
 // ── Tool Config Sync Checker ──
 
 describe("checkToolConfigSync", () => {
+  // Sentinel carried by every generated .tool-configs/ template.
+  const marker = "<!-- mex-tool-config: managed copy -->\n";
+
   it("returns empty when no tool configs are installed", () => {
     const issues = checkToolConfigSync(tmpDir);
     expect(issues).toHaveLength(0);
   });
 
   it("returns empty when only one tool config is installed", () => {
-    writeFileSync(join(tmpDir, "CLAUDE.md"), "pointer to ROUTER.md");
+    writeFileSync(join(tmpDir, "CLAUDE.md"), `${marker}pointer to ROUTER.md`);
     const issues = checkToolConfigSync(tmpDir);
     expect(issues).toHaveLength(0);
   });
 
   it("returns empty when installed tool configs all match", () => {
-    const body = "pointer to ROUTER.md\nsame for every tool\n";
+    const body = `${marker}same for every tool\n`;
     writeFileSync(join(tmpDir, "CLAUDE.md"), body);
     writeFileSync(join(tmpDir, ".cursorrules"), body);
     writeFileSync(join(tmpDir, ".windsurfrules"), body);
@@ -582,8 +585,8 @@ describe("checkToolConfigSync", () => {
   });
 
   it("flags drift between two installed tool configs", () => {
-    writeFileSync(join(tmpDir, "CLAUDE.md"), "original\n");
-    writeFileSync(join(tmpDir, ".cursorrules"), "original\nedited\n");
+    writeFileSync(join(tmpDir, "CLAUDE.md"), `${marker}original\n`);
+    writeFileSync(join(tmpDir, ".cursorrules"), `${marker}original\nedited\n`);
     const issues = checkToolConfigSync(tmpDir);
     expect(issues).toHaveLength(1);
     expect(issues[0].code).toBe("TOOL_CONFIG_DRIFT");
@@ -593,10 +596,10 @@ describe("checkToolConfigSync", () => {
   });
 
   it("flags each drifted file separately and leaves matching files alone", () => {
-    writeFileSync(join(tmpDir, "CLAUDE.md"), "v1\n");
-    writeFileSync(join(tmpDir, "AGENTS.md"), "v1\n");           // matches CLAUDE.md
-    writeFileSync(join(tmpDir, ".cursorrules"), "v2 drifted\n"); // drifted
-    writeFileSync(join(tmpDir, ".windsurfrules"), "v3 also\n");  // drifted
+    writeFileSync(join(tmpDir, "CLAUDE.md"), `${marker}v1\n`);
+    writeFileSync(join(tmpDir, "AGENTS.md"), `${marker}v1\n`);            // matches CLAUDE.md
+    writeFileSync(join(tmpDir, ".cursorrules"), `${marker}v2 drifted\n`); // drifted
+    writeFileSync(join(tmpDir, ".windsurfrules"), `${marker}v3 also\n`);  // drifted
     const issues = checkToolConfigSync(tmpDir);
     const files = issues.map((i) => i.file).sort();
     expect(files).toEqual([".cursorrules", ".windsurfrules"]);
@@ -605,11 +608,69 @@ describe("checkToolConfigSync", () => {
 
   it("picks up the Copilot config nested under .github", () => {
     mkdirSync(join(tmpDir, ".github"), { recursive: true });
-    writeFileSync(join(tmpDir, "CLAUDE.md"), "shared\n");
-    writeFileSync(join(tmpDir, ".github/copilot-instructions.md"), "changed\n");
+    writeFileSync(join(tmpDir, "CLAUDE.md"), `${marker}shared\n`);
+    writeFileSync(join(tmpDir, ".github/copilot-instructions.md"), `${marker}changed\n`);
     const issues = checkToolConfigSync(tmpDir);
     expect(issues).toHaveLength(1);
     expect(issues[0].file).toBe(".github/copilot-instructions.md");
+  });
+
+  it("ignores tool config files that are not scaffold copies", () => {
+    // A hand-written CLAUDE.md and a generated AGENTS.md (e.g. a managed skill
+    // pack) coexist without ever having been copied from .tool-configs/.
+    writeFileSync(join(tmpDir, "CLAUDE.md"), "# Project Context\nhand-written\n");
+    writeFileSync(join(tmpDir, "AGENTS.md"), "# Managed skill pack\ngenerated\n");
+    const issues = checkToolConfigSync(tmpDir);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("ignores non-scaffold files even when they mention ROUTER.md", () => {
+    // Independently owned configs legitimately point agents at ROUTER.md;
+    // that alone must not make them look like scaffold copies of each other.
+    writeFileSync(join(tmpDir, "CLAUDE.md"), "# Mine\nSee ROUTER.md for context.\n");
+    writeFileSync(join(tmpDir, "AGENTS.md"), "# Theirs\nRead .mex/ROUTER.md first.\n");
+    const issues = checkToolConfigSync(tmpDir);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("compares only the scaffold copies when non-copies are present", () => {
+    writeFileSync(join(tmpDir, "CLAUDE.md"), "# Project Context\nread ROUTER.md\n"); // not a copy
+    writeFileSync(join(tmpDir, ".cursorrules"), `${marker}v1\n`);
+    writeFileSync(join(tmpDir, ".windsurfrules"), `${marker}v1 edited\n`);
+    const issues = checkToolConfigSync(tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].file).toBe(".windsurfrules");
+    expect(issues[0].message).toContain(".cursorrules");
+  });
+
+  // Frontmatter line every tool config template has carried since the initial
+  // commit. Copies installed before the sentinel shipped are recognised by it,
+  // since `mex setup` never rewrites an anchor that already exists.
+  const legacy =
+    "---\nname: agents\ndescription: Always-loaded project anchor. Read this first. " +
+    "Contains project identity, non-negotiables, commands, and pointer to ROUTER.md for full context.\n---\n";
+
+  it("still flags drift between copies installed before the sentinel shipped", () => {
+    writeFileSync(join(tmpDir, "CLAUDE.md"), `${legacy}original\n`);
+    writeFileSync(join(tmpDir, ".cursorrules"), `${legacy}original\nedited\n`);
+    const issues = checkToolConfigSync(tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].code).toBe("TOOL_CONFIG_DRIFT");
+    expect(issues[0].file).toBe(".cursorrules");
+  });
+
+  it("leaves matching pre-sentinel copies alone", () => {
+    writeFileSync(join(tmpDir, "CLAUDE.md"), `${legacy}same\n`);
+    writeFileSync(join(tmpDir, ".cursorrules"), `${legacy}same\n`);
+    expect(checkToolConfigSync(tmpDir)).toHaveLength(0);
+  });
+
+  it("does not treat a file that merely quotes the sentinel as a copy", () => {
+    // Documentation about mex is not a managed copy of it.
+    const quoting = "# Notes\nCopies carry `<!-- mex-tool-config -->` after the frontmatter.\n";
+    writeFileSync(join(tmpDir, "CLAUDE.md"), quoting);
+    writeFileSync(join(tmpDir, "AGENTS.md"), `${quoting}and something else\n`);
+    expect(checkToolConfigSync(tmpDir)).toHaveLength(0);
   });
 });
 
