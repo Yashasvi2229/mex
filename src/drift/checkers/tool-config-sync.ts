@@ -49,6 +49,17 @@ function isScaffoldCopy(content: string): boolean {
 	return SCAFFOLD_MARKER.test(content) || content.includes(LEGACY_MARKER);
 }
 
+/** One copy differs from what the others agree on. */
+function drift(path: string, reference: string): DriftIssue {
+	return {
+		code: "TOOL_CONFIG_DRIFT",
+		severity: "warning",
+		file: path,
+		line: null,
+		message: `Tool config ${path} has drifted from ${reference}. Re-copy from .tool-configs/ or edit both to match.`,
+	};
+}
+
 /** Check that all installed tool config files hold identical content. */
 export function checkToolConfigSync(projectRoot: string): DriftIssue[] {
 	const present: Array<{ path: string; content: string }> = [];
@@ -67,17 +78,52 @@ export function checkToolConfigSync(projectRoot: string): DriftIssue[] {
 	// Nothing to compare until at least two tool configs are installed.
 	if (present.length < 2) return [];
 
-	const reference = present[0];
-	const issues: DriftIssue[] = [];
-	for (let i = 1; i < present.length; i++) {
-		if (present[i].content !== reference.content) {
-			issues.push({
+	// Group the copies by content, keeping TOOL_CONFIG_FILES order within and
+	// between groups. Identical copies collapse into one group; each edit that
+	// was not propagated forms another.
+	const groups = new Map<string, string[]>();
+	for (const { path, content } of present) {
+		const group = groups.get(content);
+		if (group) group.push(path);
+		else groups.set(content, [path]);
+	}
+	if (groups.size === 1) return [];
+
+	const ordered = [...groups.values()];
+
+	// With exactly two copies there is no majority to appeal to and no way to
+	// tell which one moved, so keep reporting the pair as before.
+	if (present.length === 2) {
+		return [drift(present[1].path, present[0].path)];
+	}
+
+	// The largest group is what the copies are supposed to say: an edit made in
+	// one place leaves the others agreeing. Blaming the first file in list order
+	// instead pins every warning on the wrong file whenever the edited copy
+	// happens to sort first. See https://github.com/mex-memory/mex/issues/127
+	const largest = ordered.reduce((a, b) => (b.length > a.length ? b : a));
+	const tied = ordered.filter((g) => g.length === largest.length).length > 1;
+
+	// No majority means no honest culprit -- say they diverged and stop there,
+	// rather than picking a group to blame.
+	if (tied) {
+		const summary = ordered.map((g) => `[${g.join(", ")}]`).join(" vs ");
+		return [
+			{
 				code: "TOOL_CONFIG_DRIFT",
 				severity: "warning",
-				file: present[i].path,
+				file: ordered[0][0],
 				line: null,
-				message: `Tool config ${present[i].path} has drifted from ${reference.path}. Re-copy from .tool-configs/ or edit both to match.`,
-			});
+				message: `Tool configs have diverged into ${ordered.length} groups with no majority: ${summary}. Decide which is correct and re-copy it over the others.`,
+			},
+		];
+	}
+
+	const issues: DriftIssue[] = [];
+	for (const group of ordered) {
+		if (group === largest) continue;
+		for (const path of group) {
+			issues.push(drift(path, largest[0]));
 		}
 	}
 	return issues;

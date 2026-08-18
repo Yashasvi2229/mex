@@ -665,6 +665,35 @@ describe("checkToolConfigSync", () => {
     expect(checkToolConfigSync(tmpDir)).toHaveLength(0);
   });
 
+  it("blames the edited copy even when it comes first in the file list", () => {
+    // CLAUDE.md heads TOOL_CONFIG_FILES, so using it as the baseline pinned a
+    // warning on all four untouched files instead. https://github.com/mex-memory/mex/issues/127
+    writeFileSync(join(tmpDir, "CLAUDE.md"), `${marker}v2 edited\n`);
+    writeFileSync(join(tmpDir, "AGENTS.md"), `${marker}v1\n`);
+    writeFileSync(join(tmpDir, ".cursorrules"), `${marker}v1\n`);
+    writeFileSync(join(tmpDir, ".windsurfrules"), `${marker}v1\n`);
+    mkdirSync(join(tmpDir, ".github"), { recursive: true });
+    writeFileSync(join(tmpDir, ".github/copilot-instructions.md"), `${marker}v1\n`);
+    const issues = checkToolConfigSync(tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].file).toBe("CLAUDE.md");
+    expect(issues[0].message).toContain("AGENTS.md");
+  });
+
+  it("names no culprit when the copies split evenly", () => {
+    writeFileSync(join(tmpDir, "CLAUDE.md"), `${marker}v1\n`);
+    writeFileSync(join(tmpDir, "AGENTS.md"), `${marker}v1\n`);
+    writeFileSync(join(tmpDir, ".cursorrules"), `${marker}v2\n`);
+    writeFileSync(join(tmpDir, ".windsurfrules"), `${marker}v2\n`);
+    const issues = checkToolConfigSync(tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].code).toBe("TOOL_CONFIG_DRIFT");
+    expect(issues[0].message).toContain("no majority");
+    expect(issues[0].message).toContain("[CLAUDE.md, AGENTS.md]");
+    expect(issues[0].message).toContain("[.cursorrules, .windsurfrules]");
+    expect(issues[0].message).not.toContain("has drifted from");
+  });
+
   it("does not treat a file that merely quotes the sentinel as a copy", () => {
     // Documentation about mex is not a managed copy of it.
     const quoting = "# Notes\nCopies carry `<!-- mex-tool-config -->` after the frontmatter.\n";
