@@ -132,7 +132,7 @@ function remediationFor(code: DriftIssue["code"]): string | null {
     case "UNDOCUMENTED_SCRIPT":
       return "Document the script in AGENTS.md, SETUP.md, or context/setup.md.";
     case "TOOL_CONFIG_DRIFT":
-      return "Re-copy the flagged file from the version the other tool configs agree on.";
+      return "Re-copy the correct version over the tool configs that disagree with it.";
     case "TODO_FIXME":
       return "Resolve the TODO/FIXME or remove the marker from the scaffold.";
     case "BROKEN_LINK":

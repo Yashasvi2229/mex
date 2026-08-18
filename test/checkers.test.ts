@@ -694,6 +694,15 @@ describe("checkToolConfigSync", () => {
     expect(issues[0].message).not.toContain("has drifted from");
   });
 
+  it("names every group when no two copies agree", () => {
+    writeFileSync(join(tmpDir, "CLAUDE.md"), `${marker}a\n`);
+    writeFileSync(join(tmpDir, "AGENTS.md"), `${marker}b\n`);
+    writeFileSync(join(tmpDir, ".cursorrules"), `${marker}c\n`);
+    const issues = checkToolConfigSync(tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain("3 groups with no majority");
+  });
+
   it("does not treat a file that merely quotes the sentinel as a copy", () => {
     // Documentation about mex is not a managed copy of it.
     const quoting = "# Notes\nCopies carry `<!-- mex-tool-config -->` after the frontmatter.\n";

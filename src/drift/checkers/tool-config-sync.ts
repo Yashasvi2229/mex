@@ -114,7 +114,7 @@ export function checkToolConfigSync(projectRoot: string): DriftIssue[] {
 				severity: "warning",
 				file: ordered[0][0],
 				line: null,
-				message: `Tool configs have diverged into ${ordered.length} groups with no majority: ${summary}. Decide which is correct and re-copy it over the others.`,
+				message: `Tool configs have diverged into ${ordered.length} groups with no majority, so none can be identified as the edited one: ${summary}.`,
 			},
 		];
 	}
