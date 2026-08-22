@@ -1,14 +1,41 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MexConfig } from "../src/types.js";
-import { runDriftCheck } from "../src/drift/index.js";
+import { runDriftCheckWithGraphStatus } from "../src/drift/index.js";
 import { createGraphEngine } from "../src/graph/engine-impl.js";
-import { loadGroundingRuntime, persistMovedGroundings, refreshGroundingBaselines } from "../src/graph/runtime.js";
+import {
+  loadGroundingRuntime,
+  loadReadOnlyGroundingRuntime,
+  persistMovedGroundings,
+  refreshGroundingBaselines,
+  type GroundingRuntime,
+} from "../src/graph/runtime.js";
 import { extractGroundings, writeGroundings } from "../src/markdown.js";
 import { buildCombinedBrief } from "../src/sync/brief-builder.js";
 import { serializeFingerprint } from "../src/graph/fingerprint.js";
+import { openSqlite } from "../src/graph/db/sqlite.js";
+import {
+  inspectGraphSidecars,
+  inspectGraphStatus,
+  inspectGraphStatusWithFreshObservation,
+} from "../src/graph/status.js";
+import { GRAPH_SNAPSHOT_METADATA_KEY } from "../src/graph/snapshot.js";
+import type { GraphStatus, GraphStatusKind } from "../src/team/contracts/graph.js";
+import { runDoctor } from "../src/doctor.js";
+import { loadDashboard } from "../src/tui.js";
 
 const roots: string[] = [];
 
@@ -24,11 +51,251 @@ function fixture(): { root: string; config: MexConfig; source: string; scaffold:
   return { root, source, scaffold, config: { projectRoot: root, scaffoldRoot: join(root, ".mex"), aiTools: [] } };
 }
 
+function graphPersistenceSnapshot(root: string) {
+  const dbPath = join(root, ".mex", "graph.db");
+  const db = openSqlite(dbPath, { readOnly: true, immutable: true });
+  try {
+    return {
+      bytes: readFileSync(dbPath),
+      mtimeMs: statSync(dbPath).mtimeMs,
+      metadata: db.prepare(
+        "SELECT key, value, updated_at FROM project_metadata ORDER BY key",
+      ).all(),
+    };
+  } finally {
+    db.close();
+  }
+}
+
+type FilesystemSnapshotEntry =
+  | { path: string; kind: "directory"; mtimeMs: number }
+  | { path: string; kind: "file"; bytes: Buffer; mtimeMs: number };
+
+function filesystemSnapshot(root: string): FilesystemSnapshotEntry[] {
+  const records: FilesystemSnapshotEntry[] = [{
+    path: ".",
+    kind: "directory",
+    mtimeMs: statSync(root).mtimeMs,
+  }];
+  const visit = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const absolute = join(directory, entry.name);
+      const path = absolute.slice(root.length + 1);
+      if (entry.isDirectory()) {
+        records.push({ path, kind: "directory", mtimeMs: statSync(absolute).mtimeMs });
+        visit(absolute);
+      } else if (entry.isFile()) {
+        records.push({
+          path,
+          kind: "file",
+          bytes: readFileSync(absolute),
+          mtimeMs: statSync(absolute).mtimeMs,
+        });
+      }
+    }
+  };
+  visit(root);
+  return records.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function graphStatus(status: GraphStatusKind): GraphStatus {
+  return {
+    status,
+    observedAt: "2026-08-22T00:00:00.000Z",
+    currentRepo: {
+      branch: null,
+      head: null,
+      dirty: false,
+      observedAt: "2026-08-22T00:00:00.000Z",
+    },
+    lastSuccessfulIndexAt: null,
+    indexedAt: null,
+    indexedBranch: null,
+    indexedHead: null,
+    schemaVersion: null,
+    extractorVersion: null,
+    grammarVersion: null,
+    parseHealth: {
+      total: 0,
+      ok: 0,
+      partial: 0,
+      failed: 0,
+      failedPaths: [],
+      failedPathsTruncated: false,
+    },
+    changes: {
+      total: 0,
+      added: [],
+      modified: [],
+      deleted: [],
+      truncated: false,
+      branchChanged: false,
+      manifestChanged: false,
+      configChanged: false,
+      grammarChanged: false,
+    },
+    diagnostics: [],
+  };
+}
+
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe("code-graph grounding integration", () => {
+  it("inspects status unconditionally without opening grounding readers when irrelevant", async () => {
+    const { config } = fixture();
+    const missing = graphStatus("missing");
+    const loader = vi.fn(async () => ({ graphStatus: missing, runtime: null }));
+    const warning = vi.fn();
+
+    const report = await runDriftCheckWithGraphStatus(config, {
+      scaffoldPatterns: ["ROUTER.md"],
+      readOnlyGroundingRuntimeLoader: loader,
+      graphWarning: warning,
+    });
+
+    expect(loader).toHaveBeenCalledWith(config, { loadRuntime: false });
+    expect(report.graphStatus).toEqual(missing);
+    expect(warning).not.toHaveBeenCalled();
+  });
+
+  it("leaves graph-aware output to first-party renderers unless a warning sink is supplied", async () => {
+    const { config } = fixture();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const report = await runDriftCheckWithGraphStatus(config, {
+      readOnlyGroundingRuntimeLoader: async () => ({
+        graphStatus: graphStatus("missing"),
+        runtime: null,
+      }),
+    });
+
+    expect(report.graphStatus.status).toBe("missing");
+    expect(warning).not.toHaveBeenCalled();
+  });
+
+  it("does not invent graph commands when status says maintenance is unsafe", async () => {
+    const { config } = fixture();
+    const warning = vi.fn();
+    const missing: GraphStatus = {
+      ...graphStatus("missing"),
+      diagnostics: [{
+        code: "GRAPH_REPO_UNAVAILABLE",
+        severity: "warning",
+        message: "Repository provenance could not be inspected safely.",
+      }],
+    };
+
+    await runDriftCheckWithGraphStatus(config, {
+      readOnlyGroundingRuntimeLoader: async () => ({ graphStatus: missing, runtime: null }),
+      groundingRuntimeLoader: async () => null,
+      graphWarning: warning,
+    });
+
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("GRAPH_REPO_UNAVAILABLE"));
+    expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("Run `mex graph`"));
+  });
+
+  it("abstains before opening SQLite when the inspected graph is not fresh", async () => {
+    const { config } = fixture();
+    const stale = graphStatus("stale");
+    const result = await loadReadOnlyGroundingRuntime(config, {
+      inspectStatus: async () => stale,
+    });
+
+    expect(result).toEqual({ graphStatus: stale, runtime: null });
+  });
+
+  it("drops immutable readers when SQLite recovery activity starts during open", async () => {
+    const { root, source, config } = fixture();
+    writeFileSync(source, "export function stableGrounding(): number { return 1; }\n");
+    const engine = createGraphEngine({ rootDir: root });
+    await engine.build();
+    engine.close();
+    const inspectSidecars = vi.fn()
+      .mockReturnValueOnce({ state: "clear" as const, paths: [] })
+      .mockReturnValueOnce({ state: "active" as const, paths: ["graph.db-wal"] });
+
+    const result = await loadReadOnlyGroundingRuntime(config, { inspectSidecars });
+
+    expect(inspectSidecars).toHaveBeenCalledTimes(2);
+    expect(result.runtime).toBeNull();
+    expect(result.graphStatus.status).toBe("degraded");
+    expect(result.graphStatus.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "GRAPH_INDEX_READER_SIDECAR_ACTIVITY" }),
+    ]));
+  });
+
+  it("drops immutable readers whose snapshot identity differs from fresh status", async () => {
+    const { root, source, config } = fixture();
+    writeFileSync(source, "export function stableGrounding(): number { return 1; }\n");
+    const engine = createGraphEngine({ rootDir: root });
+    await engine.build();
+    engine.close();
+    const dbPath = join(root, ".mex", "graph.db");
+    const inspected = await inspectGraphStatusWithFreshObservation({ projectRoot: root, dbPath });
+    expect(inspected.graphStatus.status).toBe("fresh");
+    expect(inspected.freshObservation).not.toBeNull();
+    const mismatched: GraphStatus = {
+      ...inspected.graphStatus,
+      indexedHead: "a".repeat(40),
+    };
+    const inspectSidecars = vi.fn(() => ({ state: "clear" as const, paths: [] }));
+
+    const result = await loadReadOnlyGroundingRuntime(config, {
+      inspectSidecars,
+      __internal: {
+        inspectObservation: async () => ({
+          ...inspected,
+          graphStatus: mismatched,
+        }),
+      },
+    } as unknown as Parameters<typeof loadReadOnlyGroundingRuntime>[1]);
+
+    expect(inspectSidecars).toHaveBeenCalledTimes(1);
+    expect(result.runtime).toBeNull();
+    expect(result.graphStatus.status).toBe("degraded");
+    expect(result.graphStatus.diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "GRAPH_INDEX_READER_SNAPSHOT_CHANGED" }),
+    ]));
+  });
+
+  it("rebuilds mutating grounding state from exact bytes despite restored size and mtime", async () => {
+    const { root, source, config } = fixture();
+    const original = "export function oldBodyFact(): number { return 1; }\n";
+    const replacement = "export function newBodyFact(): number { return 2; }\n";
+    const fixedTime = new Date("2024-01-01T00:00:00.000Z");
+    expect(Buffer.byteLength(replacement)).toBe(Buffer.byteLength(original));
+    writeFileSync(source, original);
+    utimesSync(source, fixedTime, fixedTime);
+    const engine = createGraphEngine({ rootDir: root });
+    await engine.build();
+    engine.close();
+
+    writeFileSync(source, replacement);
+    utimesSync(source, fixedTime, fixedTime);
+    expect(statSync(source).mtimeMs).toBe(fixedTime.getTime());
+
+    const runtime = await loadGroundingRuntime(config);
+    expect(runtime).not.toBeNull();
+    expect(runtime!.graph.searchNodes("oldBodyFact").some((node) => node.name === "oldBodyFact"))
+      .toBe(false);
+    expect(runtime!.graph.searchNodes("newBodyFact").some((node) => node.name === "newBodyFact"))
+      .toBe(true);
+    runtime!.close();
+
+    const db = openSqlite(join(root, ".mex", "graph.db"), { readOnly: true, immutable: true });
+    try {
+      const grounded = db.prepare("SELECT COUNT(*) AS count FROM _mex_grounded_source")
+        .get() as { count: number };
+      expect(grounded.count).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
   it("builds fingerprints, detects body drift, re-grounds, and durably rewrites MOVED", async () => {
     const { root, source, scaffold, config } = fixture();
     const original = `export function calculateOrderTotal(items: number[]): number {\n  const subtotal = items.reduce((sum, item) => sum + item, 0);\n  const tax = subtotal * 0.18;\n  const shipping = subtotal > 1000 ? 0 : 75;\n  const discount = items.length > 5 ? subtotal * 0.05 : 0;\n  return subtotal + tax + shipping - discount;\n}\n`;
@@ -57,9 +324,22 @@ describe("code-graph grounding integration", () => {
       "subtotal > 1000 ? 0 : 75",
       "Math.max(0, 75 - subtotal * 0.05)",
     ));
-    let report = await runDriftCheck(config);
-    expect(report.issues.filter((issue) => issue.code === "GROUNDING_DRIFT")).toHaveLength(1);
+    const beforeCheck = graphPersistenceSnapshot(root);
+    const warning = vi.fn();
+    let report = await runDriftCheckWithGraphStatus(config, { graphWarning: warning });
+    expect(report.graphStatus?.status).toBe("stale");
+    expect(report.issues.filter((issue) => issue.code === "GROUNDING_DRIFT")).toHaveLength(0);
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("Run `mex graph`"));
+    expect(graphPersistenceSnapshot(root)).toEqual(beforeCheck);
 
+    // Explicitly mutating workflows retain the existing correctness-first sync.
+    runtime = await loadGroundingRuntime(config);
+    runtime!.close();
+    const beforeFreshCheck = graphPersistenceSnapshot(root);
+    report = await runDriftCheckWithGraphStatus(config, { graphWarning: warning });
+    expect(report.graphStatus?.status).toBe("fresh");
+    expect(report.issues.filter((issue) => issue.code === "GROUNDING_DRIFT")).toHaveLength(1);
+    expect(graphPersistenceSnapshot(root)).toEqual(beforeFreshCheck);
     runtime = await loadGroundingRuntime(config);
     const bodyRepairBrief = await buildCombinedBrief([{
       file: ".mex/context/architecture.md", gitDiff: null,
@@ -73,7 +353,8 @@ describe("code-graph grounding integration", () => {
     runtime!.close();
     const refreshedContent = readFileSync(scaffold, "utf-8");
     expect(extractGroundings(refreshedContent)[0].fingerprint).not.toBe(initialFingerprint);
-    report = await runDriftCheck(config);
+    report = await runDriftCheckWithGraphStatus(config, { graphWarning: warning });
+    expect(report.graphStatus?.status).toBe("fresh");
     expect(report.issues.filter((issue) => issue.code.startsWith("GROUNDING_"))).toHaveLength(0);
 
     writeFileSync(source, readFileSync(source, "utf-8").replace("calculateOrderTotal", "computeOrderTotal"));
@@ -112,9 +393,10 @@ describe("code-graph grounding integration", () => {
     const persistedContent = readFileSync(scaffold, "utf-8");
     expect(persistedContent).not.toContain(`mex://${node.id}`);
     expect(persistedContent).toContain(`mex://${persisted[0].node}`);
-    report = await runDriftCheck(config);
+    report = await runDriftCheckWithGraphStatus(config, { graphWarning: warning });
+    expect(report.graphStatus?.status).toBe("fresh");
     expect(report.issues.filter((issue) => issue.code.startsWith("GROUNDING_"))).toHaveLength(0);
-  }, 10_000);
+  }, 20_000);
 
   it("keeps legacy checks running when the graph engine fails to load", async () => {
     const { scaffold, config } = fixture();
@@ -122,7 +404,7 @@ describe("code-graph grounding integration", () => {
       node: "function:missing", fingerprint: "mh:64:00",
     }]));
     const warning = vi.fn();
-    const report = await runDriftCheck(config, {
+    const report = await runDriftCheckWithGraphStatus(config, {
       groundingRuntimeLoader: async () => { throw new Error("simulated WASM load failure"); },
       graphWarning: warning,
       verbose: true,
@@ -131,5 +413,282 @@ describe("code-graph grounding integration", () => {
     expect(report.issues.some((issue) => issue.code.startsWith("GROUNDING_"))).toBe(false);
     expect(report.verboseLog).toContain("Checker paths: 0 issues");
     expect(warning).toHaveBeenCalledWith(expect.stringContaining("simulated WASM load failure"));
+  });
+
+  it("closes the read-only runtime when a grounding checker throws", async () => {
+    const { scaffold, config } = fixture();
+    writeFileSync(scaffold, writeGroundings(readFileSync(scaffold, "utf-8"), [{
+      node: "function:throws",
+      fingerprint: "mh:64:00",
+    }]));
+    const close = vi.fn();
+    const runtime = {
+      checker: () => { throw new Error("simulated checker failure"); },
+      close,
+    } as unknown as GroundingRuntime;
+
+    await expect(runDriftCheckWithGraphStatus(config, {
+      readOnlyGroundingRuntimeLoader: async () => ({
+        graphStatus: graphStatus("fresh"),
+        runtime,
+      }),
+      graphWarning: vi.fn(),
+    })).rejects.toThrow("simulated checker failure");
+
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("probes WAL state on the canonical target of a contained graph symlink", async () => {
+    const { root, config, source } = fixture();
+    writeFileSync(source, "export const service = 1;\n");
+    const graphPath = join(root, ".mex", "graph.db");
+    const targetPath = join(root, ".mex", "graph-target.db");
+    const engine = createGraphEngine({ rootDir: root });
+    await engine.build();
+    engine.close();
+    renameSync(graphPath, targetPath);
+    symlinkSync("graph-target.db", graphPath);
+    const fresh = await inspectGraphStatus({ projectRoot: root });
+    expect(fresh.status).toBe("fresh");
+
+    let writer: ReturnType<typeof openSqlite> | null = null;
+    try {
+      const loaded = await loadReadOnlyGroundingRuntime(config, {
+        __internal: {
+          afterStatusInspection() {
+            writer = openSqlite(targetPath);
+            writer.exec("PRAGMA wal_autocheckpoint = 0");
+            writer.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = 'manifest_hash'")
+              .run(Date.now());
+          },
+        },
+      } as unknown as Parameters<typeof loadReadOnlyGroundingRuntime>[1]);
+      expect(loaded.runtime).toBeNull();
+      expect(loaded.graphStatus.status).toBe("degraded");
+      expect(loaded.graphStatus.diagnostics).toContainEqual(expect.objectContaining({
+        code: "GRAPH_INDEX_READER_SIDECAR_ACTIVITY",
+      }));
+    } finally {
+      writer?.close();
+    }
+  });
+
+  it("rejects a graph that commits and checkpoints between immutable reader probes", async () => {
+    const { root, config, source } = fixture();
+    writeFileSync(source, "export const service = 1;\n");
+    const graphPath = join(root, ".mex", "graph.db");
+    const engine = createGraphEngine({ rootDir: root });
+    await engine.build();
+    engine.close();
+    const fresh = await inspectGraphStatus({ projectRoot: root });
+    expect(fresh.status).toBe("fresh");
+    let probes = 0;
+
+    const loaded = await loadReadOnlyGroundingRuntime(config, {
+      inspectSidecars(path) {
+        probes += 1;
+        if (probes === 2) {
+          const writer = openSqlite(graphPath);
+          try {
+            writer.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = 'manifest_hash'")
+              .run(Date.now());
+            writer.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+          } finally {
+            writer.close();
+          }
+        }
+        return inspectGraphSidecars(path);
+      },
+    });
+
+    expect(probes).toBe(2);
+    expect(loaded.runtime).toBeNull();
+    expect(loaded.graphStatus.status).toBe("degraded");
+    expect(loaded.graphStatus.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_READER_DATABASE_CHANGED",
+    }));
+  });
+
+  it("rejects an atomically replaced database whose public status fields still match", async () => {
+    const { root, config, source } = fixture();
+    writeFileSync(source, "export const service = 1;\n");
+    const graphPath = join(root, ".mex", "graph.db");
+    const replacementPath = join(root, ".mex", "graph-replacement.db");
+    const engine = createGraphEngine({ rootDir: root });
+    await engine.build();
+    engine.close();
+
+    writeFileSync(replacementPath, readFileSync(graphPath));
+    const replacement = openSqlite(replacementPath);
+    try {
+      const row = replacement.prepare(
+        "SELECT value FROM project_metadata WHERE key = ?",
+      ).get(GRAPH_SNAPSHOT_METADATA_KEY) as { value: string };
+      const originalSnapshot = JSON.parse(row.value) as Record<string, unknown>;
+      const forged = {
+        ...originalSnapshot,
+        manifestHash: "a".repeat(64),
+        configHash: "b".repeat(64),
+        compilerVersion: "forged-private-compiler",
+        resolverVersion: "forged-private-resolver",
+        semanticInputs: [{ path: "private-compiler.json", contentHash: null }],
+      };
+      expect(forged).toMatchObject({
+        version: originalSnapshot.version,
+        indexedAt: originalSnapshot.indexedAt,
+        lastSuccessfulIndexAt: originalSnapshot.lastSuccessfulIndexAt,
+        indexedBranch: originalSnapshot.indexedBranch,
+        indexedHead: originalSnapshot.indexedHead,
+        schemaVersion: originalSnapshot.schemaVersion,
+        extractorVersion: originalSnapshot.extractorVersion,
+        grammarHash: originalSnapshot.grammarHash,
+        sourceCorpusDigest: originalSnapshot.sourceCorpusDigest,
+        sourceCount: originalSnapshot.sourceCount,
+        parseHealth: originalSnapshot.parseHealth,
+      });
+      replacement.prepare(
+        "UPDATE project_metadata SET value = ? WHERE key = ?",
+      ).run(JSON.stringify(forged), GRAPH_SNAPSHOT_METADATA_KEY);
+      replacement.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } finally {
+      replacement.close();
+    }
+    expect(inspectGraphSidecars(replacementPath).state).toBe("clear");
+
+    let openedReader: ReturnType<typeof openSqlite> | null = null;
+    let replaced = false;
+    const loaded = await loadReadOnlyGroundingRuntime(config, {
+      __internal: {
+        afterDatabaseIdentityRead() {
+          renameSync(replacementPath, graphPath);
+          replaced = true;
+        },
+        afterDatabaseOpen(database) {
+          openedReader = database;
+        },
+      },
+    } as unknown as Parameters<typeof loadReadOnlyGroundingRuntime>[1]);
+
+    expect(replaced).toBe(true);
+    expect(loaded.runtime).toBeNull();
+    expect(loaded.graphStatus.status).toBe("degraded");
+    expect(loaded.graphStatus.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_READER_SNAPSHOT_CHANGED",
+    }));
+    expect(openedReader).not.toBeNull();
+    expect(openedReader!.open).toBe(false);
+  });
+
+  it("discards grounding results when the graph changes after the loader returns", async () => {
+    const { root, config, source, scaffold } = fixture();
+    writeFileSync(source, "export const service = 1;\n");
+    const graphPath = join(root, ".mex", "graph.db");
+    const engine = createGraphEngine({ rootDir: root });
+    await engine.build();
+    engine.close();
+    const loaded = await loadReadOnlyGroundingRuntime(config);
+    expect(loaded.runtime).not.toBeNull();
+
+    const writer = openSqlite(graphPath);
+    try {
+      writer.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = 'manifest_hash'")
+        .run(Date.now());
+      writer.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } finally {
+      writer.close();
+    }
+
+    const issues = loaded.runtime!.checker(
+      null,
+      scaffold,
+      ".mex/context/architecture.md",
+      root,
+      join(root, ".mex"),
+    );
+    expect(issues).toEqual([]);
+    expect(loaded.graphStatus.status).toBe("degraded");
+    expect(loaded.graphStatus.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_READER_DATABASE_CHANGED",
+      message: expect.stringContaining("results were discarded"),
+    }));
+    loaded.runtime!.close();
+  });
+
+  it("discards the whole grounding batch when a later file observes graph replacement", async () => {
+    const { root, config, scaffold } = fixture();
+    const secondScaffold = join(root, ".mex", "context", "stack.md");
+    const grounding = [{ node: "function:service", fingerprint: "mh:64:00" }];
+    writeFileSync(scaffold, writeGroundings(readFileSync(scaffold, "utf-8"), grounding));
+    writeFileSync(secondScaffold, writeGroundings("# Stack\n", grounding));
+    const fresh = graphStatus("fresh");
+    fresh.diagnostics.push({
+      code: "GRAPH_INDEX_HEAD_CHANGED",
+      severity: "info",
+      message: "The checkout HEAD differs but source contents still match.",
+    });
+    const close = vi.fn();
+    const checker = vi.fn((_frontmatter, _filePath, source: string) => {
+      if (checker.mock.calls.length === 1) {
+        return [{
+          code: "GROUNDING_DRIFT",
+          severity: "warning" as const,
+          file: source,
+          line: null,
+          message: "Finding derived from the original graph snapshot.",
+        }];
+      }
+      fresh.status = "degraded";
+      fresh.diagnostics.push({
+        code: "GRAPH_INDEX_READER_DATABASE_CHANGED",
+        severity: "warning",
+        message: "The graph changed while grounding checks were running; graph-derived results were discarded.",
+      });
+      return [];
+    });
+    const runtime = { checker, close } as unknown as GroundingRuntime;
+    const warning = vi.fn();
+
+    const report = await runDriftCheckWithGraphStatus(config, {
+      scaffoldPatterns: ["context/*.md"],
+      readOnlyGroundingRuntimeLoader: async () => ({ graphStatus: fresh, runtime }),
+      graphWarning: warning,
+    });
+
+    expect(checker).toHaveBeenCalledTimes(2);
+    expect(report.graphStatus.status).toBe("degraded");
+    expect(report.issues.filter((issue) => issue.code.startsWith("GROUNDING_"))).toEqual([]);
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("results were discarded"));
+    expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("checkout HEAD differs"));
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps doctor and dashboard graph inspection filesystem-read-only", async () => {
+    const { root, source, config } = fixture();
+    writeFileSync(source, "export function service(): string { return 'v1'; }\n");
+    const engine = createGraphEngine({ rootDir: root });
+    await engine.build();
+    engine.close();
+    writeFileSync(source, "export function service(): string { return 'v2'; }\n");
+
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      const beforeDoctor = filesystemSnapshot(join(root, ".mex"));
+      await runDoctor(config);
+      expect(filesystemSnapshot(join(root, ".mex"))).toEqual(beforeDoctor);
+      expect(log.mock.calls.flat().join("\n")).toContain("stale; 1 source change");
+      expect(warning).not.toHaveBeenCalled();
+
+      const beforeDashboard = filesystemSnapshot(join(root, ".mex"));
+      const dashboard = await loadDashboard(config);
+      expect(dashboard.report.graphStatus.status).toBe("stale");
+      expect(dashboard.report.graphStatus.changes.total).toBe(1);
+      expect(filesystemSnapshot(join(root, ".mex"))).toEqual(beforeDashboard);
+      expect(warning).not.toHaveBeenCalled();
+    } finally {
+      process.exitCode = previousExitCode;
+    }
   });
 });

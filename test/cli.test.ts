@@ -217,7 +217,7 @@ describe("built CLI main-module guard", () => {
 
   beforeAll(() => {
     execSync("npm run build", { cwd: repoRoot, stdio: "pipe" });
-  });
+  }, 30_000);
 
   it("parses argv when invoked through a symlinked bin (npm/npx layout)", () => {
     const binDir = mkdtempSync(join(tmpdir(), "mex-bin-"));
@@ -271,7 +271,7 @@ describe("built CLI main-module guard", () => {
     } finally {
       rmSync(fixture, { recursive: true, force: true });
     }
-  });
+  }, 10_000);
 });
 
 describe("mex --version", () => {

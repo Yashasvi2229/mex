@@ -130,7 +130,7 @@ program
   .action(async (opts) => {
     try {
       const config = loadConfig();
-      const { runDriftCheck } = await import("./drift/index.js");
+      const { runDriftCheckWithGraphStatus } = await import("./drift/index.js");
       const { DEFAULT_STALENESS_THRESHOLDS } = await import("./drift/checkers/staleness.js");
 
       const stalenessThresholds = {
@@ -140,7 +140,7 @@ program
         errorCommits: opts.staleErrorCommits ?? config.stalenessThresholds?.errorCommits ?? DEFAULT_STALENESS_THRESHOLDS.errorCommits,
       };
 
-      const report = await runDriftCheck(
+      const report = await runDriftCheckWithGraphStatus(
         { ...config, stalenessThresholds },
         { verbose: opts.verbose },
       );

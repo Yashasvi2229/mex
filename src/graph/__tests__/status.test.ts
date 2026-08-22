@@ -1,0 +1,1202 @@
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, relative } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { graphRemediationCommand } from "../../reporter.js";
+import { openSqlite } from "../db/sqlite.js";
+import { BANDS } from "../config.js";
+import { createGraphEngine } from "../engine-impl.js";
+import { FingerprintStore } from "../fingerprint-store.js";
+import type { Fingerprint } from "../reconcile.js";
+import {
+  GRAPH_SNAPSHOT_METADATA_KEY,
+  parseGraphSnapshot,
+  serializeGraphSnapshot,
+  type GraphSnapshot,
+} from "../snapshot.js";
+import { inspectGraphSidecars, inspectGraphStatus } from "../status.js";
+
+const NOW = new Date("2026-08-22T12:00:00.000Z");
+const roots: string[] = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+function temporaryRoot(prefix = "mex-graph-status-"): string {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  roots.push(root);
+  return root;
+}
+
+function source(root: string, path: string, content: string): void {
+  const absolutePath = join(root, path);
+  mkdirSync(dirname(absolutePath), { recursive: true });
+  writeFileSync(absolutePath, content);
+}
+
+async function build(root: string): Promise<string> {
+  const engine = createGraphEngine({ rootDir: root });
+  try {
+    await engine.build();
+  } finally {
+    engine.close();
+  }
+  return join(root, ".mex", "graph.db");
+}
+
+async function inspect(root: string, maxChangedPaths?: number) {
+  return inspectGraphStatus({ projectRoot: root, now: NOW, maxChangedPaths });
+}
+
+function updateSnapshot(dbPath: string, update: (snapshot: GraphSnapshot) => GraphSnapshot): void {
+  const db = openSqlite(dbPath);
+  try {
+    const row = db.prepare(
+      "SELECT value FROM project_metadata WHERE key = ?",
+    ).get(GRAPH_SNAPSHOT_METADATA_KEY) as { value: string };
+    const snapshot = parseGraphSnapshot(row.value);
+    if (!snapshot) throw new Error("test fixture has no valid graph snapshot");
+    db.prepare(
+      "UPDATE project_metadata SET value = ?, updated_at = ? WHERE key = ?",
+    ).run(serializeGraphSnapshot(update(snapshot)), NOW.getTime(), GRAPH_SNAPSHOT_METADATA_KEY);
+  } finally {
+    db.close();
+  }
+}
+
+function readSnapshot(dbPath: string): GraphSnapshot {
+  const db = openSqlite(dbPath, { readOnly: true, immutable: true });
+  try {
+    const row = db.prepare(
+      "SELECT value FROM project_metadata WHERE key = ?",
+    ).get(GRAPH_SNAPSHOT_METADATA_KEY) as { value: string };
+    const snapshot = parseGraphSnapshot(row.value);
+    if (!snapshot) throw new Error("test fixture has no valid graph snapshot");
+    return snapshot;
+  } finally {
+    db.close();
+  }
+}
+
+function executableRemediations(status: Awaited<ReturnType<typeof inspectGraphStatus>>): string[] {
+  return status.diagnostics.flatMap((diagnostic) =>
+    (diagnostic.remediation ?? []).flatMap((action) => action.command ? [action.command] : []));
+}
+
+function treeState(root: string): Array<Record<string, string | number>> {
+  const entries: Array<Record<string, string | number>> = [];
+  const visit = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+      const absolute = join(directory, entry.name);
+      const path = relative(root, absolute).replaceAll("\\", "/");
+      const stats = statSync(absolute);
+      entries.push({
+        path,
+        kind: entry.isDirectory() ? "directory" : "file",
+        size: stats.size,
+        mtimeMs: stats.mtimeMs,
+        ...(entry.isFile()
+          ? { sha256: createHash("sha256").update(readFileSync(absolute)).digest("hex") }
+          : {}),
+      });
+      if (entry.isDirectory()) visit(absolute);
+    }
+  };
+  visit(root);
+  return entries;
+}
+
+function git(root: string, ...args: string[]): string {
+  return execFileSync("git", args, {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+  }).trim();
+}
+
+describe("inspectGraphStatus", () => {
+  it("reports a missing graph without creating .mex or changing the filesystem", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export const service = true;\n");
+    const before = treeState(root);
+
+    const status = await inspect(root);
+
+    expect(status).toMatchObject({
+      status: "missing",
+      observedAt: NOW.toISOString(),
+      currentRepo: { branch: null, head: null, dirty: false, observedAt: NOW.toISOString() },
+      schemaVersion: null,
+      changes: { total: 1, added: ["src/service.ts"], modified: [], deleted: [] },
+    });
+    expect(treeState(root)).toEqual(before);
+  });
+
+  it("suppresses executable graph remediation when Git provenance is unavailable", async () => {
+    const root = temporaryRoot("mex-graph-git-unavailable-");
+    source(root, "src/service.ts", "export const service = true;\n");
+    await build(root);
+    source(root, "src/service.ts", "export const service = false;\n");
+    const unavailablePath = join(root, "no-executables");
+    mkdirSync(unavailablePath);
+    const previousPath = process.env.PATH;
+    process.env.PATH = unavailablePath;
+    try {
+      const status = await inspect(root);
+      expect(status.status).toBe("stale");
+      expect(status.diagnostics).toContainEqual(expect.objectContaining({
+        code: "GRAPH_REPO_STATE_UNAVAILABLE",
+      }));
+      expect(status.diagnostics).toContainEqual(expect.objectContaining({
+        code: "GRAPH_SOURCE_CORPUS_MISMATCH",
+      }));
+      expect(executableRemediations(status)).not.toContain("mex graph");
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+    }
+  });
+
+  it("reports a fresh snapshot and leaves the database and sidecar set byte-identical", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export function service(): number { return 1; }\n");
+    const dbPath = await build(root);
+    const before = treeState(root);
+
+    const status = await inspect(root);
+
+    expect(status.status).toBe("fresh");
+    expect(status.schemaVersion).toBe(2);
+    expect(status.parseHealth).toMatchObject({ total: 1, ok: 1, partial: 0, failed: 0 });
+    expect(status.changes).toMatchObject({
+      total: 0,
+      added: [],
+      modified: [],
+      deleted: [],
+      truncated: false,
+      branchChanged: false,
+      manifestChanged: false,
+      configChanged: false,
+      grammarChanged: false,
+    });
+    expect(status.indexedAt).not.toBeNull();
+    expect(statSync(dbPath).isFile()).toBe(true);
+    expect(treeState(root)).toEqual(before);
+  });
+
+  it("uses the engine's UTF-8 decoded-string hash for invalid byte sequences", async () => {
+    const root = temporaryRoot();
+    const path = join(root, "src", "invalid.ts");
+    mkdirSync(dirname(path), { recursive: true });
+    const bytes = Buffer.concat([
+      Buffer.from("export const valid = 1; // invalid byte: ", "utf8"),
+      Buffer.from([0xff]),
+      Buffer.from("\n", "utf8"),
+    ]);
+    writeFileSync(path, bytes);
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath, { readOnly: true, immutable: true });
+    let storedHash: string;
+    try {
+      const row = db.prepare("SELECT content_hash FROM files WHERE path = ?")
+        .get("src/invalid.ts") as { content_hash: string };
+      storedHash = row.content_hash;
+    } finally {
+      db.close();
+    }
+
+    const decodedHash = createHash("sha256").update(readFileSync(path, "utf8")).digest("hex");
+    const byteHash = createHash("sha256").update(bytes).digest("hex");
+    expect(storedHash).toBe(decodedHash);
+    expect(storedHash).not.toBe(byteHash);
+    expect((await inspect(root)).status).toBe("fresh");
+  });
+
+  it("uses exact decoded content hashes for deterministic added, modified, and deleted paths", async () => {
+    const root = temporaryRoot();
+    source(root, "src/b.ts", "export const b = 1;\n");
+    source(root, "src/c.ts", "export const c = 1;\n");
+    await build(root);
+    const prior = statSync(join(root, "src", "b.ts"));
+    writeFileSync(join(root, "src", "b.ts"), "export const b = 2;\n");
+    utimesSync(join(root, "src", "b.ts"), prior.atime, prior.mtime);
+    unlinkSync(join(root, "src", "c.ts"));
+    source(root, "src/a.ts", "export const a = 1;\n");
+
+    const full = await inspect(root);
+    expect(full.status).toBe("stale");
+    expect(full.changes).toMatchObject({
+      total: 3,
+      added: ["src/a.ts"],
+      modified: ["src/b.ts"],
+      deleted: ["src/c.ts"],
+      truncated: false,
+    });
+
+    const bounded = await inspect(root, 2);
+    expect(bounded.changes).toMatchObject({
+      total: 3,
+      added: ["src/a.ts"],
+      modified: ["src/b.ts"],
+      deleted: [],
+      truncated: true,
+    });
+  });
+
+  it("reports parser degradation with bounded failed paths", async () => {
+    const root = temporaryRoot();
+    source(root, "src/a.ts", "export const a = 1;\n");
+    source(root, "src/b.ts", "export const b = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.prepare("UPDATE files SET parse_status = 'failed' WHERE path IN (?, ?)")
+        .run("src/a.ts", "src/b.ts");
+    } finally {
+      db.close();
+    }
+    updateSnapshot(dbPath, (snapshot) => ({
+      ...snapshot,
+      parseHealth: { total: 2, ok: 0, partial: 0, failed: 2 },
+    }));
+
+    const status = await inspect(root, 1);
+    expect(status.status).toBe("degraded");
+    expect(status.parseHealth).toEqual({
+      total: 2,
+      ok: 0,
+      partial: 0,
+      failed: 2,
+      failedPaths: ["src/a.ts"],
+      failedPathsTruncated: true,
+    });
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_PARSE_DEGRADED",
+      message: expect.stringContaining("2 failed"),
+    }));
+  });
+
+  it.each([1, 3])("classifies schema %s as rebuild_required", async (schemaVersion) => {
+    const root = temporaryRoot();
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.exec("DELETE FROM schema_versions");
+      db.prepare("INSERT INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)")
+        .run(schemaVersion, NOW.getTime(), "test schema");
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("rebuild_required");
+    expect(status.schemaVersion).toBe(schemaVersion);
+    const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_REBUILD_REQUIRED");
+    expect(diagnostic).toBeDefined();
+    if (schemaVersion < 2) {
+      expect(diagnostic?.remediation).toEqual([{ label: "Rebuild graph", command: "mex graph" }]);
+    } else {
+      expect(diagnostic?.remediation).toBeUndefined();
+    }
+  });
+
+  it("treats an empty recorded schema version as commandless corruption", async () => {
+    const root = temporaryRoot("mex-graph-invalid-version-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.exec("DELETE FROM schema_versions");
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("corrupt");
+    const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_SCHEMA_INVALID");
+    expect(diagnostic?.message).toContain("invalid version");
+    expect(diagnostic?.remediation).toBeUndefined();
+  });
+
+  it("distinguishes a corrupt database from an active-WAL transient state", async () => {
+    const corruptRoot = temporaryRoot("mex-graph-corrupt-");
+    mkdirSync(join(corruptRoot, ".mex"));
+    writeFileSync(join(corruptRoot, ".mex", "graph.db"), "not sqlite");
+    const corruptBefore = treeState(corruptRoot);
+    const corrupt = await inspect(corruptRoot);
+    expect(corrupt.status).toBe("corrupt");
+    expect(corrupt.changes.total).toBe(0);
+    expect(corrupt.diagnostics).toContainEqual(expect.objectContaining({ code: "GRAPH_INDEX_CORRUPT" }));
+    expect(corrupt.diagnostics.flatMap((entry) => entry.remediation ?? []))
+      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+    expect(treeState(corruptRoot)).toEqual(corruptBefore);
+
+    const transientRoot = temporaryRoot("mex-graph-transient-");
+    source(transientRoot, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(transientRoot);
+    const writer = openSqlite(dbPath);
+    try {
+      writer.exec("PRAGMA wal_autocheckpoint = 0");
+      writer.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = 'manifest_hash'")
+        .run(NOW.getTime());
+      expect(statSync(`${dbPath}-wal`).size).toBeGreaterThan(0);
+      const transient = await inspect(transientRoot);
+      expect(transient.status).toBe("degraded");
+      expect(transient.changes.total).toBe(0);
+      expect(transient.diagnostics).toContainEqual(expect.objectContaining({ code: "GRAPH_INDEX_SIDECAR_ACTIVE" }));
+      expect(transient.diagnostics).not.toContainEqual(expect.objectContaining({ code: "GRAPH_INDEX_CORRUPT" }));
+    } finally {
+      writer.close();
+    }
+  });
+
+  it("reports sidecars deterministically and refuses immutable interpretation while one is active or unavailable", async () => {
+    const root = temporaryRoot("mex-graph-sidecar-probe-");
+    const dbPath = join(root, ".mex", "graph.db");
+    mkdirSync(dirname(dbPath), { recursive: true });
+    writeFileSync(dbPath, "not sqlite");
+    expect(inspectGraphSidecars(dbPath)).toEqual({ state: "clear", paths: [] });
+
+    writeFileSync(`${dbPath}-journal`, "hot rollback journal");
+    expect(inspectGraphSidecars(dbPath)).toEqual({
+      state: "active",
+      paths: ["graph.db-journal"],
+    });
+    const active = await inspect(root);
+    expect(active).toMatchObject({ status: "degraded", schemaVersion: null });
+    expect(active.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_SIDECAR_ACTIVE",
+    }));
+    expect(active.diagnostics).not.toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_CORRUPT",
+    }));
+
+    chmodSync(`${dbPath}-journal`, 0o000);
+    expect(inspectGraphSidecars(dbPath)).toEqual({
+      state: "unavailable",
+      paths: ["graph.db-journal"],
+    });
+    chmodSync(`${dbPath}-journal`, 0o600);
+    unlinkSync(`${dbPath}-journal`);
+    mkdirSync(`${dbPath}-wal`);
+    expect(inspectGraphSidecars(dbPath)).toEqual({
+      state: "unavailable",
+      paths: ["graph.db-wal"],
+    });
+    const unavailable = await inspect(root);
+    expect(unavailable).toMatchObject({ status: "degraded", schemaVersion: null });
+    expect(unavailable.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_SIDECAR_UNAVAILABLE",
+    }));
+  });
+
+  it("detects a live rollback journal before reading the database", async () => {
+    const root = temporaryRoot("mex-graph-hot-journal-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const writer = openSqlite(dbPath);
+    let transactionOpen = false;
+    try {
+      writer.exec("PRAGMA journal_mode = DELETE");
+      writer.exec("BEGIN IMMEDIATE");
+      transactionOpen = true;
+      writer.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = 'manifest_hash'")
+        .run(NOW.getTime());
+      expect(statSync(`${dbPath}-journal`).size).toBeGreaterThan(0);
+
+      const status = await inspect(root);
+      expect(status).toMatchObject({ status: "degraded", schemaVersion: null });
+      expect(status.diagnostics).toContainEqual(expect.objectContaining({
+        code: "GRAPH_INDEX_SIDECAR_ACTIVE",
+      }));
+    } finally {
+      if (transactionOpen) writer.exec("ROLLBACK");
+      writer.close();
+    }
+  });
+
+  it("never emits fresh when the database identity cannot stabilize across bounded retries", async () => {
+    const root = temporaryRoot("mex-graph-status-race-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const attempts: number[] = [];
+
+    const status = await inspectGraphStatus({
+      projectRoot: root,
+      now: NOW,
+      internal: {
+        beforeFreshValidation(attempt) {
+          attempts.push(attempt);
+          const changedAt = new Date(NOW.getTime() + (attempt + 1) * 60_000);
+          utimesSync(dbPath, changedAt, changedAt);
+        },
+      },
+    });
+
+    expect(attempts).toEqual([0, 1]);
+    expect(status.status).toBe("degraded");
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_STATUS_OBSERVATION_RACE",
+      message: expect.stringContaining("graph snapshot"),
+    }));
+  });
+
+  it("does not report durable corruption when the database changes during structural inspection", async () => {
+    const root = temporaryRoot("mex-graph-structural-race-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.exec("DROP TABLE edges");
+    } finally {
+      db.close();
+    }
+    const attempts: number[] = [];
+
+    const status = await inspectGraphStatus({
+      projectRoot: root,
+      now: NOW,
+      internal: {
+        beforeDatabaseResult(kind, attempt) {
+          if (kind !== "corrupt") return;
+          attempts.push(attempt);
+          const changedAt = new Date(NOW.getTime() + (attempt + 1) * 60_000);
+          utimesSync(dbPath, changedAt, changedAt);
+        },
+      },
+    });
+
+    expect(attempts).toEqual([0, 1]);
+    expect(status.status).toBe("degraded");
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_STATUS_OBSERVATION_RACE",
+      message: expect.stringContaining("graph database"),
+    }));
+    expect(status.diagnostics).not.toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_SCHEMA_INVALID",
+    }));
+  });
+
+  it("retries an early structural result when a contained graph symlink is retargeted", async () => {
+    const root = temporaryRoot("mex-graph-db-retarget-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const graphPath = await build(root);
+    const targetA = join(root, ".mex", "graph-a.db");
+    const targetB = join(root, ".mex", "graph-b.db");
+    renameSync(graphPath, targetA);
+    copyFileSync(targetA, targetB);
+    symlinkSync("graph-a.db", graphPath);
+    const corrupt = openSqlite(targetA);
+    try {
+      corrupt.exec("DROP TABLE edges");
+    } finally {
+      corrupt.close();
+    }
+    let retargeted = false;
+
+    const status = await inspectGraphStatus({
+      projectRoot: root,
+      now: NOW,
+      internal: {
+        beforeDatabaseResult(kind, attempt) {
+          if (retargeted || kind !== "corrupt" || attempt !== 0) return;
+          unlinkSync(graphPath);
+          symlinkSync("graph-b.db", graphPath);
+          retargeted = true;
+        },
+      },
+    });
+
+    expect(retargeted).toBe(true);
+    expect(status.status).toBe("fresh");
+    expect(status.diagnostics).not.toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_SCHEMA_INVALID",
+    }));
+  });
+
+  it("never emits fresh when an atomic save replaces a source path after it is read", async () => {
+    const root = temporaryRoot("mex-graph-source-race-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    await build(root);
+    const replacement = join(root, "src", "a.ts.next");
+    writeFileSync(replacement, "export const a = 2;\n");
+    let replaced = false;
+
+    const status = await inspectGraphStatus({
+      projectRoot: root,
+      now: NOW,
+      internal: {
+        afterSourceRead(path, pass) {
+          if (!replaced && pass === "validation" && path === "src/a.ts") {
+            replaced = true;
+            renameSync(replacement, join(root, "src", "a.ts"));
+          }
+        },
+      },
+    });
+
+    expect(replaced).toBe(true);
+    expect(status.status).toBe("stale");
+    expect(status.changes.modified).toEqual(["src/a.ts"]);
+  });
+
+  it("classifies a valid current-schema legacy graph as stale with an adoption command", async () => {
+    const root = temporaryRoot();
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.prepare("DELETE FROM project_metadata WHERE key = ?").run(GRAPH_SNAPSHOT_METADATA_KEY);
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("stale");
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SNAPSHOT_LEGACY",
+      remediation: [{ label: "Republish graph snapshot", command: "mex graph" }],
+    }));
+    expect(status.changes.total).toBe(0);
+  });
+
+  it("treats malformed, digest-inconsistent, or row-inconsistent snapshot metadata as corrupt", async () => {
+    const malformedRoot = temporaryRoot("mex-graph-snapshot-invalid-");
+    source(malformedRoot, "src/a.ts", "export const a = 1;\n");
+    const malformedPath = await build(malformedRoot);
+    const malformedDb = openSqlite(malformedPath);
+    try {
+      malformedDb.prepare("UPDATE project_metadata SET value = ? WHERE key = ?")
+        .run("{", GRAPH_SNAPSHOT_METADATA_KEY);
+    } finally {
+      malformedDb.close();
+    }
+    const malformed = await inspect(malformedRoot);
+    expect(malformed.status).toBe("corrupt");
+    expect(malformed.diagnostics.flatMap((entry) => entry.remediation ?? []))
+      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+
+    const digestRoot = temporaryRoot("mex-graph-snapshot-digest-");
+    source(digestRoot, "src/a.ts", "export const a = 1;\n");
+    const digestPath = await build(digestRoot);
+    updateSnapshot(digestPath, (snapshot) => ({
+      ...snapshot,
+      sourceCorpusDigest: "0".repeat(64),
+    }));
+    const digestMismatch = await inspect(digestRoot);
+    expect(digestMismatch.status).toBe("corrupt");
+    expect(digestMismatch.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SNAPSHOT_CONTENT_MISMATCH",
+    }));
+    expect(digestMismatch.diagnostics.flatMap((entry) => entry.remediation ?? []))
+      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+
+    const inconsistentRoot = temporaryRoot("mex-graph-snapshot-mismatch-");
+    source(inconsistentRoot, "src/a.ts", "export const a = 1;\n");
+    const inconsistentPath = await build(inconsistentRoot);
+    updateSnapshot(inconsistentPath, (snapshot) => ({
+      ...snapshot,
+      sourceCount: 2,
+      parseHealth: { total: 2, ok: 2, partial: 0, failed: 0 },
+    }));
+    const inconsistent = await inspect(inconsistentRoot);
+    expect(inconsistent.status).toBe("corrupt");
+    expect(inconsistent.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SNAPSHOT_CONTENT_MISMATCH",
+    }));
+    expect(inconsistent.diagnostics.flatMap((entry) => entry.remediation ?? []))
+      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+  }, 10_000);
+
+  it("treats missing core tables and duplicate or dangling edges as corrupt", async () => {
+    const missingTableRoot = temporaryRoot("mex-graph-missing-table-");
+    source(missingTableRoot, "src/a.ts", "export const a = 1;\n");
+    const missingTablePath = await build(missingTableRoot);
+    const missingTableDb = openSqlite(missingTablePath);
+    try {
+      missingTableDb.exec("DROP TABLE edges");
+    } finally {
+      missingTableDb.close();
+    }
+    const missingTable = await inspect(missingTableRoot);
+    expect(missingTable.status).toBe("corrupt");
+    expect(missingTable.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_SCHEMA_INVALID",
+      message: expect.stringContaining("edges"),
+    }));
+
+    const invalidEdgesRoot = temporaryRoot("mex-graph-invalid-edges-");
+    source(invalidEdgesRoot, "src/a.ts", "export function a(): number { return 1; }\n");
+    const invalidEdgesPath = await build(invalidEdgesRoot);
+    const invalidEdgesDb = openSqlite(invalidEdgesPath);
+    try {
+      const node = invalidEdgesDb.prepare("SELECT id FROM nodes ORDER BY id LIMIT 1").get() as { id: string };
+      invalidEdgesDb.exec("PRAGMA foreign_keys = OFF");
+      invalidEdgesDb.exec("DROP INDEX idx_edges_semantic_callsite");
+      invalidEdgesDb.exec("CREATE INDEX idx_edges_semantic_callsite ON edges(source, target, kind)");
+      const insertEdge = invalidEdgesDb.prepare(
+        "INSERT INTO edges (source, target, kind, line, col) VALUES (?, ?, ?, ?, ?)",
+      );
+      insertEdge.run(node.id, node.id, "test_duplicate", 1, 1);
+      insertEdge.run(node.id, node.id, "test_duplicate", 1, 1);
+      insertEdge.run("missing-source", node.id, "test_dangling", 2, 1);
+    } finally {
+      invalidEdgesDb.close();
+    }
+    const invalidEdges = await inspect(invalidEdgesRoot);
+    expect(invalidEdges.status).toBe("corrupt");
+    const invariant = invalidEdges.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_INVARIANT_FAILED");
+    expect(invariant?.message).toContain("1 duplicate edge group(s)");
+    expect(invariant?.message).toContain("1 dangling edge(s)");
+  });
+
+  it("requires retrieval triggers and current table columns", async () => {
+    const root = temporaryRoot("mex-graph-schema-structure-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.exec("DROP TRIGGER nodes_ai");
+      db.exec("ALTER TABLE files DROP COLUMN extractor_version");
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("corrupt");
+    const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_SCHEMA_INVALID");
+    expect(diagnostic?.message).toContain("missing trigger nodes_ai");
+    expect(diagnostic?.message).toContain("missing column files.extractor_version");
+  });
+
+  it("requires every FTS shadow table used by retrieval and rebuild", async () => {
+    const root = temporaryRoot("mex-graph-fts-schema-");
+    source(root, "src/a.ts", "export const searchable = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.exec("DROP TABLE nodes_fts_config");
+      db.exec("DROP TABLE source_chunks_fts_config");
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("corrupt");
+    const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_SCHEMA_INVALID");
+    expect(diagnostic?.message).toContain("missing table nodes_fts_config");
+    expect(diagnostic?.message).toContain("missing table source_chunks_fts_config");
+    expect(diagnostic?.remediation).toBeUndefined();
+  });
+
+  it("does not advertise in-place repair for a conflicting versionless schema", async () => {
+    const root = temporaryRoot("mex-graph-versionless-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    mkdirSync(join(root, ".mex"), { recursive: true });
+    const db = openSqlite(join(root, ".mex", "graph.db"));
+    try {
+      db.exec("CREATE TABLE nodes(id TEXT)");
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("corrupt");
+    const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_SCHEMA_INVALID");
+    expect(diagnostic?.message).toContain("incompatible schema objects");
+    expect(diagnostic?.remediation).toBeUndefined();
+  });
+
+  it("detects dangling ownership, alias, reference, import, and LSH records", async () => {
+    const root = temporaryRoot("mex-graph-relational-invariants-");
+    source(root, "src/a.ts", "export function a(): number { return 1; }\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.exec("PRAGMA foreign_keys = OFF");
+      db.exec("DELETE FROM files");
+      db.prepare(
+        "INSERT INTO node_aliases (alias_id, canonical_node_id, match_method, confidence, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).run("old-node", "missing-node", "test", 1, NOW.getTime());
+      db.prepare(
+        `INSERT INTO unresolved_refs (
+          ref_key, from_node_id, reference_name, reference_kind, line, col, file_path,
+          language, status, target_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run("test-ref", "missing-from", "target", "calls", 1, 1, "src/missing.ts", "typescript", "resolved", "missing-target");
+      db.prepare(
+        `INSERT INTO import_bindings (
+          binding_key, file_path, local_name, imported_name, module_specifier, target_id
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run("test-binding", "src/missing.ts", "local", "remote", "./missing", "missing-target");
+      db.prepare("INSERT INTO lsh_buckets (band, band_hash, node_id) VALUES (?, ?, ?)")
+        .run(0, "test-band", "missing-node");
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("corrupt");
+    const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_INVARIANT_FAILED");
+    expect(diagnostic?.message).toContain("node(s) without an owning file");
+    expect(diagnostic?.message).toContain("alias(es) without a canonical node");
+    expect(diagnostic?.message).toContain("unresolved reference(s) without an owning node");
+    expect(diagnostic?.message).toContain("unresolved reference(s) with a dangling target");
+    expect(diagnostic?.message).toContain("import binding(s) without an owning file");
+    expect(diagnostic?.message).toContain("import binding(s) with a dangling target");
+    expect(diagnostic?.message).toContain("LSH bucket(s) without a node");
+    expect(diagnostic?.message).toContain("LSH bucket(s) without a fingerprint");
+  });
+
+  it("rejects malformed reachable fingerprints before the reconciler can decode them", async () => {
+    const root = temporaryRoot("mex-graph-fingerprint-shape-");
+    source(root, "src/a.ts", `
+      export function alpha(value: number): number { return value + 1; }
+      export function beta(value: number): number { return value * 2; }
+      export function gamma(value: number): number { return value - 3; }
+      export function delta(value: number): number { return value / 4; }
+    `);
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      const rows = db.prepare(
+        `SELECT node_id, minhash, neighbors, token_count
+         FROM node_fingerprints ORDER BY node_id LIMIT 4`,
+      ).all() as Array<{
+        node_id: string;
+        minhash: string;
+        neighbors: string;
+        token_count: number;
+      }>;
+      expect(rows).toHaveLength(4);
+      const reachable = rows[0]!;
+      const baseline: Fingerprint = {
+        minhash: JSON.parse(reachable.minhash) as number[],
+        neighbors: JSON.parse(reachable.neighbors) as string[],
+        tokenCount: reachable.token_count,
+      };
+      db.prepare("UPDATE node_fingerprints SET minhash = ? WHERE node_id = ?")
+        .run("{", reachable.node_id);
+      const invalidNumbers = JSON.parse(rows[1]!.minhash) as number[];
+      invalidNumbers[0] = -1;
+      db.prepare("UPDATE node_fingerprints SET minhash = ? WHERE node_id = ?")
+        .run(JSON.stringify(invalidNumbers), rows[1]!.node_id);
+      db.prepare("UPDATE node_fingerprints SET neighbors = ? WHERE node_id = ?")
+        .run("[1]", rows[2]!.node_id);
+      db.prepare("UPDATE node_fingerprints SET token_count = -1 WHERE node_id = ?")
+        .run(rows[3]!.node_id);
+
+      expect(() => new FingerprintStore(db).lookup(baseline)).toThrow();
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("corrupt");
+    const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_INVARIANT_FAILED");
+    expect(diagnostic?.message).toContain("malformed fingerprint row(s)");
+    expect(diagnostic?.remediation).toBeUndefined();
+    expect(status.diagnostics.flatMap((entry) => entry.remediation ?? []))
+      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+  });
+
+  it("requires one correct LSH hash for every configured fingerprint band", async () => {
+    const root = temporaryRoot("mex-graph-fingerprint-bands-");
+    source(root, "src/a.ts", `
+      export function alpha(value: number): number { return value + 1; }
+      export function beta(value: number): number { return value * 2; }
+      export function gamma(value: number): number { return value - 3; }
+      export function delta(value: number): number { return value / 4; }
+    `);
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      const rows = db.prepare(
+        "SELECT node_id FROM node_fingerprints ORDER BY node_id LIMIT 4",
+      ).all() as Array<{ node_id: string }>;
+      expect(rows).toHaveLength(4);
+      const [missing, duplicate, outOfRange, wrongHash] = rows;
+      db.prepare("DELETE FROM lsh_buckets WHERE node_id = ?").run(missing!.node_id);
+      db.prepare(
+        `INSERT INTO lsh_buckets (band, band_hash, node_id)
+         SELECT band, band_hash, node_id FROM lsh_buckets
+         WHERE node_id = ? AND band = 0 LIMIT 1`,
+      ).run(duplicate!.node_id);
+      db.prepare(
+        `UPDATE lsh_buckets SET band = ? WHERE rowid = (
+           SELECT rowid FROM lsh_buckets WHERE node_id = ? AND band = 0 LIMIT 1
+         )`,
+      ).run(BANDS, outOfRange!.node_id);
+      db.prepare("UPDATE lsh_buckets SET band_hash = ? WHERE node_id = ?")
+        .run("0".repeat(64), wrongHash!.node_id);
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("corrupt");
+    const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_INVARIANT_FAILED");
+    expect(diagnostic?.message).toContain("missing fingerprint LSH band(s)");
+    expect(diagnostic?.message).toContain("duplicate fingerprint LSH bucket row(s)");
+    expect(diagnostic?.message).toContain("out-of-range fingerprint LSH bucket row(s)");
+    expect(diagnostic?.message).toContain("fingerprint LSH bucket hash mismatch(es)");
+    expect(diagnostic?.remediation).toBeUndefined();
+    expect(status.diagnostics.flatMap((entry) => entry.remediation ?? []))
+      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+  });
+
+  it("cross-checks node and source-chunk FTS row parity", async () => {
+    const root = temporaryRoot("mex-graph-fts-invariants-");
+    source(root, "src/a.ts", "export function searchable(): number { return 1; }\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.exec("DELETE FROM nodes_fts_docsize");
+      db.exec("DELETE FROM source_chunks_fts_docsize");
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("corrupt");
+    const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_INVARIANT_FAILED");
+    expect(diagnostic?.message).toContain("node(s) missing from full-text search");
+    expect(diagnostic?.message).toContain("source chunk(s) missing from full-text search");
+  });
+
+  it("refuses lexical and symlink database escapes without inspecting the external database", async () => {
+    const root = temporaryRoot("mex-graph-contained-root-");
+    const externalRoot = temporaryRoot("mex-graph-external-db-");
+    source(root, "src/local.ts", "export const local = true;\n");
+    source(externalRoot, "src/external.ts", "export const external = true;\n");
+    const externalDbPath = await build(externalRoot);
+    const externalBefore = treeState(externalRoot);
+
+    const lexical = await inspectGraphStatus({
+      projectRoot: root,
+      dbPath: externalDbPath,
+      now: NOW,
+    });
+    expect(lexical.status).toBe("degraded");
+    expect(lexical.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_PATH_OUTSIDE_PROJECT",
+    }));
+    expect(treeState(externalRoot)).toEqual(externalBefore);
+
+    mkdirSync(join(root, ".mex"), { recursive: true });
+    symlinkSync(externalDbPath, join(root, ".mex", "graph.db"));
+    const symlinked = await inspect(root);
+    expect(symlinked.status).toBe("degraded");
+    expect(symlinked.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_PATH_OUTSIDE_PROJECT",
+    }));
+    expect(treeState(externalRoot)).toEqual(externalBefore);
+  });
+
+  it("refuses to hash a supported source symlink whose target escapes the project", async () => {
+    const root = temporaryRoot("mex-graph-contained-source-");
+    const externalRoot = temporaryRoot("mex-graph-external-source-");
+    source(root, "src/local.ts", "export const local = true;\n");
+    source(root, "src/escape.ts", "export const formerlyLocal = true;\n");
+    source(externalRoot, "secret.ts", "export const secret = true;\n");
+    await build(root);
+    unlinkSync(join(root, "src", "escape.ts"));
+    symlinkSync(join(externalRoot, "secret.ts"), join(root, "src", "escape.ts"));
+
+    const status = await inspect(root);
+    expect(status.status).toBe("stale");
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SOURCE_PATH_OUTSIDE_PROJECT",
+      path: "src/escape.ts",
+    }));
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SOURCE_INSPECTION_INCOMPLETE",
+    }));
+  });
+
+  it("suppresses every graph command when branch and rebuild findings coexist with an unsafe source", async () => {
+    const root = temporaryRoot("mex-graph-unsafe-remediation-");
+    const externalRoot = temporaryRoot("mex-graph-unsafe-remediation-external-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    source(externalRoot, "outside.ts", "export const outside = 1;\n");
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.name", "Status Test");
+    git(root, "config", "user.email", "status@example.invalid");
+    writeFileSync(join(root, ".gitignore"), ".mex/graph.db*\n");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "fixture");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.prepare(
+        `INSERT INTO project_metadata(key, value, updated_at) VALUES(?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      ).run("rebuild_required", "1", NOW.getTime());
+    } finally {
+      db.close();
+    }
+    git(root, "switch", "-qc", "feature/unsafe-input");
+    unlinkSync(join(root, "src", "a.ts"));
+    symlinkSync(join(externalRoot, "outside.ts"), join(root, "src", "a.ts"));
+
+    const status = await inspect(root);
+
+    expect(status.status).toBe("rebuild_required");
+    expect(status.changes.branchChanged).toBe(true);
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_REBUILD_REQUIRED",
+    }));
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_BRANCH_CHANGED",
+    }));
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SOURCE_INSPECTION_INCOMPLETE",
+    }));
+    expect(executableRemediations(status)).toEqual([]);
+    expect(graphRemediationCommand(status)).toBeUndefined();
+  });
+
+  it("tracks exact compiler semantic-input content, disappearance, and negative probes", async () => {
+    const root = temporaryRoot("mex-graph-semantic-inputs-");
+    const basePath = join(root, "config", "base.json");
+    const missingPath = join(root, "config", "optional.json");
+    const base = JSON.stringify({ compilerOptions: { strict: true } });
+    source(root, "src/a.ts", "export const a: number = 1;\n");
+    source(root, "config/base.json", base);
+    writeFileSync(join(root, "tsconfig.json"), JSON.stringify({
+      extends: "./config/base.json",
+      references: [{ path: "./config/optional.json" }],
+      include: ["src/**/*.ts"],
+    }));
+    const dbPath = await build(root);
+    const snapshot = readSnapshot(dbPath);
+
+    expect(snapshot.semanticInputs).toContainEqual({
+      path: "config/base.json",
+      contentHash: createHash("sha256").update(base).digest("hex"),
+    });
+    expect(snapshot.semanticInputs).toContainEqual({
+      path: "config/optional.json",
+      contentHash: null,
+    });
+    expect((await inspect(root)).status).toBe("fresh");
+
+    const changedBase = JSON.stringify({ compilerOptions: { strict: false } });
+    writeFileSync(basePath, changedBase);
+    const changed = await inspect(root);
+    expect(changed.status).toBe("stale");
+    expect(changed.changes).toMatchObject({ total: 0, configChanged: true });
+    expect(changed.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SEMANTIC_INPUT_CHANGED",
+      path: "config/base.json",
+      message: expect.stringContaining("changed"),
+    }));
+    expect(executableRemediations(changed)).toContain("mex graph");
+
+    writeFileSync(basePath, base);
+    expect((await inspect(root)).status).toBe("fresh");
+    unlinkSync(basePath);
+    const disappeared = await inspect(root);
+    expect(disappeared.status).toBe("stale");
+    expect(disappeared.changes).toMatchObject({ total: 0, configChanged: true });
+    expect(disappeared.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SEMANTIC_INPUT_CHANGED",
+      path: "config/base.json",
+      message: expect.stringContaining("disappeared"),
+    }));
+    expect(executableRemediations(disappeared)).toContain("mex graph");
+
+    writeFileSync(basePath, base);
+    source(root, "config/optional.json", JSON.stringify({ compilerOptions: { noEmit: true } }));
+    const appeared = await inspect(root);
+    expect(appeared.status).toBe("stale");
+    expect(appeared.changes).toMatchObject({ total: 0, configChanged: true });
+    expect(appeared.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SEMANTIC_INPUT_CHANGED",
+      path: "config/optional.json",
+      message: expect.stringContaining("appeared"),
+    }));
+    expect(executableRemediations(appeared)).toContain("mex graph");
+    expect(statSync(missingPath).isFile()).toBe(true);
+  });
+
+  it("refuses escaped semantic-input targets without recommending a build that must fail", async () => {
+    const root = temporaryRoot("mex-graph-contained-semantic-");
+    const externalRoot = temporaryRoot("mex-graph-external-semantic-");
+    source(root, "src/a.ts", "export const a: number = 1;\n");
+    source(root, "config/base.json", JSON.stringify({ compilerOptions: { strict: true } }));
+    writeFileSync(join(root, "tsconfig.json"), JSON.stringify({
+      extends: "./config/base.json",
+      include: ["src/**/*.ts"],
+    }));
+    source(externalRoot, "base.json", JSON.stringify({ compilerOptions: { strict: false } }));
+    await build(root);
+    unlinkSync(join(root, "config", "base.json"));
+    symlinkSync(join(externalRoot, "base.json"), join(root, "config", "base.json"));
+
+    const readPaths: string[] = [];
+    const status = await inspectGraphStatus({
+      projectRoot: root,
+      now: NOW,
+      internal: {
+        afterSemanticInputRead(path) {
+          readPaths.push(path);
+        },
+      },
+    });
+
+    expect(status.status).toBe("stale");
+    expect(status.changes).toMatchObject({ total: 0, configChanged: true });
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SEMANTIC_INPUT_PATH_OUTSIDE_PROJECT",
+      path: "config/base.json",
+    }));
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SEMANTIC_INPUT_INSPECTION_INCOMPLETE",
+    }));
+    expect(readPaths).not.toContain("config/base.json");
+    expect(executableRemediations(status)).not.toContain("mex graph");
+  });
+
+  it("does not treat a negative semantic probe below an escaped ancestor as safely absent", async () => {
+    const root = temporaryRoot("mex-graph-negative-probe-escape-");
+    const externalRoot = temporaryRoot("mex-graph-negative-probe-external-");
+    source(root, "src/a.ts", "export const a: number = 1;\n");
+    writeFileSync(join(root, "tsconfig.json"), JSON.stringify({
+      references: [{ path: "./probes/optional.json" }],
+      include: ["src/**/*.ts"],
+    }));
+    const dbPath = await build(root);
+    expect(readSnapshot(dbPath).semanticInputs).toContainEqual({
+      path: "probes/optional.json",
+      contentHash: null,
+    });
+    mkdirSync(join(externalRoot, "probes"), { recursive: true });
+    symlinkSync(join(externalRoot, "probes"), join(root, "probes"));
+
+    const status = await inspect(root);
+
+    expect(status.status).toBe("stale");
+    expect(status.changes).toMatchObject({ total: 0, configChanged: true });
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SEMANTIC_INPUT_PATH_OUTSIDE_PROJECT",
+      path: "probes/optional.json",
+    }));
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SEMANTIC_INPUT_INSPECTION_INCOMPLETE",
+    }));
+    expect(executableRemediations(status)).not.toContain("mex graph");
+  });
+
+  it("never emits fresh when a semantic-input path is atomically replaced after it is read", async () => {
+    const root = temporaryRoot("mex-graph-semantic-race-");
+    const basePath = join(root, "config", "base.json");
+    source(root, "src/a.ts", "export const a: number = 1;\n");
+    source(root, "config/base.json", JSON.stringify({ compilerOptions: { strict: true } }));
+    writeFileSync(join(root, "tsconfig.json"), JSON.stringify({
+      extends: "./config/base.json",
+      include: ["src/**/*.ts"],
+    }));
+    await build(root);
+    const replacement = join(root, "config", "base.json.next");
+    writeFileSync(replacement, JSON.stringify({ compilerOptions: { strict: false } }));
+    let replaced = false;
+
+    const status = await inspectGraphStatus({
+      projectRoot: root,
+      now: NOW,
+      internal: {
+        afterSemanticInputRead(path, pass) {
+          if (!replaced && pass === "validation" && path === "config/base.json") {
+            replaced = true;
+            renameSync(replacement, basePath);
+          }
+        },
+      },
+    });
+
+    expect(replaced).toBe(true);
+    expect(status.status).toBe("stale");
+    expect(status.changes).toMatchObject({ total: 0, configChanged: true });
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_SEMANTIC_INPUT_CHANGED",
+      path: "config/base.json",
+    }));
+  });
+
+  it("reports config/manifest drift without treating non-source HEAD movement as stale", async () => {
+    const root = temporaryRoot();
+    source(root, "src/a.ts", "export const a = 1;\n");
+    writeFileSync(join(root, "package.json"), JSON.stringify({ name: "fixture", type: "module" }));
+    writeFileSync(join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { module: "ESNext" } }));
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.name", "Status Test");
+    git(root, "config", "user.email", "status@example.invalid");
+    writeFileSync(join(root, ".gitignore"), ".mex/graph.db*\n");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "fixture");
+    await build(root);
+
+    git(root, "commit", "--allow-empty", "-qm", "non-source head movement");
+    const headOnly = await inspect(root);
+    expect(headOnly.status).toBe("fresh");
+    expect(headOnly.changes.branchChanged).toBe(false);
+    expect(headOnly.diagnostics).toContainEqual(expect.objectContaining({ code: "GRAPH_INDEX_HEAD_CHANGED" }));
+
+    writeFileSync(join(root, "tsconfig.json"), JSON.stringify({ compilerOptions: { module: "NodeNext" } }));
+    const configChanged = await inspect(root);
+    expect(configChanged.status).toBe("stale");
+    expect(configChanged.changes).toMatchObject({
+      total: 0,
+      configChanged: true,
+      manifestChanged: true,
+      grammarChanged: false,
+    });
+    expect(configChanged.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_BUILD_MANIFEST_CHANGED",
+      remediation: [{ label: "Republish graph with current inputs", command: "mex graph" }],
+    }));
+  });
+
+  it("detects a branch switch even when HEAD and source bytes are unchanged", async () => {
+    const root = temporaryRoot();
+    source(root, "src/a.ts", "export const a = 1;\n");
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "user.name", "Status Test");
+    git(root, "config", "user.email", "status@example.invalid");
+    writeFileSync(join(root, ".gitignore"), ".mex/graph.db*\n");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "fixture");
+    await build(root);
+    git(root, "switch", "-qc", "feature/status");
+
+    const status = await inspect(root);
+    expect(status.currentRepo.branch).toBe("feature/status");
+    expect(status.currentRepo.head).toBe(status.indexedHead);
+    expect(status.status).toBe("stale");
+    expect(status.changes).toMatchObject({ total: 0, branchChanged: true });
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_BRANCH_CHANGED",
+      remediation: [{ label: "Republish graph for this branch", command: "mex graph" }],
+    }));
+  });
+});
