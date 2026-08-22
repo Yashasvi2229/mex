@@ -7,18 +7,53 @@ import {
   statSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
+import type { DatabaseSync as NodeDatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
+import {
+  HUB_JOB_INTERRUPTION_REASONS,
+  HUB_JOB_KINDS,
+  HUB_JOB_PHASES,
+} from "../../hub/jobs/types.js";
+import type {
+  HubJobInterruptionReason,
+  HubJobKind,
+  HubJobListRequest,
+  HubJobPage,
+  HubJobPhase,
+  HubJobProblem,
+  HubJobProgress,
+  HubJobSnapshot,
+} from "../../hub/jobs/types.js";
 import type { ActorRef, Revision } from "../contracts/shared.js";
-import { isRevision, MexPortError } from "../contracts/shared.js";
+import { isRevision, JOB_STATES, MexPortError } from "../contracts/shared.js";
 import type { CatchUpCursor } from "../contracts/workflow.js";
 
-const LOCAL_STATE_SCHEMA_VERSION = 1 as const;
+const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
+  DatabaseSync: typeof import("node:sqlite").DatabaseSync;
+};
+type DatabaseSync = NodeDatabaseSync;
+
+const LOCAL_STATE_SCHEMA_VERSION = 2 as const;
+const LOCAL_STATE_RECORD_REVISION_VERSION = 1 as const;
 const LOCAL_STATE_RELATIVE_PATH = ".mex/local/team.db";
 const MEMBER_ID = /^member_[0-9A-HJKMNP-TV-Z]{26}$/;
+const HUB_JOB_ID = /^job_[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 const GIT_HEAD = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const MAX_JOB_PROBLEM_JSON_BYTES = 4_096;
+const DEFAULT_JOB_PAGE_SIZE = 25;
+const MAX_JOB_PAGE_SIZE = 100;
+const TERMINAL_JOB_RETENTION = 200;
+const HUB_LEASE_TOKEN = /^[a-f0-9]{64}$/;
 
-const SCHEMA_SQL = `
+const HUB_JOB_SELECT_COLUMNS = `
+  id, scaffold_id, kind, generation, phase,
+  progress_completed, progress_total, progress_message, cancel_requested,
+  state, created_at, started_at, finished_at, interrupted_reason,
+  problem_json, summary, revision
+`;
+
+const V1_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS local_state_schema (
     singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
     version INTEGER NOT NULL,
@@ -44,7 +79,59 @@ const SCHEMA_SQL = `
   ) STRICT;
 `;
 
-const EXPECTED_TABLES = {
+const V2_SCHEMA_SQL = `
+  CREATE TABLE hub_runtime_lease (
+    singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
+    pid INTEGER NOT NULL CHECK (pid >= 1),
+    token TEXT NOT NULL CHECK (length(token) = 64),
+    acquired_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE hub_jobs (
+    id TEXT NOT NULL PRIMARY KEY,
+    scaffold_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('graph_refresh', 'graph_rebuild', 'wiki_refresh', 'wiki_rebuild')),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    phase TEXT NOT NULL CHECK (
+      phase IN ('queued', 'running', 'refreshing', 'rebuilding', 'finalizing', 'complete', 'failed', 'interrupted')
+    ),
+    progress_completed INTEGER CHECK (progress_completed IS NULL OR progress_completed >= 0),
+    progress_total INTEGER CHECK (progress_total IS NULL OR progress_total >= 1),
+    progress_message TEXT CHECK (progress_message IS NULL),
+    cancel_requested INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
+    state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'succeeded', 'failed', 'interrupted')),
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    interrupted_reason TEXT CHECK (
+      interrupted_reason IS NULL
+      OR interrupted_reason IN ('user_cancelled', 'process_restart', 'process_shutdown')
+    ),
+    problem_json TEXT CHECK (problem_json IS NULL OR length(CAST(problem_json AS BLOB)) <= ${MAX_JOB_PROBLEM_JSON_BYTES}),
+    summary TEXT CHECK (summary IS NULL),
+    revision TEXT NOT NULL,
+    CHECK (
+      (progress_completed IS NULL AND progress_total IS NULL AND progress_message IS NULL)
+      OR progress_completed IS NOT NULL
+    ),
+    CHECK (progress_total IS NULL OR progress_completed <= progress_total),
+    CHECK (state <> 'running' OR started_at IS NOT NULL),
+    CHECK (state IN ('queued', 'running') OR finished_at IS NOT NULL),
+    CHECK (state <> 'interrupted' OR interrupted_reason IS NOT NULL)
+  ) STRICT;
+
+  CREATE UNIQUE INDEX hub_jobs_one_active_index_job_per_scaffold
+    ON hub_jobs (scaffold_id)
+    WHERE state IN ('queued', 'running');
+
+  CREATE UNIQUE INDEX hub_jobs_generation_per_kind
+    ON hub_jobs (scaffold_id, kind, generation);
+
+  CREATE INDEX hub_jobs_scaffold_created
+    ON hub_jobs (scaffold_id, created_at DESC, id DESC);
+`;
+
+const EXPECTED_V1_TABLES = {
   local_state_schema: [
     { name: "singleton", type: "INTEGER", notNull: 1, primaryKeyPosition: 1 },
     { name: "version", type: "INTEGER", notNull: 1, primaryKeyPosition: 0 },
@@ -67,7 +154,35 @@ const EXPECTED_TABLES = {
   ],
 } as const;
 
-type LocalStateTable = keyof typeof EXPECTED_TABLES;
+const EXPECTED_HUB_JOB_COLUMNS = [
+  { name: "id", type: "TEXT", notNull: 1, primaryKeyPosition: 1 },
+  { name: "scaffold_id", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "kind", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "generation", type: "INTEGER", notNull: 1, primaryKeyPosition: 0 },
+  { name: "phase", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "progress_completed", type: "INTEGER", notNull: 0, primaryKeyPosition: 0 },
+  { name: "progress_total", type: "INTEGER", notNull: 0, primaryKeyPosition: 0 },
+  { name: "progress_message", type: "TEXT", notNull: 0, primaryKeyPosition: 0 },
+  { name: "cancel_requested", type: "INTEGER", notNull: 1, primaryKeyPosition: 0 },
+  { name: "state", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "created_at", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "started_at", type: "TEXT", notNull: 0, primaryKeyPosition: 0 },
+  { name: "finished_at", type: "TEXT", notNull: 0, primaryKeyPosition: 0 },
+  { name: "interrupted_reason", type: "TEXT", notNull: 0, primaryKeyPosition: 0 },
+  { name: "problem_json", type: "TEXT", notNull: 0, primaryKeyPosition: 0 },
+  { name: "summary", type: "TEXT", notNull: 0, primaryKeyPosition: 0 },
+  { name: "revision", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+] as const;
+
+const EXPECTED_HUB_LEASE_COLUMNS = [
+  { name: "singleton", type: "INTEGER", notNull: 1, primaryKeyPosition: 1 },
+  { name: "pid", type: "INTEGER", notNull: 1, primaryKeyPosition: 0 },
+  { name: "token", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "acquired_at", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+] as const;
+
+type V1LocalStateTable = keyof typeof EXPECTED_V1_TABLES;
+type LocalStateTable = V1LocalStateTable | "hub_jobs" | "hub_runtime_lease";
 
 interface DatabaseFileIdentity {
   device: bigint;
@@ -92,6 +207,33 @@ interface CatchUpCursorRow {
   branch: unknown;
   timestamp: unknown;
   revision: unknown;
+}
+
+interface HubJobRow {
+  id: unknown;
+  scaffold_id: unknown;
+  kind: unknown;
+  generation: unknown;
+  phase: unknown;
+  progress_completed: unknown;
+  progress_total: unknown;
+  progress_message: unknown;
+  cancel_requested: unknown;
+  state: unknown;
+  created_at: unknown;
+  started_at: unknown;
+  finished_at: unknown;
+  interrupted_reason: unknown;
+  problem_json: unknown;
+  summary: unknown;
+  revision: unknown;
+}
+
+interface HubLeaseRow {
+  singleton: unknown;
+  pid: unknown;
+  token: unknown;
+  acquired_at: unknown;
 }
 
 export interface ConfiguredMemberSelection {
@@ -128,6 +270,49 @@ export interface TeamLocalStateOptions {
   projectRoot: string;
   scaffoldId: string;
   now?: () => string;
+  processStatus?: (pid: number) => HubLeaseProcessStatus;
+}
+
+export type HubLeaseProcessStatus = "alive" | "dead" | "ambiguous";
+
+export interface HubJobLease {
+  pid: number;
+  token: string;
+  acquiredAt: string;
+}
+
+export interface AcquireHubJobLeaseRequest {
+  pid: number;
+  token: string;
+  acquiredAt: string;
+}
+
+export interface CreateHubJobRecordRequest {
+  leaseToken: string;
+  id: string;
+  kind: HubJobKind;
+  phase: HubJobPhase;
+  createdAt: string;
+}
+
+export interface UpdateHubJobRecordRequest {
+  leaseToken: string;
+  id: string;
+  generation: number;
+  expectedRevision: Revision;
+  phase: HubJobPhase;
+  progress: HubJobProgress | null;
+  cancelRequested: boolean;
+  state: HubJobSnapshot["state"];
+  startedAt?: string;
+  finishedAt?: string;
+  interruptedReason?: HubJobInterruptionReason;
+  problem?: HubJobProblem;
+}
+
+export interface ReconcileHubJobsResult {
+  interrupted: readonly HubJobSnapshot[];
+  pruned: number;
 }
 
 /**
@@ -143,12 +328,14 @@ export class TeamLocalState {
   private readonly projectRoot: string;
   private readonly scaffoldId: string;
   private readonly now: () => string;
+  private readonly processStatus: (pid: number) => HubLeaseProcessStatus;
 
   constructor(options: TeamLocalStateOptions) {
     this.projectRoot = canonicalProjectRoot(options.projectRoot);
     this.scaffoldId = validateScaffoldId(options.scaffoldId);
     this.databasePath = join(this.projectRoot, LOCAL_STATE_RELATIVE_PATH);
     this.now = options.now ?? (() => new Date().toISOString());
+    this.processStatus = options.processStatus ?? probeProcessStatus;
   }
 
   getConfiguredMember(): ConfiguredMemberSelection | null {
@@ -234,6 +421,256 @@ export class TeamLocalState {
   /** Explicitly confirms replacement of a cursor, including across branches. */
   resetCatchUpCursor(request: WriteCatchUpCursorRequest): StoredCatchUpCursor {
     return this.writeCursor(request, true);
+  }
+
+  /** Explicit write-side initialization/migration used by `mex hub` startup. */
+  initializeHubState(): void {
+    this.write(() => undefined);
+  }
+
+  /** Acquire the repository-singleton Hub job lease before reconciliation. */
+  acquireHubJobLease(request: AcquireHubJobLeaseRequest): HubJobLease {
+    const pid = requireSafeInteger(request.pid, "lease pid", 1);
+    const token = validateLeaseToken(request.token);
+    const acquiredAt = validateTimestamp(request.acquiredAt, "lease acquiredAt");
+    return this.write((db) => {
+      const current = readHubJobLease(db);
+      if (current?.pid === pid && current.token === token) return current;
+      if (current) {
+        const status = safeProcessStatus(this.processStatus, current.pid);
+        if (status !== "dead") throw hubLeaseHeldError(current.pid, status);
+        const replaced = db.prepare(`
+          UPDATE hub_runtime_lease
+          SET pid = ?, token = ?, acquired_at = ?
+          WHERE singleton = 1 AND pid = ? AND token = ?
+        `).run(pid, token, acquiredAt, current.pid, current.token);
+        if (Number(replaced.changes) !== 1) {
+          throw revisionConflict("The Hub job lease changed during dead-holder recovery.");
+        }
+      } else {
+        db.prepare(`
+          INSERT INTO hub_runtime_lease (singleton, pid, token, acquired_at)
+          VALUES (1, ?, ?, ?)
+        `).run(pid, token, acquiredAt);
+      }
+      return { pid, token, acquiredAt };
+    });
+  }
+
+  /** Token-checked release. Call only after every executor has settled. */
+  releaseHubJobLease(token: string): void {
+    const leaseToken = validateLeaseToken(token);
+    this.write((db) => {
+      const current = readHubJobLease(db);
+      if (!current || current.token !== leaseToken) {
+        throw revisionConflict("The Hub job lease is absent or belongs to another process.");
+      }
+      const activeCountRow = db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM hub_jobs
+        WHERE state IN ('queued', 'running')
+      `).get() as { count: unknown };
+      const activeCount = sqliteInteger(activeCountRow.count);
+      if (activeCount === null || activeCount < 0) {
+        throw corruptError("The Hub job active-row count is invalid.");
+      }
+      if (activeCount > 0) {
+        throw revisionConflict("The Hub job lease cannot be released while a job is active.");
+      }
+      const deleted = db.prepare(`
+        DELETE FROM hub_runtime_lease
+        WHERE singleton = 1 AND token = ?
+      `).run(leaseToken);
+      if (Number(deleted.changes) !== 1) {
+        throw revisionConflict("The Hub job lease changed before release.");
+      }
+    });
+  }
+
+  listHubJobs(request: HubJobListRequest = {}): HubJobPage {
+    const limit = validateJobPageLimit(request.limit);
+    const cursor = decodeJobCursor(request.cursor);
+    return this.read((db) => {
+      const rows = cursor === null
+        ? db.prepare(`
+            SELECT ${HUB_JOB_SELECT_COLUMNS}
+            FROM hub_jobs
+            WHERE scaffold_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+          `).all(this.scaffoldId, limit + 1) as unknown as HubJobRow[]
+        : db.prepare(`
+            SELECT ${HUB_JOB_SELECT_COLUMNS}
+            FROM hub_jobs
+            WHERE scaffold_id = ?
+              AND (created_at < ? OR (created_at = ? AND id < ?))
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+          `).all(
+            this.scaffoldId,
+            cursor.createdAt,
+            cursor.createdAt,
+            cursor.id,
+            limit + 1,
+          ) as unknown as HubJobRow[];
+      const decoded = rows.map((row) => decodeHubJob(row, this.scaffoldId));
+      const hasMore = decoded.length > limit;
+      const items = hasMore ? decoded.slice(0, limit) : decoded;
+      const last = items.at(-1);
+      return {
+        items,
+        ...(hasMore && last
+          ? { nextCursor: encodeJobCursor(last.createdAt, last.id) }
+          : {}),
+      };
+    }) ?? { items: [] };
+  }
+
+  getHubJob(id: string): HubJobSnapshot | null {
+    const jobId = validateHubJobId(id);
+    return this.read((db) => readHubJob(db, this.scaffoldId, jobId));
+  }
+
+  getActiveHubJob(): HubJobSnapshot | null {
+    return this.read((db) => readActiveHubJob(db, this.scaffoldId));
+  }
+
+  createHubJobRecord(request: CreateHubJobRecordRequest): HubJobSnapshot {
+    const leaseToken = validateLeaseToken(request.leaseToken);
+    const id = validateHubJobId(request.id);
+    const kind = validateHubJobKind(request.kind);
+    const phase = validateJobPhase(request.phase);
+    const createdAt = validateTimestamp(request.createdAt, "createdAt");
+
+    return this.write((db) => {
+      assertHubJobLease(db, leaseToken);
+      const active = readActiveHubJob(db, this.scaffoldId);
+      if (active) throw jobAlreadyRunningError(active.id);
+
+      const generationRow = db.prepare(`
+        SELECT MAX(generation) AS generation
+        FROM hub_jobs
+        WHERE scaffold_id = ? AND kind = ?
+      `).get(this.scaffoldId, kind) as { generation: unknown };
+      const priorGeneration = generationRow.generation === null
+        ? 0
+        : requireSafeInteger(generationRow.generation, "Hub job generation", 1);
+      const generation = priorGeneration + 1;
+      if (!Number.isSafeInteger(generation)) {
+        throw corruptError("Hub job generation is exhausted.");
+      }
+
+      const draft: Omit<HubJobSnapshot, "revision"> = {
+        id,
+        scaffoldId: this.scaffoldId,
+        kind,
+        generation,
+        phase,
+        progress: null,
+        cancelRequested: false,
+        state: "queued",
+        createdAt,
+      };
+      validateJobLifecycle(draft);
+      const job: HubJobSnapshot = {
+        ...draft,
+        revision: hubJobRevision(draft),
+      };
+      insertHubJob(db, job);
+      return job;
+    });
+  }
+
+  updateHubJobRecord(request: UpdateHubJobRecordRequest): HubJobSnapshot {
+    const leaseToken = validateLeaseToken(request.leaseToken);
+    const id = validateHubJobId(request.id);
+    const generation = requireSafeInteger(request.generation, "generation", 1);
+    const expectedRevision = validateExpectedRevision(request.expectedRevision);
+    if (expectedRevision === null) {
+      throw validationError("Updating a Hub job requires its current revision.");
+    }
+    const phase = validateJobPhase(request.phase);
+    const progress = validateJobProgress(request.progress);
+    const cancelRequested = validateBoolean(request.cancelRequested, "cancelRequested");
+    const state = validateJobState(request.state);
+    const startedAt = optionalTimestamp(request.startedAt, "startedAt");
+    const finishedAt = optionalTimestamp(request.finishedAt, "finishedAt");
+    const interruptedReason = validateInterruptionReason(request.interruptedReason);
+    const problem = validateJobProblem(request.problem);
+
+    return this.write((db) => {
+      assertHubJobLease(db, leaseToken);
+      const current = readHubJob(db, this.scaffoldId, id);
+      if (!current) throw jobNotFoundError(id);
+      if (current.generation !== generation) {
+        throw revisionConflict("The Hub job generation changed; discard the stale update.");
+      }
+      assertExpectedRevision(current.revision, expectedRevision, "Hub job");
+      assertJobTransition(current, state, progress, startedAt, cancelRequested);
+
+      const draft: Omit<HubJobSnapshot, "revision"> = {
+        id: current.id,
+        scaffoldId: current.scaffoldId,
+        kind: current.kind,
+        generation: current.generation,
+        phase,
+        progress,
+        cancelRequested,
+        state,
+        createdAt: current.createdAt,
+        ...(startedAt === undefined ? {} : { startedAt }),
+        ...(finishedAt === undefined ? {} : { finishedAt }),
+        ...(interruptedReason === undefined ? {} : { interruptedReason }),
+        ...(problem === undefined ? {} : { problem }),
+      };
+      validateJobLifecycle(draft);
+      const job: HubJobSnapshot = {
+        ...draft,
+        revision: hubJobRevision(draft),
+      };
+      replaceHubJob(db, job, expectedRevision);
+      if (isTerminalJobState(job.state)) pruneTerminalHubJobs(db, this.scaffoldId);
+      return job;
+    });
+  }
+
+  reconcileHubJobs(finishedAt: string, leaseTokenValue: string): ReconcileHubJobsResult {
+    const timestamp = validateTimestamp(finishedAt, "finishedAt");
+    const leaseToken = validateLeaseToken(leaseTokenValue);
+    return this.write((db) => {
+      assertHubJobLease(db, leaseToken);
+      const activeRows = db.prepare(`
+        SELECT ${HUB_JOB_SELECT_COLUMNS}
+        FROM hub_jobs
+        WHERE state IN ('queued', 'running')
+        ORDER BY scaffold_id ASC, created_at ASC, id ASC
+      `).all() as unknown as HubJobRow[];
+      const touchedScaffolds = new Set<string>([this.scaffoldId]);
+      const interrupted = activeRows.map((row) => {
+        const scaffoldId = validateStoredScaffoldId(row.scaffold_id);
+        touchedScaffolds.add(scaffoldId);
+        const current = decodeHubJob(row, scaffoldId);
+        const draft: Omit<HubJobSnapshot, "revision"> = {
+          ...withoutRevision(current),
+          phase: "interrupted",
+          state: "interrupted",
+          finishedAt: timestamp,
+          interruptedReason: "process_restart",
+        };
+        validateJobLifecycle(draft);
+        const job: HubJobSnapshot = {
+          ...draft,
+          revision: hubJobRevision(draft),
+        };
+        replaceHubJob(db, job, current.revision);
+        return job;
+      });
+      let pruned = 0;
+      for (const scaffoldId of touchedScaffolds) {
+        pruned += pruneTerminalHubJobs(db, scaffoldId);
+      }
+      return { interrupted, pruned };
+    });
   }
 
   private writeCursor(
@@ -433,6 +870,18 @@ function validateScaffoldId(value: string): string {
   return value;
 }
 
+function validateStoredScaffoldId(value: unknown): string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 512
+    || /[\0-\x1f\x7f]/.test(value)
+  ) {
+    throw corruptError("A persisted Hub job contains an invalid scaffold identifier.");
+  }
+  return value;
+}
+
 function validateMemberId(value: string): string {
   if (typeof value !== "string" || !MEMBER_ID.test(value)) {
     throw validationError("Member IDs must use the member_<ULID> format.");
@@ -525,7 +974,7 @@ function configuredMemberRevision(
   updatedAt: string,
 ): Revision {
   return sha256(JSON.stringify({
-    schemaVersion: LOCAL_STATE_SCHEMA_VERSION,
+    schemaVersion: LOCAL_STATE_RECORD_REVISION_VERSION,
     scaffoldId,
     memberId,
     updatedAt,
@@ -534,7 +983,7 @@ function configuredMemberRevision(
 
 function cursorRevision(cursor: Omit<StoredCatchUpCursor, "revision">): Revision {
   return sha256(JSON.stringify({
-    schemaVersion: LOCAL_STATE_SCHEMA_VERSION,
+    schemaVersion: LOCAL_STATE_RECORD_REVISION_VERSION,
     scaffoldId: cursor.scaffoldId,
     actor: cursor.actor,
     head: cursor.head,
@@ -653,6 +1102,609 @@ function decodeCatchUpCursor(
     throw corruptError("Catch Up cursor failed its revision check.");
   }
   return cursor;
+}
+
+function readHubJob(
+  db: DatabaseSync,
+  scaffoldId: string,
+  id: string,
+): HubJobSnapshot | null {
+  const row = db.prepare(`
+    SELECT ${HUB_JOB_SELECT_COLUMNS}
+    FROM hub_jobs
+    WHERE scaffold_id = ? AND id = ?
+  `).get(scaffoldId, id) as HubJobRow | undefined;
+  return row ? decodeHubJob(row, scaffoldId) : null;
+}
+
+function readHubJobLease(db: DatabaseSync): HubJobLease | null {
+  const rows = db.prepare(`
+    SELECT singleton, pid, token, acquired_at
+    FROM hub_runtime_lease
+  `).all() as unknown as HubLeaseRow[];
+  if (rows.length === 0) return null;
+  if (rows.length !== 1 || sqliteInteger(rows[0]?.singleton) !== 1) {
+    throw corruptError("The Hub job lease row is invalid.");
+  }
+  const row = rows[0]!;
+  const pid = sqliteInteger(row.pid);
+  if (pid === null || pid < 1) {
+    throw corruptError("The Hub job lease PID is invalid.");
+  }
+  if (typeof row.token !== "string" || !HUB_LEASE_TOKEN.test(row.token)) {
+    throw corruptError("The Hub job lease token is invalid.");
+  }
+  if (typeof row.acquired_at !== "string" || !isCanonicalTimestamp(row.acquired_at)) {
+    throw corruptError("The Hub job lease timestamp is invalid.");
+  }
+  return { pid, token: row.token, acquiredAt: row.acquired_at };
+}
+
+function assertHubJobLease(db: DatabaseSync, token: string): void {
+  const current = readHubJobLease(db);
+  if (!current || current.token !== token) {
+    throw revisionConflict("The repository Hub job lease is absent or no longer owned.");
+  }
+}
+
+function readActiveHubJob(
+  db: DatabaseSync,
+  scaffoldId: string,
+): HubJobSnapshot | null {
+  const rows = db.prepare(`
+    SELECT ${HUB_JOB_SELECT_COLUMNS}
+    FROM hub_jobs
+    WHERE scaffold_id = ? AND state IN ('queued', 'running')
+    ORDER BY created_at ASC, id ASC
+    LIMIT 2
+  `).all(scaffoldId) as unknown as HubJobRow[];
+  if (rows.length > 1) {
+    throw corruptError("More than one active index-mutating Hub job exists for this scaffold.");
+  }
+  return rows[0] ? decodeHubJob(rows[0], scaffoldId) : null;
+}
+
+function decodeHubJob(row: HubJobRow, expectedScaffoldId: string): HubJobSnapshot {
+  if (row.scaffold_id !== expectedScaffoldId) {
+    throw corruptError("Hub job scaffold does not match its storage partition.");
+  }
+  let id: string;
+  let kind: HubJobKind;
+  let generation: number;
+  let phase: HubJobPhase;
+  let progress: HubJobProgress | null;
+  let cancelRequested: boolean;
+  let state: HubJobSnapshot["state"];
+  let createdAt: string;
+  let startedAt: string | undefined;
+  let finishedAt: string | undefined;
+  let interruptedReason: HubJobInterruptionReason | undefined;
+  let problem: HubJobProblem | undefined;
+  let summary: string | undefined;
+  try {
+    id = validateHubJobId(row.id);
+    kind = validateHubJobKind(row.kind);
+    generation = requireSafeInteger(row.generation, "generation", 1);
+    phase = validateJobPhase(row.phase);
+    progress = decodeStoredJobProgress(row);
+    cancelRequested = decodeSqliteBoolean(row.cancel_requested, "cancelRequested");
+    state = validateJobState(row.state);
+    createdAt = validateTimestamp(row.created_at as string, "createdAt");
+    startedAt = optionalStoredTimestamp(row.started_at, "startedAt");
+    finishedAt = optionalStoredTimestamp(row.finished_at, "finishedAt");
+    interruptedReason = validateStoredInterruptionReason(row.interrupted_reason);
+    problem = decodeStoredJobProblem(row.problem_json);
+    if (row.summary !== null) {
+      throw corruptError("Hub jobs must not persist executor-provided summaries.");
+    }
+    summary = undefined;
+  } catch (error) {
+    if (error instanceof MexPortError && error.problem.code === "VALIDATION_FAILED") {
+      throw corruptError(`Hub job ${String(row.id)} contains invalid persisted fields.`);
+    }
+    throw error;
+  }
+  if (typeof row.revision !== "string" || !isRevision(row.revision)) {
+    throw corruptError("Hub job contains an invalid revision.");
+  }
+  const draft: Omit<HubJobSnapshot, "revision"> = {
+    id,
+    scaffoldId: expectedScaffoldId,
+    kind,
+    generation,
+    phase,
+    progress,
+    cancelRequested,
+    state,
+    createdAt,
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(finishedAt === undefined ? {} : { finishedAt }),
+    ...(interruptedReason === undefined ? {} : { interruptedReason }),
+    ...(problem === undefined ? {} : { problem }),
+    ...(summary === undefined ? {} : { summary }),
+  };
+  try {
+    validateJobLifecycle(draft);
+  } catch (error) {
+    if (error instanceof MexPortError) {
+      throw corruptError("Hub job contains an invalid lifecycle projection.");
+    }
+    throw error;
+  }
+  if (hubJobRevision(draft) !== row.revision) {
+    throw corruptError("Hub job failed its optimistic revision check.");
+  }
+  return { ...draft, revision: row.revision };
+}
+
+function decodeStoredJobProgress(row: HubJobRow): HubJobProgress | null {
+  if (
+    row.progress_completed === null
+    && row.progress_total === null
+    && row.progress_message === null
+  ) {
+    return null;
+  }
+  if (row.progress_completed === null) {
+    throw corruptError("Hub job progress is missing its completed count.");
+  }
+  if (row.progress_message !== null) {
+    throw corruptError("Hub jobs must not persist executor-provided progress messages.");
+  }
+  return validateJobProgress({
+    completed: requireSafeInteger(row.progress_completed, "progress.completed", 0),
+    ...(row.progress_total === null
+      ? {}
+      : { total: requireSafeInteger(row.progress_total, "progress.total", 1) }),
+  });
+}
+
+function decodeStoredJobProblem(value: unknown): HubJobProblem | undefined {
+  if (value === null) return undefined;
+  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_JOB_PROBLEM_JSON_BYTES) {
+    throw corruptError("Hub job problem is invalid or oversized.");
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(value);
+  } catch {
+    throw corruptError("Hub job problem is not valid JSON.");
+  }
+  const problem = validateJobProblem(decoded);
+  if (!problem || JSON.stringify(problem) !== value) {
+    throw corruptError("Hub job problem is not canonical JSON.");
+  }
+  return problem;
+}
+
+function insertHubJob(db: DatabaseSync, job: HubJobSnapshot): void {
+  db.prepare(`
+    INSERT INTO hub_jobs (
+      id, scaffold_id, kind, generation, phase,
+      progress_completed, progress_total, progress_message, cancel_requested,
+      state, created_at, started_at, finished_at, interrupted_reason,
+      problem_json, summary, revision
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(...hubJobSqlValues(job));
+}
+
+function replaceHubJob(
+  db: DatabaseSync,
+  job: HubJobSnapshot,
+  expectedRevision: Revision,
+): void {
+  const values = hubJobSqlValues(job);
+  const result = db.prepare(`
+    UPDATE hub_jobs SET
+      scaffold_id = ?, kind = ?, generation = ?, phase = ?,
+      progress_completed = ?, progress_total = ?, progress_message = ?, cancel_requested = ?,
+      state = ?, created_at = ?, started_at = ?, finished_at = ?,
+      interrupted_reason = ?, problem_json = ?, summary = ?, revision = ?
+    WHERE id = ? AND scaffold_id = ? AND revision = ?
+  `).run(
+    ...values.slice(1),
+    job.id,
+    job.scaffoldId,
+    expectedRevision,
+  );
+  if (Number(result.changes) !== 1) {
+    throw revisionConflict("The Hub job revision changed; reload it and retry.");
+  }
+}
+
+function hubJobSqlValues(job: HubJobSnapshot): Array<string | number | null> {
+  return [
+    job.id,
+    job.scaffoldId,
+    job.kind,
+    job.generation,
+    job.phase,
+    job.progress?.completed ?? null,
+    job.progress?.total ?? null,
+    job.progress?.message ?? null,
+    job.cancelRequested ? 1 : 0,
+    job.state,
+    job.createdAt,
+    job.startedAt ?? null,
+    job.finishedAt ?? null,
+    job.interruptedReason ?? null,
+    job.problem ? JSON.stringify(job.problem) : null,
+    job.summary ?? null,
+    job.revision,
+  ];
+}
+
+function pruneTerminalHubJobs(db: DatabaseSync, scaffoldId: string): number {
+  const result = db.prepare(`
+    DELETE FROM hub_jobs
+    WHERE scaffold_id = ?
+      AND state IN ('succeeded', 'failed', 'interrupted')
+      AND id IN (
+        SELECT id
+        FROM hub_jobs
+        WHERE scaffold_id = ?
+          AND state IN ('succeeded', 'failed', 'interrupted')
+        ORDER BY finished_at DESC, id DESC
+        LIMIT -1 OFFSET ${TERMINAL_JOB_RETENTION}
+      )
+  `).run(scaffoldId, scaffoldId);
+  return Number(result.changes);
+}
+
+function hubJobRevision(job: Omit<HubJobSnapshot, "revision">): Revision {
+  return sha256(JSON.stringify({
+    schemaVersion: 2,
+    id: job.id,
+    scaffoldId: job.scaffoldId,
+    kind: job.kind,
+    generation: job.generation,
+    phase: job.phase,
+    progress: job.progress,
+    cancelRequested: job.cancelRequested,
+    state: job.state,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt ?? null,
+    finishedAt: job.finishedAt ?? null,
+    interruptedReason: job.interruptedReason ?? null,
+    problem: job.problem ?? null,
+    summary: job.summary ?? null,
+  }));
+}
+
+function withoutRevision(job: HubJobSnapshot): Omit<HubJobSnapshot, "revision"> {
+  const { revision: _revision, ...draft } = job;
+  return draft;
+}
+
+function validateHubJobId(value: unknown): string {
+  if (typeof value !== "string" || !HUB_JOB_ID.test(value)) {
+    throw validationError("Hub job IDs must use the job_<ULID> format.");
+  }
+  return value;
+}
+
+function validateHubJobKind(value: unknown): HubJobKind {
+  if (typeof value !== "string" || !HUB_JOB_KINDS.includes(value as HubJobKind)) {
+    throw validationError("Hub job kind is not registered.");
+  }
+  return value as HubJobKind;
+}
+
+function validateJobState(value: unknown): HubJobSnapshot["state"] {
+  if (typeof value !== "string" || !JOB_STATES.includes(value as HubJobSnapshot["state"])) {
+    throw validationError("Hub job state is invalid.");
+  }
+  return value as HubJobSnapshot["state"];
+}
+
+function validateJobPhase(value: unknown): HubJobPhase {
+  if (
+    typeof value !== "string"
+    || !HUB_JOB_PHASES.includes(value as HubJobPhase)
+  ) {
+    throw validationError("Hub job phase is not in the fixed internal allowlist.");
+  }
+  return value as HubJobPhase;
+}
+
+function validateJobProgress(value: HubJobProgress | null): HubJobProgress | null {
+  if (value === null) return null;
+  if (!isPlainObject(value)) throw validationError("Hub job progress has an invalid shape.");
+  assertOnlyKeys(value, ["completed", "total", "message"], "Hub job progress");
+  if (value.message !== undefined) {
+    throw validationError("Hub jobs persist numeric progress only.");
+  }
+  const completed = requireSafeInteger(value.completed, "progress.completed", 0);
+  const total = value.total === undefined
+    ? undefined
+    : requireSafeInteger(value.total, "progress.total", 1);
+  if (total !== undefined && completed > total) {
+    throw validationError("Hub job completed progress cannot exceed its total.");
+  }
+  return {
+    completed,
+    ...(total === undefined ? {} : { total }),
+  };
+}
+
+function validateJobProblem(value: unknown): HubJobProblem | undefined {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) throw validationError("Hub job problem has an invalid shape.");
+  assertOnlyKeys(value, ["type", "status", "code", "title", "detail"], "Hub job problem");
+  if (value.type !== "about:blank" || value.status !== 500 || value.code !== "JOB_FAILED") {
+    throw validationError("Hub job problem must use the bounded JOB_FAILED projection.");
+  }
+  if (
+    value.title !== "Hub job failed"
+    || value.detail !== "The job did not complete. Retry it or inspect repository health."
+  ) {
+    throw validationError("Hub job failures must use the generic non-sensitive projection.");
+  }
+  const problem: HubJobProblem = {
+    type: "about:blank",
+    status: 500,
+    code: "JOB_FAILED",
+    title: value.title,
+    detail: value.detail,
+  };
+  if (Buffer.byteLength(JSON.stringify(problem), "utf8") > MAX_JOB_PROBLEM_JSON_BYTES) {
+    throw validationError("Hub job problem is oversized.");
+  }
+  return problem;
+}
+
+function validateInterruptionReason(
+  value: unknown,
+): HubJobInterruptionReason | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string"
+    || !HUB_JOB_INTERRUPTION_REASONS.includes(value as HubJobInterruptionReason)
+  ) {
+    throw validationError("Hub job interruption reason is invalid.");
+  }
+  return value as HubJobInterruptionReason;
+}
+
+function validateStoredInterruptionReason(
+  value: unknown,
+): HubJobInterruptionReason | undefined {
+  if (value === null) return undefined;
+  return validateInterruptionReason(value);
+}
+
+function optionalTimestamp(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  return validateTimestamp(value as string, label);
+}
+
+function optionalStoredTimestamp(value: unknown, label: string): string | undefined {
+  if (value === null) return undefined;
+  return validateTimestamp(value as string, label);
+}
+
+function requireSafeInteger(value: unknown, label: string, minimum: number): number {
+  const numeric = sqliteInteger(value);
+  if (numeric === null || numeric < minimum) {
+    throw validationError(`${label} must be a safe integer greater than or equal to ${minimum}.`);
+  }
+  return numeric;
+}
+
+function validateBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== "boolean") {
+    throw validationError(`${label} must be a boolean.`);
+  }
+  return value;
+}
+
+function validateLeaseToken(value: unknown): string {
+  if (typeof value !== "string" || !HUB_LEASE_TOKEN.test(value)) {
+    throw validationError("Hub job lease tokens must be lower-case 256-bit hex values.");
+  }
+  return value;
+}
+
+function safeProcessStatus(
+  probe: (pid: number) => HubLeaseProcessStatus,
+  pid: number,
+): HubLeaseProcessStatus {
+  try {
+    const status = probe(pid);
+    return status === "alive" || status === "dead" || status === "ambiguous"
+      ? status
+      : "ambiguous";
+  } catch {
+    return "ambiguous";
+  }
+}
+
+function probeProcessStatus(pid: number): HubLeaseProcessStatus {
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (error) {
+    return isFilesystemError(error, "ESRCH") ? "dead" : "ambiguous";
+  }
+}
+
+function decodeSqliteBoolean(value: unknown, label: string): boolean {
+  const numeric = sqliteInteger(value);
+  if (numeric !== 0 && numeric !== 1) {
+    throw corruptError(`Hub job ${label} is not a SQLite boolean.`);
+  }
+  return numeric === 1;
+}
+
+function assertOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const allowedKeys = new Set(allowed);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
+    throw validationError(`${label} contains unknown fields.`);
+  }
+}
+
+function assertJobTransition(
+  current: HubJobSnapshot,
+  nextState: HubJobSnapshot["state"],
+  nextProgress: HubJobProgress | null,
+  nextStartedAt: string | undefined,
+  nextCancelRequested: boolean,
+): void {
+  const allowed = current.state === "queued"
+    ? new Set<HubJobSnapshot["state"]>(["running", "failed", "interrupted"])
+    : current.state === "running"
+      ? new Set<HubJobSnapshot["state"]>(["running", "succeeded", "failed", "interrupted"])
+      : new Set<HubJobSnapshot["state"]>();
+  if (!allowed.has(nextState)) {
+    throw revisionConflict(`Hub job cannot transition from ${current.state} to ${nextState}.`);
+  }
+  if (current.startedAt !== undefined && nextStartedAt !== current.startedAt) {
+    throw validationError("Hub job start time is immutable once observed.");
+  }
+  if (current.cancelRequested && !nextCancelRequested) {
+    throw validationError("A Hub job cancellation request cannot be cleared.");
+  }
+  if (current.progress) {
+    if (!nextProgress || nextProgress.completed < current.progress.completed) {
+      throw validationError("Hub job progress must be monotonic.");
+    }
+    if (
+      current.progress.total !== undefined
+      && nextProgress.total !== current.progress.total
+    ) {
+      throw validationError("Hub job progress total cannot change once observed.");
+    }
+  }
+}
+
+function validateJobLifecycle(job: Omit<HubJobSnapshot, "revision">): void {
+  if (job.startedAt !== undefined && job.startedAt < job.createdAt) {
+    throw validationError("Hub job start time cannot precede creation.");
+  }
+  if (
+    job.finishedAt !== undefined
+    && (job.finishedAt < job.createdAt || (job.startedAt !== undefined && job.finishedAt < job.startedAt))
+  ) {
+    throw validationError("Hub job finish time cannot precede creation or start.");
+  }
+  if (job.state === "queued") {
+    if (
+      job.phase !== "queued"
+      || job.progress !== null
+      || job.cancelRequested
+      || job.startedAt !== undefined
+      || job.finishedAt !== undefined
+      || job.interruptedReason !== undefined
+      || job.problem !== undefined
+      || job.summary !== undefined
+    ) {
+      throw validationError("Queued Hub jobs cannot contain terminal or start fields.");
+    }
+    return;
+  }
+  if (job.state === "running") {
+    if (
+      !(["running", "refreshing", "rebuilding", "finalizing"] as const).includes(
+        job.phase as "running" | "refreshing" | "rebuilding" | "finalizing",
+      )
+      || job.startedAt === undefined
+      || job.finishedAt !== undefined
+      || job.interruptedReason !== undefined
+      || job.problem !== undefined
+      || job.summary !== undefined
+    ) {
+      throw validationError("Running Hub jobs require only a start time.");
+    }
+    return;
+  }
+  if (job.finishedAt === undefined) {
+    throw validationError("Terminal Hub jobs require a finish time.");
+  }
+  if (job.state === "interrupted") {
+    if (
+      job.phase !== "interrupted"
+      || job.interruptedReason === undefined
+      || job.problem !== undefined
+      || job.summary !== undefined
+    ) {
+      throw validationError("Interrupted Hub jobs require only an interruption reason.");
+    }
+    if (job.interruptedReason === "user_cancelled" && !job.cancelRequested) {
+      throw validationError("User-cancelled Hub jobs must retain their cancellation request.");
+    }
+    return;
+  }
+  if (job.cancelRequested) {
+    throw validationError("Successful or failed Hub jobs cannot retain a cancellation request.");
+  }
+  if (job.startedAt === undefined || job.interruptedReason !== undefined) {
+    throw validationError("Completed Hub jobs require a start time and no interruption reason.");
+  }
+  if (job.state === "failed" && job.problem === undefined) {
+    throw validationError("Failed Hub jobs require a bounded problem.");
+  }
+  if (job.state === "succeeded" && job.problem !== undefined) {
+    throw validationError("Successful Hub jobs cannot contain a problem.");
+  }
+  if (job.state === "failed" && job.summary !== undefined) {
+    throw validationError("Failed Hub jobs cannot contain a success summary.");
+  }
+  if (
+    (job.state === "failed" && job.phase !== "failed")
+    || (job.state === "succeeded" && job.phase !== "complete")
+  ) {
+    throw validationError("Completed Hub job state and phase do not match.");
+  }
+}
+
+function isTerminalJobState(state: HubJobSnapshot["state"]): boolean {
+  return state === "succeeded" || state === "failed" || state === "interrupted";
+}
+
+interface DecodedJobCursor {
+  createdAt: string;
+  id: string;
+}
+
+function encodeJobCursor(createdAt: string, id: string): string {
+  return Buffer.from(`${createdAt}\n${id}`, "utf8").toString("base64url");
+}
+
+function decodeJobCursor(value: string | undefined): DecodedJobCursor | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || value.length === 0 || value.length > 4_096) {
+    throw validationError("Hub job cursor is invalid or oversized.");
+  }
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(value, "base64url");
+  } catch {
+    throw validationError("Hub job cursor is invalid.");
+  }
+  if (bytes.toString("base64url") !== value) {
+    throw validationError("Hub job cursor is not canonical.");
+  }
+  const decoded = bytes.toString("utf8");
+  const separator = decoded.indexOf("\n");
+  if (separator < 0 || decoded.indexOf("\n", separator + 1) >= 0) {
+    throw validationError("Hub job cursor is invalid.");
+  }
+  return {
+    createdAt: validateTimestamp(decoded.slice(0, separator), "cursor timestamp"),
+    id: validateHubJobId(decoded.slice(separator + 1)),
+  };
+}
+
+function validateJobPageLimit(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_JOB_PAGE_SIZE;
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_JOB_PAGE_SIZE) {
+    throw validationError(`Hub job page limit must be between 1 and ${MAX_JOB_PAGE_SIZE}.`);
+  }
+  return value;
 }
 
 function parseStoredActor(json: string): Exclude<ActorRef, { kind: "unknown" }> {
@@ -830,9 +1882,15 @@ function validateReadableSchema(db: DatabaseSync): void {
   }
   validateSchemaTableColumns(db);
   const version = readSchemaVersion(db);
-  if (version < LOCAL_STATE_SCHEMA_VERSION) {
+  if (version === 0) {
     throw migrationError(
       `Local team schema ${version} requires an explicit write-side migration.`,
+    );
+  }
+  if (version === 1) {
+    validateV1Tables(db);
+    throw migrationError(
+      "Local team schema 1 requires the explicit Hub schema v2 migration.",
     );
   }
   if (version > LOCAL_STATE_SCHEMA_VERSION) {
@@ -840,14 +1898,17 @@ function validateReadableSchema(db: DatabaseSync): void {
       `Local team schema ${version} is newer than supported schema ${LOCAL_STATE_SCHEMA_VERSION}.`,
     );
   }
-  validateV1Tables(db);
+  if (version !== LOCAL_STATE_SCHEMA_VERSION) {
+    throw corruptError("The local team schema version is invalid.");
+  }
+  validateV2Tables(db);
 }
 
 function ensureWritableSchema(db: DatabaseSync, now: () => string): void {
   const tables = listUserTables(db);
   if (tables.length === 0) {
-    createV1Schema(db, now());
-    validateV1Tables(db);
+    createV2Schema(db, now());
+    validateV2Tables(db);
     return;
   }
   if (!tables.includes("local_state_schema")) {
@@ -862,20 +1923,30 @@ function ensureWritableSchema(db: DatabaseSync, now: () => string): void {
   }
   if (version < 0) throw corruptError("The local team schema version is invalid.");
   if (version === 0) {
-    db.exec(SCHEMA_SQL);
+    validateV0Tables(db);
+    db.exec("DROP TABLE local_state_schema");
+    db.exec(V1_SCHEMA_SQL);
     validateV1Tables(db);
+    db.prepare(`
+      INSERT INTO local_state_schema (singleton, version, applied_at)
+      VALUES (1, ?, ?)
+    `).run(1, validateTimestamp(now(), "migration timestamp"));
+  }
+  if (version <= 1) {
+    validateV1Tables(db);
+    db.exec(V2_SCHEMA_SQL);
     db.prepare(`
       UPDATE local_state_schema
       SET version = ?, applied_at = ?
       WHERE singleton = 1
     `).run(LOCAL_STATE_SCHEMA_VERSION, validateTimestamp(now(), "migration timestamp"));
-    return;
   }
-  validateV1Tables(db);
+  validateV2Tables(db);
 }
 
-function createV1Schema(db: DatabaseSync, timestamp: string): void {
-  db.exec(SCHEMA_SQL);
+function createV2Schema(db: DatabaseSync, timestamp: string): void {
+  db.exec(V1_SCHEMA_SQL);
+  db.exec(V2_SCHEMA_SQL);
   db.prepare(`
     INSERT INTO local_state_schema (singleton, version, applied_at)
     VALUES (1, ?, ?)
@@ -901,9 +1972,17 @@ function validateSchemaTableColumns(db: DatabaseSync): void {
   validateTableSemantics(db, "local_state_schema");
 }
 
+function validateV0Tables(db: DatabaseSync): void {
+  const actualTables = listUserTables(db);
+  if (actualTables.length !== 1 || actualTables[0] !== "local_state_schema") {
+    throw corruptError("The local team database contains an invalid v0 table set.");
+  }
+  validateTableSemantics(db, "local_state_schema");
+}
+
 function validateV1Tables(db: DatabaseSync): void {
   const actualTables = listUserTables(db);
-  const expectedTables = (Object.keys(EXPECTED_TABLES) as LocalStateTable[]).sort();
+  const expectedTables = (Object.keys(EXPECTED_V1_TABLES) as V1LocalStateTable[]).sort();
   if (
     actualTables.length !== expectedTables.length
     || actualTables.some((table, index) => table !== expectedTables[index])
@@ -913,13 +1992,43 @@ function validateV1Tables(db: DatabaseSync): void {
   for (const table of expectedTables) {
     validateTableSemantics(db, table);
   }
+  validateV1TableSql(db);
+  validateNamedSchemaObjects(db, []);
+}
+
+function validateV2Tables(db: DatabaseSync): void {
+  const actualTables = listUserTables(db);
+  const expectedTables = [
+    ...(Object.keys(EXPECTED_V1_TABLES) as V1LocalStateTable[]),
+    "hub_jobs" as const,
+    "hub_runtime_lease" as const,
+  ].sort();
+  if (
+    actualTables.length !== expectedTables.length
+    || actualTables.some((table, index) => table !== expectedTables[index])
+  ) {
+    throw corruptError("The local team database contains an invalid v2 table set.");
+  }
+  for (const table of expectedTables) validateTableSemantics(db, table);
+  validateV1TableSql(db);
+  validateHubJobIndexes(db);
+  validateHubJobSchemaSql(db);
+  validateNamedSchemaObjects(db, [
+    "hub_jobs_generation_per_kind",
+    "hub_jobs_one_active_index_job_per_scaffold",
+    "hub_jobs_scaffold_created",
+  ]);
 }
 
 function validateTableSemantics(
   db: DatabaseSync,
   table: LocalStateTable,
 ): void {
-  const expectedColumns = EXPECTED_TABLES[table];
+  const expectedColumns = table === "hub_jobs"
+    ? EXPECTED_HUB_JOB_COLUMNS
+    : table === "hub_runtime_lease"
+      ? EXPECTED_HUB_LEASE_COLUMNS
+      : EXPECTED_V1_TABLES[table];
   const tableRows = (db.prepare("PRAGMA table_list").all() as Array<{
     schema: unknown;
     name: unknown;
@@ -970,10 +2079,155 @@ function validateTableSemantics(
       || sqliteInteger(actual.hidden) !== 0
     ) {
       throw corruptError(
-        `Local team table ${table} column ${expected.name} has invalid v1 semantics.`,
+        `Local team table ${table} column ${expected.name} has invalid semantics.`,
       );
     }
   }
+}
+
+function validateHubJobIndexes(db: DatabaseSync): void {
+  const indexes = db.prepare("PRAGMA index_list(hub_jobs)").all() as Array<{
+    name: unknown;
+    unique: unknown;
+    origin: unknown;
+    partial: unknown;
+  }>;
+  const named = indexes
+    .filter((row) => row.origin === "c")
+    .sort((left, right) => compareCodeUnits(String(left.name), String(right.name)));
+  const expected = [
+    {
+      name: "hub_jobs_generation_per_kind",
+      unique: 1,
+      partial: 0,
+      columns: ["scaffold_id", "kind", "generation"],
+    },
+    {
+      name: "hub_jobs_one_active_index_job_per_scaffold",
+      unique: 1,
+      partial: 1,
+      columns: ["scaffold_id"],
+    },
+    {
+      name: "hub_jobs_scaffold_created",
+      unique: 0,
+      partial: 0,
+      columns: ["scaffold_id", "created_at", "id"],
+    },
+  ] as const;
+  if (named.length !== expected.length) {
+    throw corruptError("The local team database contains an invalid v2 Hub job index set.");
+  }
+  for (const [index, wanted] of expected.entries()) {
+    const actual = named[index];
+    if (
+      actual?.name !== wanted.name
+      || sqliteInteger(actual.unique) !== wanted.unique
+      || sqliteInteger(actual.partial) !== wanted.partial
+    ) {
+      throw corruptError(`Hub job index ${wanted.name} has invalid semantics.`);
+    }
+    const columns = db.prepare(`PRAGMA index_info(${wanted.name})`).all() as Array<{
+      seqno: unknown;
+      name: unknown;
+    }>;
+    if (
+      columns.length !== wanted.columns.length
+      || columns.some((column, columnIndex) => (
+        sqliteInteger(column.seqno) !== columnIndex
+        || column.name !== wanted.columns[columnIndex]
+      ))
+    ) {
+      throw corruptError(`Hub job index ${wanted.name} has invalid columns.`);
+    }
+  }
+}
+
+function validateHubJobSchemaSql(db: DatabaseSync): void {
+  const expectedStatements = V2_SCHEMA_SQL
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+  const expectedNames = [
+    "hub_runtime_lease",
+    "hub_jobs",
+    "hub_jobs_one_active_index_job_per_scaffold",
+    "hub_jobs_generation_per_kind",
+    "hub_jobs_scaffold_created",
+  ] as const;
+  for (const name of expectedNames) {
+    const row = db.prepare(`
+      SELECT sql
+      FROM sqlite_master
+      WHERE name = ? AND type IN ('table', 'index')
+    `).get(name) as { sql: unknown } | undefined;
+    const expected = expectedStatements.find((statement) => (
+      statement.startsWith(`CREATE TABLE ${name}`)
+      || statement.includes(`INDEX ${name}\n`)
+    ));
+    if (
+      !row
+      || typeof row.sql !== "string"
+      || expected === undefined
+      || normalizeSchemaSql(row.sql) !== normalizeSchemaSql(expected)
+    ) {
+      throw corruptError(`Hub job schema object ${name} does not match schema v2.`);
+    }
+  }
+}
+
+function validateV1TableSql(db: DatabaseSync): void {
+  const expectedStatements = V1_SCHEMA_SQL
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+  for (const name of Object.keys(EXPECTED_V1_TABLES) as V1LocalStateTable[]) {
+    const row = db.prepare(`
+      SELECT sql
+      FROM sqlite_master
+      WHERE name = ? AND type = 'table'
+    `).get(name) as { sql: unknown } | undefined;
+    const expected = expectedStatements.find((statement) => statement.includes(name));
+    if (
+      !row
+      || typeof row.sql !== "string"
+      || expected === undefined
+      || normalizeSchemaSql(row.sql) !== normalizeSchemaSql(expected)
+    ) {
+      throw corruptError(`Local team table ${name} does not match the exact v1 schema.`);
+    }
+  }
+}
+
+function validateNamedSchemaObjects(db: DatabaseSync, expectedNames: readonly string[]): void {
+  const actualNames = (db.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE name NOT LIKE 'sqlite_%' AND type IN ('index', 'trigger', 'view')
+    ORDER BY name
+  `).all() as Array<{ name: unknown }>).map((row) => {
+    if (typeof row.name !== "string") throw corruptError("Invalid SQLite schema metadata.");
+    return row.name;
+  });
+  const expected = [...expectedNames].sort(compareCodeUnits);
+  if (
+    actualNames.length !== expected.length
+    || actualNames.some((name, index) => name !== expected[index])
+  ) {
+    throw corruptError("The local team database contains unexpected indexes, triggers, or views.");
+  }
+}
+
+function normalizeSchemaSql(value: string): string {
+  return value
+    .replace(/\s+/g, "")
+    .replace(/;+$/g, "")
+    .replace(/ifnotexists/gi, "")
+    .toLowerCase();
+}
+
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function sqliteInteger(value: unknown): number | null {
@@ -1041,6 +2295,36 @@ function revisionConflict(detail: string): MexPortError {
     status: 409,
     code: "REVISION_CONFLICT",
     detail,
+  });
+}
+
+function jobAlreadyRunningError(activeJobId: string): MexPortError {
+  return new MexPortError({
+    title: "Hub index job already running",
+    status: 409,
+    code: "JOB_ALREADY_RUNNING",
+    detail: `Index-mutating Hub job ${activeJobId} is already active for this scaffold.`,
+    activeJobId,
+  } as ConstructorParameters<typeof MexPortError>[0]);
+}
+
+function hubLeaseHeldError(pid: number, status: Exclude<HubLeaseProcessStatus, "dead">): MexPortError {
+  return new MexPortError({
+    title: "Project Hub job lease is already held",
+    status: 409,
+    code: "JOB_ALREADY_RUNNING",
+    detail: status === "alive"
+      ? `Another live Project Hub process (${pid}) owns this repository's job lease.`
+      : `The Project Hub job lease holder (${pid}) could not be verified dead; refusing recovery.`,
+  });
+}
+
+function jobNotFoundError(id: string): MexPortError {
+  return new MexPortError({
+    title: "Hub job not found",
+    status: 404,
+    code: "NOT_FOUND",
+    detail: `Hub job ${id} does not exist in this scaffold.`,
   });
 }
 
