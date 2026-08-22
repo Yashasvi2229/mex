@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-08-22
+last_updated: 2026-08-23
 ---
 
 # Session Bootstrap
@@ -31,11 +31,14 @@ Then read this file fully before doing anything else in this session.
   codes are available under `src/team/contracts` as a provisional boundary.
 - A behavioral WikiPort mock, realistic fixture, reusable conformance suite,
   and graph protocol goldens cover the consumer-side Checkpoint 0 work.
+- Lane C provides internal canonical team-member/activity artifacts, actor
+  resolution, bounded read-only Git access, legacy timeline normalization, and
+  local configured-member/Catch Up cursor state. These remain non-public.
 
 **Not Built:**
 - The real Wiki adapter and type-parity registration against the teammate engine.
-- Project Hub, workflow persistence, graph freshness/recovery, and later delivery
-  checkpoints from the human-team program.
+- Project Hub, Workstream/Inbox/Relay/Playbook persistence, graph
+  freshness/recovery, and later delivery checkpoints from the human-team program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
