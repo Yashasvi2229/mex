@@ -67,6 +67,10 @@ const NORMALIZED_TABLES = [
     name: "project_metadata",
     columns: ["key", "value"],
     order: ["key"],
+    // Successful-index provenance contains observation timestamps and Git
+    // coordinates. It is operational state, not part of the semantic graph
+    // whose clean-build parity this hash protects.
+    where: "key != 'graph_snapshot_v1'",
   },
   {
     name: "node_fingerprints",
@@ -133,7 +137,9 @@ function normalizedRows(db, spec) {
   const columns = spec.columns.filter((column) => available.has(column));
   if (!columns.length) return [];
   const order = spec.order.filter((column) => available.has(column));
-  const sql = `SELECT ${columns.map(identifier).join(", ")} FROM ${identifier(spec.name)}${order.length ? ` ORDER BY ${order.map(identifier).join(", ")}` : ""}`;
+  const sql = `SELECT ${columns.map(identifier).join(", ")} FROM ${identifier(spec.name)}`
+    + `${spec.where ? ` WHERE ${spec.where}` : ""}`
+    + `${order.length ? ` ORDER BY ${order.map(identifier).join(", ")}` : ""}`;
   return rows(db, sql);
 }
 

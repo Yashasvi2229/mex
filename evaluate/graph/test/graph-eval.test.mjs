@@ -141,6 +141,15 @@ test("v2 integrity hashing includes semantic metadata but ignores timestamps", (
   timestamps.close();
   assert.equal(inspectGraphDatabase(path).normalizedGraphSha256, first.normalizedGraphSha256);
 
+  const operational = new DatabaseSync(path);
+  operational.prepare("INSERT INTO project_metadata VALUES (?, ?, ?)").run(
+    "graph_snapshot_v1",
+    JSON.stringify({ version: 1, indexedAt: "2026-08-22T00:00:00.000Z" }),
+    600,
+  );
+  operational.close();
+  assert.equal(inspectGraphDatabase(path).normalizedGraphSha256, first.normalizedGraphSha256);
+
   const semantic = new DatabaseSync(path);
   semantic.exec("UPDATE edges SET confidence = 0.75");
   semantic.close();
