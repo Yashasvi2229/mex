@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: [YYYY-MM-DD]
+last_updated: 2026-08-22
 ---
 
 # Session Bootstrap
@@ -24,21 +24,27 @@ If you haven't already read `AGENTS.md`, read it now — it contains the project
 Then read this file fully before doing anything else in this session.
 
 ## Current Project State
-<!-- What is working. What is not yet built. Known issues.
-     Update this section whenever significant work is completed.
-     This is the primary drift prevention mechanism — it re-grounds the agent every session.
-     Length: 3 sections (Working / Not Built / Known Issues), 3-7 items each.
-     Example:
-     **Working:**
-     - User authentication and session management
-     - Core CRUD operations for all main entities
 
-     **Not yet built:**
-     - Email notification system
-     - Admin dashboard
+**Working:**
+- MEX v0.7.2 graph retrieval and protocol-v3 JSONL behavior.
+- Internal human-team application contracts, ownership rules, and stable error
+  codes are available under `src/team/contracts` as a provisional boundary.
+- A behavioral WikiPort mock, realistic fixture, reusable conformance suite,
+  and graph protocol goldens cover the consumer-side Checkpoint 0 work.
 
-     **Known issues:**
-     - Pagination breaks on filtered queries with more than 1000 results -->
+**Not Built:**
+- The real Wiki adapter and type-parity registration against the teammate engine.
+- Project Hub, workflow persistence, graph freshness/recovery, and later delivery
+  checkpoints from the human-team program.
+- Public package-root exports for the provisional team contracts.
+
+**Known Issues:**
+- The teammate Wiki implementation branch/commit is not yet available, so the
+  consumer contract remains provisional.
+- The current scaffold architecture, conventions, decisions, stack, and setup
+  context files are still largely unpopulated placeholders.
+- Real parser, filesystem, index, migration, and graph-grounding compliance must
+  be verified against the pinned teammate implementation, not inferred from the mock.
 
 ## Routing Table
 
