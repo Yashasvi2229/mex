@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-08-22
+last_updated: 2026-08-23
 ---
 
 # Session Bootstrap
@@ -43,6 +43,12 @@ Then read this file fully before doing anything else in this session.
 **Known Issues:**
 - The teammate Wiki implementation branch/commit is not yet available, so the
   consumer contract remains provisional.
+- Agent-facing `graph query` and `graph get` still use the legacy manifest-only
+  session path; until they adopt the exact freshness handshake, they can serve
+  stale graph facts or pair an old node with newer live source text.
+- Graph evaluator normalization currently excludes the entire
+  `graph_snapshot_v1` row. It should ignore volatile timestamps/Git coordinates
+  while retaining semantic compiler, resolver, config, corpus, and input provenance.
 - The current scaffold architecture, conventions, decisions, stack, and setup
   context files are still largely unpopulated placeholders.
 - Real parser, filesystem, index, migration, and graph-grounding compliance must
