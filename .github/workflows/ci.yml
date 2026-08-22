@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 jobs:
   check:
@@ -25,6 +24,9 @@ jobs:
         if: matrix.node-version == 22
         run: npm run eval:test
       - run: npm run build
+      - name: Smoke test packed Project Hub
+        if: matrix.node-version == 22
+        run: npm run test:hub:package
       - name: Smoke test packed graph CLI
         if: matrix.node-version == 22
         shell: bash
@@ -42,3 +44,16 @@ jobs:
           MEX_TELEMETRY=0 ./node_modules/.bin/mex graph query where-defined greet | grep '"type":"result"'
           MEX_TELEMETRY=0 ./node_modules/.bin/mex graph query where-defined Vehicle | grep '"type":"result"'
           MEX_TELEMETRY=0 ./node_modules/.bin/mex graph query where-defined User | grep '"type":"result"'
+
+  hub-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:hub:web
+      - run: npm run test:hub:e2e
