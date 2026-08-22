@@ -12,7 +12,9 @@ export default defineConfig({
     toHaveScreenshot: { animations: "disabled", caret: "hide" },
   },
   reporter: process.env.CI ? [["line"], ["html", { open: "never" }]] : "line",
-  snapshotPathTemplate: "{testDir}/__screenshots__/{arg}{ext}",
+  // Browser text rasterization is platform-specific even with self-hosted fonts.
+  // Keep exact baselines per OS instead of weakening visual comparisons globally.
+  snapshotPathTemplate: "{testDir}/__screenshots__/{platform}/{arg}{ext}",
   use: {
     ...devices["Desktop Chrome"],
     baseURL: "http://127.0.0.1:4173",

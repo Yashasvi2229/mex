@@ -46,7 +46,8 @@ jobs:
           MEX_TELEMETRY=0 ./node_modules/.bin/mex graph query where-defined User | grep '"type":"result"'
 
   hub-browser:
-    runs-on: ubuntu-latest
+    # Visual baselines are exact for this runner image; do not float with ubuntu-latest.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -57,3 +58,14 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run test:hub:web
       - run: npm run test:hub:e2e
+      - name: Upload browser failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-browser-failure-${{ github.run_attempt }}
+          path: |
+            playwright-report/
+            test-results/
+            test/hub-e2e/__screenshots__/linux/
+          if-no-files-found: ignore
+          retention-days: 7
