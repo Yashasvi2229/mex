@@ -1,0 +1,95 @@
+:root {
+  font-family: "Instrument Sans Variable", "Instrument Sans", sans-serif;
+  color: #202224;
+  background: #f5f4f1;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+
+  /* Semantic tokens are intentionally theme-ready; this release ships light only. */
+  --canvas: #f5f4f1;
+  --canvas-raised: #faf9f7;
+  --surface: #ffffff;
+  --surface-subtle: #f8f7f4;
+  --surface-strong: #eceae5;
+  --text: #202224;
+  --text-secondary: #62666b;
+  --text-tertiary: #666b70;
+  --border: #deddd8;
+  --border-strong: #c9c8c2;
+  --primary: #2456d8;
+  --primary-hover: #1947bd;
+  --primary-soft: #edf2ff;
+  --success: #287a52;
+  --success-soft: #eaf5ef;
+  --warning: #9b6517;
+  --warning-soft: #fff5df;
+  --danger: #b34037;
+  --danger-soft: #fcecea;
+  --info: #3869c9;
+  --info-soft: #edf3ff;
+  --focus: #2456d8;
+  --overlay-shadow: 0 18px 48px rgba(28, 31, 34, 0.14);
+  --radius-card: 12px;
+  --radius-control: 8px;
+  --transition-fast: 140ms ease;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  min-height: 100%;
+  background: var(--canvas);
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+::selection {
+  color: #ffffff;
+  background: var(--primary);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
