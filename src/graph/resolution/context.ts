@@ -75,9 +75,8 @@ export function createStagedResolutionContext(
     getNodesByQualifiedName: (name) => byQualifiedName.get(name) ?? [],
     getNodesByKind: (kind) => byKind.get(kind) ?? [],
     getNodeById: (id) => byId.get(id) ?? null,
-    fileExists: (path) => stagedSources.has(path) || existsSync(resolve(projectRoot, path)),
-    readFile: (path) => stagedSources.get(path)
-      ?? (() => { try { return readFileSync(resolve(projectRoot, path), "utf-8"); } catch { return null; } })(),
+    fileExists: (path) => stagedSources.has(path),
+    readFile: (path) => stagedSources.get(path) ?? null,
     getProjectRoot: () => projectRoot,
     getAllFiles: () => [...new Set([...stagedSources.keys(), ...nodes.map((node) => node.filePath)])].sort(),
   };

@@ -4,7 +4,7 @@
 // meta first, source-bearing Scope by default, summary last, budget truncation,
 // directed flow records, and narrow source-on-demand via `graph get`.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1301,6 +1301,26 @@ describe("runGraphScope", () => {
 });
 
 describe("runGraphGet", () => {
+  it("releases default sessions when contained manifest inspection fails", () => {
+    const external = mkdtempSync(join(tmpdir(), "mex-cli-agent-config-escape-"));
+    const configPath = join(root, "package.json");
+    writeFileSync(join(external, "package.json"), "{\"name\":\"outside\"}\n");
+    symlinkSync(join(external, "package.json"), configPath);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const emitted: string[] = [];
+        runGraphGet([idOf("run")], root, { write: (line) => emitted.push(line) });
+        expect(emitted.map((line) => JSON.parse(line))).toContainEqual(expect.objectContaining({
+          type: "error",
+          code: "GRAPH_SOURCE_STAGING_FAILED",
+        }));
+      }
+    } finally {
+      unlinkSync(configPath);
+      rmSync(external, { recursive: true, force: true });
+    }
+  });
+
   it("returns capped source for a known id and NODE_NOT_FOUND for an unknown one", () => {
     const records = capture(() => runGraphGet([idOf("run"), "function:missing"], root, deps, {}));
     expect(records.some((r) => r.type === "source" && JSON.stringify(r).includes("helper(41)"))).toBe(true);

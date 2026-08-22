@@ -1792,6 +1792,8 @@ function scopeEdgeKey(edge: Pick<GraphEdge, "source" | "target" | "kind" | "line
 }
 
 function openSession(rootDir: string, deps: AgentCommandDeps, write: (line: string) => void): AgentGraphSession | null {
+  let graph: GraphEngine | null = null;
+  let db: SqliteDatabase | null = null;
   try {
     if (deps.open) return deps.open(rootDir);
     const dbPath = resolve(rootDir, ".mex", "graph.db");
@@ -1799,18 +1801,22 @@ function openSession(rootDir: string, deps: AgentCommandDeps, write: (line: stri
       writeJson(write, { type: "error", code: "GRAPH_UNAVAILABLE", message: "Run `mex graph` first." });
       return null;
     }
-    const graph = createGraphEngine({ rootDir, dbPath, readOnly: true });
-    const db = openGraphDatabase(dbPath, { readOnly: true });
+    graph = createGraphEngine({ rootDir, dbPath, readOnly: true });
+    db = openGraphDatabase(dbPath, { readOnly: true });
     const storedManifest = db.prepare(
       "SELECT value FROM project_metadata WHERE key = 'manifest_hash'",
     ).get() as { value: string } | undefined;
     if (storedManifest?.value !== graphManifest(resolve(rootDir)).manifestHash) {
-      graph.close();
-      db.close();
       throw new GraphRebuildRequiredError("The code graph build manifest is stale.");
     }
-    return { graph, db, close: () => { graph.close(); db.close(); } };
+    const sessionGraph = graph;
+    const sessionDb = db;
+    graph = null;
+    db = null;
+    return { graph: sessionGraph, db: sessionDb, close: () => { sessionGraph.close(); sessionDb.close(); } };
   } catch (error) {
+    graph?.close();
+    db?.close();
     unavailable(write, error);
     return null;
   }
