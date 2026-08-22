@@ -31,11 +31,13 @@ Then read this file fully before doing anything else in this session.
   codes are available under `src/team/contracts` as a provisional boundary.
 - A behavioral WikiPort mock, realistic fixture, reusable conformance suite,
   and graph protocol goldens cover the consumer-side Checkpoint 0 work.
+- Versioned graph snapshot provenance and read-only freshness inspection gate
+  grounding in check, doctor, and dashboard flows without implicit graph sync.
 
 **Not Built:**
 - The real Wiki adapter and type-parity registration against the teammate engine.
-- Project Hub, workflow persistence, graph freshness/recovery, and later delivery
-  checkpoints from the human-team program.
+- Project Hub, workflow persistence, explicit graph refresh, isolated candidate
+  rebuild/atomic recovery, and later delivery checkpoints from the human-team program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
