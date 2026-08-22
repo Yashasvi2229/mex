@@ -91,7 +91,7 @@ export const DATA_OWNERSHIP: readonly DataOwnershipRule[] = [
   },
   {
     data: "Team activity",
-    location: ".mex/events/activity/YYYY-MM/<event-id>",
+    location: ".mex/events/activity/YYYY-MM/<event-id>.md",
     ownership: "canonical",
     gitTracked: true,
     owner: "team-workflows",
