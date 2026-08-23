@@ -687,17 +687,11 @@ describe("inspectGraphStatus", () => {
     const dbPath = await build(root);
     const db = openSqlite(dbPath);
     try {
-      // SQLite 3.50+ protects FTS5 shadow tables from direct DROP statements.
-      // Remove only their schema registrations so the reopened status reader
-      // still exercises the missing-shadow-table invariant portably.
-      db.exec("PRAGMA writable_schema = ON");
-      try {
-        db.prepare(
-          "DELETE FROM sqlite_schema WHERE name IN (?, ?)",
-        ).run("nodes_fts_config", "source_chunks_fts_config");
-      } finally {
-        db.exec("PRAGMA writable_schema = OFF");
-      }
+      // SQLite 3.50+ protects FTS5 shadow tables from direct mutation. Dropping
+      // each owning virtual table is the supported, portable way to remove the
+      // complete retrieval structure, including every required shadow table.
+      db.exec("DROP TABLE nodes_fts");
+      db.exec("DROP TABLE source_chunks_fts");
     } finally {
       db.close();
     }

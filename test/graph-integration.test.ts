@@ -556,6 +556,7 @@ describe("code-graph grounding integration", () => {
     expect(inspectGraphSidecars(replacementPath).state).toBe("clear");
 
     let openedReader: ReturnType<typeof openSqlite> | null = null;
+    let descriptorClosed = false;
     let replaced = false;
     const loaded = await loadReadOnlyGroundingRuntime(config, {
       __internal: {
@@ -566,6 +567,9 @@ describe("code-graph grounding integration", () => {
         afterDatabaseOpen(database) {
           openedReader = database;
         },
+        afterDatabaseDescriptorClose() {
+          descriptorClosed = true;
+        },
       },
     } as unknown as Parameters<typeof loadReadOnlyGroundingRuntime>[1]);
 
@@ -575,8 +579,8 @@ describe("code-graph grounding integration", () => {
     expect(loaded.graphStatus.diagnostics).toContainEqual(expect.objectContaining({
       code: "GRAPH_INDEX_READER_DATABASE_CHANGED",
     }));
-    expect(openedReader).not.toBeNull();
-    expect(openedReader!.open).toBe(false);
+    expect(descriptorClosed).toBe(true);
+    if (openedReader) expect(openedReader.open).toBe(false);
   });
 
   it("discards grounding results when the graph changes after the loader returns", async () => {
