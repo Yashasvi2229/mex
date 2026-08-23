@@ -174,10 +174,12 @@ describe("Project Hub HTTP application", () => {
       headers: { host: HOST, cookie },
     });
     expect(duplicate.status).toBe(400);
+    expect((await duplicate.json() as { code: string }).code).toBe("VALIDATION_FAILED");
     const unknown = await app.request(`${ORIGIN}/api/v1/search?q=a&unsafe=x`, {
       headers: { host: HOST, cookie },
     });
     expect(unknown.status).toBe(400);
+    expect((await unknown.json() as { code: string }).code).toBe("VALIDATION_FAILED");
   });
 
   it("authenticates and strictly validates composite Code workspace reads", async () => {
@@ -199,6 +201,12 @@ describe("Project Hub HTTP application", () => {
       symbol: { id: "function:router" },
       traversal: { view: "callers" },
     });
+
+    const invalidId = await app.request(`${ORIGIN}/api/v1/code/symbols/function%20router`, {
+      headers: { host: HOST, cookie },
+    });
+    expect(invalidId.status).toBe(400);
+    expect((await invalidId.json() as { code: string }).code).toBe("VALIDATION_FAILED");
 
     for (const path of [
       "function%2Frouter",

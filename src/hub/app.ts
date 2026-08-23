@@ -43,6 +43,7 @@ import {
   problemResponse,
   resourceResponse,
   unavailable,
+  validationFailed,
 } from "./http/errors.js";
 import { readBoundedJson, readStrictQuery } from "./http/request.js";
 import {
@@ -211,7 +212,7 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
   });
 
   app.get("/api/v1/search", async (context) => {
-    const request = parseInput(
+    const request = graphInput(() => parseInput(
       SearchRequestSchema,
       readStrictQuery(context.req.raw, [
         "q",
@@ -220,7 +221,7 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
         "symbolCursor",
         "sourceCursor",
       ]),
-    );
+    ));
     return resourceResponse(SearchResponseSchema, await options.services.search(request));
   });
 
@@ -228,11 +229,11 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
     if (!options.services.codeSymbol) {
       throw unavailable("Code graph reads are not connected in this build.");
     }
-    const symbolId = parseInput(GraphSymbolIdSchema, context.req.param("id"));
-    const request = parseInput(
+    const symbolId = graphInput(() => parseInput(GraphSymbolIdSchema, context.req.param("id")));
+    const request = graphInput(() => parseInput(
       CodeWorkspaceRequestSchema,
       readStrictQuery(context.req.raw, ["view", "cursor", "limit", "depth", "sourceCursor"]),
-    );
+    ));
     return resourceResponse(
       CodeWorkspaceResponseSchema,
       await options.services.codeSymbol(symbolId, request),
@@ -324,6 +325,17 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
   });
 
   return app;
+}
+
+function graphInput<T>(read: () => T): T {
+  try {
+    return read();
+  } catch (error) {
+    if (error instanceof HubHttpError && error.code === "INVALID_REQUEST") {
+      throw validationFailed(error.message);
+    }
+    throw error;
+  }
 }
 
 function requireJobs(jobs: HubJobService | undefined): HubJobService {

@@ -114,6 +114,10 @@ export function invalidRequest(detail: string): HubHttpError {
   return new HubHttpError(400, "INVALID_REQUEST", "Invalid request", detail);
 }
 
+export function validationFailed(detail: string): HubHttpError {
+  return new HubHttpError(400, "VALIDATION_FAILED", "Validation failed", detail);
+}
+
 export function notFound(detail: string): HubHttpError {
   return new HubHttpError(404, "NOT_FOUND", "Resource not found", detail);
 }
