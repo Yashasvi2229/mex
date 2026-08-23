@@ -3,6 +3,9 @@ import {
   ActivityResponseSchema,
   BootstrapRequestSchema,
   BootstrapResponseSchema,
+  CodeWorkspaceRequestSchema,
+  CodeWorkspaceResponseSchema,
+  GraphSymbolIdSchema,
   HealthResponseSchema,
   HomeResponseSchema,
   HubCapabilitiesSchema,
@@ -16,6 +19,8 @@ import {
   SearchResponseSchema,
   SessionResponseSchema,
   type HealthResponse,
+  type CodeWorkspaceRequest,
+  type CodeWorkspaceResponse,
   type ActivityRequest,
   type ActivityResponse,
   type HomeResponse,
@@ -82,7 +87,12 @@ export interface HubReadServices {
   home(): Promise<HomeResponse> | HomeResponse;
   activity(request: ActivityRequest): Promise<ActivityResponse> | ActivityResponse;
   search(request: SearchRequest): Promise<SearchResponse> | SearchResponse;
+  codeSymbol?(
+    symbolId: string,
+    request: CodeWorkspaceRequest,
+  ): Promise<CodeWorkspaceResponse> | CodeWorkspaceResponse;
   health(): Promise<HealthResponse> | HealthResponse;
+  assertJobStartAllowed?(kind: HubJobKind): Promise<void> | void;
 }
 
 interface HubEnvironment {
@@ -214,6 +224,21 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
     return resourceResponse(SearchResponseSchema, await options.services.search(request));
   });
 
+  app.get("/api/v1/code/symbols/:id", async (context) => {
+    if (!options.services.codeSymbol) {
+      throw unavailable("Code graph reads are not connected in this build.");
+    }
+    const symbolId = parseInput(GraphSymbolIdSchema, context.req.param("id"));
+    const request = parseInput(
+      CodeWorkspaceRequestSchema,
+      readStrictQuery(context.req.raw, ["view", "cursor", "limit", "depth", "sourceCursor"]),
+    );
+    return resourceResponse(
+      CodeWorkspaceResponseSchema,
+      await options.services.codeSymbol(symbolId, request),
+    );
+  });
+
   app.get("/api/v1/health", async () => resourceResponse(
     HealthResponseSchema,
     await options.services.health(),
@@ -238,6 +263,7 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
       JobStartRequestSchema,
       await readBoundedJson(context.req.raw),
     );
+    await options.services.assertJobStartAllowed?.(request.kind);
     return resourceResponse(HubJobSnapshotSchema, await jobs.start(request), 202);
   });
 
