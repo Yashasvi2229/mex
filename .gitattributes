@@ -1,0 +1,5 @@
+# Wiki codec fixtures are byte-exact test data. Several of them exist precisely
+# to test CRLF line endings and a UTF-8 BOM, so Git must not normalize them on
+# checkout or commit — normalization would silently rewrite the thing under test
+# and the CRLF fixture would pass everywhere by becoming an LF fixture.
+test/fixtures/wiki/** -text

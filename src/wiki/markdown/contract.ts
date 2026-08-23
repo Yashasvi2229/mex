@@ -36,6 +36,20 @@ import type { LabeledRange, SourceRange } from "./ranges.js";
  * file-level entity's body would otherwise swallow the block entities inside it
  * and the ranges would overlap. See the mixed-entity fixture.
  *
+ * **Range conventions**, fixed here because the partition property makes them
+ * observable and the fixtures encode them:
+ *
+ * - A comment metadata range covers `<!--` through `-->` and stops there. The
+ *   newline after it, and any blank lines between metadata and heading, are
+ *   gaps. That keeps "only blank lines may intervene" visible as a gap holding
+ *   nothing but whitespace, rather than hidden inside a range.
+ * - A frontmatter metadata range covers the `mex` key and its value only. The
+ *   surrounding delimiters and the other keys are gaps, so a write that touches
+ *   `mex:` provably cannot disturb `name:` or a comment above it.
+ * - A heading range includes its line terminator; a body starts immediately
+ *   after. A setext heading's range covers both its text line and its
+ *   underline.
+ *
  * **Identity.** Renaming a heading does not change an entity's id. Moving
  * metadata together with its heading preserves identity.
  */
