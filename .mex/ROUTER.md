@@ -40,12 +40,20 @@ Then read this file fully before doing anything else in this session.
 - The Project Hub now projects Lane C's immutable canonical activity and legacy
   decision log through a bounded, read-only Activity timeline. Recorded actors
   remain immutable while current alias resolution is shown separately.
+- Versioned graph snapshot provenance and read-only freshness inspection gate
+  grounding in check, doctor, and dashboard flows without implicit graph sync.
+- Explicit graph status, refresh, and isolated rebuild/recovery commands preserve
+  the last trustworthy index behind one cross-process maintenance lease.
+- Targeted graph get/query/impact consumers use one provenance-bound immutable
+  snapshot and discard output if graph or exact source identity changes.
+- Graph evaluator determinism includes semantic snapshot provenance while
+  excluding only operational timestamps and Git coordinates.
 
 **Not Built:**
 - The real Wiki adapter and type-parity registration against the teammate engine.
 - Real Graph/Wiki Hub adapters, Workstream/Inbox/Relay/Playbook persistence,
-  Catch Up actions, activity creation, graph freshness/recovery, and later
-  delivery checkpoints from the human-team program.
+  Catch Up actions, activity creation, and later delivery checkpoints from the
+  human-team program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**

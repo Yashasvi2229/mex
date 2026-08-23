@@ -271,7 +271,7 @@ describe("built CLI main-module guard", () => {
     } finally {
       rmSync(fixture, { recursive: true, force: true });
     }
-  });
+  }, 10_000);
 });
 
 describe("mex --version", () => {

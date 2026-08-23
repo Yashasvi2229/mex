@@ -44,8 +44,10 @@ export type {
   CompilerReference,
   CompilerReferenceKind,
   CompilerResolutionStatus,
+  CompilerSemanticInput,
   CompilerSourceHealth,
   CompilerSourceLanguage,
+  CompilerStagedInput,
   DiscoveredTypeScriptProject,
 } from "./compiler.js";
 

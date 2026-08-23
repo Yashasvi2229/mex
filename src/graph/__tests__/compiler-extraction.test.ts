@@ -316,4 +316,22 @@ describe("TypeScript compiler extraction", () => {
     expect(tokens.get(alpha.id)).not.toContain("alpha");
     expect(tokens.get(alpha.id)).not.toContain("one");
   });
+
+  it("filters source/config-policy misses across more than 1,024 module probes", () => {
+    const imports = Array.from(
+      { length: 1_100 },
+      (_, index) => `import {} from './missing-${index}';`,
+    );
+    const root = project({
+      "src/many-imports.ts": [...imports, "export const complete = true;", ""].join("\n"),
+    });
+    const result = buildTypeScriptExtraction(root, ["src/many-imports.ts"]);
+    const missing = result.semanticInputs.filter((input) => input.contentHash === null);
+
+    // Every unresolved import probes at least one supported source extension.
+    // Those future files are already covered by source-corpus freshness, so
+    // they must not consume the bounded non-corpus semantic provenance budget.
+    expect(missing).toHaveLength(0);
+    expect(result.files).toHaveLength(1);
+  }, 15_000);
 });
