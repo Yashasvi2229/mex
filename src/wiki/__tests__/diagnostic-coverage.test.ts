@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -52,6 +52,8 @@ import { parseWikiMarkdown } from "../markdown/codec.js";
 import type { ParsedEntity } from "../markdown/contract.js";
 import { detectRangeOverlaps } from "../index/write.js";
 import { openWikiIndex } from "../index/open.js";
+import { rebuildWikiIndex } from "../index/rebuild.js";
+import { getEntity } from "../query/get.js";
 import { escapedSymlinkDiagnostic } from "../index/discover.js";
 
 /** Run `body` against a fresh scratch directory, cleaning up afterwards. */
@@ -78,7 +80,6 @@ function inScratch<T>(body: (directory: string) => T): T {
  * parked here after its phase lands, and a newly added code cannot be forgotten.
  */
 const NOT_YET_EMITTED: Record<string, string> = {
-  ENTITY_NOT_FOUND: "P3 — query layer",
   GROUNDING_UNRESOLVED: "P4 — grounding resolution against a live graph",
   GROUNDING_STALE: "P4 — grounding resolution against a live graph",
   GROUNDING_MISSING: "P4 — grounding resolution against a live graph",
@@ -320,6 +321,16 @@ status: promoted
     ];
     return detectRangeOverlaps("a.md", overlapping);
   },
+
+  ENTITY_NOT_FOUND: () =>
+    inScratch((directory) => {
+      const scaffoldRoot = join(directory, "scaffold");
+      mkdirSync(scaffoldRoot, { recursive: true });
+      writeFileSync(join(scaffoldRoot, "notes.md"), "# Prose, and no entity\n", "utf-8");
+      const built = rebuildWikiIndex({ scaffoldRoot, indexPath: join(directory, "wiki.db") });
+      const result = getEntity(built.indexPath, generateEntityId());
+      return result.ok ? [] : [result.diagnostic];
+    }),
 
   // Called directly rather than through a real symlink: Windows refuses those
   // without developer mode, and an emitter that fires only on some machines
