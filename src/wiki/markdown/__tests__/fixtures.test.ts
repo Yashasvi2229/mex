@@ -211,15 +211,9 @@ describe("scaffold fixture", () => {
   });
 });
 
-describe("codec contract", () => {
-  it("is not implemented yet, and says so", () => {
-    expect(() => parseWikiMarkdown({ path: "a.md", text: "" })).toThrow(/not implemented yet \(P2b-codec\)/);
-  });
-});
+// -- The acceptance tests, unskipped in P2b ------------------------------------
 
-// -- The red tests: unskip these in P2b ---------------------------------------
-
-describe.skip("TODO(P2b-codec): parseWikiMarkdown against the corpus", () => {
+describe("parseWikiMarkdown against the corpus", () => {
   for (const expectation of FIXTURE_EXPECTATIONS) {
     describe(expectation.path, () => {
       const text = read(expectation.path);
@@ -299,7 +293,7 @@ describe.skip("TODO(P2b-codec): parseWikiMarkdown against the corpus", () => {
   }
 });
 
-describe.skip("TODO(P2b-codec): parseWikiMarkdown against the realistic scaffold", () => {
+describe("parseWikiMarkdown against the realistic scaffold", () => {
   it("finds every declared entity across the scaffold", () => {
     const found = SCAFFOLD_PATHS.flatMap((path) =>
       parseWikiMarkdown({ path, text: read(path) }).entities.map((entry) => entry.entity.id as string),

@@ -135,23 +135,18 @@ export interface ParseOptions {
   registry?: EntityTypeRegistry;
 }
 
-export class NotImplementedError extends Error {
-  constructor(what: string) {
-    super(`${what} is not implemented yet (P2b-codec).`);
-    this.name = "NotImplementedError";
-  }
-}
-
 /**
  * Parse one Markdown file into entities, gaps, anchors and diagnostics.
  *
  * Never throws on malformed input — a broken file yields diagnostics and
  * whatever could still be read. Throwing would take out a whole
  * `rebuild-index` run for one bad file, and prose must never be lost.
+ *
+ * The implementation lives in `codec.ts`; this re-export keeps the contract and
+ * its entry point in one place for callers. The import is one-way at runtime —
+ * `codec.ts` takes only types from here.
  */
-export function parseWikiMarkdown(_options: ParseOptions): ParsedFile {
-  throw new NotImplementedError("parseWikiMarkdown");
-}
+export { parseWikiMarkdown } from "./codec.js";
 
 /**
  * Assemble every range in a parsed file, in position order, for the partition check.
