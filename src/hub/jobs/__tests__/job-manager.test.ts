@@ -178,6 +178,8 @@ describe("HubJobManager", () => {
 
     await waitForState(manager, queued.id, "running");
     expect(context).toBeDefined();
+    context!.reportProgress({ phase: "discover" });
+    expect(manager.get(queued.id)).toMatchObject({ phase: "discover", progress: null });
     context!.reportProgress({ completed: 1, total: 2, phase: "refreshing" });
     context!.reportProgress({ completed: 2, phase: "finalizing" });
     finish();
@@ -190,6 +192,7 @@ describe("HubJobManager", () => {
     });
     expect(events).toEqual([
       "snapshot:queued:none",
+      "progress:running:none",
       "progress:running:none",
       "progress:running:1",
       "progress:running:2",

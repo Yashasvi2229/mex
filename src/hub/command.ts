@@ -3,9 +3,11 @@ import { createBootstrapToken, HubSessionManager } from "./security/session.js";
 import { createHubApp } from "./app.js";
 import { openHubBrowser } from "./browser.js";
 import { HubJobManager } from "./jobs/index.js";
+import { createGraphJobExecutors } from "./jobs/graph.js";
 import { startHubNodeServer } from "./node-server.js";
 import { createLocalHubReadServices } from "./services.js";
 import { TeamLocalState } from "../team/local-state/index.js";
+import { createRepositoryGraphPort } from "../graph/application-adapter.js";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,7 +27,12 @@ export async function runHubCommand(options: RunHubCommandOptions): Promise<void
     projectRoot: options.projectRoot,
     scaffoldId: options.scaffoldId,
   });
-  const jobs = new HubJobManager({ localState });
+  const graph = createRepositoryGraphPort(options.projectRoot);
+  const jobs = new HubJobManager({
+    localState,
+    executors: createGraphJobExecutors(graph),
+    shutdownTimeoutMs: 60_000,
+  });
   jobs.initialize();
   let server: Awaited<ReturnType<typeof startHubNodeServer>> | undefined;
   try {
@@ -39,6 +46,7 @@ export async function runHubCommand(options: RunHubCommandOptions): Promise<void
       projectRoot: options.projectRoot,
       scaffoldId: options.scaffoldId,
       jobs,
+      graph,
     });
     const assets = new HubAssetManifest(resolveHubAssetRoot());
     const app = createHubApp({ security, services, jobs, assets });
