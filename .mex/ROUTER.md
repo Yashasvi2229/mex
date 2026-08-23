@@ -37,12 +37,15 @@ Then read this file fully before doing anything else in this session.
 - Lane B provides the loopback-only Project Hub, secure browser-session
   bootstrap, bounded `/api/v1` contracts, persistent local job orchestration,
   packaged React shell, and honest Home/Search/Health/Jobs states.
+- The Project Hub now projects Lane C's immutable canonical activity and legacy
+  decision log through a bounded, read-only Activity timeline. Recorded actors
+  remain immutable while current alias resolution is shown separately.
 
 **Not Built:**
 - The real Wiki adapter and type-parity registration against the teammate engine.
 - Real Graph/Wiki Hub adapters, Workstream/Inbox/Relay/Playbook persistence,
-  graph freshness/recovery, and later delivery checkpoints from the human-team
-  program.
+  Catch Up actions, activity creation, graph freshness/recovery, and later
+  delivery checkpoints from the human-team program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**

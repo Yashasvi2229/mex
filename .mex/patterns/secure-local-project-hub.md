@@ -34,16 +34,20 @@ durable, bounded jobs in `.mex/local/team.db`.
 3. Parse requests and responses through the private shared Zod contracts. Bound
    bodies, cursors, result counts, serialized responses, diagnostics, and SSE
    subscribers. Project internal failures to safe Problem Details.
-4. Serve only the built index plus manifest-known hashed assets. Do not join an
+4. Project repository-backed reads through an allowlist rather than serializing
+   storage records directly. Keep pagination state separate from source-scan
+   truncation, and retain immutable recorded identity beside mutable display
+   resolution.
+5. Serve only the built index plus manifest-known hashed assets. Do not join an
    arbitrary URL path to `dist/hub`.
-5. Acquire the repository Hub lease before startup reconciliation. Persist only
+6. Acquire the repository Hub lease before startup reconciliation. Persist only
    allowlisted job phases, numeric progress, terminal summaries, and safe
    problems; never persist prompts, source, diffs, commands, or secrets.
-6. Reject unsupported Graph/Wiki actions as unavailable. Mocks belong only to
+7. Reject unsupported Graph/Wiki actions as unavailable. Mocks belong only to
    development and tests and must be removed by the production build.
-7. Close HTTP intake before job shutdown, keep the durable active slot until an
+8. Close HTTP intake before job shutdown, keep the durable active slot until an
    executor settles, and fail closed when ownership or persistence is uncertain.
-8. Build root code before Vite so the final `dist/hub` survives tsup cleanup,
+9. Build root code before Vite so the final `dist/hub` survives tsup cleanup,
    then verify a clean packed installation can bootstrap and load it.
 
 ## Gotchas
@@ -60,12 +64,20 @@ durable, bounded jobs in `.mex/local/team.db`.
   `createRequire(import.meta.url)` and smoke-test the packed CLI.
 - Terminal SSE events should close the browser connection immediately; do not
   let `EventSource` reconnect to a finished job.
+- A paginated source can hit its corpus safety bound independently of having a
+  next page. Expose these as separate signals; never turn an incomplete scan
+  into an exact total or silently mix revision-bound pages.
+- Canonical team events may contain metadata and legacy rows may contain cwd,
+  trace, or origin fields. Hub read models must omit those fields and bound
+  subject/message previews before response validation.
 
 ## Verify
 
 - [ ] Host, Origin, CSRF, expiry, traversal, body, response, and SSE bounds pass
 - [ ] Hub lease, contention, cancellation, late progress, restart, and retention pass
 - [ ] Page loads and local-state reads are non-mutating
+- [ ] Repository-backed projections omit raw metadata, source, trace, and private paths
+- [ ] Pagination, revision conflicts, and source truncation remain distinguishable
 - [ ] Every route is keyboard reachable and passes automated accessibility checks
 - [ ] 1024 and 1440 desktop layouts work; narrower viewports show the guard
 - [ ] Production bundles contain no fixture data or external network dependency
@@ -74,5 +86,5 @@ durable, bounded jobs in `.mex/local/team.db`.
 
 ## Update Scaffold
 
-- [ ] Update `.mex/ROUTER.md` when real Graph or Wiki Hub capabilities land
+- [ ] Update `.mex/ROUTER.md` when a real Hub capability lands
 - [ ] Record any new security, packaging, or job-lifecycle trap here
