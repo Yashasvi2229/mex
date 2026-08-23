@@ -11,3 +11,4 @@
  */
 
 export * from "./model/index.js";
+export * from "./markdown/index.js";
