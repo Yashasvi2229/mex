@@ -7,10 +7,11 @@ import type { LabeledRange, SourceRange } from "./ranges.js";
 /**
  * The Markdown codec's read-side contract.
  *
- * Types and a throwing stub. The parser itself is the next phase; this file
- * exists so the oracle — the fixture corpus and its hand-derived expectations —
- * can be written against a fixed interface by someone who cannot shape that
- * interface around an implementation.
+ * These types were fixed before the parser existed, so the oracle — the fixture
+ * corpus and its hand-derived expectations — could be written against a stable
+ * interface by a session that could not shape it around an implementation. The
+ * parser landed in P2b and satisfies them; the rules below are what it must go
+ * on satisfying.
  *
  * ## Rules the implementation must satisfy
  *
@@ -49,6 +50,22 @@ import type { LabeledRange, SourceRange } from "./ranges.js";
  * - A heading range includes its line terminator; a body starts immediately
  *   after. A setext heading's range covers both its text line and its
  *   underline.
+ *
+ * **Conflict regions.** A Git conflict marker is not inert prose to CommonMark:
+ * `=======` is a valid setext underline, so
+ *
+ *     <<<<<<< HEAD
+ *     Rotation happens every fifteen minutes.
+ *     =======
+ *
+ * parses as a **depth-1 heading**. Left alone that phantom heading terminates
+ * whatever entity body contains it, and half a section silently disappears from
+ * the index after an ordinary bad merge — found by a user, not by a test. So
+ * heading detection is suppressed between `<<<<<<<` and `>>>>>>>`, and the
+ * marker text is preserved verbatim as content. This is the third rule the
+ * original spec does not state. Diagnosing conflict markers as a validation
+ * problem belongs to a later phase; here they are handled and reported as
+ * nothing.
  *
  * **Identity.** Renaming a heading does not change an entity's id. Moving
  * metadata together with its heading preserves identity.

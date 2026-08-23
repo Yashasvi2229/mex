@@ -104,7 +104,16 @@ export interface WikiEntityLocation {
   /** Start of the bound heading. Equal to `bodyStart` for a file-level entity with no heading. */
   headingStart: number;
   headingEnd: number;
-  /** Body runs to the next heading of equal-or-shallower depth, or end of file. */
+  /**
+   * Body runs to whichever comes first: the next heading of equal-or-shallower
+   * depth, **the start of the next entity's metadata**, or end of file.
+   *
+   * The middle clause is not in the build spec, which gives only the depth
+   * rule. It is forced by the partition property — without it a file-level
+   * entity's body swallows the block entities nested inside it and their ranges
+   * overlap. A consequence: a file-level entity's body stops at the first
+   * nested entity and never resumes, so it is not the whole file.
+   */
   bodyStart: number;
   bodyEnd: number;
   /** 1-based, inclusive. */
