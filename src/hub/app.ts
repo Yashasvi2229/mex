@@ -1,4 +1,6 @@
 import {
+  ActivityRequestSchema,
+  ActivityResponseSchema,
   BootstrapRequestSchema,
   BootstrapResponseSchema,
   HealthResponseSchema,
@@ -14,6 +16,8 @@ import {
   SearchResponseSchema,
   SessionResponseSchema,
   type HealthResponse,
+  type ActivityRequest,
+  type ActivityResponse,
   type HomeResponse,
   type HubCapabilities,
   type HubJobKind,
@@ -76,6 +80,7 @@ export interface HubJobService {
 export interface HubReadServices {
   capabilities(): Promise<HubCapabilities> | HubCapabilities;
   home(): Promise<HomeResponse> | HomeResponse;
+  activity(request: ActivityRequest): Promise<ActivityResponse> | ActivityResponse;
   search(request: SearchRequest): Promise<SearchResponse> | SearchResponse;
   health(): Promise<HealthResponse> | HealthResponse;
 }
@@ -186,6 +191,14 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
     HomeResponseSchema,
     await options.services.home(),
   ));
+
+  app.get("/api/v1/activity", async (context) => {
+    const request = parseInput(
+      ActivityRequestSchema,
+      readStrictQuery(context.req.raw, ["source", "since", "cursor", "limit"]),
+    );
+    return resourceResponse(ActivityResponseSchema, await options.services.activity(request));
+  });
 
   app.get("/api/v1/search", async (context) => {
     const request = parseInput(

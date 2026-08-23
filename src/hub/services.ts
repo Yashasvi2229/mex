@@ -1,15 +1,25 @@
-import type {
-  CapabilityStatus,
-  HealthResponse,
-  HomeResponse,
-  HubActor,
-  HubCapabilities,
-  HubJobSnapshot,
-  SearchRequest,
-  SearchResponse,
+import {
+  HUB_LIMITS,
+  type ActivityActor,
+  type ActivityDiagnostic,
+  type ActivityEntityRef,
+  type ActivityRequest,
+  type ActivityResponse,
+  type ActivitySubject,
+  type CapabilityStatus,
+  type HealthResponse,
+  type HomeResponse,
+  type HubActor,
+  type HubCapabilities,
+  type HubJobSnapshot,
+  type SearchRequest,
+  type SearchResponse,
 } from "@mex/hub-contracts";
 import { basename } from "node:path";
 import type { GitPort } from "../team/contracts/git.js";
+import { isRepoRelativePath, type ActorRef, type Diagnostic, type EntityRef } from "../team/contracts/shared.js";
+import type { ActivitySubjectRef } from "../team/contracts/workflow.js";
+import type { ResolvedTimelineEntry } from "../team/activity/repository.js";
 import { TeamIdentityActivityFoundation } from "../team/foundation.js";
 import { createRepositoryGitPort } from "../team/git/git-port.js";
 import type { HubReadServices } from "./app.js";
@@ -53,7 +63,7 @@ export function createLocalHubReadServices(
       return {
         apiVersion: "v1",
         git: gitStatus,
-        activity: unavailable("Activity and Catch Me Up arrive with the read-only Project Hub."),
+        activity: available(),
         jobs: available(),
         graph: {
           read: unavailable("The GraphPort is not connected in this foundation build."),
@@ -78,6 +88,12 @@ export function createLocalHubReadServices(
         .filter((job) => job.state === "failed" || job.state === "interrupted")
         .slice(0, 5)
         .map((job) => jobAttention(job));
+      let activity: HomeResponse["sections"]["activity"];
+      try {
+        activity = { availability: "available", count: team.getActivitySummary().count };
+      } catch {
+        activity = unavailableSection("Canonical activity could not be read safely.");
+      }
 
       return {
         observedAt: now().toISOString(),
@@ -93,11 +109,36 @@ export function createLocalHubReadServices(
           workstreams: unavailableSection("Workstreams are not connected in this foundation build."),
           relays: unavailableSection("Relays are not connected in this foundation build."),
           inbox: unavailableSection("Inbox workflows are not connected in this foundation build."),
-          activity: unavailableSection("Activity aggregation arrives in the read-only Project Hub."),
+          activity,
         },
         activeJobs: active.length,
         attention,
       };
+    },
+
+    async activity(request: ActivityRequest): Promise<ActivityResponse> {
+      let pageLimit = request.limit;
+      while (true) {
+        const page = await team.timeline.listResolved({ ...request, limit: pageLimit });
+        const diagnostics = page.diagnostics.map(projectDiagnostic);
+        const response: ActivityResponse = {
+          items: page.items.map(projectTimelineEntry),
+          nextCursor: page.nextCursor,
+          hasMore: page.truncated,
+          sourceTruncated: page.sourceTruncated,
+          deterministicRevision: page.deterministicRevision,
+          diagnostics: diagnostics.slice(0, 50),
+          diagnosticsTruncated: diagnostics.length > 50,
+        };
+        if (Buffer.byteLength(JSON.stringify(response), "utf8") <= HUB_LIMITS.maxJsonResponseBytes) {
+          return response;
+        }
+        // `limit` is a maximum. Retry from the same revision-bound cursor with
+        // a smaller coherent page rather than returning an oversized response
+        // or trimming rows after their cursor was calculated.
+        if (pageLimit <= 1) return response;
+        pageLimit = Math.max(1, Math.floor(pageLimit / 2));
+      }
     },
 
     async search(request: SearchRequest): Promise<SearchResponse> {
@@ -165,6 +206,172 @@ export function createLocalHubReadServices(
       };
     },
   };
+}
+
+function projectTimelineEntry(item: ResolvedTimelineEntry): ActivityResponse["items"][number] {
+  const entry = item.entry;
+  if (entry.source === "legacy") {
+    const safeFiles = entry.files.filter(isCanonicalRepoPath);
+    const subjects = safeFiles
+      .filter((path) => Buffer.byteLength(path, "utf8") <= 384)
+      .map((path): ActivitySubject => ({ kind: "file", path }));
+    const preview = subjects.slice(0, 8);
+    const message = boundedLegacyMessage(entry.message);
+    return {
+      source: "legacy",
+      id: entry.id,
+      timestamp: entry.timestamp,
+      action: entry.kind,
+      subjects: preview,
+      subjectCount: safeFiles.length,
+      subjectsTruncated: safeFiles.length > preview.length,
+      sourcePath: entry.sourcePath,
+      recordedActor: null,
+      effectiveActor: null,
+      actorDiagnostics: [],
+      workstream: null,
+      repository: null,
+      revision: null,
+      sourceLine: entry.sourceLine,
+      message: message.value,
+      messageTruncated: message.truncated,
+    };
+  }
+
+  const subjects = entry.event.subjects.flatMap((subject) => {
+    const projected = projectSubject(subject);
+    return projected === null ? [] : [projected];
+  });
+  const preview = subjects.slice(0, 8);
+  return {
+    source: "activity",
+    id: entry.id,
+    timestamp: entry.timestamp,
+    action: entry.event.action,
+    subjects: preview,
+    subjectCount: entry.event.subjects.length,
+    subjectsTruncated: entry.event.subjects.length > preview.length,
+    sourcePath: entry.sourcePath,
+    recordedActor: projectActor(item.recordedActor ?? entry.actor),
+    effectiveActor: projectActor(item.effectiveActor ?? entry.actor),
+    actorDiagnostics: item.diagnostics.slice(0, 2).map(projectDiagnostic),
+    workstream: entry.event.workstream === undefined
+      ? null
+      : projectEntity(entry.event.workstream),
+    repository: {
+      branch: entry.repoState.branch,
+      head: entry.repoState.head,
+      dirty: entry.repoState.dirty,
+      observedAt: entry.repoState.observedAt,
+    },
+    revision: entry.event.revision,
+  };
+}
+
+function projectActor(actor: ActorRef): ActivityActor {
+  if (actor.kind === "unknown") return actor;
+  if (actor.kind === "git") return actor;
+  return {
+    kind: "member",
+    memberId: actor.memberId,
+    displayName: actor.displayName ?? null,
+  };
+}
+
+function projectEntity(entity: EntityRef): ActivityEntityRef {
+  return {
+    id: entity.id,
+    entityKind: entity.kind,
+    title: entity.title ?? null,
+  };
+}
+
+function projectSubject(subject: ActivitySubjectRef): ActivitySubject | null {
+  if (subject.kind === "entity") {
+    return { kind: "entity", entity: projectEntity(subject.entity) };
+  }
+  if (subject.kind === "commit") return { kind: "commit", hash: subject.hash };
+  if (subject.kind === "file") {
+    return isActivityDisplayPath(subject.path) ? { kind: "file", path: subject.path } : null;
+  }
+  if (subject.code.kind === "file") {
+    return isActivityDisplayPath(subject.code.path)
+      ? { kind: "file", path: subject.code.path }
+      : null;
+  }
+  return { kind: "symbol", symbolId: subject.code.symbolId };
+}
+
+function projectDiagnostic(diagnostic: Diagnostic): ActivityDiagnostic {
+  return {
+    code: truncateUtf8(diagnostic.code, 128) || "ACTIVITY_DIAGNOSTIC",
+    severity: diagnostic.severity,
+    message: safeDiagnosticMessage(diagnostic.code),
+    ...(diagnostic.path !== undefined
+      && isActivityDisplayPath(diagnostic.path)
+      ? { path: diagnostic.path }
+      : {}),
+  };
+}
+
+function safeDiagnosticMessage(code: string): string {
+  switch (code) {
+    case "ACTIVITY_ARTIFACT_UNEXPECTED":
+      return "An unexpected item in canonical activity storage was ignored.";
+    case "ACTIVITY_ID_CONFLICT":
+      return "Conflicting canonical events were excluded from trusted activity.";
+    case "ACTIVITY_SOURCE_TRUNCATED":
+      return "Canonical activity exceeded its safe read bound.";
+    case "LEGACY_ACTIVITY_MALFORMED":
+      return "A malformed legacy activity row was ignored.";
+    case "LEGACY_ACTIVITY_DUPLICATE":
+      return "A duplicate legacy activity row was retained with a diagnostic.";
+    case "LEGACY_ACTIVITY_LIMIT_EXCEEDED":
+      return "Legacy activity exceeded its safe read bound.";
+    case "ACTOR_MEMBER_MISSING":
+      return "The recorded member no longer exists; the recorded actor was preserved.";
+    case "ACTOR_MEMBER_INACTIVE":
+      return "The recorded member is currently inactive.";
+    case "ACTOR_ALIAS_AMBIGUOUS":
+      return "The recorded Git identity matches multiple active members and was not remapped.";
+    case "GIT_IDENTITY_UNAVAILABLE":
+      return "Git identity could not be inspected safely.";
+    default:
+      return "Activity history reported a local diagnostic.";
+  }
+}
+
+function boundedLegacyMessage(message: string): { value: string; truncated: boolean } {
+  const normalized = message
+    .normalize("NFC")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ");
+  return {
+    value: truncateUtf8(normalized, 2_048),
+    truncated: Buffer.byteLength(normalized, "utf8") > 2_048,
+  };
+}
+
+function isCanonicalRepoPath(path: string): boolean {
+  return isRepoRelativePath(path)
+    && path.normalize("NFC") === path
+    && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(path);
+}
+
+function isActivityDisplayPath(path: string): boolean {
+  return isCanonicalRepoPath(path) && Buffer.byteLength(path, "utf8") <= 384;
+}
+
+function truncateUtf8(value: string, maximumBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maximumBytes) return value;
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const width = Buffer.byteLength(character, "utf8");
+    if (bytes + width > maximumBytes) break;
+    result += character;
+    bytes += width;
+  }
+  return result;
 }
 
 function available(): CapabilityStatus {
