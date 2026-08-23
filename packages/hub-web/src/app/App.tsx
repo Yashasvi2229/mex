@@ -7,7 +7,8 @@ import { ActivityPage } from "../pages/ActivityPage";
 import { HealthPage } from "../pages/HealthPage";
 import { HomePage } from "../pages/HomePage";
 import { JobsPage } from "../pages/JobsPage";
-import { SearchPage } from "../pages/SearchPage";
+import { CodePage, SearchPage } from "../pages/SearchPage";
+import { SymbolPage } from "../pages/SymbolPage";
 import styles from "../styles/hub.module.css";
 import { DesktopRequired, HubLayout } from "./HubLayout";
 
@@ -32,6 +33,39 @@ function SessionBoundary() {
     );
   }
 
+  if (capabilities.isPending) {
+    return (
+      <div className={styles.fullPageState}>
+        <StatePanel
+          state="loading"
+          title="Loading project capabilities"
+          detail="Checking which local workbenches are available for this repository."
+        />
+      </div>
+    );
+  }
+
+  if (capabilities.isError) {
+    return (
+      <div className={styles.fullPageState}>
+        <StatePanel
+          state="error"
+          title="Project capabilities could not be loaded"
+          detail="The Hub could not safely verify which local workbenches are available. Try the check again before continuing."
+          action={(
+            <button
+              className={styles.secondaryButton}
+              type="button"
+              onClick={() => void capabilities.refetch()}
+            >
+              Try again
+            </button>
+          )}
+        />
+      </div>
+    );
+  }
+
   return <HubLayout capabilities={capabilities.data} session={session.data} />;
 }
 
@@ -42,7 +76,8 @@ export function AppRoutes() {
         <Route index element={<HomePage />} />
         <Route path="search" element={<SearchPage />} />
         <Route path="knowledge" element={<CapabilityPage page="knowledge" />} />
-        <Route path="code" element={<CapabilityPage page="code" />} />
+        <Route path="code" element={<CodePage />} />
+        <Route path="code/symbols/:id" element={<SymbolPage />} />
         <Route path="workstreams" element={<CapabilityPage page="workstreams" />} />
         <Route path="specs" element={<CapabilityPage page="specs" />} />
         <Route path="playbooks" element={<CapabilityPage page="playbooks" />} />

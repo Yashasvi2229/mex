@@ -2,16 +2,17 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useNavigate } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { HubApi } from "../api/client";
 import { HubApiProvider } from "../api/context";
 import { createFixtureApi } from "../dev/fixture-api";
 import { AppRoutes } from "./App";
 
-function renderRoute(route: string) {
+function renderRoute(route: string, api: HubApi = createFixtureApi()) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
-      <HubApiProvider api={createFixtureApi()}>
+      <HubApiProvider api={api}>
         <MemoryRouter initialEntries={[route]}>
           <AppRoutes />
         </MemoryRouter>
@@ -25,7 +26,7 @@ describe("Project Hub routes", () => {
     ["/", "Good context starts here."],
     ["/search", "Search the project"],
     ["/knowledge", "Knowledge"],
-    ["/code", "Code"],
+    ["/code", "Explore the code graph"],
     ["/workstreams", "Workstreams"],
     ["/specs", "Specs"],
     ["/playbooks", "Playbooks"],
@@ -51,15 +52,36 @@ describe("Project Hub routes", () => {
     expect(screen.getByRole("link", { name: "Home" })).toHaveFocus();
   });
 
-  it("keeps partial search failure visible beside successful groups", async () => {
+  it("keeps routes behind a safe, retryable capabilities error", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    const getCapabilities = api.getCapabilities.bind(api);
+    const capabilities = vi
+      .spyOn(api, "getCapabilities")
+      .mockRejectedValueOnce(new Error("sensitive filesystem detail: /private/repository"))
+      .mockImplementation(getCapabilities);
+
+    renderRoute("/code", api);
+
+    expect(await screen.findByRole("heading", { name: "Project capabilities could not be loaded" })).toBeVisible();
+    expect(screen.queryByText(/sensitive filesystem detail/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Explore the code graph" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByRole("heading", { name: "Explore the code graph" })).toBeVisible();
+    expect(capabilities).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps unavailable Wiki visible beside real graph groups", async () => {
     const user = userEvent.setup();
     renderRoute("/search");
     const input = await screen.findByRole("searchbox", { name: "Search project memory and code" });
     await user.type(input, "bootstrap session");
     await user.click(screen.getByRole("button", { name: "Search" }));
-    expect(await screen.findByText("Secure loopback Hub")).toBeVisible();
-    expect(screen.getByText("This source failed independently.")).toBeVisible();
-    expect(screen.getByText("Source chunks", { selector: "h2" })).toBeVisible();
+    expect(await screen.findByText("createHubServer")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Knowledge unavailable" })).toBeVisible();
+    expect(screen.getByText("Source matches", { selector: "h2" })).toBeVisible();
   });
 
   it("links Home to canonical Activity while Inbox and Relays stay unavailable", async () => {
