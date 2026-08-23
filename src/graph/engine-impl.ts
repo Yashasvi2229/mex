@@ -91,6 +91,10 @@ interface GraphEngineInternalHooks {
   afterSemanticInputsStaged?: () => void;
   afterCompilerExtraction?: () => void;
   afterFinalSemanticInputRead?: (path: string) => void;
+  /** Final path/cancellation seam immediately before SQLite opens or creates the database. */
+  beforeDatabaseOpen?: () => void;
+  /** Final cancellation/fault seam before any publication continuity reads. */
+  beforePublication?: () => void;
 }
 
 interface GraphEngineInternalOptions {
@@ -193,6 +197,7 @@ class GraphEngineImpl implements GraphEngine {
 
   private getStore(allowRebuild = false): GraphStore {
     if (!this.store) {
+      this.internal.beforeDatabaseOpen?.();
       this.db = openGraphDatabase(this.dbPath, {
         allowRebuild,
         readOnly: this.readOnly,
@@ -231,6 +236,7 @@ class GraphEngineImpl implements GraphEngine {
       const currentCorpus = discoverSourceFiles(this.rootDir, this.sourceFileAccess);
       const snapshot = parseGraphSnapshot(store.getMetadata(GRAPH_SNAPSHOT_METADATA_KEY));
       if (snapshot?.manifestHash === manifest.manifestHash
+        && snapshot.indexedBranch === gitBeforeStaging.branch
         && sourceCorpusMatchesFileRecords(currentCorpus, store.getAllFileRecords())
         && semanticInputsMatchSnapshot(this.rootDir, snapshot.semanticInputs)) {
         return { filesIndexed: 0, nodesCreated: 0, edgesCreated: 0, durationMs: Date.now() - started };
@@ -278,6 +284,7 @@ class GraphEngineImpl implements GraphEngine {
     root: string,
     gitBeforeStaging: GraphGitProvenance,
   ): Omit<BuildResult, "durationMs"> {
+    this.internal.beforePublication?.();
     const store = this.getStore(true);
     const oldNodes = store.getAllNodes();
     const oldAliases = store.getAllAliases();

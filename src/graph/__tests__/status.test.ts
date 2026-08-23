@@ -168,7 +168,7 @@ describe("inspectGraphStatus", () => {
       expect(status.diagnostics).toContainEqual(expect.objectContaining({
         code: "GRAPH_SOURCE_CORPUS_MISMATCH",
       }));
-      expect(executableRemediations(status)).not.toContain("mex graph");
+      expect(executableRemediations(status)).toEqual([]);
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
@@ -312,14 +312,10 @@ describe("inspectGraphStatus", () => {
     expect(status.schemaVersion).toBe(schemaVersion);
     const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_REBUILD_REQUIRED");
     expect(diagnostic).toBeDefined();
-    if (schemaVersion < 2) {
-      expect(diagnostic?.remediation).toEqual([{ label: "Rebuild graph", command: "mex graph" }]);
-    } else {
-      expect(diagnostic?.remediation).toBeUndefined();
-    }
+    expect(diagnostic?.remediation).toEqual([{ label: "Rebuild graph", command: "mex graph rebuild" }]);
   });
 
-  it("treats an empty recorded schema version as commandless corruption", async () => {
+  it("offers isolated rebuild recovery for an empty recorded schema version", async () => {
     const root = temporaryRoot("mex-graph-invalid-version-");
     source(root, "src/a.ts", "export const a = 1;\n");
     const dbPath = await build(root);
@@ -335,6 +331,7 @@ describe("inspectGraphStatus", () => {
     const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_SCHEMA_INVALID");
     expect(diagnostic?.message).toContain("invalid version");
     expect(diagnostic?.remediation).toBeUndefined();
+    expect(executableRemediations(status)).toContain("mex graph rebuild");
   });
 
   it("distinguishes a corrupt database from an active-WAL transient state", async () => {
@@ -346,8 +343,7 @@ describe("inspectGraphStatus", () => {
     expect(corrupt.status).toBe("corrupt");
     expect(corrupt.changes.total).toBe(0);
     expect(corrupt.diagnostics).toContainEqual(expect.objectContaining({ code: "GRAPH_INDEX_CORRUPT" }));
-    expect(corrupt.diagnostics.flatMap((entry) => entry.remediation ?? []))
-      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+    expect(executableRemediations(corrupt)).toContain("mex graph rebuild");
     expect(treeState(corruptRoot)).toEqual(corruptBefore);
 
     const transientRoot = temporaryRoot("mex-graph-transient-");
@@ -574,7 +570,7 @@ describe("inspectGraphStatus", () => {
     expect(status.status).toBe("stale");
     expect(status.diagnostics).toContainEqual(expect.objectContaining({
       code: "GRAPH_SNAPSHOT_LEGACY",
-      remediation: [{ label: "Republish graph snapshot", command: "mex graph" }],
+      remediation: [{ label: "Republish graph snapshot", command: "mex graph refresh" }],
     }));
     expect(status.changes.total).toBe(0);
   });
@@ -592,8 +588,7 @@ describe("inspectGraphStatus", () => {
     }
     const malformed = await inspect(malformedRoot);
     expect(malformed.status).toBe("corrupt");
-    expect(malformed.diagnostics.flatMap((entry) => entry.remediation ?? []))
-      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+    expect(executableRemediations(malformed)).toContain("mex graph rebuild");
 
     const digestRoot = temporaryRoot("mex-graph-snapshot-digest-");
     source(digestRoot, "src/a.ts", "export const a = 1;\n");
@@ -607,8 +602,7 @@ describe("inspectGraphStatus", () => {
     expect(digestMismatch.diagnostics).toContainEqual(expect.objectContaining({
       code: "GRAPH_SNAPSHOT_CONTENT_MISMATCH",
     }));
-    expect(digestMismatch.diagnostics.flatMap((entry) => entry.remediation ?? []))
-      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+    expect(executableRemediations(digestMismatch)).toContain("mex graph rebuild");
 
     const inconsistentRoot = temporaryRoot("mex-graph-snapshot-mismatch-");
     source(inconsistentRoot, "src/a.ts", "export const a = 1;\n");
@@ -623,8 +617,7 @@ describe("inspectGraphStatus", () => {
     expect(inconsistent.diagnostics).toContainEqual(expect.objectContaining({
       code: "GRAPH_SNAPSHOT_CONTENT_MISMATCH",
     }));
-    expect(inconsistent.diagnostics.flatMap((entry) => entry.remediation ?? []))
-      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+    expect(executableRemediations(inconsistent)).toContain("mex graph rebuild");
   }, 10_000);
 
   it("treats missing core tables and duplicate or dangling edges as corrupt", async () => {
@@ -708,7 +701,7 @@ describe("inspectGraphStatus", () => {
     expect(diagnostic?.remediation).toBeUndefined();
   });
 
-  it("does not advertise in-place repair for a conflicting versionless schema", async () => {
+  it("advertises only isolated rebuild for a conflicting versionless schema", async () => {
     const root = temporaryRoot("mex-graph-versionless-");
     source(root, "src/a.ts", "export const a = 1;\n");
     mkdirSync(join(root, ".mex"), { recursive: true });
@@ -724,6 +717,7 @@ describe("inspectGraphStatus", () => {
     const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_SCHEMA_INVALID");
     expect(diagnostic?.message).toContain("incompatible schema objects");
     expect(diagnostic?.remediation).toBeUndefined();
+    expect(executableRemediations(status)).toContain("mex graph rebuild");
   });
 
   it("detects dangling ownership, alias, reference, import, and LSH records", async () => {
@@ -815,8 +809,7 @@ describe("inspectGraphStatus", () => {
     const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_INVARIANT_FAILED");
     expect(diagnostic?.message).toContain("malformed fingerprint row(s)");
     expect(diagnostic?.remediation).toBeUndefined();
-    expect(status.diagnostics.flatMap((entry) => entry.remediation ?? []))
-      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+    expect(executableRemediations(status)).toContain("mex graph rebuild");
   });
 
   it("requires one correct LSH hash for every configured fingerprint band", async () => {
@@ -860,8 +853,7 @@ describe("inspectGraphStatus", () => {
     expect(diagnostic?.message).toContain("out-of-range fingerprint LSH bucket row(s)");
     expect(diagnostic?.message).toContain("fingerprint LSH bucket hash mismatch(es)");
     expect(diagnostic?.remediation).toBeUndefined();
-    expect(status.diagnostics.flatMap((entry) => entry.remediation ?? []))
-      .not.toContainEqual(expect.objectContaining({ command: expect.any(String) }));
+    expect(executableRemediations(status)).toContain("mex graph rebuild");
   });
 
   it("cross-checks node and source-chunk FTS row parity", async () => {
@@ -1010,7 +1002,7 @@ describe("inspectGraphStatus", () => {
       path: "config/base.json",
       message: expect.stringContaining("changed"),
     }));
-    expect(executableRemediations(changed)).toContain("mex graph");
+    expect(executableRemediations(changed)).toContain("mex graph refresh");
 
     writeFileSync(basePath, base);
     expect((await inspect(root)).status).toBe("fresh");
@@ -1023,7 +1015,7 @@ describe("inspectGraphStatus", () => {
       path: "config/base.json",
       message: expect.stringContaining("disappeared"),
     }));
-    expect(executableRemediations(disappeared)).toContain("mex graph");
+    expect(executableRemediations(disappeared)).toContain("mex graph refresh");
 
     writeFileSync(basePath, base);
     source(root, "config/optional.json", JSON.stringify({ compilerOptions: { noEmit: true } }));
@@ -1035,7 +1027,7 @@ describe("inspectGraphStatus", () => {
       path: "config/optional.json",
       message: expect.stringContaining("appeared"),
     }));
-    expect(executableRemediations(appeared)).toContain("mex graph");
+    expect(executableRemediations(appeared)).toContain("mex graph refresh");
     expect(statSync(missingPath).isFile()).toBe(true);
   });
 
@@ -1074,7 +1066,7 @@ describe("inspectGraphStatus", () => {
       code: "GRAPH_SEMANTIC_INPUT_INSPECTION_INCOMPLETE",
     }));
     expect(readPaths).not.toContain("config/base.json");
-    expect(executableRemediations(status)).not.toContain("mex graph");
+    expect(executableRemediations(status)).toEqual([]);
   });
 
   it("does not treat a negative semantic probe below an escaped ancestor as safely absent", async () => {
@@ -1104,7 +1096,7 @@ describe("inspectGraphStatus", () => {
     expect(status.diagnostics).toContainEqual(expect.objectContaining({
       code: "GRAPH_SEMANTIC_INPUT_INSPECTION_INCOMPLETE",
     }));
-    expect(executableRemediations(status)).not.toContain("mex graph");
+    expect(executableRemediations(status)).toEqual([]);
   });
 
   it("never emits fresh when a semantic-input path is atomically replaced after it is read", async () => {
@@ -1173,7 +1165,7 @@ describe("inspectGraphStatus", () => {
     });
     expect(configChanged.diagnostics).toContainEqual(expect.objectContaining({
       code: "GRAPH_BUILD_MANIFEST_CHANGED",
-      remediation: [{ label: "Republish graph with current inputs", command: "mex graph" }],
+      remediation: [{ label: "Republish graph with current inputs", command: "mex graph refresh" }],
     }));
   });
 
@@ -1196,7 +1188,7 @@ describe("inspectGraphStatus", () => {
     expect(status.changes).toMatchObject({ total: 0, branchChanged: true });
     expect(status.diagnostics).toContainEqual(expect.objectContaining({
       code: "GRAPH_INDEX_BRANCH_CHANGED",
-      remediation: [{ label: "Republish graph for this branch", command: "mex graph" }],
+      remediation: [{ label: "Republish graph for this branch", command: "mex graph refresh" }],
     }));
   });
 });

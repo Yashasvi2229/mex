@@ -405,7 +405,7 @@ async function inspectGraphStatusAttempt(
         message: "The local code-graph index does not exist.",
         remediation: [{
           label: "Build graph",
-          ...(buildPrerequisitesComplete ? { command: "mex graph" } : {}),
+          ...(buildPrerequisitesComplete ? { command: "mex graph rebuild" } : {}),
         }],
       });
       return {
@@ -471,9 +471,21 @@ async function inspectGraphStatusAttempt(
 
   let db: SqliteDatabase | null = null;
   const finishDatabaseResult = (status: GraphStatus): InspectionAttempt => {
+    const recoverableStatus = status.status === "corrupt"
+      && !status.diagnostics.some((diagnostic) => (
+        diagnostic.remediation?.some((action) => isGraphMaintenanceCommand(action.command))
+      ))
+      ? {
+          ...status,
+          diagnostics: [
+            ...status.diagnostics,
+            rebuildDiagnostic("The contained graph index must be replaced by an isolated rebuild."),
+          ],
+        }
+      : status;
     const safeStatus = buildPrerequisitesComplete
-      ? status
-      : suppressExecutableGraphRemediations(status);
+      ? recoverableStatus
+      : suppressExecutableGraphRemediations(recoverableStatus);
     context.options.internal?.beforeDatabaseResult?.(safeStatus.status, attempt);
     return stabilizeDatabaseResult(
       projectRoot,
@@ -528,7 +540,6 @@ async function inspectGraphStatusAttempt(
     if (schemaVersion !== DB_SCHEMA_VERSION) {
       diagnostics.push(rebuildDiagnostic(
         `This mex build expects graph schema ${DB_SCHEMA_VERSION}; the index uses ${schemaVersion}.`,
-        schemaVersion < DB_SCHEMA_VERSION,
       ));
       return finishDatabaseResult(graphStatus({
           status: "rebuild_required",
@@ -620,7 +631,7 @@ async function inspectGraphStatusAttempt(
         code: "GRAPH_SNAPSHOT_LEGACY",
         severity: "warning",
         message: "The current-schema graph predates graph_snapshot_v1 and must be republished before freshness can be trusted.",
-        remediation: [{ label: "Republish graph snapshot", command: "mex graph" }],
+        remediation: [{ label: "Republish graph snapshot", command: "mex graph refresh" }],
       });
     } else if (snapshot.schemaVersion !== schemaVersion) {
       diagnostics.push({
@@ -715,7 +726,7 @@ async function inspectGraphStatusAttempt(
         code: "GRAPH_SOURCE_CORPUS_MISMATCH",
         severity: "warning",
         message: "The current supported-source corpus does not match the successful graph snapshot.",
-        remediation: [{ label: "Refresh graph", command: "mex graph" }],
+        remediation: [{ label: "Refresh graph", command: "mex graph refresh" }],
       });
     }
     if (semantic.changedPaths.length > 0) {
@@ -724,7 +735,7 @@ async function inspectGraphStatusAttempt(
         severity: "warning",
         message: "Compiler configuration inputs no longer match the successful graph snapshot.",
         ...(semantic.complete
-          ? { remediation: [{ label: "Republish graph with current inputs", command: "mex graph" }] }
+          ? { remediation: [{ label: "Republish graph with current inputs", command: "mex graph refresh" }] }
           : {}),
       });
     }
@@ -740,7 +751,7 @@ async function inspectGraphStatusAttempt(
         code: "GRAPH_INDEX_BRANCH_CHANGED",
         severity: "warning",
         message: `The current branch (${currentRepo.branch ?? "detached"}) differs from the indexed branch (${snapshot?.indexedBranch ?? "unknown"}).`,
-        remediation: [{ label: "Republish graph for this branch", command: "mex graph" }],
+        remediation: [{ label: "Republish graph for this branch", command: "mex graph refresh" }],
       });
     }
     if (sourceChanges.changes.manifestChanged) {
@@ -754,7 +765,7 @@ async function inspectGraphStatusAttempt(
         message: changedInputs.length > 0
           ? `Graph build inputs changed (${changedInputs.join(", ")}).`
           : "The graph build manifest or discovery policy changed.",
-        remediation: [{ label: "Republish graph with current inputs", command: "mex graph" }],
+        remediation: [{ label: "Republish graph with current inputs", command: "mex graph refresh" }],
       });
     }
     if (!live.complete) {
@@ -901,13 +912,13 @@ function suppressExecutableGraphRemediations(status: GraphStatus): GraphStatus {
   return {
     ...status,
     diagnostics: status.diagnostics.map((diagnostic) => {
-      if (!diagnostic.remediation?.some((action) => action.command === "mex graph")) {
+      if (!diagnostic.remediation?.some((action) => isGraphMaintenanceCommand(action.command))) {
         return diagnostic;
       }
       return {
         ...diagnostic,
         remediation: diagnostic.remediation.map((action) => {
-          if (action.command !== "mex graph") return action;
+          if (!isGraphMaintenanceCommand(action.command)) return action;
           const { command: _unsafeCommand, ...safeAction } = action;
           return safeAction;
         }),
@@ -2170,8 +2181,14 @@ function rebuildDiagnostic(message: string, executable = true): Diagnostic {
     code: "GRAPH_INDEX_REBUILD_REQUIRED",
     severity: "warning",
     message,
-    remediation: executable ? [{ label: "Rebuild graph", command: "mex graph" }] : undefined,
+    remediation: executable ? [{ label: "Rebuild graph", command: "mex graph rebuild" }] : undefined,
   };
+}
+
+function isGraphMaintenanceCommand(command: string | undefined): boolean {
+  return command === "mex graph"
+    || command === "mex graph refresh"
+    || command === "mex graph rebuild";
 }
 
 function resolveNow(now: InspectGraphStatusOptions["now"]): Date {

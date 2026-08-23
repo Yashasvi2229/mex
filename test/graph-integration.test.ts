@@ -329,7 +329,7 @@ describe("code-graph grounding integration", () => {
     let report = await runDriftCheckWithGraphStatus(config, { graphWarning: warning });
     expect(report.graphStatus?.status).toBe("stale");
     expect(report.issues.filter((issue) => issue.code === "GROUNDING_DRIFT")).toHaveLength(0);
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining("Run `mex graph`"));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("Run `mex graph refresh`"));
     expect(graphPersistenceSnapshot(root)).toEqual(beforeCheck);
 
     // Explicitly mutating workflows retain the existing correctness-first sync.
@@ -573,7 +573,7 @@ describe("code-graph grounding integration", () => {
     expect(loaded.runtime).toBeNull();
     expect(loaded.graphStatus.status).toBe("degraded");
     expect(loaded.graphStatus.diagnostics).toContainEqual(expect.objectContaining({
-      code: "GRAPH_INDEX_READER_SNAPSHOT_CHANGED",
+      code: "GRAPH_INDEX_READER_DATABASE_CHANGED",
     }));
     expect(openedReader).not.toBeNull();
     expect(openedReader!.open).toBe(false);

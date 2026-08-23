@@ -10,7 +10,7 @@
  * the doc.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import * as publicApi from "../src/index.js";
@@ -267,8 +267,10 @@ describe("public API — runDriftCheck", () => {
 
   it("includes a primary diagnostic when the stripped public report has no repair command", async () => {
     mkdirSync(join(tmpDir, ".mex/context"), { recursive: true });
+    mkdirSync(join(tmpDir, "src"), { recursive: true });
     writeFileSync(join(tmpDir, ".mex/context/architecture.md"), "# Architecture\n\nExisting context.\n");
     writeFileSync(join(tmpDir, ".mex/graph.db"), "not a sqlite database");
+    symlinkSync(tmpdir(), join(tmpDir, "src/unsafe.ts"), "dir");
     const warnings: string[] = [];
 
     const report = await runDriftCheck(config, {

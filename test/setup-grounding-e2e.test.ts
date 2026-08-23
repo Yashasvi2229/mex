@@ -101,7 +101,7 @@ export function calculateCheckoutTotal(items: number[], member: boolean): number
     let drift = await runDriftCheckWithGraphStatus(config, { graphWarning: (message) => warnings.push(message) });
     expect(drift.graphStatus?.status).toBe("stale");
     expect(drift.issues.some((issue) => issue.code.startsWith("GROUNDING_"))).toBe(false);
-    expect(warnings).toContainEqual(expect.stringContaining("Run `mex graph`"));
+    expect(warnings).toContainEqual(expect.stringContaining("Run `mex graph refresh`"));
 
     const refreshRuntime = await loadGroundingRuntime(config);
     refreshRuntime!.close();

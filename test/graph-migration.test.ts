@@ -120,7 +120,7 @@ describe("pre-0.7 graph grounding migration", () => {
     let drift = await runDriftCheckWithGraphStatus(config, { graphWarning: warning });
     expect(drift.graphStatus?.status).toBe("stale");
     expect(drift.issues.some((issue) => issue.code.startsWith("GROUNDING_"))).toBe(false);
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining("Run `mex graph`"));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("Run `mex graph refresh`"));
 
     const refreshRuntime = await loadGroundingRuntime(config);
     refreshRuntime!.close();
@@ -143,7 +143,7 @@ describe("pre-0.7 graph grounding migration", () => {
     const { root, config } = fixture();
     const warning = vi.fn();
     await runDriftCheckWithGraphStatus(config, { groundingRuntimeLoader: async () => null, graphWarning: warning });
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining("mex graph`, then `mex graph ground"));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining("mex graph rebuild`, then `mex graph ground"));
 
     const engine = createGraphEngine({ rootDir: root });
     await engine.build();
