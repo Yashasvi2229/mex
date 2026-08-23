@@ -84,8 +84,15 @@ const LAYER_RULES: LayerRule[] = [
   },
   {
     layer: "src/wiki/query/",
-    forbids: ["src/wiki/operations/"],
-    reason: "reads must not depend on writes; a query that can mutate is a query nobody can cache or parallelize",
+    forbids: [
+      "src/wiki/operations/",
+      "src/wiki/index/rebuild",
+      "src/wiki/index/refresh",
+      "src/wiki/index/publish",
+      "src/wiki/index/dbfile",
+    ],
+    reason:
+      "reads must not depend on writes; a query that can mutate is a query nobody can cache or parallelize, and a read path that can rebuild turns a 10 ms query into a 5 s one at random while hiding that the index was broken",
   },
 ];
 
@@ -182,9 +189,47 @@ export function findSerializationViolations(path: string, source: string): strin
  * log cannot be bypassed. A second writer is exactly how byte preservation
  * dies.
  */
-const WRITE_ALLOWLIST = ["src/wiki/operations/apply.ts", "src/wiki/operations/audit.ts"];
+const WRITE_ALLOWLIST = ["src/wiki/operations/apply.ts", "src/wiki/operations/audit.ts", "src/wiki/index/dbfile.ts"];
 
-const WRITE_CALLS = /\b(writeFileSync|appendFileSync|createWriteStream|writeFile|appendFile|rmSync|unlinkSync)\s*\(/g;
+const WRITE_CALLS =
+  /\b(writeFileSync|appendFileSync|createWriteStream|writeFile|appendFile|rmSync|unlinkSync|renameSync|truncateSync)\s*\(/g;
+
+/** Source with comments removed, so a rule reads code and not prose about it. */
+function withoutComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
+/**
+ * The database module's exemption, narrowed to what it is actually for.
+ *
+ * `src/wiki/index/dbfile.ts` renames a rebuilt index into place and deletes the
+ * temp file a crashed build left behind. Neither is a Markdown write — but "it
+ * is not really a Markdown write" is what every second writer has claimed, so
+ * the exemption carries its own rule: the module routes every mutation through
+ * a runtime guard that rejects any path which is not a database file, and it
+ * may not name a Markdown path at all.
+ *
+ * A lint rule cannot tell that `rmSync(path)` is safe. The guard can, and it
+ * fails closed. This asserts the guard is still there, and still in front of
+ * everything.
+ */
+export function findGuardedDatabaseWriteViolations(path: string, source: string): string[] {
+  if (!WRITE_ALLOWLIST.includes(path) || !path.startsWith("src/wiki/index/")) return [];
+
+  const violations: string[] = [];
+  const code = withoutComments(source);
+  const mutations = [...code.matchAll(WRITE_CALLS)].length;
+  const guards = [...code.matchAll(/\assertIndexPath\s*\(/g)].length;
+  if (mutations > 0 && guards < mutations) {
+    violations.push(
+      `${path} performs ${mutations} filesystem mutations but calls assertIndexPath ${guards} times — every mutation must be guarded`,
+    );
+  }
+  if (/["'`][^"'`]*\.mdx?["'`]/.test(code)) {
+    violations.push(`${path} names a Markdown path — the database module may only touch database files`);
+  }
+  return violations;
+}
 
 export function findScaffoldWriteViolations(path: string, source: string): string[] {
   if (!path.startsWith("src/wiki/") || WRITE_ALLOWLIST.includes(path)) return [];
@@ -272,6 +317,33 @@ describe("no unscoped scaffold writes", () => {
   it("holds across src/wiki/", () => {
     const violations = FILES.flatMap((path) => findScaffoldWriteViolations(path, read(path)));
     expect(violations).toEqual([]);
+  });
+
+  it("keeps the database module's exemption guarded", () => {
+    const violations = FILES.flatMap((path) => findGuardedDatabaseWriteViolations(path, read(path)));
+    expect(violations).toEqual([]);
+    // The rule needs a subject: if the file is renamed away, this notices
+    // rather than passing over nothing.
+    expect(FILES).toContain("src/wiki/index/dbfile.ts");
+    expect(read("src/wiki/index/dbfile.ts")).toContain("assertIndexPath");
+  });
+
+  it("catches an unguarded database write, and a Markdown path in the database module", () => {
+    expect(
+      findGuardedDatabaseWriteViolations("src/wiki/index/dbfile.ts", "export function f() { rmSync(path); }"),
+    ).toHaveLength(1);
+    expect(
+      findGuardedDatabaseWriteViolations(
+        "src/wiki/index/dbfile.ts",
+        'export function f() { assertIndexPath(p); rmSync(p); const doc = "ROUTER.md"; }',
+      ),
+    ).toHaveLength(1);
+    expect(
+      findGuardedDatabaseWriteViolations(
+        "src/wiki/index/dbfile.ts",
+        "export function f() { assertIndexPath(p); rmSync(p); }",
+      ),
+    ).toEqual([]);
   });
 
   it("catches a planted write", () => {

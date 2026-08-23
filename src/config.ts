@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname, isAbsolute, basename } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { MexConfig, AiTool, StalenessThresholds, WatchConfig, HeartbeatConfig, ScaffoldIdentity } from "./types.js";
+import type { MexConfig, AiTool, StalenessThresholds, WatchConfig, HeartbeatConfig, ScaffoldIdentity, WikiConfig } from "./types.js";
 import { DEFAULT_STALENESS_THRESHOLDS } from "./drift/checkers/staleness.js";
 
 /**
@@ -18,6 +18,8 @@ export interface CreateConfigInput {
   stalenessThresholds?: StalenessThresholds;
   watch?: WatchConfig;
   heartbeat?: HeartbeatConfig;
+  /** Wiki indexing scope. Optional and additive; defaults to D10's lists. */
+  wiki?: WikiConfig;
 }
 
 /**
@@ -44,6 +46,7 @@ export function createConfig(input: CreateConfigInput): MexConfig {
     stalenessThresholds: input.stalenessThresholds,
     watch: input.watch,
     heartbeat: input.heartbeat,
+    wiki: normalizeWikiConfig(input.wiki),
   };
 }
 
@@ -86,7 +89,8 @@ export function findConfig(startDir?: string): MexConfig {
   const watch = loadWatchConfig(persistedConfig);
   const heartbeat = loadHeartbeatConfig(persistedConfig);
   const identity = loadScaffoldIdentity(persistedConfig);
-  return { projectRoot, scaffoldRoot, aiTools, stalenessThresholds, watch, heartbeat, identity };
+  const wiki = loadWikiConfig(persistedConfig);
+  return { projectRoot, scaffoldRoot, aiTools, stalenessThresholds, watch, heartbeat, identity, wiki };
 }
 
 function findProjectRoot(dir: string): string | null {
@@ -107,6 +111,7 @@ const CONFIG_FILE = "config.json";
 
 interface MexPersistedConfig {
   aiTools?: unknown;
+  wiki?: unknown;
   staleness?: unknown;
   watch?: unknown;
   heartbeat?: unknown;
@@ -182,6 +187,56 @@ function loadWatchConfig(raw: MexPersistedConfig | null): WatchConfig | undefine
   const w = raw.watch as Record<string, unknown>;
   const intervalMinutes = readPositiveNumber(w.intervalMinutes);
   return intervalMinutes === undefined ? undefined : { intervalMinutes };
+}
+
+// ── Wiki indexing scope (implementation plan, D10) ──
+
+/**
+ * Paths the wiki engine never indexes.
+ *
+ * Ordered, and matched against scaffold-relative POSIX paths.
+ */
+export const DEFAULT_WIKI_EXCLUDE: readonly string[] = ["**/node_modules/**"];
+
+/**
+ * Reserved read-only prefixes.
+ *
+ * None of these directories exist yet, and that is the point: D10 fixes the set
+ * before anything consumes it, so a read-only path is a first-class concept
+ * from the first commit instead of a retrofit. A matching file is parsed,
+ * indexed, queried and grounded exactly like any other — the restriction is on
+ * writes, and P5's `operations/plan.ts` is where it is enforced.
+ */
+export const DEFAULT_WIKI_READ_ONLY: readonly string[] = ["team/**", "workstreams/**", "inbox/**", "relays/**"];
+
+/** Keep only the strings; a non-string entry is dropped rather than stored. */
+function globList(value: unknown, fallback: readonly string[]): string[] {
+  if (!Array.isArray(value)) return [...fallback];
+  const globs = value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+  return globs.length > 0 ? globs : [...fallback];
+}
+
+/** Fill in D10's defaults around whatever the caller supplied. */
+export function normalizeWikiConfig(value: Partial<WikiConfig> | undefined): WikiConfig {
+  return {
+    exclude: globList(value?.exclude, DEFAULT_WIKI_EXCLUDE),
+    readOnly: globList(value?.readOnly, DEFAULT_WIKI_READ_ONLY),
+  };
+}
+
+/**
+ * Read `wiki` out of `.mex/config.json`.
+ *
+ * **Degrades to defaults; never throws.** Config parsing runs on the path of
+ * every mex command, including the many that have nothing to do with the wiki,
+ * so a hand-edited `"wiki": "yes"` must cost the user a wiki setting rather
+ * than the whole CLI. `MexPersistedConfig`'s index signature already carries the
+ * key through the JSON load untouched, so this is purely additive.
+ */
+function loadWikiConfig(raw: MexPersistedConfig | null): WikiConfig {
+  const wiki = raw?.wiki;
+  if (typeof wiki !== "object" || wiki === null || Array.isArray(wiki)) return normalizeWikiConfig(undefined);
+  return normalizeWikiConfig(wiki as Partial<WikiConfig>);
 }
 
 function loadHeartbeatConfig(raw: MexPersistedConfig | null): HeartbeatConfig | undefined {

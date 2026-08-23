@@ -254,6 +254,19 @@ export const WIKI_DIAGNOSTICS = {
     severity: "error",
     remediation: "Two entities claim overlapping regions of one file. Re-check the heading depths.",
   },
+  /**
+   * A path in the scaffold resolves outside it.
+   *
+   * Added in P3 for discovery: a symlink whose target escapes the scaffold root
+   * is not followed. The read side has to agree with P5's write-scope rule
+   * about what "inside the scaffold" means, and the two disagreeing is its own
+   * class of bug — so the boundary is one concept with one code, reported the
+   * moment a read notices it rather than only when a write is refused.
+   */
+  PATH_OUTSIDE_SCAFFOLD: {
+    severity: "warning",
+    remediation: "Point the link inside the scaffold, or remove it. Files outside the scaffold root are never indexed.",
+  },
   ENTITY_NOT_FOUND: {
     severity: "error",
     remediation: "No entity has that id. Check the id, or rebuild the index.",

@@ -48,6 +48,26 @@ export interface HeartbeatConfig {
 }
 
 /**
+ * Wiki engine indexing scope (implementation plan, D10).
+ *
+ * Both lists are ordered globs matched against scaffold-relative POSIX paths.
+ * They are always present on a loaded config, with the D10 defaults, so no
+ * consumer has to remember what the default was — that is how a default drifts
+ * between the two places that apply it.
+ */
+export interface WikiConfig {
+  /** Paths never indexed. Default: node_modules anywhere under the scaffold. */
+  exclude: string[];
+  /**
+   * Reserved read-only prefixes. Files matching these are parsed, indexed,
+   * queried and grounded exactly like any other; what changes is that P5
+   * rejects any operation whose patch plan targets one. Loaded and exposed
+   * here, enforced there.
+   */
+  readOnly: string[];
+}
+
+/**
  * Stable identity for a mex scaffold. Persisted in the scaffold's `config.json` and used
  * as the grouping key for anonymous telemetry (one scaffold = one project).
  * `scaffold_id` is a random UUID v4 — never derived from path, repo, or git.
@@ -78,6 +98,8 @@ export interface MexConfig {
   heartbeat?: HeartbeatConfig;
   /** Scaffold identity, when present in config.json. See {@link getScaffoldIdentity}. */
   identity?: ScaffoldIdentity;
+  /** Wiki indexing scope. Always populated with D10's defaults. */
+  wiki?: WikiConfig;
 }
 
 // ── Claims (extracted from markdown) ──
