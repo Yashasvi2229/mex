@@ -28,6 +28,7 @@ import { entityContentHash } from "../hash.js";
 import { rootContext } from "../validate.js";
 import { generateEntityId, type EntityId } from "../ids.js";
 import { entity, grounding, location, ids } from "./helpers.js";
+import { parseWikiMarkdown } from "../../markdown/codec.js";
 
 /**
  * Codes declared in the registry but not yet emitted by any check.
@@ -45,21 +46,23 @@ import { entity, grounding, location, ids } from "./helpers.js";
 const NOT_YET_EMITTED: Record<string, string> = {
   WIKI_INDEX_MISSING: "P3 — index open",
   WIKI_INDEX_REBUILD_REQUIRED: "P3 — index schema version check",
-  WIKI_PARSE_ERROR: "P2 — Markdown codec",
-  UNBOUND_ENTITY_METADATA: "P2 — metadata-to-heading binding",
-  DUPLICATE_ENTITY_METADATA: "P2 — metadata-to-heading binding",
   ENTITY_RANGE_OVERLAP: "P3 — rebuild, once entities carry real ranges",
   ENTITY_NOT_FOUND: "P3 — query layer",
   GROUNDING_UNRESOLVED: "P4 — grounding resolution against a live graph",
   GROUNDING_STALE: "P4 — grounding resolution against a live graph",
   GROUNDING_MISSING: "P4 — grounding resolution against a live graph",
   SOURCE_FILE_MISSING: "P9 — source validation against the filesystem",
-  ANCHOR_GROUNDING_MISMATCH: "P2/P9 — inline anchor association",
+  // P2b associates anchors with entities but cannot compare them against a
+  // grounding: the mismatch is only observable once a declared equivalence
+  // exists and a live graph can resolve it. That is P9's check, not the
+  // codec's, and no corpus fixture asks for it.
+  ANCHOR_GROUNDING_MISMATCH: "P9 — anchor/grounding equivalence check",
   AMBIGUOUS_MIGRATION: "P6 — migration classification",
   WRITE_SCOPE_VIOLATION: "P5 — write-scope enforcement",
   INDEX_REFRESH_REQUIRED: "P5 — post-write index refresh",
   MALFORMED_OPERATION_LOG: "P5 — operation audit log",
   GENERATED_VIEW_DRIFT: "P6 — generated views",
+
 };
 
 function codesOf(diagnostics: readonly WikiDiagnostic[]): WikiDiagnosticCode[] {
@@ -86,6 +89,21 @@ function topic(id: EntityId, title: string, parents: EntityId[] = []): TopicSubj
  * below is exhaustive by construction: a new code with no way to trigger it
  * fails the disjoint-and-covering test rather than passing unnoticed.
  */
+/**
+ * Parse a small inline document and return its diagnostics.
+ *
+ * The codec's codes are emitted here rather than in a separate coverage file so
+ * that "disjoint and covering" stays a single provable fact in one place. The
+ * alternative — hoisting both maps into a shared module so a third file can
+ * assert over them — moves 130 lines of test data to buy layering purity that
+ * the lint rule does not ask for, since it exempts `__tests__` by design.
+ */
+function codecDiagnostics(text: string): readonly WikiDiagnostic[] {
+  return parseWikiMarkdown({ path: "inline.md", text }).diagnostics;
+}
+
+const CODEC_ID = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
+
 const EMITTERS: Record<string, () => readonly WikiDiagnostic[]> = {
   INVALID_ENTITY_ID: () => validateEntity(entity({ id: "not-an-id" as unknown as EntityId }), rootContext()).diagnostics,
   DUPLICATE_ENTITY_ID: () => {
@@ -195,6 +213,45 @@ const EMITTERS: Record<string, () => readonly WikiDiagnostic[]> = {
       { baseContentHash: entityContentHash("old") },
       { revision: 1, entityContentHash: entityContentHash("new") },
     ),
+
+  // -- P2b, the Markdown codec ----------------------------------------------
+
+  WIKI_PARSE_ERROR: () =>
+    codecDiagnostics(`<!-- mex:entity
+id: "unterminated
+type: decision
+-->
+## Heading
+`),
+
+  UNBOUND_ENTITY_METADATA: () =>
+    codecDiagnostics(`<!-- mex:entity
+id: ${CODEC_ID}
+type: decision
+status: promoted
+-->
+
+Prose, and no heading after it.
+`),
+
+  DUPLICATE_ENTITY_METADATA: () =>
+    codecDiagnostics(
+      `<!-- mex:entity
+id: ${CODEC_ID}
+type: decision
+status: promoted
+-->
+` +
+        `<!-- mex:entity
+id: mx_01BX5ZZKBKACTAV9WEVGEMMVRZ
+type: decision
+status: promoted
+-->
+` +
+        `## One heading, two claimants
+`,
+    ),
+
 };
 
 describe("diagnostic registry", () => {

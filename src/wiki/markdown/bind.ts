@@ -21,8 +21,17 @@ export interface Binding {
   metadataStart: number;
   metadataEnd: number;
   heading: RawHeading | null;
-  /** Raw YAML text to parse into entity metadata. */
+  /** Raw YAML text to parse into entity metadata, for a comment block. */
   yamlText: string;
+  /**
+   * Metadata already parsed, for a frontmatter block.
+   *
+   * The frontmatter YAML is parsed once for the whole document, so the `mex`
+   * value is in hand before binding. Re-rendering it to text just to parse it
+   * again would be a round-trip through a serializer — the one thing this codec
+   * must never do, and the lint rule catches it.
+   */
+  parsedMetadata?: unknown;
   /** Body extent, filled in once every binding is known. */
   bodyStart: number;
   bodyEnd: number;

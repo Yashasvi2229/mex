@@ -139,17 +139,18 @@ export function findLayeringViolations(
 const SERIALIZATION_ALLOWLIST = ["src/wiki/markdown/patch.ts", "src/wiki/markdown/frontmatter.ts"];
 
 /**
- * The one violation that exists in the shipped tree.
+ * Files exempt from the no-re-serialization rule.
  *
- * `writeGroundings` rewrites the whole frontmatter block through
- * `YAML.stringify`, losing comment placement, quoting style and key order. It
- * is on a shipped code path with its own tests, so it is not fixed here; P2
- * refactors it onto the scoped `spliceTopLevelKey` primitive and this entry
- * goes away. Listing it explicitly means the count can only go down.
+ * **Empty, and it stays empty.** `writeGroundings` in `src/markdown.ts` was the
+ * one recorded exception: it rewrote the whole frontmatter block through
+ * `YAML.stringify`, losing comment placement, quoting style and key order on
+ * every grounding write. P2b refactored it onto the scoped
+ * `spliceTopLevelKey` primitive, so the exception is gone.
  *
- * TODO(P2): remove once `writeGroundings` moves onto src/wiki/markdown/frontmatter.ts.
+ * A new entry here is not a fix. It is a second writer with different fidelity,
+ * which is how byte preservation dies.
  */
-const KNOWN_SERIALIZATION_EXCEPTIONS = ["src/markdown.ts"];
+const KNOWN_SERIALIZATION_EXCEPTIONS: string[] = [];
 
 export function findSerializationViolations(path: string, source: string): string[] {
   if (SERIALIZATION_ALLOWLIST.includes(path) || KNOWN_SERIALIZATION_EXCEPTIONS.includes(path)) return [];
@@ -233,11 +234,12 @@ describe("no Markdown re-serialization", () => {
     expect(violations).toEqual([]);
   });
 
-  it("still has exactly one recorded exception, and it is the one we know about", () => {
-    // The count may only go down. If P2 has landed and this fails, delete the
-    // entry rather than adding another.
-    expect(KNOWN_SERIALIZATION_EXCEPTIONS).toEqual(["src/markdown.ts"]);
-    expect(read("src/markdown.ts")).toContain("YAML.stringify(frontmatter)");
+  it("has no recorded exceptions left, and may not grow new ones", () => {
+    // The count reached zero when P2b moved `writeGroundings` onto the scoped
+    // splice. It may only stay there: a new entry means a second writer that
+    // reformats, which is the failure this whole rule exists to prevent.
+    expect(KNOWN_SERIALIZATION_EXCEPTIONS).toEqual([]);
+    expect(read("src/markdown.ts")).not.toContain("YAML.stringify(");
   });
 
   it("keeps remark-stringify out of the dependency list entirely", () => {

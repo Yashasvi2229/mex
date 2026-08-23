@@ -43,6 +43,13 @@ import { findTopLevelKeyRange, topLevelKeys } from "./frontmatter.js";
 import { lineAt, lineStarts } from "./positions.js";
 import { associateAnchors } from "./anchors.js";
 
+/** An already-parsed metadata value, as a map, or null when it is not one. */
+function asMetadataMap(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 /** Parse YAML, returning null rather than throwing on malformed input. */
 function parseYamlMap(text: string): Record<string, unknown> | null {
   try {
@@ -120,7 +127,10 @@ interface BuildContext {
 
 function buildEntity(context: BuildContext, binding: Binding): ParsedEntity | null {
   const { path, text } = context;
-  const metadata = parseYamlMap(binding.yamlText);
+  const metadata =
+    binding.parsedMetadata === undefined
+      ? parseYamlMap(binding.yamlText)
+      : asMetadataMap(binding.parsedMetadata);
 
   const location: WikiEntityLocation = {
     file: path,
@@ -184,7 +194,7 @@ function bindFrontmatter(
   document: RawDocument,
   frontmatter: RawFrontmatter,
   mexRange: { keyStart: number; valueEnd: number },
-  yamlText: string,
+  parsedMetadata: unknown,
 ): Binding {
   const heading = document.headings.find((candidate) => candidate.start >= frontmatter.end);
   const bindable = heading !== undefined && /^[ \t\r\n]*$/.test(text.slice(frontmatter.end, heading.start));
@@ -193,7 +203,8 @@ function bindFrontmatter(
     metadataStart: mexRange.keyStart,
     metadataEnd: mexRange.valueEnd,
     heading: bindable ? heading! : null,
-    yamlText,
+    yamlText: "",
+    parsedMetadata,
     bodyStart: bindable ? heading!.end : frontmatter.end,
     bodyEnd: text.length,
   };
@@ -281,9 +292,7 @@ export function parseWikiMarkdown(options: ParseOptions): ParsedFile {
         }),
       );
     } else if (mexRange !== null) {
-      const mexValue = rootMap["mex"];
-      const mexYaml = mexValue === null || mexValue === undefined ? "" : YAML.stringify(mexValue);
-      frontmatterBinding = bindFrontmatter(text, document, block, mexRange, mexYaml);
+      frontmatterBinding = bindFrontmatter(text, document, block, mexRange, rootMap["mex"]);
     }
   }
 

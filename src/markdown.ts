@@ -3,6 +3,7 @@ import remarkParse from "remark-parse";
 import remarkFrontmatter from "remark-frontmatter";
 import { visit } from "unist-util-visit";
 import YAML from "yaml";
+import { renderKeyValue, spliceTopLevelKey } from "./wiki/markdown/frontmatter.js";
 import type { Grounding, ScaffoldFrontmatter } from "./types.js";
 import type { Root, Content, Link } from "mdast";
 
@@ -46,21 +47,22 @@ export function isGroundingArray(value: unknown): value is Grounding[] {
   });
 }
 
-/** Add or replace grounds_to while preserving the markdown body and other frontmatter keys. */
+/**
+ * Add or replace `grounds_to`, touching nothing else in the file.
+ *
+ * This used to rewrite the whole frontmatter block through `YAML.stringify`,
+ * which preserved the body but reformatted the YAML: comment placement, quoting
+ * style and key order were lost every time MEX recorded a fingerprint. That
+ * turns a one-line grounding update into a whole-block diff, which is exactly
+ * what the Markdown-canonical design exists to avoid — the scaffold has to stay
+ * reviewable in an ordinary pull request.
+ *
+ * It now splices the one key's own range. Everything else in the file, byte for
+ * byte, is left as the author wrote it.
+ */
 export function writeGroundings(content: string, groundings: Grounding[]): string {
   if (!isGroundingArray(groundings)) throw new Error("Invalid grounds_to entries");
-  const tree = parseMarkdown(content);
-  const yamlNode = tree.children.find((node) => node.type === "yaml");
-  const frontmatter = extractFrontmatter(content) ?? {};
-  frontmatter.grounds_to = groundings;
-  const yaml = YAML.stringify(frontmatter).trimEnd();
-  const block = `---\n${yaml}\n---`;
-  const start = yamlNode?.position?.start.offset;
-  const end = yamlNode?.position?.end.offset;
-  if (start !== undefined && end !== undefined) {
-    return content.slice(0, start) + block + content.slice(end);
-  }
-  return `${block}\n\n${content}`;
+  return spliceTopLevelKey(content, "grounds_to", renderKeyValue("grounds_to", groundings)).text;
 }
 
 export interface MexAnchor {
