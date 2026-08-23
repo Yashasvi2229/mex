@@ -327,6 +327,64 @@ describe("determinism (D5)", () => {
     expect(readDump(clean)).toContain("Could not read notes/locked.md");
   });
 
+  it("reports an unreadable file identically when it is itself the changed file", () => {
+    // The *other* half of the read-error fix, and the half nothing guarded.
+    //
+    // The fix has two write sites: the rebuild path, which records a read error
+    // against the file, and the refresh path, which does the same in its own
+    // unreadable branch. Reverting the rebuild half turns the test above red.
+    // Deleting `writeFileDiagnostics` from the unreadable branch of refresh.ts
+    // left every wiki test green, because the only case that reaches it is a
+    // file that is unreadable *and* in the changed set — a permissions change
+    // the caller does know about, which is the ordinary way a user meets this.
+    //
+    // Without this test the refresh half can be deleted by any later refactor
+    // and the same divergence returns through the changed-set door instead of
+    // the unchanged-set one.
+    scaffold = createScaffold();
+    const root = scaffold.root;
+    const incremental = join(root, "wiki.db");
+    const clean = join(root, "clean.db");
+
+    scaffold.write("topics/generated.md", TOPIC_FILE);
+    scaffold.write(
+      "notes/locked.md",
+      fileMarkdown([{ id: IDS[1], type: "decision", status: "promoted", targets: [], body: "Readable for now." }]),
+    );
+
+    let locked = false;
+    const readFile = (absolutePath: string): string => {
+      if (locked && isPath(absolutePath, "notes/locked.md")) {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      }
+      return readFileSync(absolutePath, "utf-8");
+    };
+
+    // Indexed successfully first, so the refresh has rows to tear down and the
+    // diagnostic has to be *written*, not merely left in place from a rebuild.
+    rebuildWikiIndex({ scaffoldRoot: root, indexPath: incremental, now: steppingClock(), readFile });
+    expect(diagnosticCodes(incremental)).not.toContain("WIKI_PARSE_ERROR");
+
+    locked = true;
+    const refreshed = refreshWikiIndex({
+      scaffoldRoot: root,
+      indexPath: incremental,
+      changed: ["notes/locked.md"],
+      now: steppingClock(Date.UTC(2028, 0, 1)),
+      readFile,
+    });
+    expect(refreshed.ok).toBe(true);
+
+    rebuildWikiIndex({ scaffoldRoot: root, indexPath: clean, now: steppingClock(Date.UTC(2029, 0, 1)), readFile });
+
+    expect(readDump(incremental)).toBe(readDump(clean));
+    // Non-vacuity, twice over: the report must be present, and it must be
+    // present in the *refreshed* index rather than only in the clean rebuild —
+    // two indexes that both forgot the file would compare equal above.
+    expect(readDump(clean)).toContain("Could not read notes/locked.md");
+    expect(readDump(incremental)).toContain("Could not read notes/locked.md");
+  });
+
   it("clears the report when the file becomes readable again", () => {
     scaffold = createScaffold();
     const root = scaffold.root;
