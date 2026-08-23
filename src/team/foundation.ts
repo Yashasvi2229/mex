@@ -100,6 +100,20 @@ export class TeamIdentityActivityFoundation {
   listActivity(request: Parameters<ActivityRepository["list"]>[0] = {}) {
     return this.#activity.list(request);
   }
+
+  /** Exact count of valid, non-conflicting canonical events. */
+  getActivitySummary(): { count: number; diagnostics: ReturnType<ActivityRepository["readAll"]>["diagnostics"] } {
+    const read = this.#activity.readAll();
+    if (read.sourceTruncated) {
+      throw new MexPortError({
+        title: "Activity corpus is incomplete",
+        status: 422,
+        code: "VALIDATION_FAILED",
+        detail: "The canonical activity corpus exceeded its safe read bound.",
+      });
+    }
+    return { count: read.events.length, diagnostics: read.diagnostics };
+  }
 }
 
 function sameActor(left: ActorResolution["actor"], right: ActorResolution["actor"]): boolean {

@@ -1,12 +1,13 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GitPort } from "../contracts/git.js";
 import { TeamIdentityActivityFoundation } from "../foundation.js";
 
 const MEMBER = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const EVENT = "event_01ARZ3NDEKTSV4RRFFQ69G5FAB";
+const SECOND_EVENT = "event_01ARZ3NDEKTSV4RRFFQ69G5FAC";
 const NOW = new Date("2026-08-23T01:02:03.000Z");
 const roots: string[] = [];
 
@@ -141,6 +142,37 @@ describe("TeamIdentityActivityFoundation", () => {
       displayName: "Daksh Current",
     });
     expect(foundation.listActivity().items[0]?.actor).toEqual(preview.activity.event.actor);
+  });
+
+  it("memoizes current member lookup by ID while preserving each recorded display snapshot", async () => {
+    const root = temporaryRoot();
+    const ids = [EVENT, SECOND_EVENT];
+    const foundation = new TeamIdentityActivityFoundation({
+      projectRoot: root,
+      scaffoldId: "scaffold-test",
+      git: fakeGit(),
+      now: () => new Date(NOW),
+      activityIdFactory: () => ids.shift()!,
+    });
+    const member = await foundation.members.create({ id: MEMBER, displayName: "Before" });
+    foundation.localState.configureMember({ memberId: MEMBER, expectedRevision: null });
+    const first = await foundation.previewActivity({ action: "member.observed", subjects: [] });
+    await foundation.applyActivity(first, first.activity.previewRevision);
+    await foundation.members.update(MEMBER, { displayName: "Current" }, member.revision);
+    const second = await foundation.previewActivity({ action: "member.observed", subjects: [] });
+    await foundation.applyActivity(second, second.activity.previewRevision);
+
+    const resolveHistorical = vi.spyOn(foundation.actors, "resolveHistorical");
+    const page = await foundation.timeline.listResolved({ source: "activity", limit: 100 });
+    expect(resolveHistorical).toHaveBeenCalledTimes(1);
+    expect(page.items.map((item) => item.recordedActor)).toEqual([
+      { kind: "member", memberId: MEMBER, displayName: "Before" },
+      { kind: "member", memberId: MEMBER, displayName: "Current" },
+    ]);
+    expect(page.items.map((item) => item.effectiveActor)).toEqual([
+      { kind: "member", memberId: MEMBER, displayName: "Current" },
+      { kind: "member", memberId: MEMBER, displayName: "Current" },
+    ]);
   });
 });
 

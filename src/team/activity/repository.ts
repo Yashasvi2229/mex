@@ -63,12 +63,14 @@ export interface ActivityCreatePreview {
 export interface ActivityReadResult {
   events: readonly StoredActivityEvent[];
   diagnostics: readonly Diagnostic[];
+  sourceTruncated: boolean;
 }
 
 export interface ActivityListPage {
   items: readonly StoredActivityEvent[];
   nextCursor: string | null;
   truncated: boolean;
+  sourceTruncated: boolean;
   deterministicRevision: Revision;
   diagnostics: readonly Diagnostic[];
 }
@@ -187,7 +189,7 @@ export class ActivityRepository {
     const page = buildTimelinePage(read.events, [], read.diagnostics, {
       ...request,
       source: "activity",
-    });
+    }, read.sourceTruncated);
     return {
       items: page.items.map((entry) => {
         if (entry.source !== "activity") throw new Error("Unexpected legacy activity entry.");
@@ -195,6 +197,7 @@ export class ActivityRepository {
       }),
       nextCursor: page.nextCursor,
       truncated: page.truncated,
+      sourceTruncated: page.sourceTruncated,
       deterministicRevision: page.deterministicRevision,
       diagnostics: page.diagnostics,
     };
@@ -202,16 +205,25 @@ export class ActivityRepository {
 
   readAll(): ActivityReadResult {
     const root = assertContainedArtifactDirectory(this.projectRoot, ACTIVITY_ROOT);
-    if (root === null) return { events: [], diagnostics: [] };
+    if (root === null) return { events: [], diagnostics: [], sourceTruncated: false };
 
     const parsed: StoredActivityEvent[] = [];
     const diagnostics: Diagnostic[] = [];
+    let sourceTruncated = false;
     let scannedFiles = 0;
-    for (const monthEntry of readDirectoryBounded(
+    const monthDirectory = readDirectoryBounded(
       root,
       MAX_ACTIVITY_MONTH_DIRECTORIES,
-      "month directories",
-    )) {
+    );
+    if (monthDirectory.truncated) {
+      sourceTruncated = true;
+      diagnostics.push(diagnostic(
+        "ACTIVITY_SOURCE_TRUNCATED",
+        `Canonical activity exceeds the ${MAX_ACTIVITY_MONTH_DIRECTORIES}-month safety limit.`,
+        ACTIVITY_ROOT,
+      ));
+    }
+    for (const monthEntry of monthDirectory.entries) {
       const monthPath = `${ACTIVITY_ROOT}/${monthEntry.name}` as RepoRelativePath;
       if (!monthEntry.isDirectory() || !ACTIVITY_MONTH.test(monthEntry.name)) {
         diagnostics.push(diagnostic(
@@ -232,13 +244,20 @@ export class ActivityRepository {
         continue;
       }
 
-      const fileEntries = readDirectoryBounded(
+      const fileDirectory = readDirectoryBounded(
         monthRoot,
         MAX_ACTIVITY_SCAN_FILES - scannedFiles,
-        "activity files",
       );
-      scannedFiles += fileEntries.length;
-      for (const fileEntry of fileEntries) {
+      scannedFiles += fileDirectory.entries.length;
+      if (fileDirectory.truncated) {
+        sourceTruncated = true;
+        diagnostics.push(diagnostic(
+          "ACTIVITY_SOURCE_TRUNCATED",
+          `Canonical activity exceeds the ${MAX_ACTIVITY_SCAN_FILES}-file safety limit.`,
+          ACTIVITY_ROOT,
+        ));
+      }
+      for (const fileEntry of fileDirectory.entries) {
         const sourcePath = `${monthPath}/${fileEntry.name}` as RepoRelativePath;
         if (!fileEntry.isFile() || !ACTIVITY_FILE.test(fileEntry.name)) {
           diagnostics.push(diagnostic(
@@ -259,6 +278,7 @@ export class ActivityRepository {
           diagnostics.push(diagnosticFromError(error, sourcePath));
         }
       }
+      if (fileDirectory.truncated) break;
     }
 
     const events: StoredActivityEvent[] = [];
@@ -285,7 +305,10 @@ export class ActivityRepository {
       ));
     }
 
-    return { events, diagnostics };
+    // A partial directory walk depends on filesystem enumeration order. Do not
+    // surface those rows as a trusted canonical subset; retain only the safe
+    // truncation diagnostic until the corpus can be read completely.
+    return { events: sourceTruncated ? [] : events, diagnostics, sourceTruncated };
   }
 }
 
@@ -297,15 +320,19 @@ export class TimelineReader {
   ) {}
 
   list(request: TimelineRequest = {}): TimelinePage {
-    const canonical = this.activity.readAll();
-    const legacy = readLegacyTimeline(this.projectRoot);
-    const page = buildTimelinePage(
+    const canonical = request.source === "legacy"
+      ? { events: [], diagnostics: [], sourceTruncated: false }
+      : this.activity.readAll();
+    const legacy = request.source === "activity"
+      ? { entries: [], diagnostics: [], truncated: false }
+      : readLegacyTimeline(this.projectRoot);
+    return buildTimelinePage(
       canonical.events,
       legacy.entries,
       [...canonical.diagnostics, ...legacy.diagnostics],
       request,
+      canonical.sourceTruncated || legacy.truncated,
     );
-    return legacy.truncated ? { ...page, truncated: true } : page;
   }
 
   async listResolved(request: TimelineRequest = {}): Promise<ResolvedTimelinePage> {
@@ -317,15 +344,27 @@ export class TimelineReader {
       );
     }
     const page = this.list(request);
+    const resolutions = new Map<string, ReturnType<ActorResolver["resolveHistorical"]>>();
     const items = await Promise.all(page.items.map(async (entry): Promise<ResolvedTimelineEntry> => {
       if (entry.source === "legacy") {
         return { entry, recordedActor: null, effectiveActor: null, diagnostics: [] };
       }
-      const resolution = await this.actorResolver!.resolveHistorical(entry.actor);
+      const key = actorKey(entry.actor);
+      let pending = resolutions.get(key);
+      if (pending === undefined) {
+        pending = this.actorResolver!.resolveHistorical(entry.actor);
+        resolutions.set(key, pending);
+      }
+      const resolution = await pending;
       return {
         entry,
-        recordedActor: resolution.recordedActor,
-        effectiveActor: resolution.resolvedActor,
+        // Cache current lookup work, never the immutable bytes recorded by this
+        // particular event (older member display snapshots may differ).
+        recordedActor: entry.actor,
+        effectiveActor: resolution.diagnostics.some((item) => item.code === "ACTOR_MEMBER_MISSING")
+          || (entry.actor.kind === "git" && resolution.resolvedActor.kind === "git")
+          ? entry.actor
+          : resolution.resolvedActor,
         diagnostics: resolution.diagnostics,
       };
     }));
@@ -379,27 +418,35 @@ function sameRepoCheckpoint(left: ActivityEvent["repoState"], right: ActivityEve
   return left.branch === right.branch && left.head === right.head && left.dirty === right.dirty;
 }
 
-function readDirectoryBounded(path: string, maximum: number, label: string): Dirent[] {
+function readDirectoryBounded(
+  path: string,
+  maximum: number,
+): { entries: Dirent[]; truncated: boolean } {
   const directory = opendirSync(path);
   const entries: Dirent[] = [];
+  let truncated = false;
   try {
     let entry: Dirent | null;
     while ((entry = directory.readSync()) !== null) {
       if (entries.length >= maximum) {
-        throw artifactError(
-          "VALIDATION_FAILED",
-          "Activity corpus is too large",
-          `Canonical activity exceeds the ${maximum} ${label} safety limit.`,
-        );
+        truncated = true;
+        break;
       }
       entries.push(entry);
     }
   } finally {
     directory.closeSync();
   }
-  return entries.sort((left, right) =>
-    left.name < right.name ? -1 : left.name > right.name ? 1 : 0
-  );
+  entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+  return { entries, truncated };
+}
+
+function actorKey(actor: ActivityEvent["actor"]): string {
+  if (actor.kind === "unknown") return "unknown";
+  if (actor.kind === "member") {
+    return `member\0${actor.memberId}`;
+  }
+  return `git\0${actor.name?.trim().normalize("NFC") ?? ""}\0${actor.email?.trim().normalize("NFC").toLowerCase() ?? ""}`;
 }
 
 function diagnostic(code: string, message: string, path: RepoRelativePath): Diagnostic {

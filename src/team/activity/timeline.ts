@@ -34,7 +34,10 @@ export interface TimelineRequest extends PageRequest {
 export interface TimelinePage {
   items: readonly TimelineEntry[];
   nextCursor: string | null;
+  /** More entries exist after this page. */
   truncated: boolean;
+  /** A corpus safety bound prevented a complete source scan. */
+  sourceTruncated: boolean;
   deterministicRevision: string;
   diagnostics: readonly Diagnostic[];
 }
@@ -52,6 +55,7 @@ export function buildTimelinePage(
   legacy: readonly LegacyTimelineEntry[],
   diagnostics: readonly Diagnostic[],
   request: TimelineRequest = {},
+  sourceTruncated = false,
 ): TimelinePage {
   const limit = pageLimit(request.limit);
   const since = parseSince(request.since);
@@ -82,7 +86,14 @@ export function buildTimelinePage(
     ? 0
     : entries.findIndex((entry) => compareEntryToCursor(entry, cursor) > 0);
   if (cursor !== null && start === -1) {
-    return { items: [], nextCursor: null, truncated: false, deterministicRevision: revision, diagnostics };
+    return {
+      items: [],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated,
+      deterministicRevision: revision,
+      diagnostics,
+    };
   }
 
   const items = entries.slice(start, start + limit);
@@ -100,6 +111,7 @@ export function buildTimelinePage(
         })
       : null,
     truncated,
+    sourceTruncated,
     deterministicRevision: revision,
     diagnostics,
   };
