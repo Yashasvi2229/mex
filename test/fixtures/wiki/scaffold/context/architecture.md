@@ -11,14 +11,14 @@ grounds_to:
 Prose introducing the system, belonging to no entity.
 
 <!-- mex:entity
-id: mx_01J0ARCH1TECTURE5Y6Q2ZBCH
+id: mx_01KQVXGJ60VSKPKQ4H1GJ2S0CB
 type: architecture
 status: promoted
 revision: 2
-topics: [mx_01J0T0P1CAUTHENT1CAT10N5N]
+topics: [mx_01KRC0G1Y0B27EG9PJMQMMD3RE]
 relations:
   - type: depends_on
-    target: mx_01J0C0MP0NENTGATEWAY3TWVX
+    target: mx_01KQYKB4T0FC6RE3HSRDJ4AVAH
 -->
 ## Overall shape
 
@@ -30,11 +30,11 @@ Requests enter at the gateway and fan out. This deeper heading is part of the
 entity above.
 
 <!-- mex:entity
-id: mx_01J0C0MP0NENTGATEWAY3TWVX
+id: mx_01KQYKB4T0FC6RE3HSRDJ4AVAH
 type: component
 status: promoted
 revision: 1
-topics: [mx_01J0T0P1CAUTHENT1CAT10N5N]
+topics: [mx_01KRC0G1Y0B27EG9PJMQMMD3RE]
 grounds_to:
   - node: "function:a3f8c21d9e4b7f60a1c2d3e4f5061728"
     fingerprint: "mh:64:9f2a4c6e"

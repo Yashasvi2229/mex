@@ -2,7 +2,7 @@
 name: conventions
 description: How we write things here
 mex:
-  id: mx_01J0C0NVENT10NNAM1NG8FGH
+  id: mx_01KR195QE08J72KRAYJSXW9CCT
   type: convention
   status: promoted
   revision: 1

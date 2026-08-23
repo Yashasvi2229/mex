@@ -1,7 +1,7 @@
 ---
 name: authentication
 mex:
-  id: mx_01J0T0P1CAUTHENT1CAT10N5N
+  id: mx_01KRC0G1Y0B27EG9PJMQMMD3RE
   type: topic
   status: promoted
   revision: 1

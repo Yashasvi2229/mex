@@ -2,11 +2,11 @@
 name: router
 description: Navigation surface
 mex:
-  id: mx_01J0ROUTERV1EW7QN4M6K2SD8
+  id: mx_01KQS7NZJ01XRTQHM8SEYB446Y
   type: guide
   status: promoted
   revision: 3
-  topics: [mx_01J0T0P1CAUTHENT1CAT10N5N]
+  topics: [mx_01KRC0G1Y0B27EG9PJMQMMD3RE]
 ---
 
 # Project router

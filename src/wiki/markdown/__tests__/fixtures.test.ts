@@ -8,22 +8,25 @@ import {
   type FixtureExpectation,
 } from "./expectations.js";
 import { checkRangePartition } from "../ranges.js";
+import { isEntityId } from "../../model/ids.js";
 import { parseWikiMarkdown, partitionRanges } from "../contract.js";
 
 /**
  * The codec's acceptance tests, written before the codec.
  *
- * The parser does not exist, so the tests that call it are skipped and tagged
- * `TODO(P2b-codec)`. The next phase's definition of done is: delete the skips,
- * everything passes, and **nothing in the corpus or the expectations was edited
- * to make it so.**
+ * P2a wrote these against a throwing stub, so they could not be shaped around
+ * an implementation. P2b built the codec and unskipped them without editing the
+ * corpus or the expectations — with one sanctioned exception, recorded in the
+ * plan at §3c.1: eight scaffold ids were not valid entity ids and no codec
+ * could ever have parsed them.
  *
- * The meta-tests below are *not* skipped. They keep the corpus and the
- * expectations honest without a parser: that every fixture is claimed, that
- * every anchor resolves, that the ranges an expectation describes partition the
- * file, and that the encoding fixtures' absolute numbers agree with their
- * anchors. Without them a fixture could be quietly orphaned or an expectation
- * could name text that is not there, and nobody would know until P2b.
+ * The meta-tests keep the corpus and the expectations honest independently of
+ * the parser: that every fixture is claimed, that every anchor resolves, that
+ * the ranges an expectation describes partition the file, that the encoding
+ * fixtures' absolute numbers agree with their anchors, and — since the id
+ * defect — that every id an expectation names is well-formed by the model's own
+ * guard. That last one is the lesson: the oracle must be able to fail on its
+ * own data, or it is not an oracle.
  */
 
 const FIXTURE_ROOT = resolve(__dirname, "../../../../test/fixtures/wiki");
@@ -74,6 +77,18 @@ describe("fixture corpus", () => {
   it("gives every expectation a note explaining what it proves", () => {
     for (const expectation of FIXTURE_EXPECTATIONS) {
       expect(expectation.note.length, `${expectation.path} has no note`).toBeGreaterThan(20);
+    }
+  });
+
+  it("names only well-formed entity ids in every expectation", () => {
+    // The scaffold's ids were the ones that were wrong, but the gap was
+    // generic: nothing checked that an expectation's id was an id. Covering
+    // every fixture means the next hand-typed id fails here rather than
+    // surfacing as an inexplicable parser failure.
+    for (const expectation of FIXTURE_EXPECTATIONS) {
+      for (const entity of expectation.entities) {
+        expect(isEntityId(entity.id), `${expectation.path} names ${entity.id}`).toBe(true);
+      }
     }
   });
 
@@ -191,6 +206,21 @@ describe("scaffold fixture", () => {
   it("has every file it claims", () => {
     for (const path of SCAFFOLD_PATHS) {
       expect(CORPUS).toContain(path);
+    }
+  });
+
+  it("declares only well-formed entity ids", () => {
+    // The root cause of the defect this test was added for: P2a asserted that
+    // each id appeared exactly once, but never that it was an id at all, so
+    // eight malformed ones — 24-25 characters, some using O, U or L, which
+    // Crockford Base32 excludes as confusable — survived a full verification
+    // pass. An oracle that cannot fail on its own data is not an oracle.
+    //
+    // Asserted with the model's own guard rather than a regex written here, so
+    // the corpus and the engine can never drift to different notions of a
+    // valid id.
+    for (const id of SCAFFOLD_FIXTURE.entityIds) {
+      expect(isEntityId(id), `${id} is not a valid entity id`).toBe(true);
     }
   });
 
