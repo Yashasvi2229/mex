@@ -35,29 +35,167 @@ test.describe("populated development fixture", () => {
     await page.goto("/?fixture=populated");
     await expect(page.getByRole("heading", { name: "Good context starts here." })).toBeVisible();
     await expect(page.getByLabel("Repository context").getByText("feat/project-hub-foundation", { exact: true })).toBeVisible();
+    await expect(page.getByText("The code graph is behind this branch", { exact: true })).toBeVisible();
     await expectAccessible(page);
     expect(errors).toEqual([]);
     await expect(page).toHaveScreenshot("hub-home.png", { fullPage: true });
   });
 
-  test("keeps Search sources separate under partial failure", async ({ page }) => {
+  test("keeps real Graph search groups separate while Wiki is unavailable", async ({ page }) => {
     const errors = watchBrowserErrors(page);
-    await page.goto("/search?fixture=populated&q=freshness");
+    await page.goto("/search?fixture=populated&q=hub");
     await expect(page.getByRole("heading", { name: "Search the project" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Knowledge" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Knowledge", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Knowledge unavailable" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Code symbols" })).toBeVisible();
-    await expect(page.getByText("This source failed independently.")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Source matches" })).toBeVisible();
+    await expect(page.getByRole("link", { name: /createHubServer/ }).first()).toBeVisible();
+    await expect(page.getByText(/export async function createHubServer/)).toBeVisible();
+    await expect(page.getByText("This source failed independently.")).toHaveCount(0);
     await expectAccessible(page);
     expect(errors).toEqual([]);
     await expect(page).toHaveScreenshot("hub-search.png", { fullPage: true });
   });
 
-  test("renders Health without inventing repair availability", async ({ page }) => {
+  test("renders the deterministic Code landing and exact symbol workspace", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    const external: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).hostname !== "127.0.0.1") external.push(request.url());
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/code?fixture=populated");
+
+    await expect(page.getByRole("heading", { name: "Explore the code graph" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Find the exact symbol behind the change" })).toBeVisible();
+    await page.getByRole("searchbox", { name: "Search code symbols and source" }).fill("hub");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Code symbols" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Source matches" })).toBeVisible();
+    await page.getByRole("link", { name: /createHubServer/ }).first().click();
+
+    await expect(page.getByRole("heading", { level: 1, name: "createHubServer" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
+    const specimen = page.getByRole("region", { name: "src/hub/server.ts, lines 74 through 84" });
+    await expect(specimen).toBeVisible();
+    await expect.poll(() => specimen.locator("code").allTextContents()).toEqual([
+      "export async function createHubServer(options: HubServerOptions) {",
+      "  const app = createHubApp(options);",
+      "  const server = await listenOnLoopback(app, options.port);",
+      "  return { server, address: server.address() };",
+      "}",
+    ]);
+    await expect(page.getByText("sha256:888888888888", { exact: true })).toBeVisible();
+    await expectAccessible(page);
+    expect(external).toEqual([]);
+    expect(errors).toEqual([]);
+    await expect(page).toHaveScreenshot("hub-code.png", { fullPage: true });
+  });
+
+  test("uses keyboard tabs for callers, callees, and dependent impact", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/code/symbols/sym.createHubServer?fixture=populated");
+    const overview = page.getByRole("tab", { name: "Overview" });
+    await expect(overview).toHaveAttribute("aria-selected", "true");
+    await overview.focus();
+
+    await page.keyboard.press("ArrowRight");
+    const callers = page.getByRole("tab", { name: "Callers" });
+    await expect(callers).toBeFocused();
+    await expect(callers).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/\?view=callers$/);
+    await expect(page.getByRole("tabpanel", { name: "Callers" }).getByText("sym.GraphPort.searchNodes", { exact: true })).toBeVisible();
+
+    await page.keyboard.press("ArrowRight");
+    const callees = page.getByRole("tab", { name: "Callees" });
+    await expect(callees).toBeFocused();
+    await expect(callees).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/\?view=callees$/);
+    await expect(page.getByRole("tabpanel", { name: "Callees" }).getByText("sym.GraphPort.searchNodes", { exact: true })).toBeVisible();
+
+    await page.keyboard.press("End");
+    const impact = page.getByRole("tab", { name: "Impact" });
+    await expect(impact).toBeFocused();
+    await expect(impact).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/\?view=impact&depth=2$/);
+    const impactPanel = page.getByRole("tabpanel", { name: "Impact" });
+    await expect(impactPanel.getByRole("heading", { name: "Dependent blast radius" })).toBeVisible();
+    await expect(impactPanel.getByText("1 affected dependents", { exact: true })).toBeVisible();
+    await expect(impactPanel.getByText(/downstream/i)).toHaveCount(0);
+    await expectAccessible(page);
+
+    await page.keyboard.press("Home");
+    await expect(overview).toBeFocused();
+    await expect(overview).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/\/code\/symbols\/sym\.createHubServer$/);
+    expect(errors).toEqual([]);
+  });
+
+  for (const width of [1440, 1024] as const) {
+    test(`keeps the Code observatory accessible and overflow-free at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/code/symbols/sym.createHubServer?fixture=populated");
+      await expect(page.getByRole("heading", { level: 1, name: "createHubServer" })).toBeVisible();
+
+      const identity = await page.getByRole("heading", { level: 2, name: "createHubServer" }).locator("xpath=ancestor::section[1]").boundingBox();
+      const source = await page.getByRole("heading", { name: "Source specimen" }).locator("xpath=ancestor::section[1]").boundingBox();
+      const traversal = await page.getByRole("tabpanel", { name: "Overview" }).boundingBox();
+      expect(identity).not.toBeNull();
+      expect(source).not.toBeNull();
+      expect(traversal).not.toBeNull();
+      if (width === 1440) {
+        expect(identity!.x).toBeLessThan(source!.x);
+        expect(source!.x).toBeLessThan(traversal!.x);
+        expect(Math.abs(identity!.y - source!.y)).toBeLessThanOrEqual(1);
+        expect(Math.abs(source!.y - traversal!.y)).toBeLessThanOrEqual(1);
+      } else {
+        expect(identity!.y).toBeLessThan(source!.y);
+        expect(source!.y).toBeLessThan(traversal!.y);
+      }
+      const geometry = await page.evaluate(() => ({
+        viewportWidth: window.innerWidth,
+        documentClientWidth: document.documentElement.clientWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+      }));
+      expect(geometry).toEqual({
+        viewportWidth: width,
+        documentClientWidth: width,
+        documentScrollWidth: width,
+        bodyScrollWidth: width,
+      });
+      await expectAccessible(page);
+    });
+  }
+
+  test("suppresses Code traversal motion when reduced motion is requested", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/code/symbols/sym.createHubServer?fixture=populated&view=callers");
+    const relation = page.getByRole("tabpanel", { name: "Callers" }).getByRole("link").first();
+    await expect(relation).toBeVisible();
+    const motion = await relation.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { transitionDuration: style.transitionDuration, animationDuration: style.animationDuration };
+    });
+    expect(Number.parseFloat(motion.transitionDuration)).toBeLessThanOrEqual(0.00001);
+    expect(Number.parseFloat(motion.animationDuration)).toBeLessThanOrEqual(0.00001);
+  });
+
+  test("renders structured Graph Health without inventing repair availability", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     await page.goto("/health?fixture=populated");
     await expect(page.getByRole("heading", { name: "Health", exact: true })).toBeVisible();
+    await expect(page.getByText("Indexed snapshot", { exact: true })).toBeVisible();
+    await expect(page.getByText("Current repository", { exact: true })).toBeVisible();
+    await expect(page.getByText("179/183", { exact: true })).toBeVisible();
+    await expect(page.getByText("Branch changed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "View active job" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Refresh graph/ })).toBeDisabled();
+    await expect(page.getByRole("button", { name: /Rebuild graph/ })).toBeDisabled();
     await expect(page.getByText("The previous trustworthy index was preserved.")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Wiki rebuild" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: /Wiki rebuild/i })).toHaveCount(0);
     await expectAccessible(page);
     expect(errors).toEqual([]);
     await expect(page).toHaveScreenshot("hub-health.png", { fullPage: true });
@@ -69,6 +207,9 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("heading", { name: "Jobs", exact: true })).toBeVisible();
     await expect(page.getByRole("complementary", { name: "Job detail" })).toBeVisible();
     await expect(page.getByRole("complementary", { name: "Job detail" }).getByRole("progressbar", { name: "68% complete" })).toBeVisible();
+    await expect(page.getByLabel("Graph operation phases").getByText("Parse", { exact: true })).toHaveAttribute("aria-current", "step");
+    await expect(page.getByRole("button", { name: /^Refresh graph/ })).toBeDisabled();
+    await expect(page.getByRole("button", { name: /^Rebuild graph/ })).toBeDisabled();
     await expect(page.getByRole("button", { name: "Rebuild Wiki" })).toBeDisabled();
     await expectAccessible(page);
     expect(errors).toEqual([]);
@@ -166,7 +307,7 @@ test.describe("populated development fixture", () => {
 
     const routes = [
       ["Knowledge", "Knowledge"],
-      ["Code", "Code"],
+      ["Code", "Explore the code graph"],
       ["Workstreams", "Workstreams"],
       ["Specs", "Specs"],
       ["Playbooks", "Playbooks"],
@@ -244,6 +385,10 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("heading", { name: "Good context starts here." })).toBeVisible();
     await page.goto("/activity?fixture=populated");
     await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
+    await page.goto("/code?fixture=populated&q=hub");
+    await expect(page.getByRole("heading", { name: "Code symbols" })).toBeVisible();
+    await page.getByRole("link", { name: /createHubServer/ }).first().click();
+    await expect(page.getByRole("heading", { level: 1, name: "createHubServer" })).toBeVisible();
     expect(external).toEqual([]);
   });
 });
@@ -289,12 +434,18 @@ test.describe("built production Hub", () => {
     const response = await page.goto(bootstrapUrl);
     await expect(page.getByRole("heading", { name: "Good context starts here." })).toBeVisible();
     await expect.poll(() => page.url()).not.toContain("#token=");
-    await expect(page.getByText("Knowledge and code indexes are unavailable.")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Knowledge Unavailable" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Code", exact: true })).toBeVisible();
     await expect(page.getByText("Three knowledge pages lost grounding")).toHaveCount(0);
 
     await page.goto(`${new URL(bootstrapUrl).origin}/?fixture=populated`);
     await expect(page.getByText("Three knowledge pages lost grounding")).toHaveCount(0);
-    await expect(page.getByText("Knowledge and code indexes are unavailable.")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Knowledge Unavailable" })).toBeVisible();
+
+    await page.goto(`${new URL(bootstrapUrl).origin}/code?fixture=populated`);
+    await expect(page.getByRole("heading", { name: "Explore the code graph" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Find the exact symbol behind the change" })).toBeVisible();
+    await expect(page.getByText("createHubServer", { exact: true })).toHaveCount(0);
 
     await page.goto(`${new URL(bootstrapUrl).origin}/activity?fixture=populated`);
     await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();

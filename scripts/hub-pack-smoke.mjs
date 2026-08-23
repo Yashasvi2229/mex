@@ -37,7 +37,7 @@ try {
   const project = join(work, "project");
   mkdirSync(join(project, ".mex"), { recursive: true });
   writeFileSync(join(project, "package.json"), "{\n  \"private\": true\n}\n");
-  writeFileSync(join(project, ".gitignore"), "node_modules/\n.mex/local/\n");
+  writeFileSync(join(project, ".gitignore"), "node_modules/\n.mex/graph.db*\n.mex/local/\n");
   writeFileSync(join(project, ".mex", "ROUTER.md"), "# Project Router\n");
   writeFileSync(
     join(project, ".mex", "config.json"),
@@ -47,12 +47,22 @@ try {
     }, null, 2) + "\n",
   );
   writeActivityFixture(project);
-  writeFileSync(join(project, ".mex", "graph.db"), "packed graph sentinel\n");
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "src", "packed.ts"), [
+    "export function packedService(input: number): number {",
+    "  return input * 2;",
+    "}",
+    "",
+    "export function packedCaller(): number {",
+    "  return packedService(21);",
+    "}",
+    "",
+  ].join("\n"));
   writeFileSync(join(project, ".mex", "wiki.db"), "packed wiki sentinel\n");
   run("git", ["init", "--quiet"], project);
   run("git", ["config", "user.name", "Packed Ada"], project);
   run("git", ["config", "user.email", "packed@example.test"], project);
-  run("git", ["add", ".gitignore", "package.json", ".mex"], project);
+  run("git", ["add", ".gitignore", "package.json", ".mex", "src"], project);
   run("git", ["commit", "--quiet", "-m", "test fixture"], project);
   run(npm, [
     "install",
@@ -70,7 +80,7 @@ try {
   if (!existsSync(manifest)) throw new Error("The packed package omitted dist/hub assets.");
   const declaration = readFileSync(join(installed, "dist", "index.d.ts"), "utf8");
   if (
-    /Hub(?:Job|Api|Session|Capabilities|Activity)|Activity(?:Request|Response|Item|Diagnostic)|runHubCommand/.test(
+    /Hub(?:Job|Api|Session|Capabilities|Activity)|Activity(?:Request|Response|Item|Diagnostic)|CodeWorkspace|GraphHealthDetails|RepositoryGraphPort|runHubCommand/.test(
       declaration,
     )
   ) {
@@ -78,6 +88,7 @@ try {
   }
 
   const cli = join(installed, "dist", "cli.js");
+  run(process.execPath, [cli, "graph", "rebuild", "--root", project, "--json"], project);
   child = spawn(process.execPath, [cli, "hub", "--no-open"], {
     cwd: project,
     env: { ...process.env, MEX_TELEMETRY: "0", NO_COLOR: "1" },
@@ -111,14 +122,22 @@ try {
     headers: { cookie },
     redirect: "error",
   });
-  if (!session.ok || typeof (await session.json()).csrfToken !== "string") {
+  const sessionBody = await session.json();
+  if (!session.ok || typeof sessionBody.csrfToken !== "string") {
     throw new Error("The packaged Hub session API did not load.");
   }
   const capabilities = await fetch(`${url.origin}/api/v1/capabilities`, {
     headers: { cookie },
     redirect: "error",
   });
-  if (!capabilities.ok || (await capabilities.json()).apiVersion !== "v1") {
+  const capabilitiesBody = await capabilities.json();
+  if (
+    !capabilities.ok
+    || capabilitiesBody.apiVersion !== "v1"
+    || capabilitiesBody.graph?.read?.availability !== "available"
+    || capabilitiesBody.graph?.refresh?.availability !== "available"
+    || capabilitiesBody.graph?.rebuild?.availability !== "available"
+  ) {
     throw new Error("The packaged Hub capabilities API did not load.");
   }
   const home = await fetch(`${url.origin}/api/v1/home`, {
@@ -155,9 +174,96 @@ try {
       throw new Error(`The packaged activity API leaked a private field: ${secret}`);
     }
   }
+  const search = await fetch(`${url.origin}/api/v1/search?q=packedService&limit=10`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const searchBody = await search.json();
+  const symbol = searchBody.groups?.symbols?.items?.find((item) => (
+    item.kind === "code_symbol" && item.name === "packedService"
+  ));
+  if (
+    !search.ok
+    || searchBody.groups?.symbols?.status !== "available"
+    || searchBody.groups?.sources?.status !== "available"
+    || !symbol
+  ) {
+    throw new Error("The packaged Hub did not expose real grouped graph search.");
+  }
+  const code = await fetch(
+    `${url.origin}/api/v1/code/symbols/${encodeURIComponent(symbol.id)}?view=callers`,
+    { headers: { cookie }, redirect: "error" },
+  );
+  const codeBody = await code.json();
+  if (
+    !code.ok
+    || codeBody.symbol?.id !== symbol.id
+    || !codeBody.source?.items?.some((item) => item.content.includes("packedService"))
+    || codeBody.traversal?.view !== "callers"
+  ) {
+    throw new Error("The packaged Hub did not expose the real symbol workspace.");
+  }
+  const health = await fetch(`${url.origin}/api/v1/health`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const healthBody = await health.json();
+  const graphHealth = healthBody.components?.find((component) => component.id === "graph");
+  if (!health.ok || graphHealth?.graph?.indexStatus !== "fresh") {
+    throw new Error("The packaged Hub did not report fresh graph health.");
+  }
   const afterReads = snapshotProtectedProjectState(project);
   if (JSON.stringify(afterReads) !== JSON.stringify(beforeReads)) {
-    throw new Error("Reading packaged Home and Activity mutated protected project state.");
+    throw new Error("Reading packaged Home, Activity, Search, Code, or Health mutated protected project state.");
+  }
+
+  const beforeMaintenance = snapshotProtectedProjectState(project, { includeRuntimeState: false });
+
+  for (const kind of ["graph_refresh", "graph_rebuild"]) {
+    if (kind === "graph_rebuild") {
+      writeFileSync(join(project, ".mex", "graph.db"), "intentionally corrupt graph for rebuild coverage\n");
+      const corruptHealth = await fetch(`${url.origin}/api/v1/health`, {
+        headers: { cookie },
+        redirect: "error",
+      });
+      const corruptHealthBody = await corruptHealth.json();
+      const corruptGraph = corruptHealthBody.components?.find((component) => component.id === "graph");
+      if (!corruptHealth.ok || corruptGraph?.graph?.indexStatus !== "corrupt") {
+        throw new Error("The packaged Hub did not observe the intentionally corrupt graph before rebuild.");
+      }
+    }
+    const started = await fetch(`${url.origin}/api/v1/jobs`, {
+      method: "POST",
+      headers: {
+        cookie,
+        origin: url.origin,
+        "content-type": "application/json",
+        "x-mex-csrf": sessionBody.csrfToken,
+      },
+      body: JSON.stringify({ kind }),
+      redirect: "error",
+    });
+    const startedBody = await started.json();
+    if (started.status !== 202 || typeof startedBody.id !== "string") {
+      throw new Error(`The packaged Hub could not start ${kind}.`);
+    }
+    const terminal = await waitForJob(url.origin, cookie, startedBody.id);
+    if (terminal.state !== "succeeded") {
+      throw new Error(`The packaged Hub ${kind} job did not succeed.`);
+    }
+  }
+  const repairedHealth = await fetch(`${url.origin}/api/v1/health`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const repairedHealthBody = await repairedHealth.json();
+  const repairedGraph = repairedHealthBody.components?.find((component) => component.id === "graph");
+  if (!repairedHealth.ok || repairedGraph?.graph?.indexStatus !== "fresh") {
+    throw new Error("The packaged Hub graph rebuild did not replace the corrupt graph with a fresh index.");
+  }
+  const afterMaintenance = snapshotProtectedProjectState(project, { includeRuntimeState: false });
+  if (JSON.stringify(afterMaintenance) !== JSON.stringify(beforeMaintenance)) {
+    throw new Error("Packaged graph maintenance mutated source, Git, activity, member, or Wiki state.");
   }
 
   child.kill("SIGTERM");
@@ -201,7 +307,7 @@ function writeActivityFixture(project) {
   })}\n`);
 }
 
-function snapshotProtectedProjectState(project) {
+function snapshotProtectedProjectState(project, { includeRuntimeState = true } = {}) {
   const status = run("git", [
     "--no-optional-locks",
     "status",
@@ -212,15 +318,18 @@ function snapshotProtectedProjectState(project) {
   const candidates = [
     join(project, ".mex", "events"),
     join(project, ".mex", "team"),
+    join(project, "src"),
   ];
-  const localRoot = join(project, ".mex", "local");
-  if (existsSync(localRoot)) {
-    for (const name of readdirSync(localRoot)) {
-      if (name.startsWith("team.db")) candidates.push(join(localRoot, name));
+  if (includeRuntimeState) {
+    const localRoot = join(project, ".mex", "local");
+    if (existsSync(localRoot)) {
+      for (const name of readdirSync(localRoot)) {
+        if (name.startsWith("team.db")) candidates.push(join(localRoot, name));
+      }
     }
   }
   for (const name of readdirSync(join(project, ".mex"))) {
-    if (name.startsWith("graph.db") || name.startsWith("wiki.db")) {
+    if (name.startsWith("wiki.db") || (includeRuntimeState && name.startsWith("graph.db"))) {
       candidates.push(join(project, ".mex", name));
     }
   }
@@ -316,4 +425,19 @@ function waitForExit(processHandle, timeoutMs) {
       resolveExit({ code, signal });
     });
   });
+}
+
+async function waitForJob(origin, cookie, id) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${origin}/api/v1/jobs/${encodeURIComponent(id)}`, {
+      headers: { cookie },
+      redirect: "error",
+    });
+    const job = await response.json();
+    if (!response.ok) throw new Error(`Reading packaged Hub job ${id} failed.`);
+    if (job.state !== "queued" && job.state !== "running") return job;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  throw new Error(`Packaged Hub job ${id} did not finish before the deadline.`);
 }
