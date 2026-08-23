@@ -588,6 +588,7 @@ describe("graph construction integration", () => {
     beforeDb.close();
 
     expect(await engine.sync([])).toMatchObject({ filesIndexed: 0, nodesCreated: 0, edgesCreated: 0 });
+    engine.close();
     writeFileSync(join(root, "tsconfig.json"), JSON.stringify({
       compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext" },
       include: ["src/**/*.ts"],
@@ -597,8 +598,9 @@ describe("graph construction integration", () => {
     expect(staleOutput.map((line) => JSON.parse(line))).toEqual([
       expect.objectContaining({ code: "GRAPH_REBUILD_REQUIRED", recoveryCommand: "mex graph" }),
     ]);
-    expect(await engine.sync(["tsconfig.json"])).toMatchObject({ filesIndexed: 1 });
-    engine.close();
+    const refreshEngine = createGraphEngine({ rootDir: root });
+    expect(await refreshEngine.sync(["tsconfig.json"])).toMatchObject({ filesIndexed: 1 });
+    refreshEngine.close();
 
     const afterDb = openGraphDatabase(dbPath);
     const after = new GraphStore(afterDb);

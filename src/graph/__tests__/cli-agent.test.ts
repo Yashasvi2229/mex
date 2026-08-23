@@ -1301,7 +1301,7 @@ describe("runGraphScope", () => {
 });
 
 describe("runGraphGet", () => {
-  it("releases default sessions when contained manifest inspection fails", () => {
+  it("releases default sessions when production preflight inspection fails", async () => {
     const external = mkdtempSync(join(tmpdir(), "mex-cli-agent-config-escape-"));
     const configPath = join(root, "package.json");
     writeFileSync(join(external, "package.json"), "{\"name\":\"outside\"}\n");
@@ -1309,10 +1309,10 @@ describe("runGraphGet", () => {
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
         const emitted: string[] = [];
-        runGraphGet([idOf("run")], root, { write: (line) => emitted.push(line) });
+        await runGraphGet([idOf("run")], root, { write: (line) => emitted.push(line) });
         expect(emitted.map((line) => JSON.parse(line))).toContainEqual(expect.objectContaining({
           type: "error",
-          code: "GRAPH_SOURCE_STAGING_FAILED",
+          code: "GRAPH_UNAVAILABLE",
         }));
       }
     } finally {
