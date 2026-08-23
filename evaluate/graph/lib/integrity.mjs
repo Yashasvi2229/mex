@@ -12,6 +12,31 @@ process.emitWarning = ((warning, ...rest) => {
 });
 const { DatabaseSync } = require("node:sqlite");
 
+const GRAPH_SNAPSHOT_METADATA_KEY = "graph_snapshot_v1";
+const GRAPH_SNAPSHOT_VERSION = 1;
+const GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUTS = 1_024;
+const GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUT_PATH_LENGTH = 4_096;
+const GRAPH_SNAPSHOT_KEYS = [
+  "version",
+  "indexedAt",
+  "lastSuccessfulIndexAt",
+  "indexedBranch",
+  "indexedHead",
+  "schemaVersion",
+  "compilerVersion",
+  "extractorVersion",
+  "resolverVersion",
+  "grammarHash",
+  "configHash",
+  "manifestHash",
+  "sourceCorpusDigest",
+  "sourceCount",
+  "semanticInputs",
+  "parseHealth",
+];
+const GRAPH_SNAPSHOT_SEMANTIC_INPUT_KEYS = ["path", "contentHash"];
+const GRAPH_SNAPSHOT_PARSE_HEALTH_KEYS = ["total", "ok", "partial", "failed"];
+
 const NORMALIZED_TABLES = [
   {
     name: "nodes",
@@ -67,10 +92,7 @@ const NORMALIZED_TABLES = [
     name: "project_metadata",
     columns: ["key", "value"],
     order: ["key"],
-    // Successful-index provenance contains observation timestamps and Git
-    // coordinates. It is operational state, not part of the semantic graph
-    // whose clean-build parity this hash protects.
-    where: "key != 'graph_snapshot_v1'",
+    normalize: normalizeProjectMetadataRow,
   },
   {
     name: "node_fingerprints",
@@ -131,6 +153,154 @@ function groupedCounts(db, table, column, where = null) {
   return Object.fromEntries(result.map((row) => [row.key ?? "<null>", Number(row.count)]));
 }
 
+function normalizeProjectMetadataRow(row) {
+  if (row.key !== GRAPH_SNAPSHOT_METADATA_KEY) return row;
+  if (typeof row.value !== "string") invalidGraphSnapshot("metadata value must be JSON text");
+  let snapshot;
+  try {
+    snapshot = JSON.parse(row.value);
+  } catch {
+    invalidGraphSnapshot("metadata value must contain valid JSON");
+  }
+  return { ...row, value: semanticGraphSnapshot(snapshot) };
+}
+
+/**
+ * Keep successful-build provenance that can change graph meaning while removing
+ * only observation timestamps and Git coordinates. The persisted writer emits
+ * one canonical v1 shape; unknown or non-canonical input must invalidate an
+ * evaluation instead of being silently omitted from the determinism hash.
+ */
+function semanticGraphSnapshot(snapshot) {
+  assertExactKeys(snapshot, GRAPH_SNAPSHOT_KEYS, "snapshot");
+  if (snapshot.version !== GRAPH_SNAPSHOT_VERSION) {
+    invalidGraphSnapshot(`unsupported version (expected ${GRAPH_SNAPSHOT_VERSION})`);
+  }
+  if (!isIsoTimestamp(snapshot.indexedAt) || !isIsoTimestamp(snapshot.lastSuccessfulIndexAt)) {
+    invalidGraphSnapshot("timestamps must be canonical ISO-8601 values");
+  }
+  if (!isNullableString(snapshot.indexedBranch) || !isNullableString(snapshot.indexedHead)) {
+    invalidGraphSnapshot("Git coordinates must be strings or null");
+  }
+  if (!isNonNegativeInteger(snapshot.schemaVersion)
+    || !isNonNegativeInteger(snapshot.sourceCount)) {
+    invalidGraphSnapshot("schemaVersion and sourceCount must be non-negative integers");
+  }
+  if (!isNonEmptyString(snapshot.compilerVersion)
+    || !isNonEmptyString(snapshot.extractorVersion)
+    || !isNonEmptyString(snapshot.resolverVersion)) {
+    invalidGraphSnapshot("compiler, extractor, and resolver versions must be non-empty strings");
+  }
+  if (!isDigest(snapshot.grammarHash)
+    || !isDigest(snapshot.configHash)
+    || !isDigest(snapshot.manifestHash)
+    || !isDigest(snapshot.sourceCorpusDigest)) {
+    invalidGraphSnapshot("semantic hashes must be lowercase SHA-256 digests");
+  }
+  if (!Array.isArray(snapshot.semanticInputs)
+    || snapshot.semanticInputs.length > GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUTS) {
+    invalidGraphSnapshot("semanticInputs must be a bounded array");
+  }
+
+  let previousPath;
+  const semanticInputs = snapshot.semanticInputs.map((input) => {
+    assertExactKeys(input, GRAPH_SNAPSHOT_SEMANTIC_INPUT_KEYS, "semantic input");
+    if (!isSafeRelativePath(input.path) || !isNullableDigest(input.contentHash)) {
+      invalidGraphSnapshot("semantic inputs must contain a safe path and nullable SHA-256 digest");
+    }
+    if (previousPath !== undefined && compareText(previousPath, input.path) >= 0) {
+      invalidGraphSnapshot("semantic input paths must be unique and strictly code-point sorted");
+    }
+    previousPath = input.path;
+    return { path: input.path, contentHash: input.contentHash };
+  });
+
+  assertExactKeys(snapshot.parseHealth, GRAPH_SNAPSHOT_PARSE_HEALTH_KEYS, "parseHealth");
+  const { total, ok, partial, failed } = snapshot.parseHealth;
+  if (!isNonNegativeInteger(total)
+    || !isNonNegativeInteger(ok)
+    || !isNonNegativeInteger(partial)
+    || !isNonNegativeInteger(failed)
+    || total !== snapshot.sourceCount
+    || ok + partial + failed !== total) {
+    invalidGraphSnapshot("parseHealth totals must be non-negative and match sourceCount");
+  }
+
+  return {
+    version: snapshot.version,
+    schemaVersion: snapshot.schemaVersion,
+    compilerVersion: snapshot.compilerVersion,
+    extractorVersion: snapshot.extractorVersion,
+    resolverVersion: snapshot.resolverVersion,
+    grammarHash: snapshot.grammarHash,
+    configHash: snapshot.configHash,
+    manifestHash: snapshot.manifestHash,
+    sourceCorpusDigest: snapshot.sourceCorpusDigest,
+    sourceCount: snapshot.sourceCount,
+    semanticInputs,
+    parseHealth: { total, ok, partial, failed },
+  };
+}
+
+function assertExactKeys(value, expected, label) {
+  if (!isRecord(value)) invalidGraphSnapshot(`${label} must be an object`);
+  const actual = Object.keys(value).sort(compareText);
+  const canonical = [...expected].sort(compareText);
+  if (actual.length !== canonical.length
+    || actual.some((key, index) => key !== canonical[index])) {
+    invalidGraphSnapshot(`${label} contains missing or unknown fields`);
+  }
+}
+
+function invalidGraphSnapshot(reason) {
+  throw new Error(`invalid ${GRAPH_SNAPSHOT_METADATA_KEY}: ${reason}`);
+}
+
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isIsoTimestamp(value) {
+  if (typeof value !== "string") return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function isNullableString(value) {
+  return value === null || typeof value === "string";
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isNonNegativeInteger(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isDigest(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function isNullableDigest(value) {
+  return value === null || isDigest(value);
+}
+
+function isSafeRelativePath(value) {
+  if (typeof value !== "string"
+    || value.length === 0
+    || value.length > GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUT_PATH_LENGTH
+    || value.includes("\\")
+    || value.includes("\0")
+    || value.startsWith("/")
+    || /^[A-Za-z]:\//.test(value)) return false;
+  return value.split("/").every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
+function compareText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function normalizedRows(db, spec) {
   const available = tableColumns(db, spec.name);
   if (!available.size) return null;
@@ -140,7 +310,8 @@ function normalizedRows(db, spec) {
   const sql = `SELECT ${columns.map(identifier).join(", ")} FROM ${identifier(spec.name)}`
     + `${spec.where ? ` WHERE ${spec.where}` : ""}`
     + `${order.length ? ` ORDER BY ${order.map(identifier).join(", ")}` : ""}`;
-  return rows(db, sql);
+  const selected = rows(db, sql);
+  return spec.normalize ? selected.map((row) => spec.normalize(row)) : selected;
 }
 
 function normalizedGraphHash(db) {
