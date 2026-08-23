@@ -45,12 +45,19 @@ belong only to explicit maintenance workflows.
    rollback-journal, containment, and file identity. Validate every schema
    object and data shape required by graph readers before reporting `fresh`.
 7. Preserve the prior trustworthy graph when an explicit rebuild candidate is
-   incomplete or failed, and surface failure rather than printing a successful
-   no-op summary.
+   incomplete or failed. Build under a repository-scoped owner-token lock,
+   validate a same-directory candidate, revalidate the live database, and only
+   then publish by atomic rename. Surface failure rather than printing a
+   successful no-op summary.
 8. Guard graph-derived reads for their complete use window. If the database or
-   selected path changes, discard the whole batch of derived findings.
+   selected path changes, discard the whole batch of derived findings. Bind any
+   returned live source to one contained fd-stable byte buffer whose decoded
+   hash matches the indexed row, so an A→B→A edit cannot escape validation.
 9. Keep retrieval ranking and protocol-v3 record shapes untouched unless the
    task explicitly changes that public boundary; rerun the exact JSONL goldens.
+10. Normalize evaluator provenance field-by-field. Exclude only explicitly
+    operational snapshot fields; malformed or future snapshot shapes must fail
+    closed instead of disappearing from the semantic graph hash.
 
 ## Gotchas
 
@@ -67,6 +74,9 @@ belong only to explicit maintenance workflows.
   cannot detect facts extracted from B; extraction must be bound to A.
 - Graph diagnostics and remediation commands must be truthful. Do not recommend
   a command for a state it cannot safely repair.
+- Wall-clock status timings vary by machine and process-start overhead. Keep
+  the benchmark non-gating, record its environment, and protect correctness
+  with deterministic race, non-mutation, and bounded-work tests.
 
 ## Verify
 
@@ -79,8 +89,12 @@ belong only to explicit maintenance workflows.
 - [ ] Source/config symlink escape, retarget, atomic replacement, and ABA tests
       preserve the prior snapshot.
 - [ ] Failed parse/stage/publication tests preserve prior facts and metadata.
+- [ ] Candidate replacement, candidate WAL, rollback, maintenance-lock, and
+      first-publication failure tests leave either the prior graph or no graph.
 - [ ] Ordinary check, doctor, dashboard, and status paths do not change graph
       bytes, sidecars, metadata, or directory mtimes.
+- [ ] `get`, `query`, and `impact` return no partial records when freshness,
+      source identity, sidecars, or the selected database change mid-read.
 - [ ] `npm run typecheck`, `npm test`, `npm run eval:test`, and `npm run build`
       pass, along with protocol-v3 goldens and `git diff --check`.
 - [ ] Only intended paths are staged; generated graph databases and unrelated

@@ -33,22 +33,22 @@ Then read this file fully before doing anything else in this session.
   and graph protocol goldens cover the consumer-side Checkpoint 0 work.
 - Versioned graph snapshot provenance and read-only freshness inspection gate
   grounding in check, doctor, and dashboard flows without implicit graph sync.
+- Explicit graph status, refresh, and isolated rebuild/recovery commands preserve
+  the last trustworthy index behind one cross-process maintenance lease.
+- Targeted graph get/query/impact consumers use one provenance-bound immutable
+  snapshot and discard output if graph or exact source identity changes.
+- Graph evaluator determinism includes semantic snapshot provenance while
+  excluding only operational timestamps and Git coordinates.
 
 **Not Built:**
 - The real Wiki adapter and type-parity registration against the teammate engine.
-- Project Hub, workflow persistence, explicit graph refresh, isolated candidate
-  rebuild/atomic recovery, and later delivery checkpoints from the human-team program.
+- Project Hub, workflow persistence, and later delivery checkpoints from the
+  human-team program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
 - The teammate Wiki implementation branch/commit is not yet available, so the
   consumer contract remains provisional.
-- Agent-facing `graph query` and `graph get` still use the legacy manifest-only
-  session path; until they adopt the exact freshness handshake, they can serve
-  stale graph facts or pair an old node with newer live source text.
-- Graph evaluator normalization currently excludes the entire
-  `graph_snapshot_v1` row. It should ignore volatile timestamps/Git coordinates
-  while retaining semantic compiler, resolver, config, corpus, and input provenance.
 - The current scaffold architecture, conventions, decisions, stack, and setup
   context files are still largely unpopulated placeholders.
 - Real parser, filesystem, index, migration, and graph-grounding compliance must
