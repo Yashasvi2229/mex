@@ -219,7 +219,7 @@ export function findGuardedDatabaseWriteViolations(path: string, source: string)
   const violations: string[] = [];
   const code = withoutComments(source);
   const mutations = [...code.matchAll(WRITE_CALLS)].length;
-  const guards = [...code.matchAll(/\assertIndexPath\s*\(/g)].length;
+  const guards = [...code.matchAll(/\bassertIndexPath\s*\(/gu)].length;
   if (mutations > 0 && guards < mutations) {
     violations.push(
       `${path} performs ${mutations} filesystem mutations but calls assertIndexPath ${guards} times — every mutation must be guarded`,
@@ -344,6 +344,13 @@ describe("no unscoped scaffold writes", () => {
         "export function f() { assertIndexPath(p); rmSync(p); }",
       ),
     ).toEqual([]);
+    // A word boundary, not an identity escape. `/ssertIndexPath/` matches a
+    // literal "assertIndexPath" anywhere, so `xassertIndexPath(` counted as a
+    // guard and inflated the count — a rule weakened in the direction that
+    // hides violations rather than inventing them.
+    expect(
+      findGuardedDatabaseWriteViolations("src/wiki/index/dbfile.ts", "export function f() { xassertIndexPath(p); rmSync(p); }"),
+    ).toHaveLength(1);
   });
 
   it("catches a planted write", () => {

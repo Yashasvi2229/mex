@@ -7,6 +7,7 @@ import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openSqlite } from "../../../graph/db/sqlite.js";
 import { WIKI_META_KEYS, WIKI_SCHEMA_SQL, WIKI_SCHEMA_VERSION, WIKI_TABLES } from "../schema.js";
+import { DUMP_EXCLUSIONS, DUMP_TABLES, dumpColumnsFor, excludedColumnsFor } from "../dump.js";
 import { createWikiIndex, openWikiIndex } from "../open.js";
 import { assertIndexPath, IndexPathError, removeIndexFiles } from "../dbfile.js";
 import { sweepPendingIndexes } from "../publish.js";
@@ -40,6 +41,52 @@ describe("schema", () => {
       handle.close();
     } finally {
       scaffold.dispose();
+    }
+  });
+});
+
+describe("the dump covers the schema", () => {
+  it("compares every table the schema declares", () => {
+    // DUMP_TABLES is maintained by hand, so a table added to the schema would
+    // simply fall outside the oracle: nothing would compare it and nothing
+    // would fail. Both sides are derived here rather than restated, so the next
+    // table cannot be forgotten. P4 adds one (wiki_grounding_snapshots).
+    const declared = [...WIKI_SCHEMA_SQL.matchAll(/CREATE (?:VIRTUAL )?TABLE (\w+)/g)].map((match) => match[1]!).sort();
+    expect(DUMP_TABLES).toEqual(declared);
+    expect(declared.length).toBeGreaterThan(5);
+  });
+
+  it("compares every column of every table, or names it as an exclusion", () => {
+    // Column level, against the database the schema actually produces rather
+    // than against the SQL text — a column added by a later ALTER, or one the
+    // schema declares in a way the regex would miss, still has to be accounted
+    // for.
+    const scaffold = createScaffold();
+    try {
+      const handle = createWikiIndex(join(scaffold.root, "wiki.db"));
+      try {
+        for (const table of DUMP_TABLES) {
+          const actual = (handle.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[])
+            .map((row) => row.name)
+            .sort();
+          const accounted = [...dumpColumnsFor(table), ...excludedColumnsFor(table)].sort();
+          expect(accounted, `${table}: every column must be dumped or explicitly excluded`).toEqual(actual);
+        }
+      } finally {
+        handle.close();
+      }
+    } finally {
+      scaffold.dispose();
+    }
+  });
+
+  it("keeps the exclusion list short, and every entry justified", () => {
+    // Each exclusion is a hole in the oracle. There is no principled maximum,
+    // but there is a principled requirement: a reason, in prose, next to it.
+    expect(DUMP_EXCLUSIONS.length).toBeLessThanOrEqual(6);
+    for (const exclusion of DUMP_EXCLUSIONS) {
+      expect(exclusion.reason.length, `${exclusion.table}.${exclusion.column} needs a reason`).toBeGreaterThan(40);
+      expect(DUMP_TABLES).toContain(exclusion.table);
     }
   });
 });

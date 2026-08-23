@@ -21,19 +21,17 @@
  * wrong row survive, because the row is replaced either way when it is written.
  */
 
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { relative } from "node:path";
 import { toPosix } from "../../paths.js";
 import type { WikiDiagnostic } from "../model/diagnostic.js";
-import { diagnostic } from "../model/diagnostic.js";
 import { fileContentHash } from "../model/hash.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 import { parseWikiMarkdown } from "../markdown/codec.js";
 import { discoverMarkdownFiles, type DiscoveredFile } from "./discover.js";
 import { openWikiIndexForWrite } from "./open.js";
-import { defaultIndexPath } from "./rebuild.js";
-import { deleteFileRows, resolveIndexState, writeParsedFile } from "./write.js";
+import { defaultIndexPath, readText, unreadableFileDiagnostic } from "./rebuild.js";
+import { deleteFileRows, resolveIndexState, writeFileDiagnostics, writeParsedFile } from "./write.js";
 
 export interface RefreshOptions {
   scaffoldRoot: string;
@@ -47,6 +45,8 @@ export interface RefreshOptions {
   changed: readonly string[];
   registry?: EntityTypeRegistry;
   now?: () => string;
+  /** Injectable file reader. See `RebuildOptions.readFile` for why it exists. */
+  readFile?: (absolutePath: string) => string;
 }
 
 export type RefreshResult =
@@ -87,7 +87,8 @@ export function refreshWikiIndex(options: RefreshOptions): RefreshResult {
     const reparsed: string[] = [];
     const removed: string[] = [];
     const unchanged: string[] = [];
-    const readDiagnostics: WikiDiagnostic[] = [];
+    const unreadable: WikiDiagnostic[] = [];
+    const readFile = options.readFile ?? readText;
 
     index.db.transaction(() => {
       const storedHash = index.db.prepare(`SELECT content_hash FROM wiki_files WHERE path = ?`);
@@ -104,15 +105,17 @@ export function refreshWikiIndex(options: RefreshOptions): RefreshResult {
 
         let text: string;
         try {
-          text = readFileSync(file.absolutePath, "utf-8");
+          text = readFile(file.absolutePath);
         } catch (error) {
+          // The rows go, and the report stays — attached to this file, so it
+          // survives a later refresh of an unrelated one and is cleared by the
+          // refresh that finally reads this file successfully. A rebuild
+          // derives exactly the same row.
           deleteFileRows(index.db, path);
+          const entry = unreadableFileDiagnostic(path, error);
+          writeFileDiagnostics(index.db, path, [entry]);
+          unreadable.push(entry);
           removed.push(path);
-          readDiagnostics.push(
-            diagnostic("WIKI_PARSE_ERROR", `Could not read ${path}: ${error instanceof Error ? error.message : String(error)}`, {
-              file: path,
-            }),
-          );
           continue;
         }
 
@@ -137,11 +140,11 @@ export function refreshWikiIndex(options: RefreshOptions): RefreshResult {
         scaffoldRoot,
         buildKind: "refresh",
         now: now(),
-        scaffoldDiagnostics: [...discovery.diagnostics, ...readDiagnostics],
+        scaffoldDiagnostics: discovery.diagnostics,
       });
     });
 
-    return { ok: true, reparsed, removed, unchanged, diagnostics: [...discovery.diagnostics, ...readDiagnostics] };
+    return { ok: true, reparsed, removed, unchanged, diagnostics: [...discovery.diagnostics, ...unreadable] };
   } finally {
     index.close();
   }

@@ -19,10 +19,19 @@
 
 import type { SqliteDatabase } from "../../graph/db/sqlite.js";
 
-/** A column left out of the dump, and why it cannot be compared. */
+/**
+ * Something left out of the dump, and why it cannot be compared.
+ *
+ * `kind` matters: `wiki_meta`'s exclusions are *rows* — one key each — while
+ * `wiki_files.indexed_at` is a column. Calling both "column" made the two
+ * indistinguishable, which would make a column-coverage check expect three
+ * columns on `wiki_meta` that do not exist.
+ */
 export interface DumpExclusion {
   table: string;
+  /** A column name when `kind` is "column"; a `wiki_meta` key when it is "meta-key". */
   column: string;
+  kind: "column" | "meta-key";
   reason: string;
 }
 
@@ -36,34 +45,45 @@ export const DUMP_EXCLUSIONS: readonly DumpExclusion[] = [
   {
     table: "wiki_files",
     column: "indexed_at",
+    kind: "column",
     reason:
       "Wall-clock time of the write. A clean rebuild and an incremental refresh of the same content can never agree on it, and no consumer treats it as content — it exists so `mex wiki doctor` can say how old a row is.",
   },
   {
     table: "wiki_meta",
     column: "built_at",
+    kind: "meta-key",
     reason: "Wall clock, for the same reason as wiki_files.indexed_at.",
   },
   {
     table: "wiki_meta",
     column: "build_kind",
+    kind: "meta-key",
     reason:
       "Records whether the index came from a rebuild or a refresh. Comparing it would make the determinism test assert the two paths are distinguishable, which is the opposite of the property under test.",
   },
   {
     table: "wiki_meta",
     column: "scaffold_root",
+    kind: "meta-key",
     reason:
       "An absolute path, so it differs between two checkouts of the same scaffold and between a dev box and CI. Every path that is content is stored scaffold-relative elsewhere.",
   },
 ];
 
 const EXCLUDED_META_KEYS = new Set(
-  DUMP_EXCLUSIONS.filter((entry) => entry.table === "wiki_meta").map((entry) => entry.column),
+  DUMP_EXCLUSIONS.filter((entry) => entry.kind === "meta-key").map((entry) => entry.column),
 );
 
-/** Column lists, in dump order, with the exclusions already applied. */
-const TABLE_COLUMNS: Record<string, { columns: string[]; orderBy: string }> = {
+/**
+ * Column lists, in dump order, with the exclusions already applied.
+ *
+ * Exported so a test can compare it against the schema the database actually
+ * has. It is maintained by hand, and a hand-maintained mirror of a schema is a
+ * hole in the oracle waiting for the next table: whatever is missing here is
+ * simply not compared, and nothing fails.
+ */
+export const TABLE_COLUMNS: Record<string, { columns: string[]; orderBy: string }> = {
   wiki_meta: { columns: ["key", "value"], orderBy: "key" },
   wiki_files: {
     columns: ["path", "content_hash", "parse_status", "entity_count", "text_length"],
@@ -129,6 +149,18 @@ const TABLE_COLUMNS: Record<string, { columns: string[]; orderBy: string }> = {
 
 /** Tables in dump order. */
 export const DUMP_TABLES = Object.keys(TABLE_COLUMNS).sort();
+
+/** Columns of `table` that the dump compares. */
+export function dumpColumnsFor(table: string): readonly string[] {
+  return TABLE_COLUMNS[table]?.columns ?? [];
+}
+
+/** Columns of `table` the dump deliberately skips. */
+export function excludedColumnsFor(table: string): readonly string[] {
+  return DUMP_EXCLUSIONS.filter((entry) => entry.table === table && entry.kind === "column").map(
+    (entry) => entry.column,
+  );
+}
 
 /**
  * A stable textual rendering of every row in the index.

@@ -295,6 +295,30 @@ export function writeParsedFile(db: SqliteDatabase, parsed: ParsedFile, options:
   return { path: parsed.path, entityCount: parsed.entities.length, diagnosticCount: diagnostics.length };
 }
 
+/**
+ * Record a problem that belongs to one file, so it lives and dies with that
+ * file's rows.
+ *
+ * Used for a file that could not be *read*. That is not a global fact about the
+ * build, even though a rebuild happens to discover all of them at once: a
+ * rebuild reports every unreadable file and a refresh only sees the ones in its
+ * changed set, so recording them as global made a refresh of an unrelated file
+ * silently drop a report a rebuild would have made — a refresh/rebuild
+ * divergence, which is the one thing this phase's oracle exists to exclude.
+ *
+ * File-scoped, it survives a refresh that does not touch it, is cleared by
+ * `deleteFileRows` when it is touched, and is re-derived identically by a clean
+ * rebuild. There is deliberately no `wiki_files` row to hang it on — the file
+ * could not be read, so there is nothing to describe.
+ */
+export function writeFileDiagnostics(
+  db: SqliteDatabase,
+  path: string,
+  diagnostics: readonly WikiDiagnostic[],
+): void {
+  writeDiagnostics(db, "file", path, diagnostics);
+}
+
 function writeDiagnostics(
   db: SqliteDatabase,
   scope: "file" | "global",

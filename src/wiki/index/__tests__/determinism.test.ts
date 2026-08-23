@@ -25,6 +25,8 @@ import { refreshWikiIndex } from "../refresh.js";
 import { isEntityId } from "../../model/ids.js";
 import { createScaffold, steppingClock, type Scaffold } from "./harness.js";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { toPosix } from "../../../paths.js";
 
 /**
  * Twelve generated ULIDs, asserted well-formed by the test below rather than by
@@ -104,6 +106,11 @@ Everything generated hangs off this.
 
 /** The mutable state the script drives, mirrored onto disk. */
 type World = Map<string, EntitySpec[]>;
+
+/** True when an absolute path ends with a scaffold-relative POSIX path. */
+function isPath(absolutePath: string, scaffoldRelative: string): boolean {
+  return toPosix(absolutePath).endsWith(scaffoldRelative);
+}
 
 function pick<T>(random: () => number, values: readonly T[]): T {
   return values[Math.floor(random() * values.length)]!;
@@ -262,6 +269,91 @@ describe("determinism (D5)", () => {
     expect(cleanDump.split("\n").length).toBeGreaterThan(20);
     expect(cleanDump).toContain("wiki_entities\t");
     expect(cleanDump).toContain("wiki_fts\t");
+  });
+
+  it("reports an unreadable file identically after a refresh of an unrelated one", () => {
+    // The case the 50-mutation script could not reach, and therefore the case
+    // it could not catch. A file that is present but unreadable — a permissions
+    // change, or a walk/read race — was reported by a rebuild and silently
+    // dropped by any later refresh of a different file, because read errors
+    // were recorded against the *build* while a refresh only reads its changed
+    // set. That is exactly the refresh/rebuild divergence this suite exists to
+    // exclude, and no assertion could see it.
+    //
+    // The failure is injected through the reader rather than staged on disk:
+    // there is no portable way to make a real file unreadable on every machine
+    // the suite runs on, and a test that is inert on the dev box protects
+    // nothing there.
+    scaffold = createScaffold();
+    const root = scaffold.root;
+    const incremental = join(root, "wiki.db");
+    const clean = join(root, "clean.db");
+
+    scaffold.write("topics/generated.md", TOPIC_FILE);
+    scaffold.write(
+      "notes/readable.md",
+      fileMarkdown([{ id: IDS[1], type: "decision", status: "promoted", targets: [], body: "Readable." }]),
+    );
+    scaffold.write(
+      "notes/locked.md",
+      fileMarkdown([{ id: IDS[2], type: "component", status: "promoted", targets: [], body: "Never read." }]),
+    );
+
+    const readFile = (absolutePath: string): string => {
+      if (isPath(absolutePath, "notes/locked.md")) {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      }
+      return readFileSync(absolutePath, "utf-8");
+    };
+
+    rebuildWikiIndex({ scaffoldRoot: root, indexPath: incremental, now: steppingClock(), readFile });
+    expect(diagnosticCodes(incremental).filter((code) => code === "WIKI_PARSE_ERROR")).toHaveLength(1);
+
+    // Refresh a *different* file. The unreadable one is not in the changed set.
+    const refreshed = refreshWikiIndex({
+      scaffoldRoot: root,
+      indexPath: incremental,
+      changed: ["notes/readable.md"],
+      now: steppingClock(Date.UTC(2028, 0, 1)),
+      readFile,
+    });
+    expect(refreshed.ok).toBe(true);
+
+    rebuildWikiIndex({ scaffoldRoot: root, indexPath: clean, now: steppingClock(Date.UTC(2029, 0, 1)), readFile });
+
+    expect(readDump(incremental)).toBe(readDump(clean));
+    // Non-vacuity: the report has to actually be in there. Both dumps agreeing
+    // that nothing happened would satisfy the line above.
+    expect(readDump(clean)).toContain("Could not read notes/locked.md");
+  });
+
+  it("clears the report when the file becomes readable again", () => {
+    scaffold = createScaffold();
+    const root = scaffold.root;
+    const indexPath = join(root, "wiki.db");
+
+    scaffold.write("topics/generated.md", TOPIC_FILE);
+    scaffold.write(
+      "notes/locked.md",
+      fileMarkdown([{ id: IDS[2], type: "component", status: "promoted", targets: [], body: "Eventually readable." }]),
+    );
+
+    let locked = true;
+    const readFile = (absolutePath: string): string => {
+      if (locked && isPath(absolutePath, "notes/locked.md")) throw new Error("EACCES");
+      return readFileSync(absolutePath, "utf-8");
+    };
+
+    rebuildWikiIndex({ scaffoldRoot: root, indexPath, now: steppingClock(), readFile });
+    expect(diagnosticCodes(indexPath)).toContain("WIKI_PARSE_ERROR");
+
+    locked = false;
+    refreshWikiIndex({ scaffoldRoot: root, indexPath, changed: ["notes/locked.md"], now: steppingClock(), readFile });
+    expect(diagnosticCodes(indexPath)).not.toContain("WIKI_PARSE_ERROR");
+
+    const clean = join(root, "clean.db");
+    rebuildWikiIndex({ scaffoldRoot: root, indexPath: clean, now: steppingClock(Date.UTC(2031, 0, 1)), readFile });
+    expect(readDump(indexPath)).toBe(readDump(clean));
   });
 
   it("re-resolves a relation whose target is deleted and then restored", () => {

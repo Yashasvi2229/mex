@@ -25,7 +25,7 @@ import { parseWikiMarkdown } from "../markdown/codec.js";
 import type { ParsedFile } from "../markdown/contract.js";
 import { discoverMarkdownFiles } from "./discover.js";
 import { createPendingIndex, discardPendingIndex, publishPendingIndex, sweepPendingIndexes } from "./publish.js";
-import { resolveIndexState, writeParsedFile } from "./write.js";
+import { resolveIndexState, writeFileDiagnostics, writeParsedFile } from "./write.js";
 
 /** Default index location: `.mex/wiki.db`, beside the scaffold it indexes. */
 export function defaultIndexPath(scaffoldRoot: string): string {
@@ -42,6 +42,16 @@ export interface RebuildOptions {
   registry?: EntityTypeRegistry;
   /** Injectable clock, so tests can prove the excluded columns are the only volatile ones. */
   now?: () => string;
+  /**
+   * Injectable file reader, defaulting to `readFileSync(path, "utf-8")`.
+   *
+   * A seam, not a convenience. An unreadable file has to behave identically
+   * under a rebuild and under a refresh, and there is no portable way to make
+   * a real file unreadable on every machine the suite runs on — so the oracle
+   * injects the failure instead of staging it, and covers the case everywhere
+   * rather than only on the platforms where `chmod` means something.
+   */
+  readFile?: (absolutePath: string) => string;
 }
 
 export interface RebuildResult {
@@ -55,8 +65,23 @@ export interface RebuildResult {
 }
 
 /** Read a file as text. Never as a Buffer — offsets are UTF-16 units (D2a). */
-function readText(absolutePath: string): string {
+export function readText(absolutePath: string): string {
   return readFileSync(absolutePath, "utf-8");
+}
+
+/** One file that could not be read, and the diagnostic that says so. */
+export interface UnreadableFile {
+  path: string;
+  diagnostic: WikiDiagnostic;
+}
+
+/** The diagnostic for a file that exists but cannot be read. */
+export function unreadableFileDiagnostic(path: string, error: unknown): WikiDiagnostic {
+  return diagnostic(
+    "WIKI_PARSE_ERROR",
+    `Could not read ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    { file: path },
+  );
 }
 
 /**
@@ -70,26 +95,23 @@ function readText(absolutePath: string): string {
 export function parseAll(
   files: readonly { path: string; absolutePath: string }[],
   registry: EntityTypeRegistry | undefined,
-): { parsed: ParsedFile[]; diagnostics: WikiDiagnostic[] } {
+  readFile: (absolutePath: string) => string = readText,
+): { parsed: ParsedFile[]; unreadable: UnreadableFile[] } {
   const parsed: ParsedFile[] = [];
-  const diagnostics: WikiDiagnostic[] = [];
+  const unreadable: UnreadableFile[] = [];
 
   for (const file of files) {
     let text: string;
     try {
-      text = readText(file.absolutePath);
+      text = readFile(file.absolutePath);
     } catch (error) {
-      diagnostics.push(
-        diagnostic("WIKI_PARSE_ERROR", `Could not read ${file.path}: ${error instanceof Error ? error.message : String(error)}`, {
-          file: file.path,
-        }),
-      );
+      unreadable.push({ path: file.path, diagnostic: unreadableFileDiagnostic(file.path, error) });
       continue;
     }
     parsed.push(parseWikiMarkdown(registry === undefined ? { path: file.path, text } : { path: file.path, text, registry }));
   }
 
-  return { parsed, diagnostics };
+  return { parsed, unreadable };
 }
 
 /**
@@ -110,7 +132,7 @@ export function rebuildWikiIndex(options: RebuildOptions): RebuildResult {
   const discovery = discoverMarkdownFiles({ root: scaffoldRoot, exclude: options.exclude });
 
   // 3. Parse every file.
-  const { parsed, diagnostics: readDiagnostics } = parseAll(discovery.files, options.registry);
+  const { parsed, unreadable } = parseAll(discovery.files, options.registry, options.readFile);
 
   const { handle, tempPath } = createPendingIndex(indexPath);
   try {
@@ -118,6 +140,11 @@ export function rebuildWikiIndex(options: RebuildOptions): RebuildResult {
       // 4-5, 7, 9. Per-file projection: entities, relations as written, topics,
       // sources, groundings, full text, and this file's own diagnostics.
       for (const file of parsed) writeParsedFile(handle.db, file, { now: now() });
+
+      // A file that could not be read is a fact about that file, recorded
+      // against it. Recording it against the build instead would make a later
+      // refresh of an unrelated file drop it.
+      for (const file of unreadable) writeFileDiagnostics(handle.db, file.path, [file.diagnostic]);
 
       // 4-6. The second pass. Every reference is resolved here, over the
       // complete set, never while files are still arriving. Discovery problems
@@ -127,7 +154,7 @@ export function rebuildWikiIndex(options: RebuildOptions): RebuildResult {
         scaffoldRoot,
         buildKind: "rebuild",
         now: now(),
-        scaffoldDiagnostics: [...discovery.diagnostics, ...readDiagnostics],
+        scaffoldDiagnostics: discovery.diagnostics,
       });
     });
 
@@ -136,7 +163,13 @@ export function rebuildWikiIndex(options: RebuildOptions): RebuildResult {
 
     // 10. Make it active.
     publishPendingIndex(handle, tempPath, indexPath);
-    return { indexPath, fileCount, entityCount, diagnostics: [...discovery.diagnostics, ...readDiagnostics], sweptTempFiles };
+    return {
+      indexPath,
+      fileCount,
+      entityCount,
+      diagnostics: [...discovery.diagnostics, ...unreadable.map((file) => file.diagnostic)],
+      sweptTempFiles,
+    };
   } catch (error) {
     discardPendingIndex(handle, tempPath);
     throw error;
