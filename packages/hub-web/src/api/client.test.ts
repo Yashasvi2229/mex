@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpHubApi, HubApiError, fixturesEnabled, readBootstrapToken } from "./client";
-import type { JobSummary } from "./types";
+import type { ActivityResponse, JobSummary } from "./types";
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
   status,
@@ -23,6 +23,16 @@ const job: JobSummary = {
   cancelRequested: false,
   createdAt: "2026-08-23T08:00:00.000Z",
   revision: "a".repeat(64),
+};
+
+const activity: ActivityResponse = {
+  items: [],
+  nextCursor: null,
+  hasMore: false,
+  sourceTruncated: false,
+  deterministicRevision: "f".repeat(64),
+  diagnostics: [],
+  diagnosticsTruncated: false,
 };
 
 afterEach(() => {
@@ -48,6 +58,29 @@ describe("bootstrap fragment handling", () => {
 });
 
 describe("HttpHubApi shared-contract boundary", () => {
+  it("sends bounded Activity filters and parses the shared response contract", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json(activity));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new HttpHubApi().getActivity({
+      source: "legacy",
+      since: "2026-08-23T00:00:00.000Z",
+      cursor: "opaque-cursor",
+      limit: 25,
+    })).resolves.toEqual(activity);
+
+    const [rawUrl, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const url = new URL(rawUrl, "http://127.0.0.1");
+    expect(url.pathname).toBe("/api/v1/activity");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      limit: "25",
+      source: "legacy",
+      since: "2026-08-23T00:00:00.000Z",
+      cursor: "opaque-cursor",
+    });
+    expect(init.method).toBeUndefined();
+  });
+
   it("retains CSRF only in memory and adds it to JSON mutations", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(json(session))

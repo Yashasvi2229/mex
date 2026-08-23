@@ -1,6 +1,5 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity,
   BookOpenText,
   Boxes,
   Code2,
@@ -78,13 +77,6 @@ export const capabilityPages: Record<string, CapabilityPageDefinition> = {
     unavailableCopy: "Relays are not available in this foundation.",
     sections: [{ title: "Outgoing", detail: "Completed work, blockers, decisions, and next actions." }, { title: "For you", detail: "Published handoffs with explicit acknowledgement." }],
   },
-  activity: {
-    title: "Activity", eyebrow: "Repository timeline", capability: "team", icon: Activity,
-    description: "Follow immutable, bounded events without prompts, transcripts, or source dumps.",
-    availableCopy: "Canonical team activity exists locally; the full timeline view arrives in a later lane.",
-    unavailableCopy: "Team activity browsing is not available in this foundation.",
-    sections: [{ title: "Repository events", detail: "Deterministic actions and subject references." }, { title: "Catch Up", detail: "Cursor-based summaries that advance only when requested." }],
-  },
 };
 
 function capabilityStatus(capabilities: CapabilitiesResponse | undefined, name: CapabilityName): CapabilityStatus | undefined {
@@ -92,7 +84,8 @@ function capabilityStatus(capabilities: CapabilitiesResponse | undefined, name: 
   if (name === "graph") return capabilities.graph.read;
   if (name === "wiki") return capabilities.wiki.read;
   if (name === "jobs") return capabilities.jobs;
-  return capabilities.activity;
+  if (name === "activity") return capabilities.activity;
+  return undefined;
 }
 
 export function CapabilityPage({ page }: { page: keyof typeof capabilityPages }) {

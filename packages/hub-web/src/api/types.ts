@@ -1,4 +1,11 @@
 export type {
+  ActivityActor,
+  ActivityDiagnostic,
+  ActivityItem,
+  ActivityRequest,
+  ActivityResponse,
+  ActivitySource,
+  ActivitySubject,
   BootstrapResponse,
   CapabilityStatus,
   HealthResponse,
@@ -16,5 +23,5 @@ export type {
   SessionResponse,
 } from "@mex/hub-contracts";
 
-export type CapabilityName = "graph" | "wiki" | "jobs" | "team";
+export type CapabilityName = "graph" | "wiki" | "jobs" | "activity" | "team";
 export type Tone = "neutral" | "info" | "success" | "warning" | "danger";

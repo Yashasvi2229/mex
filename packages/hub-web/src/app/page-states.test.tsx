@@ -1,10 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
-import type { HubApi } from "../api/client";
+import { describe, expect, it, vi } from "vitest";
+import { HubApiError, type HubApi } from "../api/client";
 import { HubApiProvider } from "../api/context";
 import type {
+  ActivityResponse,
   CapabilitiesResponse,
   HealthResponse,
   HomeResponse,
@@ -21,6 +23,7 @@ function apiWith(overrides: Partial<HubApi>): HubApi {
     getSession: () => fixture.getSession(),
     getCapabilities: () => fixture.getCapabilities(),
     getHome: () => fixture.getHome(),
+    getActivity: (request) => fixture.getActivity(request),
     search: (query) => fixture.search(query),
     getHealth: () => fixture.getHealth(),
     getJobs: (cursor) => fixture.getJobs(cursor),
@@ -107,6 +110,211 @@ describe("Home states", () => {
 
     expect(await screen.findByText("Knowledge and code indexes are unavailable.")).toBeVisible();
     expect(screen.getAllByText("Unavailable")).toHaveLength(4);
+  });
+});
+
+describe("Activity states", () => {
+  const emptyActivity = (overrides: Partial<ActivityResponse> = {}): ActivityResponse => ({
+    items: [],
+    nextCursor: null,
+    hasMore: false,
+    sourceTruncated: false,
+    deterministicRevision: "f".repeat(64),
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    ...overrides,
+  });
+
+  it("does not call the timeline endpoint when Activity is unavailable", async () => {
+    const fixture = createFixtureApi();
+    const capabilities = await fixture.getCapabilities();
+    const getActivity = vi.fn(() => pending<ActivityResponse>());
+    renderRoute("/activity", apiWith({
+      getCapabilities: () => Promise.resolve({
+        ...capabilities,
+        activity: unavailable("The timeline reader is not connected."),
+      }),
+      getActivity,
+    }));
+
+    expect(await screen.findByRole("heading", { name: "Activity is unavailable" })).toBeVisible();
+    expect(screen.getByText("The timeline reader is not connected.")).toBeVisible();
+    expect(getActivity).not.toHaveBeenCalled();
+  });
+
+  it("renders loading and bounded initial-error states", async () => {
+    const first = renderRoute("/activity", apiWith({ getActivity: () => pending<ActivityResponse>() }));
+    expect(await screen.findByRole("heading", { name: "Reading immutable history" })).toBeVisible();
+    first.unmount();
+
+    renderRoute("/activity", apiWith({ getActivity: () => Promise.reject(new Error("private filesystem detail")) }));
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByRole("heading", { name: "This view could not be loaded" })).toBeVisible();
+    expect(alert).not.toHaveTextContent("private filesystem detail");
+  });
+
+  it("distinguishes a new timeline from an empty filtered result", async () => {
+    const first = renderRoute("/activity", apiWith({ getActivity: () => Promise.resolve(emptyActivity()) }));
+    expect(await screen.findByRole("heading", { name: "No activity recorded" })).toBeVisible();
+    first.unmount();
+
+    renderRoute("/activity?source=legacy&since=2026-08-23", apiWith({ getActivity: () => Promise.resolve(emptyActivity()) }));
+    expect(await screen.findByRole("heading", { name: "No activity matches these filters" })).toBeVisible();
+  });
+
+  it("renders canonical and legacy rows, actor remapping, disclosure, and pagination", async () => {
+    const user = userEvent.setup();
+    renderRoute("/activity", createFixtureApi());
+
+    expect(await screen.findByRole("heading", { name: "Hub activity view connected" })).toBeVisible();
+    expect(screen.getByText("Keep activity immutable and preserve legacy history as a read-only projection.")).toBeVisible();
+    expect(screen.getByText("Recorded as Daksh Jaitly")).toBeVisible();
+
+    await user.click(screen.getAllByRole("button", { name: "Show details" })[0]);
+    expect(screen.getByText("Effective actor")).toBeVisible();
+    expect(screen.getByText("feat/hub-activity-timeline")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Hide details" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Load older activity" }));
+    expect(await screen.findByText("Project Hub foundations remain independent of the Wiki engine.")).toBeVisible();
+  });
+
+  it("sends URL-backed source and UTC-midnight date filters to the API", async () => {
+    const user = userEvent.setup();
+    const fixture = createFixtureApi();
+    const getActivity = vi.fn((request) => fixture.getActivity(request));
+    renderRoute("/activity?fixture=populated", apiWith({ getActivity }));
+    await screen.findByRole("heading", { name: "Hub activity view connected" });
+
+    await user.click(screen.getByRole("button", { name: "Legacy" }));
+    await waitFor(() => expect(getActivity).toHaveBeenLastCalledWith(expect.objectContaining({ source: "legacy" })));
+    fireEvent.change(screen.getByLabelText("Since"), { target: { value: "2026-08-23" } });
+    await waitFor(() => expect(getActivity).toHaveBeenLastCalledWith(expect.objectContaining({
+      source: "legacy",
+      since: "2026-08-23T00:00:00.000Z",
+    })));
+    await waitFor(() => expect(screen.getByText(/events? loaded/).parentElement).toHaveFocus());
+  });
+
+  it("keeps valid rows visible beside partial diagnostics and source truncation", async () => {
+    const fixture = createFixtureApi();
+    const response = await fixture.getActivity({ limit: 25 });
+    renderRoute("/activity", apiWith({
+      getActivity: () => Promise.resolve({ ...response, sourceTruncated: true, diagnosticsTruncated: true }),
+    }));
+
+    expect(await screen.findByRole("heading", { name: "Hub activity view connected" })).toBeVisible();
+    expect(screen.getByText("Some history could not be trusted.")).toBeVisible();
+    expect(screen.getByText("Valid events remain visible.")).toBeVisible();
+    expect(screen.getByText("The source scan reached a safety limit.")).toBeVisible();
+  });
+
+  it("keeps diagnostics and safety truncation visible when no row is trusted", async () => {
+    renderRoute("/activity", apiWith({
+      getActivity: () => Promise.resolve(emptyActivity({
+        sourceTruncated: true,
+        diagnostics: [{ code: "ACTIVITY_CONFLICT", severity: "error", message: "Conflicting canonical rows were excluded." }],
+      })),
+    }));
+
+    expect(await screen.findByRole("heading", { name: "No trusted rows available" })).toBeVisible();
+    expect(screen.getByText("Some history could not be trusted.")).toBeVisible();
+    expect(screen.getByText("No trusted events are available in this result.")).toBeVisible();
+    expect(screen.queryByText("Valid events remain visible.")).not.toBeInTheDocument();
+    expect(screen.getByText("The source scan reached a safety limit.")).toBeVisible();
+    expect(screen.getByText("The source scan is incomplete, so this result cannot confirm that no matching activity exists.")).toBeVisible();
+  });
+
+  it("reports omitted subject previews in both the collapsed row and expanded details", async () => {
+    const user = userEvent.setup();
+    const fixture = createFixtureApi();
+    const response = await fixture.getActivity({ limit: 25 });
+    const canonical = response.items.find((item) => item.source === "activity");
+    if (canonical?.source !== "activity") throw new Error("Expected a canonical fixture row.");
+    renderRoute("/activity", apiWith({
+      getActivity: () => Promise.resolve({
+        ...response,
+        items: [{ ...canonical, subjects: [], subjectCount: 3, subjectsTruncated: true }],
+        nextCursor: null,
+        hasMore: false,
+      }),
+    }));
+
+    expect(await screen.findByText("3 linked subjects; previews omitted")).toBeVisible();
+    expect(screen.queryByText("No linked subjects")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show details" }));
+    expect(screen.getByText("3 subject references were recorded; previews were omitted by the response safety limits.")).toBeVisible();
+  });
+
+  it("marks a legacy message when its bounded preview was shortened", async () => {
+    const fixture = createFixtureApi();
+    const response = await fixture.getActivity({ limit: 25 });
+    const items = response.items.map((item) => item.source === "legacy" ? { ...item, messageTruncated: true } : item);
+    renderRoute("/activity", apiWith({ getActivity: () => Promise.resolve({ ...response, items }) }));
+
+    expect(await screen.findByText("Legacy message shortened by the response safety limit.")).toBeVisible();
+  });
+
+  it("rejects a mixed-revision page while preserving the loaded rows", async () => {
+    const user = userEvent.setup();
+    const fixture = createFixtureApi();
+    const firstPage = await fixture.getActivity({ limit: 25 });
+    const getActivity = vi.fn()
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce(emptyActivity({ deterministicRevision: "e".repeat(64) }));
+    renderRoute("/activity", apiWith({ getActivity }));
+    await screen.findByRole("heading", { name: "Hub activity view connected" });
+
+    await user.click(screen.getByRole("button", { name: "Load older activity" }));
+    expect(await screen.findByText("Activity changed while you were reading.")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Hub activity view connected" })).toBeVisible();
+    expect(screen.queryByText("Project Hub foundations remain independent of the Wiki engine.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reload newest" })).toBeEnabled();
+  });
+
+  it("surfaces a stale-cursor conflict without leaking problem internals", async () => {
+    const user = userEvent.setup();
+    const fixture = createFixtureApi();
+    const firstPage = await fixture.getActivity({ limit: 25 });
+    const problem = new HubApiError({
+      type: "about:blank",
+      title: "Timeline changed",
+      status: 409,
+      code: "REVISION_CONFLICT",
+      detail: "A newer revision exists.",
+      requestId: "1e586537-c11b-4f73-9b5c-f4de2a8f7bad",
+    });
+    const getActivity = vi.fn().mockResolvedValueOnce(firstPage).mockRejectedValueOnce(problem);
+    renderRoute("/activity", apiWith({ getActivity }));
+    await screen.findByRole("heading", { name: "Hub activity view connected" });
+
+    await user.click(screen.getByRole("button", { name: "Load older activity" }));
+    expect(await screen.findByText("Activity changed while you were reading.")).toBeVisible();
+    expect(screen.queryByText("A newer revision exists.")).not.toBeInTheDocument();
+  });
+
+  it("preserves loaded rows and retries an ordinary older-page failure", async () => {
+    const user = userEvent.setup();
+    const fixture = createFixtureApi();
+    const firstPage = await fixture.getActivity({ limit: 25 });
+    if (firstPage.nextCursor === null) throw new Error("Expected a paginated fixture response.");
+    const olderPage = await fixture.getActivity({ limit: 25, cursor: firstPage.nextCursor });
+    const getActivity = vi.fn()
+      .mockResolvedValueOnce(firstPage)
+      .mockRejectedValueOnce(new Error("private pagination failure"))
+      .mockResolvedValueOnce(olderPage);
+    renderRoute("/activity", apiWith({ getActivity }));
+    await screen.findByRole("heading", { name: "Hub activity view connected" });
+
+    await user.click(screen.getByRole("button", { name: "Load older activity" }));
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("Older activity could not be loaded.")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Hub activity view connected" })).toBeVisible();
+    expect(screen.queryByText("private pagination failure")).not.toBeInTheDocument();
+
+    await user.click(within(alert).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Project Hub foundations remain independent of the Wiki engine.")).toBeVisible();
+    expect(getActivity).toHaveBeenCalledTimes(3);
   });
 });
 
