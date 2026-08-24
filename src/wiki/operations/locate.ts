@@ -28,6 +28,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { EntityMetadataKind, ParsedFile } from "../markdown/contract.js";
 import { parseWikiMarkdown } from "../markdown/codec.js";
+import { parseDocument, type RawDocument } from "../markdown/parse.js";
 import type { WikiEntity, EntityTypeRegistry } from "../model/entity.js";
 import { discoverMarkdownFiles } from "../index/discover.js";
 import { entityKeyOf } from "../index/write.js";
@@ -47,12 +48,67 @@ export interface LocatedEntity {
   entityKey: string;
 }
 
+/**
+ * A parse cache for one batch run — **keyed on the bytes, never on time.**
+ *
+ * `locateEntity` walks and re-parses the scaffold for every operation whose id
+ * the index cannot place, which is every operation in a migration (a pre-wiki
+ * scaffold has no index at all). Sixty-five operations over twenty-five files
+ * is sixteen hundred parses of the same unchanged prose, and it is why five
+ * migration tests time out at vitest's default five seconds.
+ *
+ * The obvious cache — remember a file until something writes it — buys the
+ * speed by taking on an invalidation policy, and an invalidation policy is a
+ * thing that can be wrong. P5's guarantee is that locate's answer is identical
+ * with a fresh index, a stale index and no index at all, because every fact
+ * comes from the current bytes; a cache that hands back yesterday's parse after
+ * a write turns that into a lie, silently, in the layer that decides what gets
+ * written into a user's files.
+ *
+ * So this one still reads the file every time and caches only the **parse**,
+ * under the exact text it was parsed from. A hit requires the bytes on disk to
+ * be byte-for-byte what produced the cached tree, so there is no invalidation
+ * to get wrong: a write changes the text, the text no longer matches, and the
+ * file is re-parsed. Reading is a `readFileSync` of a few kilobytes; parsing is
+ * remark plus binding plus model validation, and it is the cost that matters.
+ *
+ * Passing no cache leaves the behaviour exactly as it was.
+ */
+export interface ParseCache {
+  entries: Map<string, Map<string, ParsedFile>>;
+  /**
+   * Raw-AST parses, under the same byte-equality rule.
+   *
+   * `parseDocument` is a second remark pass over the same text — migration's
+   * inventory takes one of each per file — and it is worth remembering for the
+   * same reason and on the same terms.
+   */
+  documents: Map<string, Map<string, RawDocument>>;
+  /** Parses avoided. Reported by the migration run and asserted by its tests. */
+  hits: number;
+  /** Parses performed through this cache. */
+  misses: number;
+}
+
+/** A fresh cache. One per run; never shared between runs, and never global. */
+export function createParseCache(): ParseCache {
+  return { entries: new Map(), documents: new Map(), hits: 0, misses: 0 };
+}
+
 export interface LocateOptions {
   scaffoldRoot: string;
   indexPath?: string;
   exclude?: readonly string[];
   registry?: EntityTypeRegistry;
   readFile?: (absolutePath: string) => string;
+  /**
+   * Reuse a parse when the file's bytes are unchanged. See {@link ParseCache}.
+   *
+   * Scoped to one batch run by the caller that creates it. There is no module
+   * state here on purpose: a cache that outlived its run would be a cache
+   * nobody could reason about from a call site.
+   */
+  parseCache?: ParseCache;
   /**
    * Look here first, ahead of the index and the walk.
    *
@@ -80,10 +136,90 @@ export function readParsed(
   } catch {
     return null;
   }
+  return { text, parsed: parseCached(options, path, absolutePath, text) };
+}
+
+/**
+ * Parse `text` as the file at `absolutePath`, reusing a cached tree when the
+ * text is byte-for-byte the text that tree was parsed from.
+ *
+ * Provenance of the cached tree is deliberately irrelevant: `parseWikiMarkdown`
+ * is a pure function of `(path, text, registry)`, so a hit on all three returns
+ * the tree the caller would have computed. That is what lets `verifyPlan` store
+ * its parse of a plan's *proposed* text — which becomes the file's bytes a
+ * moment later, so the next operation to read that file gets a hit instead of
+ * re-parsing what this process just parsed.
+ */
+export function parseCached(
+  options: LocateOptions,
+  path: string,
+  absolutePath: string,
+  text: string,
+): ParsedFile {
+  const cache = options.parseCache;
+  let byText: Map<string, ParsedFile> | undefined;
+  if (cache !== undefined) {
+    const key = cacheKey(absolutePath, path, options.registry);
+    byText = cache.entries.get(key);
+    if (byText === undefined) {
+      byText = new Map();
+      cache.entries.set(key, byText);
+    }
+    const hit = byText.get(text);
+    if (hit !== undefined) {
+      cache.hits += 1;
+      return hit;
+    }
+  }
+
   const parsed = parseWikiMarkdown(
     options.registry === undefined ? { path, text } : { path, text, registry: options.registry },
   );
-  return { text, parsed };
+  if (byText !== undefined && cache !== undefined) {
+    cache.misses += 1;
+    byText.set(text, parsed);
+  }
+  return parsed;
+}
+
+/**
+ * Registries are compared by identity, which is enough and is deliberate: two
+ * different registry objects may describe the same types, and treating them as
+ * interchangeable would be a judgement about equality that nothing else here
+ * makes. A duplicate parse is the cost of being wrong in the safe direction.
+ */
+const registryIds = new WeakMap<object, number>();
+let nextRegistryId = 0;
+
+function registryKey(registry: EntityTypeRegistry | undefined): string {
+  if (registry === undefined) return "-";
+  let id = registryIds.get(registry as unknown as object);
+  if (id === undefined) {
+    id = (nextRegistryId += 1);
+    registryIds.set(registry as unknown as object, id);
+  }
+  return String(id);
+}
+
+/**
+ * The whole identity of a parse: where the file is, what it is called, what it
+ * held, and which registry read it.
+ *
+ * The text is part of the key rather than a field compared against one
+ * remembered entry, and that is the correction that made the cache worth
+ * having. A one-entry-per-path cache thrashes on exactly this pipeline's
+ * access pattern: `verifyPlan` parses the proposed text, `revalidate` then
+ * re-reads the base text still on disk and evicts it, and the write that lands
+ * a moment later leaves the next operation re-parsing the very tree this
+ * process built. Keyed by content, both live side by side and neither evicts
+ * the other.
+ *
+ * The separator is U+0000, escaped rather than written literally — a literal
+ * one makes the file binary to Git (finding 45). It cannot occur in a path and
+ * cannot be produced by a Markdown decode, so no two distinct parses collide.
+ */
+function cacheKey(absolutePath: string, path: string, registry: EntityTypeRegistry | undefined): string {
+  return `${absolutePath}\u0000${path}\u0000${registryKey(registry)}`;
 }
 
 /** Every claimant of `id` in one parsed file, in position order. */
@@ -189,4 +325,27 @@ export function locateFile(options: LocateOptions, path: string): LocatedFile | 
   const read = readParsed(options, path, absolutePath);
   if (read === null) return null;
   return { path, absolutePath, text: read.text, parsed: read.parsed, existed: true };
+}
+
+/** {@link parseDocument}, memoized on the file's own bytes. See {@link ParseCache}. */
+export function parseDocumentCached(cache: ParseCache | undefined, absolutePath: string, text: string): RawDocument {
+  let byText: Map<string, RawDocument> | undefined;
+  if (cache !== undefined) {
+    byText = cache.documents.get(absolutePath);
+    if (byText === undefined) {
+      byText = new Map();
+      cache.documents.set(absolutePath, byText);
+    }
+    const hit = byText.get(text);
+    if (hit !== undefined) {
+      cache.hits += 1;
+      return hit;
+    }
+  }
+  const document = parseDocument(text);
+  if (byText !== undefined && cache !== undefined) {
+    cache.misses += 1;
+    byText.set(text, document);
+  }
+  return document;
 }

@@ -31,6 +31,7 @@ import type { EntityTypeRegistry } from "../model/entity.js";
 import type { GroundingGraph } from "../grounding/adapter.js";
 import { applyOperation, type ApplyOptions } from "../operations/apply.js";
 import { planOperation } from "../operations/plan.js";
+import { createParseCache } from "../operations/locate.js";
 import { previewPlan, renderPreview } from "../operations/preview.js";
 import { inventoryScaffold, type ScaffoldInventory } from "./inventory.js";
 import { classifyFile, orderForAdoption, type Abstention, type Candidate, type FileClassification } from "./classify.js";
@@ -134,7 +135,9 @@ function countType(report: MigrationReport, type: WikiEntityType): void {
  * it had already run.
  */
 export function planMigration(options: MigrateOptions): MigrationReport {
+  const parseCache = createParseCache();
   const inventory = inventoryScaffold({
+    parseCache,
     scaffoldRoot: options.scaffoldRoot,
     ...(options.exclude === undefined ? {} : { exclude: options.exclude }),
     ...(options.registry === undefined ? {} : { registry: options.registry }),
@@ -254,9 +257,15 @@ function envelope(
  * than minting a second entity for the same prose.
  */
 export function migrateScaffold(options: MigrateOptions): MigrationReport {
+  // One cache for the whole run, created here rather than inside `applyOptions`
+  // so every operation shares it. It caches parses keyed on the file's own
+  // bytes, so a file this run has just written re-parses on the next operation
+  // that reads it — see `ParseCache` in `operations/locate.ts`.
+  const parseCache = createParseCache();
   const applyOptions = (): ApplyOptions => ({
     scaffoldRoot: options.scaffoldRoot,
     unconditional: true,
+    parseCache,
     ...(options.registry === undefined ? {} : { registry: options.registry }),
     ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
     ...(options.graph === undefined || options.graph === null ? {} : { graph: options.graph }),
@@ -352,6 +361,7 @@ export function migrateScaffold(options: MigrateOptions): MigrationReport {
   // pass from the first pass's bookkeeping would be trusting a projection over
   // the tree it projected.
   const after = inventoryScaffold({
+    parseCache,
     scaffoldRoot: options.scaffoldRoot,
     ...(options.exclude === undefined ? {} : { exclude: options.exclude }),
     ...(options.registry === undefined ? {} : { registry: options.registry }),

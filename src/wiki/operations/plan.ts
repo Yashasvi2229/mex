@@ -68,10 +68,10 @@ import { entityContentHash, fileContentHash } from "../model/hash.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 import { applyEdits, WriteScopeError, type PatchEdit } from "../markdown/patch.js";
 import type { LabeledRange } from "../markdown/ranges.js";
-import { entityTextOf, parseWikiMarkdown } from "../markdown/codec.js";
+import { entityTextOf } from "../markdown/codec.js";
 import type { GroundingGraph } from "../grounding/adapter.js";
 import { checkContainment, isReadOnlyPath, readOnlyDiagnostic } from "./paths.js";
-import { locateEntity, locateFile, type LocateOptions } from "./locate.js";
+import { locateEntity, locateFile, parseCached, type LocateOptions } from "./locate.js";
 import { buildOperationEdits, type OperationContext, type OperationEdits } from "./operations.js";
 
 /** One file's worth of a plan: the exact bytes, and the ranges they may occupy. */
@@ -342,10 +342,12 @@ export function verifyPlan(plan: WikiPatchPlan, options: PlanOptions): WikiDiagn
   const diagnostics: WikiDiagnostic[] = [];
 
   for (const file of plan.files) {
-    const parse = (text: string) =>
-      parseWikiMarkdown(
-        options.registry === undefined ? { path: file.path, text } : { path: file.path, text, registry: options.registry },
-      );
+    // Routed through the cache rather than `parseWikiMarkdown` directly: the
+    // base text is the text `locate` just read and parsed, and the proposed
+    // text is what the file will hold a moment from now, so both are worth
+    // remembering. A hit still requires byte equality, so neither can hand a
+    // later caller a tree that does not describe the bytes on disk.
+    const parse = (text: string) => parseCached(options, file.path, file.absolutePath, text);
 
     const before = new Map(
       parse(file.baseText).entities.map((entry) => [

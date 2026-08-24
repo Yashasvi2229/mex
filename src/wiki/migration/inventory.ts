@@ -14,10 +14,10 @@
 import { readFileSync } from "node:fs";
 
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
-import { parseWikiMarkdown } from "../markdown/codec.js";
-import { parseDocument, type RawHeading } from "../markdown/parse.js";
+import type { RawHeading } from "../markdown/parse.js";
 import type { ParsedFile } from "../markdown/contract.js";
 import { discoverMarkdownFiles } from "../index/discover.js";
+import { parseCached, parseDocumentCached, type ParseCache } from "../operations/locate.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 
 /** One scaffold file, read and parsed. */
@@ -52,6 +52,11 @@ export interface InventoryOptions {
   registry?: EntityTypeRegistry;
   /** Injectable so a test can make one file unreadable without touching disk. */
   readFile?: (absolutePath: string) => string;
+  /**
+   * Reuse this run's parses. A migration takes two inventories, and the second
+   * is over a tree whose changed files this run has already parsed.
+   */
+  parseCache?: ParseCache;
 }
 
 function message(error: unknown): string {
@@ -87,12 +92,14 @@ export function inventoryScaffold(options: InventoryOptions): ScaffoldInventory 
       );
       continue;
     }
-    const parsed = parseWikiMarkdown(
-      options.registry === undefined
-        ? { path: entry.path, text }
-        : { path: entry.path, text, registry: options.registry },
+    const parsed = parseCached(
+      { scaffoldRoot: root, ...(options.registry === undefined ? {} : { registry: options.registry }), ...(options.parseCache === undefined ? {} : { parseCache: options.parseCache }) },
+      entry.path,
+      absolutePath,
+      text,
     );
-    files.push({ path: entry.path, absolutePath, text, parsed, headings: parseDocument(text).headings });
+    const headings = parseDocumentCached(options.parseCache, absolutePath, text).headings;
+    files.push({ path: entry.path, absolutePath, text, parsed, headings });
   }
 
   return { root, files, diagnostics };
