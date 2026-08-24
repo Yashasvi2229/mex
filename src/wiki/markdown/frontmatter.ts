@@ -19,7 +19,7 @@
  */
 
 import YAML from "yaml";
-import { applyEdits, type PatchResult } from "./patch.js";
+import { applyEdits, type PatchEdit, type PatchResult } from "./patch.js";
 import { parseDocument, type RawFrontmatter, type YamlRegion } from "./parse.js";
 import { terminatorLengthAt } from "./positions.js";
 
@@ -185,40 +185,66 @@ export function spliceKeyPath(
   path: readonly string[],
   value: unknown,
 ): PatchResult | null {
+  const edit = keyPathEdit(content, region, path, value);
+  return edit === null ? null : applyEdits(content, [edit]);
+}
+
+/**
+ * The **edit** that would set a key, rather than the result of applying it.
+ *
+ * An operation usually changes more than one key — a `set-property` also bumps
+ * the revision — and applying two splices in sequence would mean re-parsing
+ * between them and holding ranges in two different coordinate systems. Then the
+ * one `checkOnlyRangesChanged` over the *original* text, which is the guarantee
+ * this whole phase rests on, could no longer be stated. Returning edits in base
+ * coordinates lets every change an operation makes go through one `applyEdits`.
+ */
+export function keyPathEdit(
+  content: string,
+  region: YamlRegion,
+  path: readonly string[],
+  value: unknown,
+): PatchEdit | null {
   if (path.length === 0) return null;
   const key = path[path.length - 1]!;
   const rendered = renderKeyValue(key, value);
-  const eol = dominantTerminator(content);
 
   const existing = findKeyPathRange(content, region, path);
   if (existing !== null) {
     const indent = indentAt(content, existing.keyStart);
-    return applyEdits(content, [
-      {
-        start: existing.keyStart,
-        end: existing.valueEnd,
-        text: withIndent(rendered, indent).slice(indent.length),
-        label: `metadata key ${path.join(".")}`,
-      },
-    ]);
+    return {
+      start: existing.keyStart,
+      end: existing.valueEnd,
+      text: withIndent(rendered, indent).slice(indent.length),
+      label: `metadata key ${path.join(".")}`,
+    };
   }
 
   const insertion = findMapInsertion(content, region, path.slice(0, -1));
   if (insertion === null) return null;
-  return applyEdits(content, [
-    {
-      start: insertion.offset,
-      end: insertion.offset,
-      text: `${insertion.needsLeadingBreak ? eol : ""}${withIndent(rendered, insertion.indent)}`,
-      label: `insert metadata key ${path.join(".")}`,
-    },
-  ]);
+  return {
+    start: insertion.offset,
+    end: insertion.offset,
+    text: `${insertion.needsLeadingBreak ? dominantTerminator(content) : ""}${withIndent(rendered, insertion.indent)}`,
+    label: `insert metadata key ${path.join(".")}`,
+  };
 }
 
 /** Remove a key at `path` inside `region`, leaving no blank-line residue. */
 export function removeKeyPath(content: string, region: YamlRegion, path: readonly string[]): PatchResult | null {
+  const edit = keyPathRemoveEdit(content, region, path);
+  if (edit === null) return null;
+  return edit === "absent" ? { text: content, declared: [] } : applyEdits(content, [edit]);
+}
+
+/** The edit that would remove a key; `"absent"` when there is nothing to remove. */
+export function keyPathRemoveEdit(
+  content: string,
+  region: YamlRegion,
+  path: readonly string[],
+): PatchEdit | "absent" | null {
   const existing = findKeyPathRange(content, region, path);
-  if (existing === null) return { text: content, declared: [] };
+  if (existing === null) return "absent";
   const insertion = findMapInsertion(content, region, path.slice(0, -1));
   if (insertion === null) return null;
 
@@ -231,7 +257,7 @@ export function removeKeyPath(content: string, region: YamlRegion, path: readonl
     if (content.charCodeAt(start - 1) === 0x0d) start -= 1;
   }
   const end = isLast ? existing.valueEnd : existing.nodeEnd;
-  return applyEdits(content, [{ start, end, text: "", label: `remove metadata key ${path.join(".")}` }]);
+  return { start, end, text: "", label: `remove metadata key ${path.join(".")}` };
 }
 
 /** Top-level keys in document order, so a writer can preserve that order. */
@@ -256,6 +282,27 @@ export function topLevelKeys(frontmatter: RawFrontmatter): string[] {
  */
 export function renderKeyValue(key: string, value: unknown): string {
   return YAML.stringify({ [key]: value }).replace(/\n$/, "");
+}
+
+/**
+ * Render several keys, in the order given, as one YAML fragment.
+ *
+ * For a *new* metadata block, where there is nothing to preserve. Composed from
+ * {@link renderKeyValue} one key at a time rather than stringifying a map,
+ * which keeps the whole-map serializer out of the picture even here: the key
+ * order is the caller's list, not whatever a serializer chose, and the same
+ * rendering path serves a new block and an edited one.
+ *
+ * A key whose value is `undefined` is omitted rather than rendered as null —
+ * the model's `optional()` rejects an explicit null, so emitting one would
+ * produce a block MEX itself refuses to read.
+ */
+export function renderKeyValues(entries: readonly (readonly [string, unknown])[], eol = "\n"): string {
+  return entries
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => renderKeyValue(key, value))
+    .join("\n")
+    .replace(/\n/g, eol);
 }
 
 /** The line ending this text uses, so inserted text matches it. */

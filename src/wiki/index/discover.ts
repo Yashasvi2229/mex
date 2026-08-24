@@ -87,6 +87,26 @@ export function matchesAnyGlob(path: string, patterns: readonly string[]): boole
 }
 
 /**
+ * Is `absolute` strictly inside `root`?
+ *
+ * Exported because the read side and the write side must give **one** answer
+ * for one path (handoff §29.9). It was a closure inside the walk until P5
+ * needed it, which is precisely the shape that drifts: two containment rules
+ * written months apart disagree on a trailing separator or a case-different
+ * drive letter, and the disagreement shows up as a file the index refuses to
+ * read but an operation is happy to write.
+ *
+ * Purely lexical, and deliberately so — resolving symlinks is the caller's
+ * step, because the two sides resolve *different* things (the walk resolves
+ * entries it walked over; a write resolves a path that may not exist yet).
+ * `root` itself is not inside itself.
+ */
+export function insideRoot(root: string, absolute: string): boolean {
+  const rel = relative(root, absolute);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
  * True when every path under `directory` is excluded, so the walk can prune it.
  *
  * Derived from the patterns rather than probed with a fake filename: a pattern
@@ -119,11 +139,6 @@ export function discoverMarkdownFiles(options: DiscoverOptions): DiscoveryResult
 
   const relativeToRoot = (absolute: string): string => toPosix(relative(root, absolute));
 
-  const insideRoot = (absolute: string): boolean => {
-    const rel = relative(root, absolute);
-    return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
-  };
-
   const walk = (directory: string): void => {
     let entries;
     try {
@@ -151,7 +166,7 @@ export function discoverMarkdownFiles(options: DiscoverOptions): DiscoveryResult
           );
           continue;
         }
-        if (!insideRoot(target)) {
+        if (!insideRoot(root, target)) {
           diagnostics.push(escapedSymlinkDiagnostic(rel, target));
           continue;
         }

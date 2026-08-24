@@ -200,40 +200,81 @@ function withoutComments(source: string): string {
 }
 
 /**
- * The database module's exemption, narrowed to what it is actually for.
+ * Every allowlisted writer's exemption, narrowed to what it is actually for.
  *
  * `src/wiki/index/dbfile.ts` renames a rebuilt index into place and deletes the
- * temp file a crashed build left behind. Neither is a Markdown write — but "it
- * is not really a Markdown write" is what every second writer has claimed, so
- * the exemption carries its own rule: the module routes every mutation through
- * a runtime guard that rejects any path which is not a database file, and it
- * may not name a Markdown path at all.
+ * temp file a crashed build left behind. `src/wiki/operations/apply.ts` writes
+ * Markdown through a temp file and a rename. `src/wiki/operations/audit.ts`
+ * appends one line to the operation log. None can be judged safe by reading a
+ * call site — but "it is not really an unscoped write" is what every second
+ * writer has claimed, so each exemption carries its own runtime guard and this
+ * rule asserts the guard is in front of **every** mutation.
+ *
+ * Until P5 this rule began `if (!WRITE_ALLOWLIST.includes(path) ||
+ * !path.startsWith("src/wiki/index/")) return []`, so `apply.ts` and `audit.ts`
+ * sat on the allowlist with nothing behind it: either could have called
+ * `writeFileSync` on any path in the world with every lint test green. The
+ * guard name is now a per-file fact, which is also what stops one module
+ * satisfying the count with another module's guard.
  *
  * A lint rule cannot tell that `rmSync(path)` is safe. The guard can, and it
- * fails closed. This asserts the guard is still there, and still in front of
- * everything.
+ * fails closed.
  */
-export function findGuardedDatabaseWriteViolations(path: string, source: string): string[] {
-  if (!WRITE_ALLOWLIST.includes(path) || !path.startsWith("src/wiki/index/")) return [];
+const WRITE_GUARDS: Readonly<Record<string, string>> = {
+  "src/wiki/index/dbfile.ts": "assertIndexPath",
+  "src/wiki/operations/apply.ts": "assertWritablePath",
+  "src/wiki/operations/audit.ts": "assertOperationLogPath",
+};
+
+/** A string literal naming a Markdown file. */
+const MARKDOWN_LITERAL = /["'`][^"'`]*\.mdx?["'`]/;
+
+export function findGuardedWriteViolations(path: string, source: string): string[] {
+  const guardName = WRITE_GUARDS[path];
+  if (guardName === undefined) return [];
 
   const violations: string[] = [];
   const code = withoutComments(source);
   const mutations = [...code.matchAll(WRITE_CALLS)].length;
-  const guards = [...code.matchAll(/\bassertIndexPath\s*\(/gu)].length;
+  const guards = [...code.matchAll(new RegExp(String.raw`\b` + guardName + String.raw`\s*\(`, "gu"))].length;
   if (mutations > 0 && guards < mutations) {
     violations.push(
-      `${path} performs ${mutations} filesystem mutations but calls assertIndexPath ${guards} times — every mutation must be guarded`,
+      `${path} performs ${mutations} filesystem mutations but calls ${guardName} ${guards} times — every mutation must be guarded`,
     );
   }
-  if (/["'`][^"'`]*\.mdx?["'`]/.test(code)) {
+  // The index module may not name Markdown; the Markdown writers, obviously,
+  // may. That half of the rule belongs to one exemption, not to all of them.
+  if (path.startsWith("src/wiki/index/") && MARKDOWN_LITERAL.test(code)) {
     violations.push(`${path} names a Markdown path — the database module may only touch database files`);
   }
   return violations;
 }
 
+/**
+ * Every file the allowlist exempts must be a file the guard rule can see.
+ *
+ * The two lists drifting apart is exactly how `apply.ts` came to be exempt with
+ * nothing behind it, so they are asserted equal rather than maintained in
+ * parallel and hoped about.
+ */
+export function findUnguardedAllowlistEntries(): string[] {
+  return WRITE_ALLOWLIST.filter((path) => WRITE_GUARDS[path] === undefined).map(
+    (path) => `${path} is write-allowlisted but has no runtime guard registered`,
+  );
+}
+
+/**
+ * The ban itself, read against code rather than prose about code.
+ *
+ * `withoutComments` was added in P3 for the guarded rule and not for this one,
+ * so a module *documenting* why it does not call `writeFileSync` was a
+ * violation — a false positive that pushes the next author to reword a comment
+ * rather than to think about the rule. Stripping comments cannot hide a real
+ * write, because a write inside a comment is not a write.
+ */
 export function findScaffoldWriteViolations(path: string, source: string): string[] {
   if (!path.startsWith("src/wiki/") || WRITE_ALLOWLIST.includes(path)) return [];
-  return [...source.matchAll(WRITE_CALLS)].map(
+  return [...withoutComments(source).matchAll(WRITE_CALLS)].map(
     (match) =>
       `${path} calls ${match[1]} — all writes go through the operation pipeline so write-scope enforcement and the audit log cannot be bypassed`,
   );
@@ -433,44 +474,121 @@ describe("no unscoped scaffold writes", () => {
     expect(violations).toEqual([]);
   });
 
-  it("keeps the database module's exemption guarded", () => {
-    const violations = FILES.flatMap((path) => findGuardedDatabaseWriteViolations(path, read(path)));
-    expect(violations).toEqual([]);
-    // The rule needs a subject: if the file is renamed away, this notices
-    // rather than passing over nothing.
-    expect(FILES).toContain("src/wiki/index/dbfile.ts");
-    expect(read("src/wiki/index/dbfile.ts")).toContain("assertIndexPath");
+  it("keeps every write exemption guarded", () => {
+    expect(FILES.flatMap((path) => findGuardedWriteViolations(path, read(path)))).toEqual([]);
+    // The allowlist and the guard table must name the same files.
+    expect(findUnguardedAllowlistEntries()).toEqual([]);
+    // Each rule needs a subject: renaming a guarded file away must fail this
+    // rather than satisfy it by leaving nothing to check.
+    for (const [path, guard] of Object.entries(WRITE_GUARDS)) {
+      expect(FILES, `${path} is registered as a guarded writer`).toContain(path);
+      expect(read(path), `${path} must call ${guard}`).toContain(guard);
+    }
   });
 
   it("catches an unguarded database write, and a Markdown path in the database module", () => {
+    expect(findGuardedWriteViolations("src/wiki/index/dbfile.ts", "export function f() { rmSync(path); }")).toHaveLength(1);
     expect(
-      findGuardedDatabaseWriteViolations("src/wiki/index/dbfile.ts", "export function f() { rmSync(path); }"),
-    ).toHaveLength(1);
-    expect(
-      findGuardedDatabaseWriteViolations(
+      findGuardedWriteViolations(
         "src/wiki/index/dbfile.ts",
         'export function f() { assertIndexPath(p); rmSync(p); const doc = "ROUTER.md"; }',
       ),
     ).toHaveLength(1);
     expect(
-      findGuardedDatabaseWriteViolations(
-        "src/wiki/index/dbfile.ts",
-        "export function f() { assertIndexPath(p); rmSync(p); }",
-      ),
+      findGuardedWriteViolations("src/wiki/index/dbfile.ts", "export function f() { assertIndexPath(p); rmSync(p); }"),
     ).toEqual([]);
-    // A word boundary, not an identity escape. `/ssertIndexPath/` matches a
-    // literal "assertIndexPath" anywhere, so `xassertIndexPath(` counted as a
-    // guard and inflated the count — a rule weakened in the direction that
-    // hides violations rather than inventing them.
+    // A word boundary, not an identity escape (§33.4).
     expect(
-      findGuardedDatabaseWriteViolations("src/wiki/index/dbfile.ts", "export function f() { xassertIndexPath(p); rmSync(p); }"),
+      findGuardedWriteViolations("src/wiki/index/dbfile.ts", "export function f() { xassertIndexPath(p); rmSync(p); }"),
     ).toHaveLength(1);
   });
 
-  it("catches a planted write", () => {
-    expect(findScaffoldWriteViolations("src/wiki/migration/apply.ts", 'writeFileSync(path, text);')).toHaveLength(1);
-    expect(findScaffoldWriteViolations("src/wiki/migration/generated.ts", 'await writeFile(path, text);')).toHaveLength(1);
+  it("fires on a planted violation in each of the two operation writers", () => {
+    // The rule this replaces returned `[]` for both of these files, so an
+    // `apply.ts` that wrote anywhere in the world passed every lint test. A
+    // planted violation is the only way to know the extension actually fires.
+    expect(
+      findGuardedWriteViolations("src/wiki/operations/apply.ts", "export function f() { writeFileSync(p, t); }"),
+    ).toHaveLength(1);
+    expect(
+      findGuardedWriteViolations("src/wiki/operations/audit.ts", "export function f() { appendFileSync(p, line); }"),
+    ).toHaveLength(1);
+    // Satisfied by the *right* guard, not by any guard: apply.ts cannot borrow
+    // the audit log's, which is what a per-file table buys over a shared name.
+    expect(
+      findGuardedWriteViolations(
+        "src/wiki/operations/apply.ts",
+        "export function f() { assertOperationLogPath(root, p); writeFileSync(p, t); }",
+      ),
+    ).toHaveLength(1);
+    expect(
+      findGuardedWriteViolations(
+        "src/wiki/operations/apply.ts",
+        "export function f() { assertWritablePath(root, p); writeFileSync(p, t); }",
+      ),
+    ).toEqual([]);
+    // A Markdown path in a Markdown writer is the point of it, not a violation.
+    expect(
+      findGuardedWriteViolations(
+        "src/wiki/operations/apply.ts",
+        'export function f() { assertWritablePath(root, p); writeFileSync(p, "x.md"); }',
+      ),
+    ).toEqual([]);
+  });
+
+  it("catches a planted write, and reads code rather than prose about it", () => {
+    expect(findScaffoldWriteViolations("src/wiki/migration/apply.ts", "writeFileSync(path, text);")).toHaveLength(1);
+    expect(findScaffoldWriteViolations("src/wiki/migration/generated.ts", "await writeFile(path, text);")).toHaveLength(1);
     expect(findScaffoldWriteViolations("src/wiki/operations/audit.ts", "appendFileSync(log, line);")).toEqual([]);
+    const commented = ["// never calls writeFileSync(path, text)", "const x = 1;"].join(String.fromCharCode(10));
+    const real = ["// a comment", "writeFileSync(path, text);"].join(String.fromCharCode(10));
+    expect(findScaffoldWriteViolations("src/wiki/index/open.ts", commented)).toEqual([]);
+    expect(findScaffoldWriteViolations("src/wiki/index/open.ts", real)).toHaveLength(1);
+  });
+
+  it("pins every filesystem writer outside the wiki engine", () => {
+    // D9 says there is no second writer anywhere in the tree. **That is not
+    // true today**, and the honest response is to pin the exceptions rather
+    // than restate the claim.
+    //
+    // `src/graph/runtime.ts` is the one that matters, and it is the reason this
+    // rule exists: it writes into `.mex` Markdown files a human already wrote,
+    // twice — anchor reconciliation and grounding-baseline capture. Both go
+    // through the scoped splice since P2b, so neither is lossy, but both bypass
+    // write-scope enforcement, the audit log and `wiki.readOnly`: a `mex ground`
+    // run will happily write into `team/**`. Pinned rather than folded, because
+    // routing `mex ground` through this pipeline changes shipped behaviour on a
+    // path with real users, for legacy root-level keys P6 migrates away from
+    // anyway — a bad trade to make in the phase that introduces the pipeline.
+    //
+    // The rest write JSON, hooks, or brand-new files, so there are no bytes of
+    // anybody's to preserve. **Pinned by write call, not by a Markdown
+    // heuristic**: the first draft of this rule looked for a `.md` literal near
+    // a write, and `runtime.ts` — the only entry that matters — does not
+    // contain one, because its paths arrive in variables. A detector that
+    // cannot see its own motivating case is worse than a longer list.
+    //
+    // Every other rule in this file is scoped to `src/wiki/`, so before this
+    // one nothing in `src/` was watching at all.
+    const KNOWN: Readonly<Record<string, string>> = {
+      "src/graph/runtime.ts": "edits existing .mex Markdown; bypasses the pipeline (recorded D9 exception)",
+      "src/config.ts": "writes config.json",
+      "src/global-config.ts": "writes the global config and telemetry id",
+      "src/events.ts": "appends to events/decisions.jsonl",
+      "src/pattern/index.ts": "creates a new pattern file from a template",
+      "src/watch.ts": "installs and removes git hooks",
+    };
+
+    const outside = FILES.filter((path) => !path.startsWith("src/wiki/"));
+    const writers = outside.filter((path) => [...withoutComments(read(path)).matchAll(WRITE_CALLS)].length > 0);
+    expect(writers.sort()).toEqual(Object.keys(KNOWN).sort());
+    // Vacuity guard: there were files outside the wiki engine to check.
+    expect(outside.length).toBeGreaterThan(20);
+
+    // And exactly two sites inside the recorded exception, so a third added to
+    // the same file — the likelier way one appears — is caught as well.
+    const sites = [...withoutComments(read("src/graph/runtime.ts")).matchAll(/writeFileSync\s*\(/g)];
+    expect(sites).toHaveLength(2);
   });
 
   it("does not constrain code outside the wiki engine", () => {

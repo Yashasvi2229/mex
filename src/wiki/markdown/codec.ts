@@ -107,8 +107,15 @@ function buildEntityDraft(
  * span between them is not the entity's — for a file-level entity it holds the
  * closing frontmatter fence and other keys, which belong to no entity and must
  * not move the hash when they change.
+ *
+ * **Exported, and the operations layer calls it.** It is *not*
+ * `slice(metadataStart, bodyEnd)`, which is the natural thing to write and
+ * differs by the newline after `-->` and any blank lines before the heading. A
+ * second definition here would be a precondition mismatch between plan time and
+ * apply time, and it would read as a concurrency bug rather than as the
+ * arithmetic error it is.
  */
-function entityText(text: string, location: WikiEntityLocation): string {
+export function entityTextOf(text: string, location: WikiEntityLocation): string {
   return (
     text.slice(location.metadataStart, location.metadataEnd) +
     text.slice(location.headingStart, location.headingEnd) +
@@ -146,7 +153,7 @@ function buildEntity(context: BuildContext, binding: Binding): ParsedEntity | nu
     fileContentHash: context.fileHash,
     entityContentHash: "",
   };
-  location.entityContentHash = entityContentHash(entityText(text, location));
+  location.entityContentHash = entityContentHash(entityTextOf(text, location));
 
   if (metadata === null) {
     context.diagnostics.push(

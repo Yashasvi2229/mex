@@ -1,0 +1,48 @@
+/**
+ * The operation pipeline: plan → preview → apply, plus the audit log.
+ *
+ * Designed for a batch caller as well as a single one, because one exists: P6's
+ * migration owns classification and no bytes, and emits `create-entry` and
+ * `set-property` envelopes into this pipeline rather than growing a writer of
+ * its own (D9).
+ */
+
+export { planOperation, verifyPlan, payloadHashOf } from "./plan.js";
+export type {
+  EntityPrecondition,
+  PlanOptions,
+  PlanResult,
+  PlannedFileEdit,
+  RevisionChange,
+  WikiPatchPlan,
+} from "./plan.js";
+
+export { previewPlan, previewHashOf, renderPreview } from "./preview.js";
+export type { DiffHunk, FileDiff, WikiPreview } from "./preview.js";
+
+export { applyOperation } from "./apply.js";
+export type { ApplyOptions, ApplyResult } from "./apply.js";
+
+export {
+  OPERATION_LOG_FILE,
+  acceptedOperations,
+  appendAudit,
+  auditRecord,
+  operationLogPath,
+  readAuditLog,
+  recordFor,
+} from "./audit.js";
+export type { AuditEntry, AuditLog, AuditPhase, OperationRecord } from "./audit.js";
+
+export { locateEntity, locateFile } from "./locate.js";
+export type { LocateOptions, LocatedEntity, LocatedFile } from "./locate.js";
+
+export {
+  assertWritablePath,
+  checkContainment,
+  isReadOnlyPath,
+  readOnlyDiagnostic,
+  resolveThroughSymlinks,
+  toScaffoldRelative,
+  WritePathError,
+} from "./paths.js";
