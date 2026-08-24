@@ -57,6 +57,7 @@ import {
   wikiMigrate,
   wikiNeighborhood,
   wikiRebuildIndex,
+  wikiRegenerateViews,
   wikiSearch,
   wikiValidate,
   type ServiceResult,
@@ -265,6 +266,38 @@ export function runRebuildIndex(io: CommandIo, flags: CommandFlags): void {
   emit(io, wikiRebuildIndex(serviceOptions(io)), flags, (data) => {
     io.write(`Indexed ${data.entityCount} entities from ${data.fileCount} file(s) into ${data.indexPath}`);
     for (const swept of data.sweptTempFiles) io.write(chalk.dim(`removed a crashed build's temp index: ${swept}`));
+  });
+}
+
+/**
+ * `wiki regenerate-views` — rewrite generated sections that have drifted.
+ *
+ * An eleventh command, and the smaller of the two changes P6's seam could take.
+ * §15.1 lists ten commands to implement rather than closing the surface, while
+ * §11.2's eleven operation semantics *are* a closed vocabulary that
+ * `operation.test.ts` pins — so adding a command costs a line in a list, and
+ * adding an operation type would put a rendering act into the ledger of
+ * knowledge changes. The reasoning for the write itself is on
+ * `applyGeneratedViews`.
+ *
+ * `--dry-run` is the default posture for anything an agent can call, so this
+ * reports what has drifted unless it is told to write.
+ */
+export function runRegenerateViews(io: CommandIo, flags: CommandFlags): void {
+  const result = wikiRegenerateViews({ ...serviceOptions(io), dryRun: flags.dryRun === true });
+  emit(io, result, flags, (data) => {
+    if (data.examined.length === 0) {
+      io.write("No generated sections in this scaffold.");
+      return;
+    }
+    if (data.changedFiles.length === 0) {
+      io.write(`${data.examined.length} generated section(s), all current.`);
+      return;
+    }
+    const verb = data.dryRun ? "would be regenerated" : "regenerated";
+    io.write(`${data.changedFiles.length} of ${data.examined.length} generated section(s) ${verb}:`);
+    for (const file of data.changedFiles) io.write(`  ${file}`);
+    if (data.dryRun) io.write(chalk.dim("re-run without --dry-run to write"));
   });
 }
 

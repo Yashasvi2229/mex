@@ -51,14 +51,15 @@ import { dirname, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import type { EntityId } from "../model/ids.js";
-import { entityContentHash } from "../model/hash.js";
+import { entityContentHash, fileContentHash } from "../model/hash.js";
 import { entityTextOf } from "../markdown/codec.js";
 import type { GroundingResolver } from "../index/write.js";
 import { refreshWikiIndex } from "../index/refresh.js";
 import { defaultIndexPath } from "../index/rebuild.js";
-import { assertWritablePath } from "./paths.js";
+import { assertWritablePath, checkContainment, isReadOnlyPath, readOnlyDiagnostic } from "./paths.js";
 import { locateEntity } from "./locate.js";
-import { payloadHashOf, planOperation, type PlanOptions, type PlannedFileEdit, type RevisionChange, type WikiPatchPlan } from "./plan.js";
+import { applyEdits } from "../markdown/patch.js";
+import { payloadHashOf, planOperation, writeScopeDiagnostic, type PlanOptions, type PlannedFileEdit, type RevisionChange, type WikiPatchPlan } from "./plan.js";
 import { previewHashOf, previewPlan, type WikiPreview } from "./preview.js";
 import { appendAudit, auditRecord, readAuditLog, recordFor, type AuditEntry } from "./audit.js";
 
@@ -397,4 +398,105 @@ function refreshIndex(scaffoldRoot: string, changedFiles: readonly string[], opt
       ),
     ];
   }
+}
+
+/**
+ * Regenerate a file's generated section — the one Markdown write that is not an
+ * operation, and why it is not one.
+ *
+ * P6 shipped detection, deterministic rendering and a marker-bounded edit, and
+ * left applying it as a stated seam with two candidate homes: a twelfth
+ * operation type, or a command. Building it settles the question, because a
+ * `WikiPatchPlan` carries a `WikiOperationType` and that field is not
+ * decoration — it is what the audit log records and what `acceptedOperations()`
+ * reports as having changed this wiki. So the choice is really:
+ *
+ * - **a twelfth type**, which puts a *rendering* act into the vocabulary of
+ *   knowledge changes and makes §11.4's ledger report cosmetic regenerations
+ *   alongside the decisions people actually made; or
+ * - **a plan carrying one of the eleven**, which is a lie in the audit log; or
+ * - **a write that is not an operation.**
+ *
+ * The third, because a generated section is *derived state*, exactly like
+ * `wiki.db`: it contains no knowledge that is not already recorded in the
+ * entities it lists, it is re-derivable from the scaffold at any moment, it
+ * mints no id, bumps no revision and has no precondition worth taking. There is
+ * nothing for replay to protect and nothing for a reviewer to review, so there
+ * is no audit line — the audit log is the ledger of knowledge operations, and
+ * padding it with regenerations would make the thing it exists to answer harder
+ * to read.
+ *
+ * **It is not a second writer.** The bytes go through `applyEdits`, which
+ * verifies that nothing outside the declared range moved, and through
+ * `writeAtomically` in this module — the single guarded writer D9 names, with
+ * `assertWritablePath` in front of every mutation exactly as before. What is
+ * new is a second *caller*, not a second writer.
+ *
+ * Opt-in at the command line, never a side effect of a read.
+ */
+export function applyGeneratedViews(options: GeneratedViewApplyOptions): GeneratedViewApplyResult {
+  const scaffoldRoot = resolve(options.scaffoldRoot);
+  const diagnostics: WikiDiagnostic[] = [];
+  const changedFiles: string[] = [];
+  const readOnly = options.readOnly ?? [];
+
+  for (const candidate of options.views) {
+    if (!candidate.stale) continue;
+
+    if (isReadOnlyPath(candidate.file, readOnly)) {
+      diagnostics.push(readOnlyDiagnostic(candidate.file));
+      continue;
+    }
+    const containment = checkContainment(scaffoldRoot, candidate.file);
+    if (containment.diagnostic !== null) {
+      diagnostics.push(containment.diagnostic);
+      continue;
+    }
+
+    const absolutePath = resolve(scaffoldRoot, candidate.file);
+    let patched;
+    try {
+      patched = applyEdits(candidate.baseText, [
+        { start: candidate.region.start, end: candidate.region.end, text: candidate.rendered, label: `generated view in ${candidate.file}` },
+      ]);
+    } catch (error) {
+      diagnostics.push(writeScopeDiagnostic(error, candidate.file));
+      continue;
+    }
+
+    if (patched.text === candidate.baseText) continue;
+    writeAtomically(scaffoldRoot, {
+      path: candidate.file,
+      absolutePath,
+      baseText: candidate.baseText,
+      baseFileHash: fileContentHash(candidate.baseText),
+      existed: true,
+      declared: patched.declared,
+      edits: [],
+      proposedText: patched.text,
+    });
+    changedFiles.push(candidate.file);
+    options.onFileWritten?.(candidate.file);
+  }
+
+  diagnostics.push(...refreshIndex(scaffoldRoot, changedFiles, options));
+  return { changedFiles, diagnostics };
+}
+
+/** One file's generated section, as the caller measured it. */
+export interface GeneratedViewCandidate {
+  file: string;
+  baseText: string;
+  region: { start: number; end: number };
+  rendered: string;
+  stale: boolean;
+}
+
+export interface GeneratedViewApplyOptions extends ApplyOptions {
+  views: readonly GeneratedViewCandidate[];
+}
+
+export interface GeneratedViewApplyResult {
+  changedFiles: string[];
+  diagnostics: WikiDiagnostic[];
 }

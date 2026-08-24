@@ -357,6 +357,16 @@ wikiCommand
   });
 
 wikiCommand
+  .command("regenerate-views")
+  .description("Rewrite generated sections that have drifted; --dry-run reports only")
+  .option("--dry-run", "report what has drifted and write nothing")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runRegenerateViews } = await import("./wiki/cli/commands.js");
+    runRegenerateViews(wikiIo(), options);
+  });
+
+wikiCommand
   .command("migrate")
   .description("Convert a pre-wiki scaffold; --dry-run writes nothing and mints no id")
   .option("--dry-run", "report what would happen and write nothing")

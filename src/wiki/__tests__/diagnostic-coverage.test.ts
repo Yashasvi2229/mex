@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { migrateScaffold } from "../migration/migrate.js";
 import { inventoryScaffold } from "../migration/inventory.js";
 import { planGeneratedView, GENERATED_BEGIN, GENERATED_END } from "../migration/generated.js";
+import { validateScaffold } from "../validation/validate.js";
 import {
   WIKI_DIAGNOSTIC_CODES,
   isWikiDiagnosticCode,
@@ -86,15 +87,15 @@ function inScratch<T>(body: (directory: string) => T): T {
  * are disjoint and together cover the registry, so a code cannot be quietly
  * parked here after its phase lands, and a newly added code cannot be forgotten.
  */
-const NOT_YET_EMITTED: Record<string, string> = {
-  SOURCE_FILE_MISSING: "P9 — source validation against the filesystem",
-  // P2b associates anchors with entities but cannot compare them against a
-  // grounding: the mismatch is only observable once a declared equivalence
-  // exists and a live graph can resolve it. That is P9's check, not the
-  // codec's, and no corpus fixture asks for it.
-  ANCHOR_GROUNDING_MISMATCH: "P9 — anchor/grounding equivalence check",
-
-};
+/**
+ * Empty, and it may only ever be empty or shrinking.
+ *
+ * Forty-nine codes were declared in P1 with seventeen deferred; P9's validation
+ * pass emits the last two. A code added later belongs here only with the phase
+ * that will emit it named, and the disjoint-and-covering assertion below is
+ * what stops one being parked here after its check has landed.
+ */
+const NOT_YET_EMITTED: Record<string, string> = {};
 
 function codesOf(diagnostics: readonly WikiDiagnostic[]): WikiDiagnosticCode[] {
   return diagnostics.map((entry) => entry.code);
@@ -144,6 +145,34 @@ function entityOf(absolutePath: string, id: string) {
   if (found === undefined) throw new Error(`no entity ${id}`);
   return found.entity;
 }
+
+/**
+ * A scaffold on disk, for the two codes that can only be reached by validating one.
+ *
+ * Both of P9's codes are properties of a *file*: one is about a path that is
+ * not in the checkout, the other about an anchor inside an entity's body. A
+ * synthetic diagnostic would prove the registry has the code, not that anything
+ * emits it, which is finding 44's shape.
+ */
+function validationDiagnostics(files: Record<string, string>): readonly WikiDiagnostic[] {
+  const root = mkdtempSync(join(tmpdir(), "mex-coverage-"));
+  try {
+    for (const [path, text] of Object.entries(files)) {
+      const absolute = join(root, path);
+      mkdirSync(join(absolute, ".."), { recursive: true });
+      writeFileSync(absolute, text, "utf-8");
+    }
+    return validateScaffold({ scaffoldRoot: root, projectRoot: root }).diagnostics;
+  } finally {
+    try {
+      rmSync(root, { recursive: true, force: true });
+    } catch {
+      // Windows keeps handles on just-closed files.
+    }
+  }
+}
+
+const COVERAGE_ENTITY = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
 
 const EMITTERS: Record<string, () => readonly WikiDiagnostic[]> = {
   INVALID_ENTITY_ID: () => validateEntity(entity({ id: "not-an-id" as unknown as EntityId }), rootContext()).diagnostics,
@@ -429,6 +458,40 @@ status: promoted
       reason: "the declaration is gone",
     })),
 
+  SOURCE_FILE_MISSING: () =>
+    validationDiagnostics({
+      "context/x.md": `<!-- mex:entity
+id: ${COVERAGE_ENTITY}
+type: decision
+status: promoted
+revision: 1
+sources:
+  - type: file
+    ref: src/never-existed.ts
+-->
+## Cites a file that is gone
+
+Body.
+`,
+    }),
+
+  ANCHOR_GROUNDING_MISMATCH: () =>
+    validationDiagnostics({
+      "context/x.md": `<!-- mex:entity
+id: ${COVERAGE_ENTITY}
+type: decision
+status: promoted
+revision: 1
+grounds_to:
+  - node: "function:deadbeefdeadbeef"
+    fingerprint: "mh:64:aabbccdd"
+-->
+## Grounded one way, anchored another
+
+See [the code](mex://function:0123456789abcdef).
+`,
+    }),
+
   GROUNDING_UNRESOLVED: () =>
     groundingDiagnostics((grounding) => ({
       state: "unresolved",
@@ -572,6 +635,12 @@ describe("diagnostic code coverage", () => {
     // its check lands, and a newly added code cannot be forgotten.
     const emitted = new Set(Object.keys(EMITTERS));
     const deferred = new Set(Object.keys(NOT_YET_EMITTED));
+
+    // P9 emits the last two, so the deferred map is empty. Asserted directly
+    // as well as through the covering property: "empty" is the exit criterion,
+    // and a map that grew again would satisfy disjoint-and-covering perfectly
+    // well while quietly reopening a check nobody emits.
+    expect(Object.keys(NOT_YET_EMITTED)).toEqual([]);
 
     const overlap = [...emitted].filter((code) => deferred.has(code));
     expect(overlap, "these codes are emitted, so remove them from NOT_YET_EMITTED").toEqual([]);
