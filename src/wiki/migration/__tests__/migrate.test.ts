@@ -19,6 +19,19 @@ import { parseWikiMarkdown } from "../../markdown/codec.js";
 import { readAuditLog, acceptedOperations, operationLogPath } from "../../operations/audit.js";
 import { isEntityId } from "../../model/ids.js";
 
+/**
+ * A migration of the twenty-five-file corpus is roughly three seconds of real
+ * work, so a test that runs two of them does not fit vitest's five-second
+ * default — which is a statement about unit tests, not about integration ones.
+ *
+ * Stated as an explicit timeout rather than a suite-wide flag, for the reason
+ * P6 made its `beforeAll` hooks explicit: a hook that outran the default marked
+ * its whole suite *skipped* rather than failed, and six tests disappeared from
+ * a green run. A number written beside the test that needs it is visible; a
+ * flag on an invocation is not, and it silently loosens every other test too.
+ */
+const TWO_MIGRATIONS = { timeout: 30_000 };
+
 const TIER1 = resolve(__dirname, "..", "..", "..", "..", "test", "fixtures", "wiki-migration", "tier1");
 
 function scaffold(): string {
@@ -152,7 +165,7 @@ describe("the dry run", () => {
     expect(JSON.stringify(report.planned)).not.toMatch(/mx_[0-9A-HJKMNP-TV-Z]{26}/);
   });
 
-  it("reports the ambiguity an apply would produce, before anything is written", () => {
+  it("reports the ambiguity an apply would produce, before anything is written", TWO_MIGRATIONS, () => {
     const root = scaffold();
     const dry = planMigration({ scaffoldRoot: root });
     const wet = migrateScaffold({ scaffoldRoot: root });
@@ -163,7 +176,7 @@ describe("the dry run", () => {
 });
 
 describe("opIds", () => {
-  it("are derived from the work, so a re-run recomputes them", () => {
+  it("are derived from the work, so a re-run recomputes them", TWO_MIGRATIONS, () => {
     const root = scaffold();
     const first = inventoryScaffold({ scaffoldRoot: root });
     const idsBefore = first.files.flatMap((file) =>
@@ -217,7 +230,7 @@ describe("opIds", () => {
 });
 
 describe("restartability", () => {
-  it("completes cleanly after a crash mid-apply, with no duplicate id", () => {
+  it("completes cleanly after a crash mid-apply, with no duplicate id", TWO_MIGRATIONS, () => {
     const root = scaffold();
     let written = 0;
     expect(() =>
@@ -293,7 +306,7 @@ describe("the report", () => {
 });
 
 describe("a file that already carries ids", () => {
-  it("is skipped, and its ids are never regenerated", () => {
+  it("is skipped, and its ids are never regenerated", TWO_MIGRATIONS, () => {
     const root = scaffold();
     migrateScaffold({ scaffoldRoot: root });
     const idsFirst = inventoryScaffold({ scaffoldRoot: root })
