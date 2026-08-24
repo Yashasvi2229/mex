@@ -82,10 +82,39 @@ function proseBucket(lines) {
   return "200-plus";
 }
 
+/**
+ * The provenance block, emitted rather than hand-written.
+ *
+ * It used to live only in the committed `census.json`, which made the
+ * documented refresh command destroy the thing it exists to update: piping
+ * this script over the file replaced a census marked `realScaffoldCensus:
+ * true` with one that had no provenance at all, and the corpus test skips
+ * `provenance` when comparing, so nothing failed. A census that cannot say
+ * where it came from is a census nobody can trust twice.
+ */
+function provenanceFor(fileCount) {
+  return {
+    realScaffoldCensus: true,
+    // Deliberately no path, no directory name and no project name: the
+    // argument this script was given is itself identifying, and mex is public.
+    source: `a real filled pre-wiki scaffold on the maintainer's machine, ${fileCount} files. Numbers only.`,
+    takenAt: new Date().toISOString().slice(0, 10),
+    refresh:
+      "node scripts/wiki-scaffold-census.mjs <scaffold-path> > test/fixtures/wiki-migration/census.json, " +
+      "then node scripts/generate-wiki-migration-corpus.mjs to regenerate tier 1 against it. " +
+      "Only numbers ever enter this repo (plan section 6a).",
+    note:
+      "Numbers only. No file name, heading, prose, or user-chosen frontmatter key from any real " +
+      "scaffold appears here or in the generated corpus: directory names are bucketed against a " +
+      "closed list and key names against a closed allowlist, with everything else counted as `other`.",
+  };
+}
+
 export function censusOf(root) {
   const files = walk(root, root, []);
   const census = {
     schema: 1,
+    provenance: provenanceFor(files.length),
     fileCount: files.length,
     filesByBucket: {},
     headingDepthHistogram: {},

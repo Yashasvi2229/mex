@@ -1,47 +1,228 @@
 ---
 name: conventions
-description: "How code is written in Harbour: naming, structure, error handling and tests."
+description: "How code is written in Harbour: naming, structure, errors and tests."
 triggers:
-  - "convention"
-  - "naming"
-  - "style"
-  - "how should I write"
-  - "error handling"
+  - "setup"
+  - "environment"
+  - "first run"
+  - "risk"
+  - "failure mode"
+  - "capacity"
+  - "retention"
+  - "stack"
+  - "dependency"
+  - "version"
 edges:
-  - target: context/architecture.md
-    condition: when a convention depends on a service boundary
-  - target: patterns/INDEX.md
-    condition: when a task looks like something already documented
+  - target: context/risks.md
+    condition: when a failure mode is being weighed
+  - target: context/testing.md
+    condition: when adding or changing a test
+  - target: context/operations.md
+    condition: when running the service in anger
+  - target: context/glossary.md
+    condition: when a term is used without definition
 last_updated: 2026-03-14
 ---
 # Conventions
 
-The rules a change is reviewed against. They are short because a long list is a
-list nobody reads.
+The work queue is a table in the same database as everything else. That
+costs throughput nobody is currently asking for and buys one thing to
+back up, one thing to restore, and one place a stuck job can be found.
 
 ## Naming
 
-Modules are named for the noun they own, not for the layer they sit in. A module
-called ticket owns tickets; there is no ticket-service, ticket-manager or
-ticket-helper. Functions that answer a question are named for the answer, so a
-reader can predict the return type from the call site without opening the
-definition.
+Operators reassign rather than share. Cross-team tickets move between
+queues, which means reassignment has to be one action and has to leave a
+trail that answers who moved it and when.
+
+Every test names the behaviour it protects in its title. A test that
+cannot fail is deleted rather than kept for coverage, and one that needs
+two fixtures to explain itself is usually testing two things.
+
+Retention is the open question. The raw store keeps every message and has
+no expiry, so the volume fills on a schedule nobody has written down and
+ingest starts refusing when it does.
+
+Rules are data and are reloaded without a restart, which took the deploy
+out of the loop and put validation on the critical path. A malformed rule
+set now reaches production with only the loader standing in front of it.
+
+The bootstrap target is safe to re-run. It drops and recreates the local
+database only, applies every migration in order, and loads a fixture set
+with three queues and a handful of threads.
 
 ## Errors
 
-An error carries the identifier of the thing that failed and nothing else. No
-stack strings in messages, no wrapped-and-rewrapped chains, no error text that
-depends on which layer caught it. A handler either recovers or lets the error
-reach the boundary that turns it into a response.
+A health check that sends a message and reads it back is the only thing
+that would catch a stalled sender, because tickets continue to look
+answered from the operator's side while replies pile up unsent.
+
+Schema changes go out ahead of the code that needs them and stay backward
+compatible for one release. Two deploys is slower and it is what lets a
+rollback happen without a second migration under pressure.
+
+Search is a query against Postgres rather than a cluster of its own. It is
+slower than it could be at a volume the service does not have, and it is
+one fewer system to operate, secure and keep in sync.
+
+Inbound mail is written to the raw store before anything parses it, so a
+parser that rejects a message never loses it. Everything that can fail
+interestingly happens downstream, where a retry is cheap and visible.
+
+A stored message is matched to a thread by its reply headers, falling back
+to a subject-and-participant match when those headers are missing. The
+fallback is generous on purpose, because a missed join is the worse error.
 
 ## Structure
 
-A module exports a narrow surface and keeps its internals unexported. If two
-modules need the same private helper, the helper moves into a third module that
-owns it rather than being exported from one of them and imported by the other.
+Each ticket is assigned to exactly one queue. The rules run in declaration
+order and the first match wins, with an explicit catch-all last, so there
+is always an owner and an operator can predict the outcome.
+
+Outbound replies go through a single sender that owns rate limiting and
+bounce handling. Nothing else talks to the mail provider, so changing
+provider touches one module and the credentials it reads.
+
+Modules are named for the noun they own rather than the layer they sit in.
+A module called ticket owns tickets, and there is no manager, service or
+helper variant of it hiding the same behaviour under a second name.
+
+An error carries the identifier of the thing that failed and nothing else.
+No stack strings in messages and no chains rewrapped at every layer, so a
+reader can tell what broke without reconstructing how it was caught.
+
+Configuration is read from the environment with no defaults for anything
+that addresses a real system. A missing variable fails at startup naming
+itself, rather than defaulting to something that silently half-works.
 
 ## Tests
 
-Every test names the behaviour it protects in its title, and a test that cannot
-fail is deleted rather than kept for coverage. A test that needs more than one
-fixture to explain itself is usually testing two things.
+The work queue is a table in the same database as everything else. That
+costs throughput nobody is currently asking for and buys one thing to
+back up, one thing to restore, and one place a stuck job can be found.
+
+Operators reassign rather than share. Cross-team tickets move between
+queues, which means reassignment has to be one action and has to leave a
+trail that answers who moved it and when.
+
+Every test names the behaviour it protects in its title. A test that
+cannot fail is deleted rather than kept for coverage, and one that needs
+two fixtures to explain itself is usually testing two things.
+
+Retention is the open question. The raw store keeps every message and has
+no expiry, so the volume fills on a schedule nobody has written down and
+ingest starts refusing when it does.
+
+Rules are data and are reloaded without a restart, which took the deploy
+out of the loop and put validation on the critical path. A malformed rule
+set now reaches production with only the loader standing in front of it.
+
+## Logging
+
+The bootstrap target is safe to re-run. It drops and recreates the local
+database only, applies every migration in order, and loads a fixture set
+with three queues and a handful of threads.
+
+A health check that sends a message and reads it back is the only thing
+that would catch a stalled sender, because tickets continue to look
+answered from the operator's side while replies pile up unsent.
+
+Schema changes go out ahead of the code that needs them and stay backward
+compatible for one release. Two deploys is slower and it is what lets a
+rollback happen without a second migration under pressure.
+
+Search is a query against Postgres rather than a cluster of its own. It is
+slower than it could be at a volume the service does not have, and it is
+one fewer system to operate, secure and keep in sync.
+
+Inbound mail is written to the raw store before anything parses it, so a
+parser that rejects a message never loses it. Everything that can fail
+interestingly happens downstream, where a retry is cheap and visible.
+
+## Configuration
+
+A stored message is matched to a thread by its reply headers, falling back
+to a subject-and-participant match when those headers are missing. The
+fallback is generous on purpose, because a missed join is the worse error.
+
+Each ticket is assigned to exactly one queue. The rules run in declaration
+order and the first match wins, with an explicit catch-all last, so there
+is always an owner and an operator can predict the outcome.
+
+Outbound replies go through a single sender that owns rate limiting and
+bounce handling. Nothing else talks to the mail provider, so changing
+provider touches one module and the credentials it reads.
+
+Modules are named for the noun they own rather than the layer they sit in.
+A module called ticket owns tickets, and there is no manager, service or
+helper variant of it hiding the same behaviour under a second name.
+
+An error carries the identifier of the thing that failed and nothing else.
+No stack strings in messages and no chains rewrapped at every layer, so a
+reader can tell what broke without reconstructing how it was caught.
+
+## Migrations
+
+Configuration is read from the environment with no defaults for anything
+that addresses a real system. A missing variable fails at startup naming
+itself, rather than defaulting to something that silently half-works.
+
+The work queue is a table in the same database as everything else. That
+costs throughput nobody is currently asking for and buys one thing to
+back up, one thing to restore, and one place a stuck job can be found.
+
+Operators reassign rather than share. Cross-team tickets move between
+queues, which means reassignment has to be one action and has to leave a
+trail that answers who moved it and when.
+
+Every test names the behaviour it protects in its title. A test that
+cannot fail is deleted rather than kept for coverage, and one that needs
+two fixtures to explain itself is usually testing two things.
+
+Retention is the open question. The raw store keeps every message and has
+no expiry, so the volume fills on a schedule nobody has written down and
+ingest starts refusing when it does.
+
+## Dependencies
+
+Rules are data and are reloaded without a restart, which took the deploy
+out of the loop and put validation on the critical path. A malformed rule
+set now reaches production with only the loader standing in front of it.
+
+The bootstrap target is safe to re-run. It drops and recreates the local
+database only, applies every migration in order, and loads a fixture set
+with three queues and a handful of threads.
+
+A health check that sends a message and reads it back is the only thing
+that would catch a stalled sender, because tickets continue to look
+answered from the operator's side while replies pile up unsent.
+
+Schema changes go out ahead of the code that needs them and stay backward
+compatible for one release. Two deploys is slower and it is what lets a
+rollback happen without a second migration under pressure.
+
+Search is a query against Postgres rather than a cluster of its own. It is
+slower than it could be at a volume the service does not have, and it is
+one fewer system to operate, secure and keep in sync.
+
+## Review
+
+Inbound mail is written to the raw store before anything parses it, so a
+parser that rejects a message never loses it. Everything that can fail
+interestingly happens downstream, where a retry is cheap and visible.
+
+A stored message is matched to a thread by its reply headers, falling back
+to a subject-and-participant match when those headers are missing. The
+fallback is generous on purpose, because a missed join is the worse error.
+
+Each ticket is assigned to exactly one queue. The rules run in declaration
+order and the first match wins, with an explicit catch-all last, so there
+is always an owner and an operator can predict the outcome.
+
+Outbound replies go through a single sender that owns rate limiting and
+bounce handling. Nothing else talks to the mail provider, so changing
+provider touches one module and the credentials it reads.
+
+Modules are named for the noun they own rather than the layer they sit in.
+A module called ticket owns tickets, and there is no manager, service or
+helper variant of it hiding the same behaviour under a second name.

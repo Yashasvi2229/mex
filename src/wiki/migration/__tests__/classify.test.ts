@@ -16,6 +16,8 @@ import {
 } from "../classify.js";
 import { parseWikiMarkdown } from "../../markdown/codec.js";
 import { parseDocument } from "../../markdown/parse.js";
+import { applyOperation } from "../../operations/apply.js";
+import { readFileSync } from "node:fs";
 
 const CORPUS = resolve(__dirname, "..", "..", "..", "..", "test", "fixtures", "wiki-migration", "tier1");
 
@@ -41,7 +43,7 @@ describe("inventory", () => {
 
   it("carries headings from the codec's own AST seam, not a regex", () => {
     const decisions = fileAt(inventory, "context/decisions.md");
-    expect(decisions?.headings.map((heading) => heading.depth)).toEqual([1, 2, 3, 3, 3, 3]);
+    expect(decisions?.headings.map((heading) => heading.depth)).toEqual([1, 2, 3, 3, 3, 3, 3, 3, 3, 3, 2, 3, 3]);
   });
 
   it("reports an unreadable file rather than throwing", () => {
@@ -93,7 +95,8 @@ describe("classification over the corpus", () => {
       "component:Delivery",
       "architecture:architecture",
     ]);
-    expect(result.abstentions).toEqual([]);
+    // Its six depth-3 subsections are reported, not adopted — see below.
+    expect(result.abstentions.every((entry) => entry.target?.at === "heading" && entry.target.depth === 3)).toBe(true);
   });
 
   it("makes a decision of a log entry, and abstains on the log itself", () => {
@@ -102,11 +105,19 @@ describe("classification over the corpus", () => {
       "Store raw mail before parsing it",
       "One queue owns a ticket",
       "Queue rules are data, not code",
-      "Use a single outbound sender",
+      "Keep the work queue in Postgres",
+      "Two-phase schema changes",
+      "Search without a search cluster",
+      "A single outbound sender",
+      "Reassign rather than share ownership",
     ]);
     expect(result.candidates.every((candidate) => candidate.type === "decision")).toBe(true);
+    // The two containers, and the two entries that state no decision.
     expect(result.abstentions.map((entry) => (entry.target?.at === "heading" ? entry.target.text : null))).toEqual([
       "Decision Log",
+      "Open questions",
+      "Raw store retention",
+      "Multi-region ingest",
     ]);
   });
 
@@ -132,8 +143,20 @@ describe("classification over the corpus", () => {
 
   it("gives a risk register no file-level entity, only its risks", () => {
     const result = classified("context/risks.md");
-    expect(result.candidates.map((candidate) => candidate.target.at)).toEqual(["heading", "heading", "heading"]);
+    expect(result.candidates.length).toBe(6);
+    expect(result.candidates.every((candidate) => candidate.target.at === "heading")).toBe(true);
     expect(result.candidates.every((candidate) => candidate.type === "risk")).toBe(true);
+  });
+
+  it("reports a nested subsection rather than passing over it in silence", () => {
+    // architecture.md has six depth-3 headings inside two of its components.
+    // They do not become entities, and section 13.2 says ambiguous prose is
+    // retained *and reported* — their prose is now inside a parent's body, and
+    // a reader has to be told that.
+    const result = classified("context/architecture.md");
+    const nested = result.abstentions.filter((entry) => entry.target?.at === "heading" && entry.target.depth === 3);
+    expect(nested.length).toBe(6);
+    expect(nested[0]?.reason).toContain("stays with the section that contains it");
   });
 
   it("abstains on a file no rule covers, and says why", () => {
@@ -166,9 +189,18 @@ describe("classification over the corpus", () => {
     const candidates = all.flatMap((entry) => entry.candidates);
     const abstentions = all.flatMap((entry) => entry.abstentions);
     // A "prose unchanged" property over a corpus nothing was written to would
-    // pass for the wrong reason, so the count is pinned here.
-    expect(candidates.length).toBe(4 + 1 + 4 + 4 + 1 + 4 + 1 + 3 + 13);
-    expect(abstentions.length).toBeGreaterThan(0);
+    // pass for the wrong reason, so the count is pinned here — written as the
+    // sum it is, so a change says which rule moved.
+    const architecture = 4 + 1; // four components, plus the file
+    const conventions = 9 + 1;
+    const decisions = 8; // ten entries, two of which state no decision
+    const setup = 6 + 1;
+    const risks = 6; // a register is a list, not one claim
+    const patterns = 6; // one file-level entity each
+    expect(candidates.length).toBe(architecture + conventions + decisions + setup + risks + patterns);
+    // Eight context files no section 13.2 rule covers, abstained on whole.
+    expect(abstentions.filter((entry) => entry.target === null).length).toBe(8);
+    expect(abstentions.length).toBeGreaterThan(8);
     expect(all.filter((entry) => entry.skipped).length).toBe(6);
   });
 });
@@ -224,5 +256,107 @@ describe("section extents", () => {
     expect(sectionTextOf(file, 1)).not.toContain("gamma");
     expect(sectionTextOf(file, 2)).toContain("beta");
     expect(sectionTextOf(file, 2)).not.toContain("gamma");
+  });
+});
+
+describe("why the adoption order is what it is", () => {
+  /**
+   * The order is a correctness property, and this is the test that provokes it.
+   *
+   * Pinning `orderForAdoption`'s output is a regression detector; it does not
+   * assert the *reason*. What follows adopts a parent and then its child
+   * through the real pipeline and asserts P5 refuses the second — and then
+   * adopts them in the other order and asserts both land. Without this the
+   * constraint is a preference with a passing test in front of it, which is
+   * finding 44's shape exactly.
+   */
+  function scaffoldWith(text: string): string {
+    const root = mkdtempSync(join(tmpdir(), "mig-order-"));
+    mkdirSync(join(root, "context"), { recursive: true });
+    writeFileSync(join(root, "context", "decisions.md"), text, "utf-8");
+    return root;
+  }
+
+  const SOURCE = [
+    "---",
+    "name: decisions",
+    "---",
+    "",
+    "# Decisions",
+    "",
+    "## Decision Log",
+    "",
+    "Prose belonging to the log itself, long enough to be a section of substance.",
+    "It runs to several lines so the container is not thin for the wrong reason.",
+    "A third line, so the threshold is cleared on both counts here.",
+    "",
+    "### One queue owns a ticket",
+    "",
+    "**Decision:** a ticket has exactly one owning queue.",
+    "**Reasoning:** shared ownership produced tickets nobody answered.",
+    "",
+  ].join("\n");
+
+  function adopt(root: string, ordinal: number, text: string, type: string, opId: string) {
+    return applyOperation(
+      {
+        opId,
+        type: "create-entry",
+        actor: { kind: "human", id: "test" },
+        timestamp: "2026-08-24T00:00:00.000Z",
+        payload: {
+          file: "context/decisions.md",
+          adopt: { at: "heading", ordinal, text },
+          type,
+          title: text,
+        },
+      },
+      { scaffoldRoot: root, unconditional: true },
+    );
+  }
+
+  it("refuses the child once its parent is already an entity", () => {
+    const root = scaffoldWith(SOURCE);
+    // Parent first — the wrong order.
+    const parent = adopt(root, 1, "Decision Log", "architecture", "op-parent");
+    expect(parent.ok, parent.diagnostics.map((entry) => entry.message).join(" | ")).toBe(true);
+
+    const child = adopt(root, 2, "One queue owns a ticket", "decision", "op-child");
+    expect(child.ok).toBe(false);
+    expect(child.diagnostics.map((entry) => entry.code)).toContain("WRITE_SCOPE_VIOLATION");
+    // And it says which entity it would have disturbed, rather than failing vaguely.
+    expect(child.diagnostics.map((entry) => entry.message).join(" ")).toContain("which it does not name");
+    // Refused means refused: the file is what the parent adoption left.
+    expect(readFileSync(join(root, "context", "decisions.md"), "utf-8")).not.toContain("type: decision");
+  });
+
+  it("accepts both when the child is adopted first", () => {
+    const root = scaffoldWith(SOURCE);
+    const child = adopt(root, 2, "One queue owns a ticket", "decision", "op-child");
+    expect(child.ok, child.diagnostics.map((entry) => entry.message).join(" | ")).toBe(true);
+
+    const parent = adopt(root, 1, "Decision Log", "architecture", "op-parent");
+    expect(parent.ok, parent.diagnostics.map((entry) => entry.message).join(" | ")).toBe(true);
+
+    const final = readFileSync(join(root, "context", "decisions.md"), "utf-8");
+    const parsed = parseWikiMarkdown({ path: "context/decisions.md", text: final });
+    expect(parsed.entities.length).toBe(2);
+    expect(parsed.diagnostics).toEqual([]);
+    // The prose survived both insertions, character for character.
+    expect(final).toContain("**Decision:** a ticket has exactly one owning queue.");
+    expect(final).toContain("Prose belonging to the log itself, long enough to be a section of substance.");
+  });
+
+  it("and orderForAdoption is what produces the accepted order", () => {
+    const file = inline(SOURCE, "context/decisions.md");
+    const container: Candidate = {
+      file: "context/decisions.md",
+      target: { at: "heading", ordinal: 1, text: "Decision Log", depth: 2, start: file.text.indexOf("## Decision Log") },
+      type: "architecture",
+      title: "Decision Log",
+      rule: "the container, hypothetically adopted",
+    };
+    const ordered = orderForAdoption([container, ...classifyFile(file).candidates]);
+    expect(ordered.map((candidate) => candidate.title)).toEqual(["One queue owns a ticket", "Decision Log"]);
   });
 });

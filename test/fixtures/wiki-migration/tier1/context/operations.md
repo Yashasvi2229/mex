@@ -1,43 +1,31 @@
 ---
-name: replay-raw-message
-description: "Replay a stored message that never became a ticket. Follow this rather than working it out again."
+name: operations
+description: "Running Harbour: deploys, alerts, and what to do when something stops."
 triggers:
-  - "architecture"
-  - "request flow"
-  - "boundaries"
   - "queues"
   - "routing"
   - "threading"
+  - "delivery"
+  - "ingest"
+  - "naming"
+  - "style"
+  - "error handling"
 edges:
-  - target: context/testing.md
-    condition: when adding or changing a test
-  - target: context/operations.md
-    condition: when running the service in anger
-  - target: context/glossary.md
-    condition: when a term is used without definition
+  - target: context/security.md
+    condition: when the change touches credentials
+  - target: context/performance.md
+    condition: when latency or volume is the concern
+  - target: patterns/INDEX.md
+    condition: at the start of a task, to find a matching pattern
 last_updated: 2026-03-14
 ---
-# Replay a stored message that never became a ticket
-
-An error carries the identifier of the thing that failed and nothing else.
-No stack strings in messages and no chains rewrapped at every layer, so a
-reader can tell what broke without reconstructing how it was caught.
-
-## Context
-
-Configuration is read from the environment with no defaults for anything
-that addresses a real system. A missing variable fails at startup naming
-itself, rather than defaulting to something that silently half-works.
-
-The work queue is a table in the same database as everything else. That
-costs throughput nobody is currently asking for and buys one thing to
-back up, one thing to restore, and one place a stuck job can be found.
+# Operations
 
 Operators reassign rather than share. Cross-team tickets move between
 queues, which means reassignment has to be one action and has to leave a
 trail that answers who moved it and when.
 
-## Steps
+## Deploys
 
 Every test names the behaviour it protects in its title. A test that
 cannot fail is deleted rather than kept for coverage, and one that needs
@@ -51,7 +39,7 @@ Rules are data and are reloaded without a restart, which took the deploy
 out of the loop and put validation on the critical path. A malformed rule
 set now reaches production with only the loader standing in front of it.
 
-## Gotchas
+## Alerts
 
 The bootstrap target is safe to re-run. It drops and recreates the local
 database only, applies every migration in order, and loads a fixture set
@@ -65,7 +53,7 @@ Schema changes go out ahead of the code that needs them and stay backward
 compatible for one release. Two deploys is slower and it is what lets a
 rollback happen without a second migration under pressure.
 
-## Verify
+## Backups
 
 Search is a query against Postgres rather than a cluster of its own. It is
 slower than it could be at a volume the service does not have, and it is
@@ -79,7 +67,7 @@ A stored message is matched to a thread by its reply headers, falling back
 to a subject-and-participant match when those headers are missing. The
 fallback is generous on purpose, because a missed join is the worse error.
 
-## Debug
+## Rollback
 
 Each ticket is assigned to exactly one queue. The rules run in declaration
 order and the first match wins, with an explicit catch-all last, so there
@@ -93,7 +81,7 @@ Modules are named for the noun they own rather than the layer they sit in.
 A module called ticket owns tickets, and there is no manager, service or
 helper variant of it hiding the same behaviour under a second name.
 
-## Update Scaffold
+## On call
 
 An error carries the identifier of the thing that failed and nothing else.
 No stack strings in messages and no chains rewrapped at every layer, so a

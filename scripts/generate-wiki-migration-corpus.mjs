@@ -7,6 +7,20 @@
  * invented — it describes a fictional "Harbour" ticketing service — and the
  * only thing taken from any real scaffold is a count.
  *
+ * The shape is not invented. `test/fixtures/wiki-migration/census.json` is a
+ * census of a real filled pre-wiki scaffold, and the file table below exists to
+ * hit it: 13 context files against 8 pattern files, a 14-edge router against a
+ * mode of 3, sixteen depth-3 headings, and every one of 77 edges carrying a
+ * condition. Those are the structures a human produced over months that neither
+ * a spec nor a builder would think to invent.
+ *
+ * **Tier 1 has no groundings and no anchors**, because a real pre-wiki scaffold
+ * has none: `mex ground` is what writes them, and a scaffold that has not been
+ * grounded yet carries nothing. Grounding migration is tier 2's, which runs the
+ * real grounding path against a temporary graph so the node ids and `mh:64:`
+ * fingerprints are real rather than hand-typed, and tier 3's, which carries the
+ * multi-entity ambiguity case.
+ *
  * Deterministic: no clock, no randomness, no absolute paths in output. Running
  * it twice produces byte-identical files, which is what lets a test assert the
  * committed fixture is exactly the generator's output.
@@ -23,535 +37,303 @@ const DEFAULT_TARGET = resolve(HERE, "..", "test", "fixtures", "wiki-migration",
 /** A fixed date. A clock in a generator makes the fixture change on its own. */
 const DATE = "2026-03-14";
 
-/** Two invented graph node ids and fingerprints. Not derived from any repo. */
-const NODE_A = "function:1c9d4b7e2f5a8036c4e1b9d7a2f60358";
-const NODE_B = "class:7e2a1f4c8b09d3e65a17c4f2b8d09e13";
-const FP_A = "mh:64:4b1c7e29";
-const FP_B = "mh:64:c08a3f7d";
+/** Invented prose, rotated deterministically. Three lines each. */
+const PARAGRAPHS = [
+  [
+    "Inbound mail is written to the raw store before anything parses it, so a",
+    "parser that rejects a message never loses it. Everything that can fail",
+    "interestingly happens downstream, where a retry is cheap and visible.",
+  ],
+  [
+    "A stored message is matched to a thread by its reply headers, falling back",
+    "to a subject-and-participant match when those headers are missing. The",
+    "fallback is generous on purpose, because a missed join is the worse error.",
+  ],
+  [
+    "Each ticket is assigned to exactly one queue. The rules run in declaration",
+    "order and the first match wins, with an explicit catch-all last, so there",
+    "is always an owner and an operator can predict the outcome.",
+  ],
+  [
+    "Outbound replies go through a single sender that owns rate limiting and",
+    "bounce handling. Nothing else talks to the mail provider, so changing",
+    "provider touches one module and the credentials it reads.",
+  ],
+  [
+    "Modules are named for the noun they own rather than the layer they sit in.",
+    "A module called ticket owns tickets, and there is no manager, service or",
+    "helper variant of it hiding the same behaviour under a second name.",
+  ],
+  [
+    "An error carries the identifier of the thing that failed and nothing else.",
+    "No stack strings in messages and no chains rewrapped at every layer, so a",
+    "reader can tell what broke without reconstructing how it was caught.",
+  ],
+  [
+    "Configuration is read from the environment with no defaults for anything",
+    "that addresses a real system. A missing variable fails at startup naming",
+    "itself, rather than defaulting to something that silently half-works.",
+  ],
+  [
+    "The work queue is a table in the same database as everything else. That",
+    "costs throughput nobody is currently asking for and buys one thing to",
+    "back up, one thing to restore, and one place a stuck job can be found.",
+  ],
+  [
+    "Operators reassign rather than share. Cross-team tickets move between",
+    "queues, which means reassignment has to be one action and has to leave a",
+    "trail that answers who moved it and when.",
+  ],
+  [
+    "Every test names the behaviour it protects in its title. A test that",
+    "cannot fail is deleted rather than kept for coverage, and one that needs",
+    "two fixtures to explain itself is usually testing two things.",
+  ],
+  [
+    "Retention is the open question. The raw store keeps every message and has",
+    "no expiry, so the volume fills on a schedule nobody has written down and",
+    "ingest starts refusing when it does.",
+  ],
+  [
+    "Rules are data and are reloaded without a restart, which took the deploy",
+    "out of the loop and put validation on the critical path. A malformed rule",
+    "set now reaches production with only the loader standing in front of it.",
+  ],
+  [
+    "The bootstrap target is safe to re-run. It drops and recreates the local",
+    "database only, applies every migration in order, and loads a fixture set",
+    "with three queues and a handful of threads.",
+  ],
+  [
+    "A health check that sends a message and reads it back is the only thing",
+    "that would catch a stalled sender, because tickets continue to look",
+    "answered from the operator's side while replies pile up unsent.",
+  ],
+  [
+    "Schema changes go out ahead of the code that needs them and stay backward",
+    "compatible for one release. Two deploys is slower and it is what lets a",
+    "rollback happen without a second migration under pressure.",
+  ],
+  [
+    "Search is a query against Postgres rather than a cluster of its own. It is",
+    "slower than it could be at a volume the service does not have, and it is",
+    "one fewer system to operate, secure and keep in sync.",
+  ],
+];
 
-const front = ({ name, description, triggers, edges, grounds }) => {
-  const lines = ["---", `name: ${name}`, `description: "${description}"`];
-  lines.push("triggers:");
-  for (const trigger of triggers) lines.push(`  - "${trigger}"`);
-  lines.push("edges:");
-  for (const edge of edges) {
-    lines.push(`  - target: ${edge.target}`);
-    lines.push(`    condition: ${edge.condition}`);
+let rotation = 0;
+function prose(count) {
+  const lines = [];
+  for (let index = 0; index < count; index += 1) {
+    lines.push(...PARAGRAPHS[rotation % PARAGRAPHS.length], "");
+    rotation += 1;
   }
-  if (grounds !== undefined) {
-    lines.push("grounds_to:");
-    for (const entry of grounds) {
-      lines.push(`  - node: "${entry.node}"`);
-      lines.push(`    fingerprint: "${entry.fingerprint}"`);
+  return lines;
+}
+
+/** Ten decision entries. Two carry no `**Decision:**` marker, deliberately. */
+const DECISIONS = [
+  ["Store raw mail before parsing it", "2026-01-12", "Active", true],
+  ["One queue owns a ticket", "2026-01-30", "Active", true],
+  ["Queue rules are data, not code", "2026-02-09", "Active", true],
+  ["Keep the work queue in Postgres", "2026-02-16", "Active", true],
+  ["Two-phase schema changes", "2026-02-23", "Active", true],
+  ["Search without a search cluster", "2026-03-02", "Active", true],
+  ["A single outbound sender", "2026-03-06", "Active", true],
+  ["Reassign rather than share ownership", "2026-03-09", "Active", true],
+  ["Raw store retention", "2026-03-11", "Open", false],
+  ["Multi-region ingest", "2026-03-13", "Open", false],
+];
+
+function decisionEntry([title, date, status, decided], paras) {
+  const lines = [`### ${title}`, ""];
+  if (decided) {
+    lines.push(
+      `**Date:** ${date}`,
+      `**Status:** ${status}`,
+      "**Decision:** stated in one sentence, so a reader can stop here.",
+      "**Reasoning:** the constraint that made the alternative worse.",
+      "",
+    );
+  } else {
+    lines.push(
+      `**Date:** ${date}`,
+      `**Status:** ${status}`,
+      "Nothing has been decided here yet. The section exists so the question is",
+      "written down rather than rediscovered, and it names what would settle it.",
+      "",
+    );
+  }
+  lines.push(...prose(paras));
+  return lines;
+}
+
+const front = ({ name, description, triggers, edges }) => {
+  const lines = ["---", `name: ${name}`, `description: "${description}"`];
+  if (triggers !== undefined) {
+    lines.push("triggers:");
+    for (const trigger of triggers) lines.push(`  - "${trigger}"`);
+  }
+  if (edges !== undefined) {
+    lines.push("edges:");
+    for (const edge of edges) {
+      lines.push(`  - target: ${edge.target}`);
+      lines.push(`    condition: ${edge.condition}`);
     }
   }
   lines.push(`last_updated: ${DATE}`, "---", "");
   return lines.join("\n");
 };
 
-const files = {};
-const add = (path, text) => {
-  files[path] = text;
-};
-
-// -- root -------------------------------------------------------------------
-
-add(
-  "ROUTER.md",
-  front({
-    name: "router",
-    description: "Session bootstrap and navigation hub for the Harbour ticketing service.",
-    triggers: ["start of session", "where do I look", "routing", "bootstrap", "navigation"],
-    edges: [
-      { target: "context/architecture.md", condition: "when working on service boundaries or request flow" },
-      { target: "context/stack.md", condition: "when choosing or upgrading a library" },
-      { target: "context/conventions.md", condition: "when writing new handlers or reviewing a change" },
-      { target: "context/decisions.md", condition: "when a design choice needs its reasoning" },
-      { target: "context/setup.md", condition: "when preparing a development machine" },
-      { target: "patterns/INDEX.md", condition: "at the start of a task, to find a matching pattern" },
-    ],
-  }) +
-    `# Session Bootstrap
-
-Read this file before touching anything in Harbour. It says where knowledge lives
-and in what order to read it.
-
-## Reading order
-
-Start with the routing table below, then open only the files a task actually
-needs. Reading everything costs more than it returns and buries the parts that
-matter for the change in front of you.
-
-## Routing table
-
-The edges in this file's frontmatter are the routing table. Each one names a
-destination and the condition under which it is worth opening.
-
-## Working agreement
-
-Leave the scaffold in a state the next session can use. If a decision was made
-during a session, it belongs in the decision log before the session ends.
-`,
-);
-
-add(
-  "AGENTS.md",
-  `# Harbour
-
-Harbour is a ticketing service for small support teams. It accepts inbound mail,
-turns each thread into a ticket, and routes tickets to the queue that owns them.
-
-## Non-negotiables
-
-Inbound mail is never dropped. A message that cannot be parsed becomes a ticket
-in the triage queue with the raw body attached, and an operator decides.
-
-## Commands
-
-The dev target runs the service against a local Postgres. The check target runs
-the whole test suite and the linter. Both must pass before a change is proposed.
-
-## After every task
-
-Update the decision log when a choice was made, and the pattern index when a new
-pattern file lands.
-`,
-);
-
-add(
-  "SETUP.md",
-  `# First run
-
-This file is what a new contributor reads on day one. It assumes nothing beyond
-a working package manager.
-
-## Install
-
-Install the toolchain, then run the bootstrap target once. It creates the local
-database, applies every migration, and loads a small fixture set.
-
-## Verify
-
-Run the check target. A clean run prints a summary and exits zero. Anything else
-means the environment is not ready and the output says which step failed.
-
-## Where to go next
-
-Open the router. It explains which context file answers which kind of question.
-`,
-);
-
-add(
-  "SYNC.md",
-  `# Keeping the scaffold honest
-
-The scaffold drifts when code moves and nobody updates the prose that described
-it. Run the sync check before proposing a change, and fix what it reports rather
-than silencing it.
-
-## What sync checks
-
-It compares the routing edges against the files on disk, the pattern index
-against the pattern files, and every recorded grounding against the code it
-points at.
-`,
-);
-
-// -- context ----------------------------------------------------------------
-
-add(
-  "context/architecture.md",
-  front({
-    name: "architecture",
-    description: "How Harbour's pieces connect and how a message becomes a ticket.",
-    triggers: ["architecture", "request flow", "how does X reach Y", "boundaries", "queues"],
-    edges: [
-      { target: "context/stack.md", condition: "when a specific library's behaviour matters" },
-      { target: "context/decisions.md", condition: "when the reasoning behind a boundary is needed" },
-      { target: "context/conventions.md", condition: "when adding a handler to an existing service" },
-    ],
-    grounds: [
-      { node: NODE_A, fingerprint: FP_A },
-      { node: NODE_B, fingerprint: FP_B },
-    ],
-  }) +
-    `# Architecture
-
-An overview of the moving parts, written for someone who has not read the code.
-
-## Ingest
-
-Inbound mail arrives over SMTP and is written to the raw store before anything
-parses it. Parsing happens afterwards, from the stored copy, so a parser bug
-never loses a message. The ingest worker is deliberately dumb: it accepts,
-stores, acknowledges, and enqueues. Everything that can fail interestingly
-happens downstream of that acknowledgement, where a retry is cheap and a failure
-is visible in the triage queue rather than in a mail server's logs.
-
-## Threading
-
-A stored message is matched to an existing thread by its reply headers, and falls
-back to a subject-and-participant match when those headers are missing. The
-fallback is generous on purpose. A thread joined wrongly can be split by an
-operator in one action; a thread that is never joined produces two tickets nobody
-notices are the same conversation, and the second is usually answered twice. See
-[\`threadFor()\`](mex://${NODE_A}) for the matcher.
-
-## Routing
-
-Each ticket is assigned to exactly one queue. Assignment runs the queue rules in
-declaration order and takes the first match, with an explicit catch-all last, so
-there is always an owner. Rules are data, not code, and are reloaded without a
-restart. The ordering rule matters more than it looks: two overlapping rules are
-common, and resolving them by declaration order gives an operator something they
-can reason about without reading the engine.
-
-## Delivery
-
-Outbound replies go through a single sender that owns rate limiting and bounce
-handling. Nothing else in the system talks to the mail provider, so a change of
-provider touches one module and the credentials it reads.
-`,
-);
-
-add(
-  "context/conventions.md",
-  front({
-    name: "conventions",
-    description: "How code is written in Harbour: naming, structure, error handling and tests.",
-    triggers: ["convention", "naming", "style", "how should I write", "error handling"],
-    edges: [
-      { target: "context/architecture.md", condition: "when a convention depends on a service boundary" },
-      { target: "patterns/INDEX.md", condition: "when a task looks like something already documented" },
-    ],
-  }) +
-    `# Conventions
-
-The rules a change is reviewed against. They are short because a long list is a
-list nobody reads.
-
-## Naming
-
-Modules are named for the noun they own, not for the layer they sit in. A module
-called ticket owns tickets; there is no ticket-service, ticket-manager or
-ticket-helper. Functions that answer a question are named for the answer, so a
-reader can predict the return type from the call site without opening the
-definition.
-
-## Errors
-
-An error carries the identifier of the thing that failed and nothing else. No
-stack strings in messages, no wrapped-and-rewrapped chains, no error text that
-depends on which layer caught it. A handler either recovers or lets the error
-reach the boundary that turns it into a response.
-
-## Structure
-
-A module exports a narrow surface and keeps its internals unexported. If two
-modules need the same private helper, the helper moves into a third module that
-owns it rather than being exported from one of them and imported by the other.
-
-## Tests
-
-Every test names the behaviour it protects in its title, and a test that cannot
-fail is deleted rather than kept for coverage. A test that needs more than one
-fixture to explain itself is usually testing two things.
-`,
-);
-
-add(
-  "context/decisions.md",
-  front({
-    name: "decisions",
-    description: "The choices Harbour has made and the reasoning behind each one.",
-    triggers: ["why do we", "decision", "alternative", "we chose", "rationale"],
-    edges: [
-      { target: "context/architecture.md", condition: "when a decision shaped a boundary" },
-      { target: "context/stack.md", condition: "when a decision was about a dependency" },
-    ],
-  }) +
-    `# Decisions
-
-Kept in one place, oldest at the bottom. A superseded decision is never deleted.
-
-## Decision Log
-
-### Store raw mail before parsing it
-
-**Date:** 2026-01-12
-**Status:** Active
-**Decision:** Inbound mail is written to the raw store and acknowledged before
-any parsing runs.
-**Reasoning:** A parser bug that rejects a message loses a customer's mail with
-no record it ever arrived. Storing first makes every parser failure recoverable
-by replay.
-**Consequences:** The raw store grows without bound and needs its own retention
-policy, which is tracked as a risk.
-
-### One queue owns a ticket
-
-**Date:** 2026-01-30
-**Status:** Active
-**Decision:** A ticket is assigned to exactly one queue, with an explicit
-catch-all rule last.
-**Reasoning:** Shared ownership produced tickets nobody answered. A single owner
-with a visible fallback is worse for edge cases and much better for the common
-one.
-**Consequences:** Cross-team tickets are handled by reassignment rather than by
-membership, and reassignment has to be cheap.
-
-### Queue rules are data, not code
-
-**Date:** 2026-02-09
-**Status:** Active
-**Decision:** Routing rules are loaded from configuration and reloaded without a
-restart.
-**Reasoning:** Rules change weekly and a deploy per change made operators wait on
-engineers.
-**Consequences:** Rule validation has to be strict at load time, because a bad
-rule now reaches production without passing a compiler.
-
-### Use a single outbound sender
-
-**Date:** 2026-02-27
-**Status:** Superseded by "One queue owns a ticket"
-**Decision:** All outbound mail is sent through one module that owns rate
-limiting.
-**Reasoning:** Two senders drifted on retry behaviour and produced duplicate
-replies.
-**Consequences:** The sender is a single point of failure and needs its own
-health check.
-`,
-);
-
-add(
-  "context/setup.md",
-  front({
-    name: "setup",
-    description: "Preparing a machine to run and test Harbour locally.",
-    triggers: ["setup", "first run", "environment", "local development", "getting started"],
-    edges: [
-      { target: "context/stack.md", condition: "when a version constraint is unclear" },
-      { target: "context/architecture.md", condition: "when it is not obvious which service to run" },
-    ],
-  }) +
-    `# Setup
-
-Everything needed to get a working local environment, in the order it is needed.
-
-## Prerequisites
-
-A recent runtime, a local Postgres, and a mail catcher that accepts SMTP on a
-local port. The catcher stands in for the provider so that no local run can send
-real mail to a real address.
-
-## First-time setup
-
-Run the bootstrap target once. It creates the database, applies migrations, and
-loads a fixture set with three queues and a handful of threads. It is safe to
-re-run; it drops and recreates the local database only.
-
-## Environment variables
-
-Configuration is read from the environment with no defaults for anything that
-addresses a real system. A missing variable fails at startup with the name of the
-variable, rather than defaulting to something that silently works.
-
-## Common issues
-
-If ingest accepts mail but no tickets appear, the parser worker is not running.
-If replies never leave, check that the catcher is listening on the port the
-sender is configured with.
-`,
-);
-
-add(
-  "context/stack.md",
-  front({
-    name: "stack",
-    description: "The technologies Harbour runs on and the constraints on changing them.",
-    triggers: ["stack", "library", "dependency", "version", "what do we use"],
-    edges: [
-      { target: "context/decisions.md", condition: "when a dependency choice needs its reasoning" },
-      { target: "context/architecture.md", condition: "when a library choice is shaped by a boundary" },
-    ],
-  }) +
-    `# Stack
-
-What Harbour is built from, and what is deliberately absent.
-
-## Core
-
-A single service process, Postgres for everything durable, and a work queue that
-is a table in the same database rather than a separate broker.
-
-## Deliberately absent
-
-There is no cache tier, no message broker and no search cluster. Each was
-considered and rejected as an operational cost the current volume does not
-justify.
-
-## Version constraints
-
-The runtime is pinned to a major version and upgraded deliberately. Postgres is
-pinned to the version the managed instance runs, so a local run cannot pass on a
-feature production does not have.
-`,
-);
-
-add(
-  "context/risks.md",
-  front({
-    name: "risks",
-    description: "Known risks in Harbour, what triggers each one, and what would reduce it.",
-    triggers: ["risk", "what could break", "failure mode", "incident", "capacity", "retention"],
-    edges: [
-      { target: "context/architecture.md", condition: "when a risk sits at a boundary" },
-      { target: "context/decisions.md", condition: "when a risk was accepted deliberately" },
-      { target: "context/setup.md", condition: "when reproducing a failure locally" },
-    ],
-  }) +
-    `# Risks
-
-Written down so they are chosen rather than discovered.
-
-## Raw store growth
-
-The raw store keeps every inbound message and has no retention policy. At the
-current rate it outgrows its volume within a year. Nothing breaks quietly: the
-volume fills and ingest starts refusing, which is loud but sudden.
-
-## Single outbound sender
-
-Every reply goes through one module. If it stops, replies stop, and the failure
-is invisible from the operator's side because tickets continue to look answered.
-A health check that sends and reads back a message would catch it.
-
-## Rule reload without validation
-
-Queue rules are reloaded from configuration at runtime. A malformed rule set
-reaches production without a compiler between it and the queue engine, so the
-validation at load time is the only thing standing there.
-`,
-);
-
-// -- patterns ---------------------------------------------------------------
-
-add(
-  "patterns/INDEX.md",
-  front({
-    name: "pattern-index",
-    description: "Lookup table for Harbour's pattern files.",
-    triggers: ["pattern", "index", "how do I", "is there a pattern", "lookup", "recipe"],
-    edges: [
-      { target: "ROUTER.md", condition: "when the task does not match any pattern" },
-      { target: "context/conventions.md", condition: "when a pattern and a convention disagree" },
-    ],
-  }) +
-    `# Pattern Index
-
-Look here first. If a pattern matches the task, follow it rather than inventing a
-second way to do the same thing.
-
-The table below is maintained by hand today. Rows are added when a pattern file
-lands and removed when one is deleted, and the sync check compares the two.
-
-## Patterns
-
-| Pattern | Use when |
-|---------|----------|
-| add-queue-rule | adding or reordering a routing rule |
-| replay-raw-message | a message was stored but never became a ticket |
-| split-thread | two conversations were joined into one thread |
-| merge-tickets | one conversation became two tickets |
-`,
-);
-
-add(
-  "patterns/README.md",
-  `# Patterns
-
-A pattern file describes one repeatable task: what it is for, the steps, the
-places it goes wrong, and how to check it worked.
-
-## Adding a pattern
-
-Copy an existing file, keep the section headings, and add a row to the index.
-
-## Keeping them honest
-
-A pattern that no longer matches the code is worse than no pattern. Delete it or
-fix it; do not leave it.
-`,
-);
-
-const PATTERNS = [
-  ["add-queue-rule", "Add or reorder a routing rule", "routing rules", "queue"],
-  ["replay-raw-message", "Replay a stored message that never became a ticket", "replay", "raw store"],
-  ["split-thread", "Split a thread that was joined wrongly", "threading", "split"],
-  ["merge-tickets", "Merge two tickets that are the same conversation", "merge", "duplicate"],
-  ["add-migration", "Add and apply a database migration", "migration", "schema"],
-  ["rotate-provider-credentials", "Rotate the mail provider credentials", "credentials", "rotation"],
-  ["add-inbound-address", "Accept mail on a new inbound address", "inbound", "address"],
-  ["backfill-queue-assignment", "Backfill queue assignment after a rule change", "backfill", "assignment"],
-  ["trace-a-reply", "Trace a reply that never reached the customer", "delivery", "trace"],
-  ["add-a-health-check", "Add a health check to a worker", "health check", "worker"],
-  ["expire-raw-messages", "Expire raw messages past their retention window", "retention", "expiry"],
-  ["reprocess-bounces", "Reprocess a batch of bounced replies", "bounce", "reprocess"],
-  ["add-an-operator-action", "Add an action operators can take on a ticket", "operator", "action"],
+/** Trigger phrases, invented, sliced to the count a file needs. */
+const TRIGGER_POOL = [
+  "architecture", "request flow", "boundaries", "queues", "routing", "threading",
+  "delivery", "ingest", "naming", "style", "error handling", "conventions",
+  "why do we", "decision", "alternative", "setup", "environment", "first run",
+  "risk", "failure mode", "capacity", "retention", "stack", "dependency",
+  "version", "testing", "fixtures", "operations", "runbook", "on call",
 ];
 
-for (const [slug, title, triggerA, triggerB] of PATTERNS) {
-  const anchor = slug === "replay-raw-message" ? ` The entry point is [\`replayMessage()\`](mex://${NODE_B}).` : "";
-  const options = {
-    name: slug,
-    description: `${title}. Follow this rather than working it out again.`,
-    triggers: [triggerA, triggerB],
-    edges: [{ target: "context/conventions.md", condition: "when verifying the change against house style" }],
-  };
-  if (slug === "add-queue-rule") options.grounds = [{ node: NODE_A, fingerprint: FP_A }];
-  add(
-    `patterns/${slug}.md`,
-    front(options) +
-      `# ${title}
+/** Edge targets, invented, drawn from the corpus's own file list. */
+const EDGE_POOL = [
+  "context/architecture.md", "context/conventions.md", "context/decisions.md",
+  "context/setup.md", "context/stack.md", "context/risks.md",
+  "context/testing.md", "context/operations.md", "context/glossary.md",
+  "context/data-model.md", "context/integrations.md", "context/security.md",
+  "context/performance.md", "patterns/INDEX.md",
+];
 
-## Context
+const CONDITIONS = [
+  "when the boundary between two services matters",
+  "when writing or reviewing a change",
+  "when a design choice needs its reasoning",
+  "when preparing a development machine",
+  "when a library version is in question",
+  "when a failure mode is being weighed",
+  "when adding or changing a test",
+  "when running the service in anger",
+  "when a term is used without definition",
+  "when the shape of stored data matters",
+  "when a third party is involved",
+  "when the change touches credentials",
+  "when latency or volume is the concern",
+  "at the start of a task, to find a matching pattern",
+];
 
-Use this when the task is exactly the one this file names. If the situation is
-close but not the same, read the pattern anyway and then say in the change why
-you departed from it.${anchor}
-
-## Steps
-
-Work through these in order. Each step is checkable on its own, so a run that
-stops halfway leaves something a reader can reason about rather than a partial
-state nobody can name.
-
-## Gotchas
-
-The step that goes wrong most often is the one that looks like bookkeeping. Do
-not skip the verification below on the grounds that the change was small.
-
-## Verify
-
-Run the check target and confirm the summary is clean. Then exercise the path by
-hand once, because the check does not cover the operator-facing side.
-
-## Debug
-
-If the result is not what the pattern promises, the cause is almost always state
-left over from an earlier attempt. Reset the local database and start again
-before looking for a deeper explanation.
-
-## Update Scaffold
-
-If this pattern was wrong or incomplete, fix it here in the same change. Add a
-row to the index if the pattern is new.
-`,
-  );
+function edgesFor(count, offset) {
+  const edges = [];
+  for (let index = 0; index < count; index += 1) {
+    const slot = (offset + index) % EDGE_POOL.length;
+    edges.push({ target: EDGE_POOL[slot], condition: CONDITIONS[slot] });
+  }
+  return edges;
 }
 
-// -- write ------------------------------------------------------------------
+function triggersFor(count, offset) {
+  const triggers = [];
+  for (let index = 0; index < count; index += 1) {
+    triggers.push(TRIGGER_POOL[(offset + index) % TRIGGER_POOL.length]);
+  }
+  return triggers;
+}
+
+/**
+ * The file table.
+ *
+ * `h2` names the depth-2 sections; `nested` gives a section its depth-3
+ * children. `paras` is paragraphs per section, which is what lands each file in
+ * the prose-length bucket the census records.
+ */
+const PLAN = [
+  { path: "ROUTER.md", title: "Session Bootstrap", name: "router", description: "Session bootstrap and navigation hub for the Harbour ticketing service.", edges: 14, triggers: 12, h2: ["Reading order", "Routing table", "Working agreement"], paras: 2 },
+  { path: "AGENTS.md", title: "Harbour", h2: ["Non-negotiables", "Commands", "After every task"], paras: 2 },
+  { path: "SETUP.md", title: "First run", h2: ["Install", "Verify", "Where to go next"], paras: 2 },
+  { path: "SYNC.md", title: "Keeping the scaffold honest", h2: ["What sync checks", "When it disagrees", "What it will not do"], paras: 2 },
+
+  { path: "context/architecture.md", title: "Architecture", name: "architecture", description: "How Harbour's pieces connect and how a message becomes a ticket.", edges: 5, triggers: 12, h2: ["Ingest", "Threading", "Routing", "Delivery"], nested: { Ingest: ["Acceptance", "The raw store", "Enqueueing"], Threading: ["Header matching", "The fallback", "Splitting"] }, paras: 1 },
+  { path: "context/conventions.md", title: "Conventions", name: "conventions", description: "How code is written in Harbour: naming, structure, errors and tests.", edges: 4, triggers: 10, h2: ["Naming", "Errors", "Structure", "Tests", "Logging", "Configuration", "Migrations", "Dependencies", "Review"], paras: 5 },
+  { path: "context/decisions.md", title: "Decisions", name: "decisions", description: "The choices Harbour has made and the reasoning behind each one.", edges: 5, triggers: 11, decisionLog: true, paras: 2 },
+  { path: "context/setup.md", title: "Setup", name: "setup", description: "Preparing a machine to run and test Harbour locally.", edges: 4, triggers: 9, h2: ["Prerequisites", "First-time setup", "Environment variables", "Running the workers", "Loading fixtures", "Common issues"], paras: 2 },
+  { path: "context/risks.md", title: "Risks", name: "risks", description: "Known risks in Harbour, what triggers each one, and what would reduce it.", edges: 4, triggers: 9, h2: ["Raw store growth", "Single outbound sender", "Rule reload without validation", "Queue starvation", "Provider lock-in", "Operator error"], paras: 2 },
+  { path: "context/stack.md", title: "Stack", name: "stack", description: "The technologies Harbour runs on and the constraints on changing them.", edges: 3, triggers: 9, h2: ["Core", "Deliberately absent", "Version constraints", "Upgrades", "Local substitutes"], paras: 3 },
+  { path: "context/testing.md", title: "Testing", name: "testing", description: "How Harbour is tested and what each layer of the suite is for.", edges: 3, triggers: 8, h2: ["Layers", "Fixtures", "The mail catcher", "Flakiness", "What is not tested"], paras: 3 },
+  { path: "context/operations.md", title: "Operations", name: "operations", description: "Running Harbour: deploys, alerts, and what to do when something stops.", edges: 3, triggers: 8, h2: ["Deploys", "Alerts", "Backups", "Rollback", "On call"], paras: 3 },
+  { path: "context/glossary.md", title: "Glossary", name: "glossary", description: "Terms used throughout Harbour, defined once so they are not redefined.", edges: 3, h2: ["Ticket", "Thread", "Queue", "Raw message"], paras: 1 },
+  { path: "context/data-model.md", title: "Data model", name: "data-model", description: "The tables Harbour stores and how they relate to one another.", edges: 3, triggers: 7, h2: ["Tickets", "Messages", "Queues", "Audit"], paras: 1 },
+  { path: "context/integrations.md", title: "Integrations", name: "integrations", description: "The third parties Harbour talks to and what each one is trusted for.", edges: 3, triggers: 6, h2: ["Mail provider", "Identity", "Billing", "Webhooks"], paras: 1 },
+  { path: "context/security.md", title: "Security", name: "security", description: "How Harbour handles credentials, access and customer data.", edges: 3, triggers: 6, h2: ["Credentials", "Access", "Customer data", "Audit trail"], paras: 1 },
+  { path: "context/performance.md", title: "Performance", name: "performance", description: "Where Harbour spends its time and which numbers are worth watching.", edges: 3, triggers: 6, h2: ["Ingest latency", "Queue depth", "Query shapes", "What to watch"], paras: 1 },
+
+  { path: "patterns/INDEX.md", title: "Pattern Index", name: "pattern-index", description: "Lookup table for Harbour's pattern files.", h2: ["Patterns", "Adding a row", "Removing a row", "Keeping it honest"], paras: 2 },
+  { path: "patterns/README.md", title: "Patterns", introParas: 4, paras: 3 },
+];
+
+const PATTERN_SECTIONS = ["Context", "Steps", "Gotchas", "Verify", "Debug", "Update Scaffold"];
+
+const PATTERNS = [
+  ["add-queue-rule", "Add or reorder a routing rule", 3, 6, 1],
+  ["replay-raw-message", "Replay a stored message that never became a ticket", 3, 6, 3],
+  ["split-thread", "Split a thread that was joined wrongly", 3, 6, 1],
+  ["merge-tickets", "Merge two tickets that are the same conversation", 3, 5, 1],
+  ["add-migration", "Add and apply a database migration", 3, 5, 1],
+  ["trace-a-reply", "Trace a reply that never reached the customer", 2, 5, 1],
+];
+
+for (const [slug, title, edgeCount, triggerCount, paras] of PATTERNS) {
+  PLAN.push({
+    path: `patterns/${slug}.md`,
+    title,
+    name: slug,
+    description: `${title}. Follow this rather than working it out again.`,
+    edges: edgeCount,
+    triggers: triggerCount,
+    h2: PATTERN_SECTIONS,
+    paras,
+  });
+}
+
+function render(spec, index) {
+  const lines = [];
+  const head =
+    spec.name === undefined
+      ? ""
+      : front({
+          name: spec.name,
+          description: spec.description,
+          ...(spec.triggers === undefined ? {} : { triggers: triggersFor(spec.triggers, index * 3) }),
+          ...(spec.edges === undefined ? {} : { edges: edgesFor(spec.edges, index) }),
+        });
+
+  lines.push(`# ${spec.title}`, "");
+  lines.push(...prose(spec.introParas ?? 1));
+
+  if (spec.decisionLog === true) {
+    lines.push("## Decision Log", "");
+    lines.push(...prose(spec.paras));
+    for (const entry of DECISIONS.slice(0, 8)) lines.push(...decisionEntry(entry, spec.paras));
+    lines.push("## Open questions", "");
+    lines.push(...prose(spec.paras));
+    for (const entry of DECISIONS.slice(8)) lines.push(...decisionEntry(entry, spec.paras));
+  } else {
+    for (const heading of spec.h2 ?? []) {
+      lines.push(`## ${heading}`, "");
+      lines.push(...prose(spec.paras));
+      for (const child of spec.nested?.[heading] ?? []) {
+        lines.push(`### ${child}`, "");
+        lines.push(...prose(spec.paras));
+      }
+    }
+  }
+
+  // One trailing blank line collapses to the file's final terminator.
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return `${head}${lines.join("\n")}\n`;
+}
+
+const files = {};
+PLAN.forEach((spec, index) => {
+  files[spec.path] = render(spec, index);
+});
 
 const target = resolve(process.argv[2] ?? DEFAULT_TARGET);
 rmSync(target, { recursive: true, force: true });

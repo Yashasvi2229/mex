@@ -231,20 +231,26 @@ export function classifyFile(file: InventoryFile): FileClassification {
   // Decision log: depth-3 entries under a depth-2 heading that names the log,
   // each carrying the structural decision marker.
   if (file.path === "context/decisions.md") {
-    let insideLog = false;
     file.headings.forEach((heading, index) => {
-      if (heading.depth <= 2) {
-        insideLog = DECISION_LOG_HEADING.test(heading.title.trim());
-        if (insideLog) {
-          result.abstentions.push({
-            file: file.path,
-            target: targetOf(heading, index),
-            reason: "A decision log is a container for its entries, not a decision of its own.",
-          });
-        }
+      if (heading.depth === 1) return;
+      if (heading.depth === 2) {
+        result.abstentions.push({
+          file: file.path,
+          target: targetOf(heading, index),
+          reason: DECISION_LOG_HEADING.test(heading.title.trim())
+            ? "A decision log is a container for its entries, not a decision of its own."
+            : "A depth-2 heading in a decisions file groups entries; it makes no claim of its own.",
+        });
         return;
       }
-      if (heading.depth !== 3 || !insideLog) return;
+      if (heading.depth !== 3) {
+        result.abstentions.push({
+          file: file.path,
+          target: targetOf(heading, index),
+          reason: `A decision entry is a depth-3 heading; this one is depth ${heading.depth}.`,
+        });
+        return;
+      }
       const section = sectionTextOf(file, index);
       if (!DECISION_MARKER.test(section)) {
         result.abstentions.push({
@@ -271,7 +277,21 @@ export function classifyFile(file: InventoryFile): FileClassification {
   if (role.sectionType !== null) {
     const sectionType = role.sectionType;
     file.headings.forEach((heading, index) => {
-      if (heading.depth !== role.sectionDepth) return;
+      if (heading.depth === 1) return;
+      if (heading.depth !== role.sectionDepth) {
+        // Reported rather than silently passed over. Section 13.2 says
+        // ambiguous prose is retained *and reported*, and a subsection nested
+        // inside a section that did become an entity is exactly the case a
+        // reader needs told about — its prose is now inside its parent's body.
+        result.abstentions.push({
+          file: file.path,
+          target: targetOf(heading, index),
+          reason:
+            `Sections of ${file.path} become entities at depth ${role.sectionDepth}; this heading is ` +
+            `depth ${heading.depth}. Its prose stays with the section that contains it.`,
+        });
+        return;
+      }
       const section = sectionTextOf(file, index);
       if (!isSubstantial(section)) {
         const weight = proseWeight(section);

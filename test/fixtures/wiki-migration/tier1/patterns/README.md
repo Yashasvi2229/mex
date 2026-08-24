@@ -1,13 +1,17 @@
 # Patterns
 
-A pattern file describes one repeatable task: what it is for, the steps, the
-places it goes wrong, and how to check it worked.
+Retention is the open question. The raw store keeps every message and has
+no expiry, so the volume fills on a schedule nobody has written down and
+ingest starts refusing when it does.
 
-## Adding a pattern
+Rules are data and are reloaded without a restart, which took the deploy
+out of the loop and put validation on the critical path. A malformed rule
+set now reaches production with only the loader standing in front of it.
 
-Copy an existing file, keep the section headings, and add a row to the index.
+The bootstrap target is safe to re-run. It drops and recreates the local
+database only, applies every migration in order, and loads a fixture set
+with three queues and a handful of threads.
 
-## Keeping them honest
-
-A pattern that no longer matches the code is worse than no pattern. Delete it or
-fix it; do not leave it.
+A health check that sends a message and reads it back is the only thing
+that would catch a stalled sender, because tickets continue to look
+answered from the operator's side while replies pile up unsent.

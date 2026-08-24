@@ -2,44 +2,58 @@
 name: merge-tickets
 description: "Merge two tickets that are the same conversation. Follow this rather than working it out again."
 triggers:
-  - "merge"
-  - "duplicate"
+  - "delivery"
+  - "ingest"
+  - "naming"
+  - "style"
+  - "error handling"
 edges:
-  - target: context/conventions.md
-    condition: when verifying the change against house style
+  - target: context/glossary.md
+    condition: when a term is used without definition
+  - target: context/data-model.md
+    condition: when the shape of stored data matters
+  - target: context/integrations.md
+    condition: when a third party is involved
 last_updated: 2026-03-14
 ---
 # Merge two tickets that are the same conversation
 
+Search is a query against Postgres rather than a cluster of its own. It is
+slower than it could be at a volume the service does not have, and it is
+one fewer system to operate, secure and keep in sync.
+
 ## Context
 
-Use this when the task is exactly the one this file names. If the situation is
-close but not the same, read the pattern anyway and then say in the change why
-you departed from it.
+Inbound mail is written to the raw store before anything parses it, so a
+parser that rejects a message never loses it. Everything that can fail
+interestingly happens downstream, where a retry is cheap and visible.
 
 ## Steps
 
-Work through these in order. Each step is checkable on its own, so a run that
-stops halfway leaves something a reader can reason about rather than a partial
-state nobody can name.
+A stored message is matched to a thread by its reply headers, falling back
+to a subject-and-participant match when those headers are missing. The
+fallback is generous on purpose, because a missed join is the worse error.
 
 ## Gotchas
 
-The step that goes wrong most often is the one that looks like bookkeeping. Do
-not skip the verification below on the grounds that the change was small.
+Each ticket is assigned to exactly one queue. The rules run in declaration
+order and the first match wins, with an explicit catch-all last, so there
+is always an owner and an operator can predict the outcome.
 
 ## Verify
 
-Run the check target and confirm the summary is clean. Then exercise the path by
-hand once, because the check does not cover the operator-facing side.
+Outbound replies go through a single sender that owns rate limiting and
+bounce handling. Nothing else talks to the mail provider, so changing
+provider touches one module and the credentials it reads.
 
 ## Debug
 
-If the result is not what the pattern promises, the cause is almost always state
-left over from an earlier attempt. Reset the local database and start again
-before looking for a deeper explanation.
+Modules are named for the noun they own rather than the layer they sit in.
+A module called ticket owns tickets, and there is no manager, service or
+helper variant of it hiding the same behaviour under a second name.
 
 ## Update Scaffold
 
-If this pattern was wrong or incomplete, fix it here in the same change. Add a
-row to the index if the pattern is new.
+An error carries the identifier of the thing that failed and nothing else.
+No stack strings in messages and no chains rewrapped at every layer, so a
+reader can tell what broke without reconstructing how it was caught.

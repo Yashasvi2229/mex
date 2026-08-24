@@ -12,7 +12,8 @@
  */
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve, relative, sep } from "node:path";
 import { isEntityId } from "../../model/ids.js";
 
@@ -20,6 +21,7 @@ const REPO_ROOT = resolve(__dirname, "..", "..", "..", "..");
 const CORPUS = join(REPO_ROOT, "test", "fixtures", "wiki-migration", "tier1");
 const CENSUS = join(REPO_ROOT, "test", "fixtures", "wiki-migration", "census.json");
 const CENSUS_SCRIPT = join(REPO_ROOT, "scripts", "wiki-scaffold-census.mjs");
+const GENERATOR = join(REPO_ROOT, "scripts", "generate-wiki-migration-corpus.mjs");
 
 function markdownFiles(directory: string, out: string[] = []): string[] {
   for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
@@ -92,27 +94,97 @@ describe("the tier-1 migration corpus", () => {
   it("carries the legacy shapes migration exists to convert", () => {
     const texts = new Map(FILES.map((path) => [relative(CORPUS, path).split(sep).join("/"), readFileSync(path, "utf-8")]));
     const withEdges = [...texts.values()].filter((text) => /^edges:/m.test(text));
-    const withGrounds = [...texts.entries()].filter(([, text]) => /^grounds_to:/m.test(text)).map(([name]) => name);
+    const conditions = [...texts.values()].flatMap((text) => text.match(/^ {4}condition:/gm) ?? []);
+    const targets = [...texts.values()].flatMap((text) => text.match(/^ {2}- target:/gm) ?? []);
 
-    expect(withEdges.length).toBe(21);
-    // One on a file that will yield several entities (ambiguous, section 9.4)
-    // and one on a file that will yield exactly one (unambiguous).
-    expect(withGrounds.sort()).toEqual(["context/architecture.md", "patterns/add-queue-rule.md"]);
-    expect([...texts.values()].filter((text) => text.includes("](mex://")).length).toBe(2);
-    // The nested-deeper case: `###` decisions inside a `##` container.
+    expect(withEdges.length).toBe(20);
+    // Every edge carries a condition in a real scaffold: 77 of 77. The
+    // condition-to-`note` conversion path is always live, never occasional.
+    expect(targets.length).toBe(77);
+    expect(conditions.length).toBe(77);
+    // The outlier the census records: one hub against a mode of three. It is
+    // what stresses the mint-every-id-before-converting-any-edge ordering.
+    const routerEdges = (texts.get("ROUTER.md")?.match(/^ {2}- target:/gm) ?? []).length;
+    expect(routerEdges).toBe(14);
+    // The nested-deeper case, sixteen depth-3 headings across two files.
+    const depthThree = [...texts.values()].flatMap((text) => text.match(/^### /gm) ?? []);
+    expect(depthThree.length).toBe(16);
     expect(texts.get("context/decisions.md")).toMatch(/^### Store raw mail before parsing it$/m);
   });
 
+  it("carries no grounding and no anchor — a pre-wiki scaffold has neither", () => {
+    // Measured on a real filled scaffold: zero root `grounds_to`, zero
+    // `mex://` anchors, zero `mex` keys. `mex ground` is what writes those, and
+    // a scaffold that has not been grounded has none of them.
+    //
+    // So grounding migration is **not** tier 1's to cover. It belongs to tier
+    // 2, which runs the real grounding path against a temporary graph so node
+    // ids and `mh:64:` fingerprints are real rather than hand-typed, and to
+    // tier 3's adversarial multi-entity ambiguity case. Keeping invented
+    // groundings here to make that coverage look present would have made the
+    // corpus disagree with every scaffold migration will actually meet.
+    for (const path of FILES) {
+      const text = readFileSync(path, "utf-8");
+      const name = relative(CORPUS, path).split(sep).join("/");
+      expect(/^grounds_to:/m.test(text), `${name} carries a root grounds_to`).toBe(false);
+      expect(text.includes("](mex://"), `${name} carries an inline anchor`).toBe(false);
+    }
+  });
+
+  it("says where its numbers came from, and the instrument says so too", () => {
+    // The refresh command pipes the script over census.json. If the script did
+    // not emit provenance, refreshing would silently replace a census marked
+    // `realScaffoldCensus: true` with one that had no provenance at all — and
+    // the comparison above skips `provenance`, so nothing would fail.
+    const committed = JSON.parse(readFileSync(CENSUS, "utf-8")) as { provenance?: Record<string, unknown> };
+    expect(committed.provenance?.realScaffoldCensus).toBe(true);
+    expect(committed.provenance?.refresh).toContain("wiki-scaffold-census.mjs");
+
+    const emitted = JSON.parse(
+      execFileSync(process.execPath, [CENSUS_SCRIPT, CORPUS], { encoding: "utf-8" }),
+    ) as { provenance?: Record<string, unknown> };
+    expect(emitted.provenance?.realScaffoldCensus).toBe(true);
+    expect(emitted.provenance?.note).toContain("Numbers only");
+    // The path the script was given is itself identifying, so it must not
+    // survive into anything the script prints.
+    expect(JSON.stringify(emitted.provenance)).not.toContain("tier1");
+  });
+
   it("is byte-identical to what the generator produces", () => {
+    // Generated into a temp directory, never over the committed fixture. A
+    // test that deletes and rewrites shared fixture bytes races every other
+    // test file reading them, which is a flake that looks like a corpus bug.
+    const scratch = mkdtempSync(join(tmpdir(), "wiki-corpus-"));
+    execFileSync(process.execPath, [GENERATOR, scratch], { encoding: "utf-8" });
+    const produced = markdownFiles(scratch);
+    expect(produced.length).toBe(FILES.length);
+    for (const path of produced) {
+      const name = relative(scratch, path).split(sep).join("/");
+      expect(readFileSync(path, "utf-8"), `${name} differs from the committed fixture`).toBe(
+        readFileSync(join(CORPUS, name), "utf-8"),
+      );
+    }
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  it("is byte-identical across two generator runs", () => {
     // Determinism: a generator with a clock or a random seed would make the
     // fixture drift on its own, and the census assertion above would then be
-    // measuring whichever run happened last.
-    const before = new Map(FILES.map((path) => [path, readFileSync(path, "utf-8")]));
-    execFileSync(process.execPath, [join(REPO_ROOT, "scripts", "generate-wiki-migration-corpus.mjs")], { encoding: "utf-8" });
-    for (const [path, text] of before) {
-      expect(readFileSync(path, "utf-8"), `${relative(CORPUS, path)} changed when regenerated`).toBe(text);
+    // measuring whichever run happened last. Two scratch runs, never the
+    // committed fixture.
+    const first = mkdtempSync(join(tmpdir(), "wiki-corpus-a-"));
+    const second = mkdtempSync(join(tmpdir(), "wiki-corpus-b-"));
+    execFileSync(process.execPath, [GENERATOR, first], { encoding: "utf-8" });
+    execFileSync(process.execPath, [GENERATOR, second], { encoding: "utf-8" });
+    const names = markdownFiles(first).map((path) => relative(first, path).split(sep).join("/"));
+    expect(names.length).toBe(FILES.length);
+    for (const name of names) {
+      expect(readFileSync(join(second, name), "utf-8"), `${name} differs between runs`).toBe(
+        readFileSync(join(first, name), "utf-8"),
+      );
     }
-    expect(markdownFiles(CORPUS).length).toBe(before.size);
+    rmSync(first, { recursive: true, force: true });
+    rmSync(second, { recursive: true, force: true });
   });
 
   it("has no CRLF or BOM in tier 1 — those belong to tier 3, deliberately", () => {

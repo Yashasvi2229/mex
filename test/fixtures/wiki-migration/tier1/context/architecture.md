@@ -2,58 +2,93 @@
 name: architecture
 description: "How Harbour's pieces connect and how a message becomes a ticket."
 triggers:
-  - "architecture"
-  - "request flow"
-  - "how does X reach Y"
-  - "boundaries"
-  - "queues"
+  - "why do we"
+  - "decision"
+  - "alternative"
+  - "setup"
+  - "environment"
+  - "first run"
+  - "risk"
+  - "failure mode"
+  - "capacity"
+  - "retention"
+  - "stack"
+  - "dependency"
 edges:
   - target: context/stack.md
-    condition: when a specific library's behaviour matters
-  - target: context/decisions.md
-    condition: when the reasoning behind a boundary is needed
-  - target: context/conventions.md
-    condition: when adding a handler to an existing service
-grounds_to:
-  - node: "function:1c9d4b7e2f5a8036c4e1b9d7a2f60358"
-    fingerprint: "mh:64:4b1c7e29"
-  - node: "class:7e2a1f4c8b09d3e65a17c4f2b8d09e13"
-    fingerprint: "mh:64:c08a3f7d"
+    condition: when a library version is in question
+  - target: context/risks.md
+    condition: when a failure mode is being weighed
+  - target: context/testing.md
+    condition: when adding or changing a test
+  - target: context/operations.md
+    condition: when running the service in anger
+  - target: context/glossary.md
+    condition: when a term is used without definition
 last_updated: 2026-03-14
 ---
 # Architecture
 
-An overview of the moving parts, written for someone who has not read the code.
+The bootstrap target is safe to re-run. It drops and recreates the local
+database only, applies every migration in order, and loads a fixture set
+with three queues and a handful of threads.
 
 ## Ingest
 
-Inbound mail arrives over SMTP and is written to the raw store before anything
-parses it. Parsing happens afterwards, from the stored copy, so a parser bug
-never loses a message. The ingest worker is deliberately dumb: it accepts,
-stores, acknowledges, and enqueues. Everything that can fail interestingly
-happens downstream of that acknowledgement, where a retry is cheap and a failure
-is visible in the triage queue rather than in a mail server's logs.
+A health check that sends a message and reads it back is the only thing
+that would catch a stalled sender, because tickets continue to look
+answered from the operator's side while replies pile up unsent.
+
+### Acceptance
+
+Schema changes go out ahead of the code that needs them and stay backward
+compatible for one release. Two deploys is slower and it is what lets a
+rollback happen without a second migration under pressure.
+
+### The raw store
+
+Search is a query against Postgres rather than a cluster of its own. It is
+slower than it could be at a volume the service does not have, and it is
+one fewer system to operate, secure and keep in sync.
+
+### Enqueueing
+
+Inbound mail is written to the raw store before anything parses it, so a
+parser that rejects a message never loses it. Everything that can fail
+interestingly happens downstream, where a retry is cheap and visible.
 
 ## Threading
 
-A stored message is matched to an existing thread by its reply headers, and falls
-back to a subject-and-participant match when those headers are missing. The
-fallback is generous on purpose. A thread joined wrongly can be split by an
-operator in one action; a thread that is never joined produces two tickets nobody
-notices are the same conversation, and the second is usually answered twice. See
-[`threadFor()`](mex://function:1c9d4b7e2f5a8036c4e1b9d7a2f60358) for the matcher.
+A stored message is matched to a thread by its reply headers, falling back
+to a subject-and-participant match when those headers are missing. The
+fallback is generous on purpose, because a missed join is the worse error.
+
+### Header matching
+
+Each ticket is assigned to exactly one queue. The rules run in declaration
+order and the first match wins, with an explicit catch-all last, so there
+is always an owner and an operator can predict the outcome.
+
+### The fallback
+
+Outbound replies go through a single sender that owns rate limiting and
+bounce handling. Nothing else talks to the mail provider, so changing
+provider touches one module and the credentials it reads.
+
+### Splitting
+
+Modules are named for the noun they own rather than the layer they sit in.
+A module called ticket owns tickets, and there is no manager, service or
+helper variant of it hiding the same behaviour under a second name.
 
 ## Routing
 
-Each ticket is assigned to exactly one queue. Assignment runs the queue rules in
-declaration order and takes the first match, with an explicit catch-all last, so
-there is always an owner. Rules are data, not code, and are reloaded without a
-restart. The ordering rule matters more than it looks: two overlapping rules are
-common, and resolving them by declaration order gives an operator something they
-can reason about without reading the engine.
+An error carries the identifier of the thing that failed and nothing else.
+No stack strings in messages and no chains rewrapped at every layer, so a
+reader can tell what broke without reconstructing how it was caught.
 
 ## Delivery
 
-Outbound replies go through a single sender that owns rate limiting and bounce
-handling. Nothing else in the system talks to the mail provider, so a change of
-provider touches one module and the credentials it reads.
+Configuration is read from the environment with no defaults for anything
+that addresses a real system. A missing variable fails at startup naming
+itself, rather than defaulting to something that silently half-works.

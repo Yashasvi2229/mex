@@ -2,47 +2,59 @@
 name: add-queue-rule
 description: "Add or reorder a routing rule. Follow this rather than working it out again."
 triggers:
-  - "routing rules"
-  - "queue"
+  - "operations"
+  - "runbook"
+  - "on call"
+  - "architecture"
+  - "request flow"
+  - "boundaries"
 edges:
-  - target: context/conventions.md
-    condition: when verifying the change against house style
-grounds_to:
-  - node: "function:1c9d4b7e2f5a8036c4e1b9d7a2f60358"
-    fingerprint: "mh:64:4b1c7e29"
+  - target: context/risks.md
+    condition: when a failure mode is being weighed
+  - target: context/testing.md
+    condition: when adding or changing a test
+  - target: context/operations.md
+    condition: when running the service in anger
 last_updated: 2026-03-14
 ---
 # Add or reorder a routing rule
 
+Schema changes go out ahead of the code that needs them and stay backward
+compatible for one release. Two deploys is slower and it is what lets a
+rollback happen without a second migration under pressure.
+
 ## Context
 
-Use this when the task is exactly the one this file names. If the situation is
-close but not the same, read the pattern anyway and then say in the change why
-you departed from it.
+Search is a query against Postgres rather than a cluster of its own. It is
+slower than it could be at a volume the service does not have, and it is
+one fewer system to operate, secure and keep in sync.
 
 ## Steps
 
-Work through these in order. Each step is checkable on its own, so a run that
-stops halfway leaves something a reader can reason about rather than a partial
-state nobody can name.
+Inbound mail is written to the raw store before anything parses it, so a
+parser that rejects a message never loses it. Everything that can fail
+interestingly happens downstream, where a retry is cheap and visible.
 
 ## Gotchas
 
-The step that goes wrong most often is the one that looks like bookkeeping. Do
-not skip the verification below on the grounds that the change was small.
+A stored message is matched to a thread by its reply headers, falling back
+to a subject-and-participant match when those headers are missing. The
+fallback is generous on purpose, because a missed join is the worse error.
 
 ## Verify
 
-Run the check target and confirm the summary is clean. Then exercise the path by
-hand once, because the check does not cover the operator-facing side.
+Each ticket is assigned to exactly one queue. The rules run in declaration
+order and the first match wins, with an explicit catch-all last, so there
+is always an owner and an operator can predict the outcome.
 
 ## Debug
 
-If the result is not what the pattern promises, the cause is almost always state
-left over from an earlier attempt. Reset the local database and start again
-before looking for a deeper explanation.
+Outbound replies go through a single sender that owns rate limiting and
+bounce handling. Nothing else talks to the mail provider, so changing
+provider touches one module and the credentials it reads.
 
 ## Update Scaffold
 
-If this pattern was wrong or incomplete, fix it here in the same change. Add a
-row to the index if the pattern is new.
+Modules are named for the noun they own rather than the layer they sit in.
+A module called ticket owns tickets, and there is no manager, service or
+helper variant of it hiding the same behaviour under a second name.

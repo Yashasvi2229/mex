@@ -2,44 +2,59 @@
 name: split-thread
 description: "Split a thread that was joined wrongly. Follow this rather than working it out again."
 triggers:
+  - "queues"
+  - "routing"
   - "threading"
-  - "split"
+  - "delivery"
+  - "ingest"
+  - "naming"
 edges:
-  - target: context/conventions.md
-    condition: when verifying the change against house style
+  - target: context/operations.md
+    condition: when running the service in anger
+  - target: context/glossary.md
+    condition: when a term is used without definition
+  - target: context/data-model.md
+    condition: when the shape of stored data matters
 last_updated: 2026-03-14
 ---
 # Split a thread that was joined wrongly
 
+Operators reassign rather than share. Cross-team tickets move between
+queues, which means reassignment has to be one action and has to leave a
+trail that answers who moved it and when.
+
 ## Context
 
-Use this when the task is exactly the one this file names. If the situation is
-close but not the same, read the pattern anyway and then say in the change why
-you departed from it.
+Every test names the behaviour it protects in its title. A test that
+cannot fail is deleted rather than kept for coverage, and one that needs
+two fixtures to explain itself is usually testing two things.
 
 ## Steps
 
-Work through these in order. Each step is checkable on its own, so a run that
-stops halfway leaves something a reader can reason about rather than a partial
-state nobody can name.
+Retention is the open question. The raw store keeps every message and has
+no expiry, so the volume fills on a schedule nobody has written down and
+ingest starts refusing when it does.
 
 ## Gotchas
 
-The step that goes wrong most often is the one that looks like bookkeeping. Do
-not skip the verification below on the grounds that the change was small.
+Rules are data and are reloaded without a restart, which took the deploy
+out of the loop and put validation on the critical path. A malformed rule
+set now reaches production with only the loader standing in front of it.
 
 ## Verify
 
-Run the check target and confirm the summary is clean. Then exercise the path by
-hand once, because the check does not cover the operator-facing side.
+The bootstrap target is safe to re-run. It drops and recreates the local
+database only, applies every migration in order, and loads a fixture set
+with three queues and a handful of threads.
 
 ## Debug
 
-If the result is not what the pattern promises, the cause is almost always state
-left over from an earlier attempt. Reset the local database and start again
-before looking for a deeper explanation.
+A health check that sends a message and reads it back is the only thing
+that would catch a stalled sender, because tickets continue to look
+answered from the operator's side while replies pile up unsent.
 
 ## Update Scaffold
 
-If this pattern was wrong or incomplete, fix it here in the same change. Add a
-row to the index if the pattern is new.
+Schema changes go out ahead of the code that needs them and stay backward
+compatible for one release. Two deploys is slower and it is what lets a
+rollback happen without a second migration under pressure.
