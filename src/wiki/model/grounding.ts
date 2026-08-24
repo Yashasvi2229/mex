@@ -49,8 +49,24 @@ import {
 export interface WikiGrounding {
   /** Code-graph node id. Produced by the graph, never invented. */
   node: string;
-  /** Serialized MinHash fingerprint, `mh:<K>:<hex>`. Produced by the graph. */
+  /**
+   * Serialized MinHash fingerprint, `mh:<K>:<hex>`. Produced by the graph.
+   *
+   * This is an **identity** signal, not a change signal. It is what finds a
+   * symbol again after it moves — see {@link groundingComparator} for why that
+   * distinction decides how drift is detected.
+   */
   fingerprint: string;
+  /**
+   * sha256 of the grounded node's body when the entity was grounded.
+   *
+   * **The change signal, and canonical because it is in Markdown.** Optional
+   * only because §8.7 requires `node` and `fingerprint` and this is additive:
+   * a grounding written before this field existed still resolves, through the
+   * coarser comparator {@link groundingComparator} names. Everything mex writes
+   * carries it.
+   */
+  bodyHash?: string;
   /** Repository-relative path, cached for display when the graph is unavailable. */
   file?: string;
   commit?: string;
@@ -195,9 +211,40 @@ export function isNodeIdShaped(value: unknown): value is string {
   return typeof value === "string" && GRAPH_NODE_ID_PATTERN.test(value);
 }
 
+/**
+ * Which committed value a grounding can be checked against, and therefore what
+ * kind of change it can see.
+ *
+ * **The fingerprint cannot see a changed constant, and this is measured, not
+ * assumed.** The extractor represents identifiers and literals by their grammar
+ * kind alone — `normalizedCompilerTokens` says so in as many words, and a probe
+ * against a real graph confirms it: changing `3600` to `7200`, or renaming a
+ * local, moves the node's `bodyHash` and leaves its serialized fingerprint
+ * byte-identical. That is deliberate and correct for the fingerprint's actual
+ * job, which is finding a symbol again after it moves.
+ *
+ * It is the wrong instrument for drift. A decision entity that says "tokens
+ * rotate every hour" is grounded to exactly the code where the constant lives,
+ * and a fingerprint-only check reports it `fresh` forever after someone edits
+ * the number.
+ *
+ * So the drift comparison prefers the body hash **committed in Markdown**. Note
+ * what that does *not* mean: the graph's cached `body_hash` is still never the
+ * oracle. A cache is re-captured by an ordinary graph rebuild, so comparing
+ * current-against-cache compares current against current and drift vanishes.
+ * Both values compared here — the current node's, and the entity's — are
+ * canonical: one is the live code, the other is in Git.
+ */
+export function groundingComparator(grounding: WikiGrounding): "bodyHash" | "fingerprint" {
+  return typeof grounding.bodyHash === "string" && grounding.bodyHash.length > 0
+    ? "bodyHash"
+    : "fingerprint";
+}
+
 const shapeValidator = validateShape<WikiGrounding>({
   node: validateString(),
   fingerprint: validateString(),
+  bodyHash: optional(validateString()),
   file: optional(validateString()),
   commit: optional(validateString()),
   verifiedAt: optional(validateString()),

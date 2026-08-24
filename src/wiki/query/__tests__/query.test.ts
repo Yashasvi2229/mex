@@ -240,6 +240,43 @@ describe("stale health lowers rank but never hides (§10.4)", () => {
     if (summary.ok) expect(summary.value.health).toBe("missing");
   });
 
+  it("summarizes an entity by its worst health, using the model's precedence", () => {
+    // Two groundings on one entity: one `changed`, one `ambiguous`. The model
+    // calls ambiguous worse; the ranking's HEALTH_RANK penalizes changed more.
+    // Aggregation is the model's question — which finding represents this
+    // entity — so the answer must be `ambiguous`.
+    //
+    // The two orders were free to disagree while nothing ever populated the
+    // column. P4 populates it, so the disagreement became reachable.
+    const opened = openWikiIndex(indexPath, { readOnly: false });
+    if (!opened.ok) throw new Error(opened.diagnostic.message);
+    opened.index.db
+      .prepare(
+        `INSERT INTO wiki_groundings (entity_key, ordinal, node_id, fingerprint, health)
+         SELECT entity_key, 1, 'function:beefbeefbeefbeef', 'mh:64:ccdd', 'changed' FROM wiki_entities WHERE id = ?`,
+      )
+      .run(IDS.stale);
+    opened.index.db
+      .prepare(`UPDATE wiki_groundings SET health = 'ambiguous' WHERE ordinal = 0 AND entity_key IN (SELECT entity_key FROM wiki_entities WHERE id = ?)`)
+      .run(IDS.stale);
+    opened.index.close();
+
+    try {
+      const summary = session((query) => query.get(IDS.stale));
+      expect(summary.ok).toBe(true);
+      if (summary.ok) expect(summary.value.health).toBe("ambiguous");
+    } finally {
+      // Restore the fixture for whatever runs next: this suite shares one index.
+      const reopened = openWikiIndex(indexPath, { readOnly: false });
+      if (!reopened.ok) throw new Error(reopened.diagnostic.message);
+      reopened.index.db.prepare(`DELETE FROM wiki_groundings WHERE ordinal = 1`).run();
+      reopened.index.db
+        .prepare(`UPDATE wiki_groundings SET health = 'missing' WHERE ordinal = 0`)
+        .run();
+      reopened.index.close();
+    }
+  });
+
   it("orders a healthy entity above an unhealthy one, all else equal", () => {
     const base: EntitySummary = {
       id: "mx_01KR2E4K002H3ZYA9G0C4XV531",

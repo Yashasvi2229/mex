@@ -31,7 +31,13 @@ import { parseWikiMarkdown } from "../markdown/codec.js";
 import { discoverMarkdownFiles, type DiscoveredFile } from "./discover.js";
 import { openWikiIndexForWrite } from "./open.js";
 import { defaultIndexPath, readText, unreadableFileDiagnostic } from "./rebuild.js";
-import { deleteFileRows, resolveIndexState, writeFileDiagnostics, writeParsedFile } from "./write.js";
+import {
+  deleteFileRows,
+  resolveIndexState,
+  writeFileDiagnostics,
+  writeParsedFile,
+  type GroundingResolver,
+} from "./write.js";
 
 export interface RefreshOptions {
   scaffoldRoot: string;
@@ -47,6 +53,18 @@ export interface RefreshOptions {
   now?: () => string;
   /** Injectable file reader. See `RebuildOptions.readFile` for why it exists. */
   readFile?: (absolutePath: string) => string;
+  /**
+   * How to resolve grounding health, when the caller has a code graph.
+   *
+   * Optional because the index must build in a checkout that has none — a
+   * fresh clone, CI before `mex graph`, a sandbox. Absent, every grounding's
+   * verdict column stays NULL, which is what "nothing looked" is stored as.
+   *
+   * **A rebuild and a refresh must be given the same resolver or neither**, or
+   * their dumps differ for a reason that is not a refresh bug: health depends
+   * on code, and code changes without the scaffold changing at all.
+   */
+  resolveGrounding?: GroundingResolver;
 }
 
 export type RefreshResult =
@@ -141,6 +159,7 @@ export function refreshWikiIndex(options: RefreshOptions): RefreshResult {
         buildKind: "refresh",
         now: now(),
         scaffoldDiagnostics: discovery.diagnostics,
+        resolveGrounding: options.resolveGrounding,
       });
     });
 

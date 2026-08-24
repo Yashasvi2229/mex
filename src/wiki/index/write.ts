@@ -31,7 +31,7 @@ import {
   type TopicSubject,
 } from "../model/topic.js";
 import { findDuplicateSources, sourceIdentity, type WikiSource } from "../model/source.js";
-import type { WikiGrounding } from "../model/grounding.js";
+import type { GroundingResolution, WikiGrounding } from "../model/grounding.js";
 import type { ParsedEntity, ParsedFile } from "../markdown/contract.js";
 import type { SqliteDatabase } from "../../graph/db/sqlite.js";
 import { WIKI_META_KEYS } from "./schema.js";
@@ -201,8 +201,8 @@ export function writeParsedFile(db: SqliteDatabase, parsed: ParsedFile, options:
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertGrounding = db.prepare(
-    `INSERT INTO wiki_groundings (entity_key, ordinal, node_id, fingerprint, file, commit_sha, verified_at, reason, health)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+    `INSERT INTO wiki_groundings (entity_key, ordinal, node_id, fingerprint, body_hash, file, commit_sha, verified_at, reason, state, resolved_node, health)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
   );
   const insertFts = db.prepare(
     `INSERT INTO wiki_fts (entity_key, title, summary, body, aliases, meta) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -263,11 +263,16 @@ export function writeParsedFile(db: SqliteDatabase, parsed: ParsedFile, options:
     });
 
     entity.groundsTo.forEach((grounding: WikiGrounding, ordinal: number) => {
+      // The verdict columns are left NULL here on purpose. Health is derived
+      // from the *code graph*, which is not a property of this file, and a fact
+      // computed during per-file projection is a fact a refresh computes from a
+      // different subset than a rebuild did. It belongs to `resolveIndexState`.
       insertGrounding.run(
         key,
         ordinal,
         grounding.node,
         grounding.fingerprint,
+        grounding.bodyHash ?? null,
         grounding.file ?? null,
         grounding.commit ?? null,
         grounding.verifiedAt ?? null,
@@ -365,10 +370,33 @@ interface EntityRow {
  * is what keeps it inside the 50 ms refresh target: parsing 1,000 files is
  * expensive, reading 5,000 rows is not.
  */
+/**
+ * Resolve one committed grounding against the local checkout.
+ *
+ * A callback rather than an imported module, so this file stays free of the
+ * code graph: the index must build in a checkout that has no graph, and the
+ * layering lint keeps the graph behind one door in `src/wiki/grounding/`.
+ */
+export type GroundingResolver = (grounding: WikiGrounding) => GroundingResolution;
+
 export interface ResolveOptions {
   scaffoldRoot: string;
   buildKind: string;
   now: string;
+  /**
+   * How to resolve grounding health, when the caller has a graph.
+   *
+   * **Supplied identically by both build paths or by neither.** Health is the
+   * one derived column whose input lives outside the scaffold, so it is also
+   * the one place two dumps can legitimately differ: an index built with a
+   * graph present and one built without it *should* disagree. That is not a
+   * determinism failure, it is a different input — and it is why the resolver
+   * is a parameter rather than something either path reaches for on its own.
+   *
+   * Absent, every verdict column is set to NULL. Not `'unverified'`: that is a
+   * verdict, and nothing looked.
+   */
+  resolveGrounding?: GroundingResolver;
   /**
    * Diagnostics that belong to the scaffold rather than to any one file —
    * discovery problems, chiefly. They are supplied on every call, by both the
@@ -399,11 +427,25 @@ export function resolveIndexState(db: SqliteDatabase, meta: ResolveOptions): voi
             THEN 1 ELSE 0 END`,
   ).run();
 
-  // 3. Set-level diagnostics, replaced entirely.
-  db.prepare(`DELETE FROM wiki_diagnostics WHERE scope = 'global'`).run();
-  writeDiagnostics(db, "global", null, [...(meta.scaffoldDiagnostics ?? []), ...collectGlobalDiagnostics(db)]);
+  // 3. Grounding health, re-derived for every row from the caller's resolver.
+  const groundingDiagnostics = resolveGroundings(db, meta.resolveGrounding);
 
-  // 4. Rebuild metadata.
+  // 4. Set-level diagnostics, replaced entirely.
+  //
+  // The grounding ones are global rather than file-scoped, and the distinction
+  // is the one §33.1 turned on: a global diagnostic must be re-derivable from
+  // the whole set on *both* paths. These are — every grounding row is resolved
+  // on every rebuild and every refresh, from the same resolver. The read errors
+  // that had to become file-scoped were exactly the opposite: a refresh only
+  // ever saw the changed set, so it could not re-derive the rest.
+  db.prepare(`DELETE FROM wiki_diagnostics WHERE scope = 'global'`).run();
+  writeDiagnostics(db, "global", null, [
+    ...(meta.scaffoldDiagnostics ?? []),
+    ...collectGlobalDiagnostics(db),
+    ...groundingDiagnostics,
+  ]);
+
+  // 5. Rebuild metadata.
   const fileCount = countOf(db, `SELECT COUNT(*) AS n FROM wiki_files`);
   const entityCount = countOf(db, `SELECT COUNT(*) AS n FROM wiki_entities WHERE shadowed = 0`);
   const put = db.prepare(`INSERT INTO wiki_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
@@ -412,6 +454,116 @@ export function resolveIndexState(db: SqliteDatabase, meta: ResolveOptions): voi
   put.run(WIKI_META_KEYS.scaffoldRoot, meta.scaffoldRoot);
   put.run(WIKI_META_KEYS.fileCount, String(fileCount));
   put.run(WIKI_META_KEYS.entityCount, String(entityCount));
+}
+
+interface GroundingRow {
+  entity_key: string;
+  ordinal: number;
+  entity_id: string;
+  file: string;
+  node_id: string;
+  fingerprint: string;
+  body_hash: string | null;
+  grounding_file: string | null;
+  commit_sha: string | null;
+  verified_at: string | null;
+  reason: string | null;
+}
+
+/**
+ * Re-derive every grounding verdict, and report the ones that are not fresh.
+ *
+ * Wholesale, always, on both paths — like shadowing and target resolution and
+ * for the same reason. A grounding's health depends on code that changes
+ * without the scaffold changing at all, so there is no changed set that could
+ * scope it: the file whose entity went stale is the file nobody touched.
+ *
+ * With no resolver every verdict column is cleared. That is what makes a
+ * refresh of an index built without a graph agree with a rebuild without one,
+ * and it is why the columns are nullable rather than defaulted.
+ *
+ * Shadowed entities are resolved but not reported. A duplicated id already has
+ * its own diagnostic naming both claimants, and a second warning about the
+ * loser's grounding is noise pointing at a row no query returns.
+ */
+function resolveGroundings(db: SqliteDatabase, resolve?: GroundingResolver): WikiDiagnostic[] {
+  db.prepare(`UPDATE wiki_groundings SET state = NULL, resolved_node = NULL, health = NULL`).run();
+  if (resolve === undefined) return [];
+
+  const rows = db
+    .prepare(
+      `SELECT g.entity_key, g.ordinal, e.id AS entity_id, e.file AS file, e.shadowed AS shadowed,
+              g.node_id, g.fingerprint, g.body_hash, g.file AS grounding_file,
+              g.commit_sha, g.verified_at, g.reason
+         FROM wiki_groundings g
+         JOIN wiki_entities e ON e.entity_key = g.entity_key
+        ORDER BY g.entity_key, g.ordinal`,
+    )
+    .all() as Array<GroundingRow & { shadowed: number }>;
+
+  const update = db.prepare(
+    `UPDATE wiki_groundings SET state = ?, resolved_node = ?, health = ? WHERE entity_key = ? AND ordinal = ?`,
+  );
+  const diagnostics: WikiDiagnostic[] = [];
+
+  for (const row of rows) {
+    const resolution = resolve(groundingOf(row));
+    const resolvedNode = "resolvedNode" in resolution ? resolution.resolvedNode : null;
+    update.run(resolution.state, resolvedNode, resolution.health, row.entity_key, row.ordinal);
+    if (row.shadowed === 1) continue;
+    const entry = groundingDiagnostic(row, resolution);
+    if (entry !== null) diagnostics.push(entry);
+  }
+  return diagnostics;
+}
+
+/** Rebuild the committed reference from its row, exactly as Markdown had it. */
+function groundingOf(row: GroundingRow): WikiGrounding {
+  const grounding: WikiGrounding = { node: row.node_id, fingerprint: row.fingerprint };
+  if (row.body_hash !== null) grounding.bodyHash = row.body_hash;
+  if (row.grounding_file !== null) grounding.file = row.grounding_file;
+  if (row.commit_sha !== null) grounding.commit = row.commit_sha;
+  if (row.verified_at !== null) grounding.verifiedAt = row.verified_at;
+  if (row.reason !== null) grounding.reason = row.reason;
+  return grounding;
+}
+
+/**
+ * The diagnostic one resolution deserves, or none.
+ *
+ * `fresh` says nothing, and `ungrounded` never reaches here — it is a property
+ * of an entity with no grounding rows at all, so there is no row to carry it.
+ *
+ * All three are warnings, not errors, and none of them touches lifecycle. A
+ * stale grounding is a local, branch-dependent fact (§5.3): the same entity is
+ * fresh on the branch where the code was not edited, and letting that rewrite
+ * canonical status would make a rebase change what a team had decided.
+ */
+function groundingDiagnostic(row: GroundingRow, resolution: GroundingResolution): WikiDiagnostic | null {
+  const context = { file: row.file, entityId: row.entity_id, path: `groundsTo[${row.ordinal}]` };
+
+  if (resolution.state === "stale") {
+    return diagnostic(
+      "GROUNDING_STALE",
+      `The code ${row.entity_id} is grounded to has changed (${resolution.resolvedNode}).`,
+      context,
+    );
+  }
+  if (resolution.state === "missing") {
+    return diagnostic(
+      "GROUNDING_MISSING",
+      `${row.entity_id} is grounded to ${row.node_id}, which no longer exists in the code graph.`,
+      context,
+    );
+  }
+  if (resolution.state === "unresolved") {
+    return diagnostic(
+      "GROUNDING_UNRESOLVED",
+      resolution.reason ?? `${row.entity_id}'s grounding to ${row.node_id} could not be resolved.`,
+      context,
+    );
+  }
+  return null;
 }
 
 function countOf(db: SqliteDatabase, sql: string): number {

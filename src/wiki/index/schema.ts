@@ -29,7 +29,7 @@
  * `openWikiIndex`, never a throw from inside an open and never a silent
  * rebuild on a read path.
  */
-export const WIKI_SCHEMA_VERSION = 1;
+export const WIKI_SCHEMA_VERSION = 2;
 
 /** Every table the schema declares, for the packaging and dump tests. */
 export const WIKI_TABLES = [
@@ -177,19 +177,35 @@ CREATE TABLE wiki_sources (
 );
 
 -- A derived resolution cache only (D1). The canonical grounding lives in
--- Markdown frontmatter; \`health\` stays NULL here because resolving it needs a
--- live graph, which is P4's. A NULL health means "not resolved in this phase",
--- which is honest; writing 'unverified' would look like a verdict.
+-- Markdown; the one baseline store is \`graph.db._mex_grounded_source\`. Nothing
+-- here is a source of truth: delete this database and a rebuild recovers the
+-- reference from Markdown and the verdict from the graph.
+--
+-- \`node_id\`, \`fingerprint\` and \`body_hash\` are what Markdown committed.
+-- \`body_hash\` is the one that detects drift: the fingerprint is a MinHash over
+-- grammar kinds, so it is blind to a changed constant or a renamed local, which
+-- is precisely the edit a decision entity is usually grounded to. It is
+-- nullable because §8.7 requires only node and fingerprint, and a grounding
+-- written without one can still be checked — just more coarsely.
+--
+-- \`state\`, \`resolved_node\` and \`health\` are the *derived* verdict, and all
+-- three are NULL until something resolves them against a graph. NULL means "not
+-- resolved here", which is honest; writing 'unverified' would look like a
+-- verdict that had been reached. \`resolved_node\` differs from \`node_id\` exactly
+-- when reconciliation rebound a moved symbol — the entity id never changes.
 CREATE TABLE wiki_groundings (
-  entity_key  TEXT NOT NULL REFERENCES wiki_entities(entity_key) ON DELETE CASCADE,
-  ordinal     INTEGER NOT NULL,
-  node_id     TEXT NOT NULL,
-  fingerprint TEXT NOT NULL,
-  file        TEXT,
-  commit_sha  TEXT,
-  verified_at TEXT,
-  reason      TEXT,
-  health      TEXT,
+  entity_key    TEXT NOT NULL REFERENCES wiki_entities(entity_key) ON DELETE CASCADE,
+  ordinal       INTEGER NOT NULL,
+  node_id       TEXT NOT NULL,
+  fingerprint   TEXT NOT NULL,
+  body_hash     TEXT,
+  file          TEXT,
+  commit_sha    TEXT,
+  verified_at   TEXT,
+  reason        TEXT,
+  state         TEXT,
+  resolved_node TEXT,
+  health        TEXT,
   PRIMARY KEY (entity_key, ordinal)
 );
 

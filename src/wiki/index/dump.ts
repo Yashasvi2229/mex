@@ -131,7 +131,18 @@ export const TABLE_COLUMNS: Record<string, { columns: string[]; orderBy: string 
     orderBy: "entity_key, ordinal",
   },
   wiki_groundings: {
-    columns: ["entity_key", "ordinal", "node_id", "fingerprint", "file", "commit_sha", "verified_at", "reason", "health"],
+    // Health, state and the resolved node are compared like everything else.
+    // They are derived from the code graph rather than from Markdown, which
+    // makes them the one place a dump can differ for a reason that is not a
+    // refresh bug — so `resolveIndexState` recomputes all three from the same
+    // resolver on both paths, and the determinism test hands both paths the
+    // same one. Excluding them instead would put the phase's own new state
+    // outside the oracle, which is the opposite of what the exclusion list is
+    // for.
+    columns: [
+      "entity_key", "ordinal", "node_id", "fingerprint", "body_hash", "file", "commit_sha",
+      "verified_at", "reason", "state", "resolved_node", "health",
+    ],
     orderBy: "entity_key, ordinal",
   },
   wiki_diagnostics: {

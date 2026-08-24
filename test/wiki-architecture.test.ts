@@ -239,6 +239,69 @@ export function findScaffoldWriteViolations(path: string, source: string): strin
   );
 }
 
+// -- Rule (d): one door onto the code graph ----------------------------------
+
+/**
+ * The wiki reaches the code graph through exactly one module.
+ *
+ * `src/wiki/grounding/adapter.ts` binds `GraphEngine`, the `Reconciler` and
+ * `FingerprintStore` into an interface, and everything else works against that
+ * interface. The reason is the rule the adapter's callers have to obey and
+ * cannot be reminded of at every call site: the drift oracle is the reference
+ * committed in Markdown, and `graph.db`'s cached `body_hash` is never the
+ * primary signal, because a graph rebuild re-captures it and the comparison
+ * silently becomes current-against-current.
+ *
+ * That rule is enforceable while there is one door and unenforceable once there
+ * are several. This is the same discipline P2b's `createPositionMap` has for
+ * AST offsets, and for the same reason: the second implementation is where the
+ * correction gets forgotten.
+ *
+ * `src/graph/db/sqlite.ts` is exempt because it is not the graph — it is the
+ * SQLite adapter D8 says the wiki index shares, and `wiki.db` is opened with
+ * it. Importing a database driver tells you nothing about code.
+ */
+const GRAPH_DOOR = "src/wiki/grounding/adapter.ts";
+
+/**
+ * What each file under `src/wiki/` may reach for, beyond the door.
+ *
+ * Stated per file rather than per directory on purpose. A rule that exempted
+ * `src/wiki/grounding/` wholesale would let the next module in that directory
+ * bind the engine directly, which is the thing being prevented.
+ *
+ * - Every wiki file may import the shared SQLite adapter (D8) and the
+ *   baseline's value types. Neither carries any knowledge of code: one is a
+ *   database driver, the other is two interfaces and a string union.
+ * - `query/budget.ts` composes with the graph's own token estimator and budget
+ *   ledger, which D10 requires rather than permits — a second budget system is
+ *   the failure it avoids.
+ * - `grounding/baseline.ts` wraps `FingerprintStore`, the code that has always
+ *   owned the one baseline table. D1's whole point is that it stays the only
+ *   one, so wrapping it is the compliance, not the violation. It may reach for
+ *   that and nothing else.
+ */
+const GRAPH_IMPORT_ALLOWANCES: ReadonlyArray<{ file: string | null; allows: string }> = [
+  { file: null, allows: "src/graph/db/sqlite" },
+  { file: null, allows: "src/graph/grounding" },
+  { file: "src/wiki/query/budget.ts", allows: "src/graph/agent-protocol" },
+  { file: "src/wiki/grounding/baseline.ts", allows: "src/graph/fingerprint-store" },
+];
+
+export function findGraphSeamViolations(path: string, source: string): string[] {
+  if (!path.startsWith("src/wiki/")) return [];
+  if (path === GRAPH_DOOR) return [];
+  const allowed = (resolved: string): boolean =>
+    GRAPH_IMPORT_ALLOWANCES.some(
+      (allowance) => (allowance.file === null || allowance.file === path) && resolved.startsWith(allowance.allows),
+    );
+  return importSpecifiers(source)
+    .map((specifier) => resolveSpecifier(path, specifier))
+    .filter((resolved) => resolved.startsWith("src/graph/"))
+    .filter((resolved) => !allowed(resolved))
+    .map((resolved) => `${path} imports ${resolved}; the code graph is reached through ${GRAPH_DOOR}`);
+}
+
 // -- The rules, applied to the tree ------------------------------------------
 
 describe("wiki layering", () => {
@@ -270,6 +333,57 @@ describe("wiki layering", () => {
     expect(findLayeringViolations("src/wiki/model/entity.ts", 'import { type EntityId } from "./ids.js";')).toEqual([]);
     // Layers above the model may reach for I/O and the graph.
     expect(findLayeringViolations("src/wiki/index/open.ts", 'import { readFileSync } from "node:fs";')).toEqual([]);
+  });
+});
+
+describe("one door onto the code graph", () => {
+  it("holds across src/wiki/", () => {
+    expect(FILES.flatMap((path) => findGraphSeamViolations(path, read(path)))).toEqual([]);
+  });
+
+  it("checks a file list that actually contains the door", () => {
+    // Vacuity guard with teeth: renaming the adapter away must fail this rule
+    // rather than satisfy it by leaving nothing to check.
+    expect(FILES).toContain(GRAPH_DOOR);
+    expect(read(GRAPH_DOOR)).toContain("from \"../../graph/engine.js\"");
+  });
+
+  it("catches a second seam, and permits the shared SQLite adapter", () => {
+    expect(
+      findGraphSeamViolations("src/wiki/query/for-code.ts", 'import { createGraphEngine } from "../../graph/engine-impl.js";'),
+    ).toHaveLength(1);
+    expect(
+      findGraphSeamViolations("src/wiki/index/write.ts", 'import { FingerprintStore } from "../../graph/fingerprint-store.js";'),
+    ).toHaveLength(1);
+    // The type-only import of the row shapes is still a graph import and still
+    // banned; only the database driver and the baseline's own value types pass.
+    expect(
+      findGraphSeamViolations("src/wiki/index/write.ts", 'import type { SqliteDatabase } from "../../graph/db/sqlite.js";'),
+    ).toEqual([]);
+    expect(
+      findGraphSeamViolations("src/wiki/grounding/baseline.ts", 'import type { GroundingSubject } from "../../graph/grounding.js";'),
+    ).toEqual([]);
+    // The door itself may import whatever it needs.
+    expect(
+      findGraphSeamViolations(GRAPH_DOOR, 'import { FingerprintStore } from "../../graph/fingerprint-store.js";'),
+    ).toEqual([]);
+    // A per-file allowance is exactly that: baseline.ts may wrap the store and
+    // may not bind the engine, and no other file inherits its allowance.
+    expect(
+      findGraphSeamViolations("src/wiki/grounding/baseline.ts", 'import { FingerprintStore } from "../../graph/fingerprint-store.js";'),
+    ).toEqual([]);
+    expect(
+      findGraphSeamViolations("src/wiki/grounding/baseline.ts", 'import type { GraphEngine } from "../../graph/engine.js";'),
+    ).toHaveLength(1);
+    expect(
+      findGraphSeamViolations("src/wiki/grounding/resolve.ts", 'import { FingerprintStore } from "../../graph/fingerprint-store.js";'),
+    ).toHaveLength(1);
+  });
+
+  it("does not constrain code outside the wiki engine", () => {
+    expect(
+      findGraphSeamViolations("src/drift/checkers/grounding.ts", 'import type { GraphEngine } from "../../graph/engine.js";'),
+    ).toEqual([]);
   });
 });
 

@@ -25,7 +25,7 @@ import { parseWikiMarkdown } from "../markdown/codec.js";
 import type { ParsedFile } from "../markdown/contract.js";
 import { discoverMarkdownFiles } from "./discover.js";
 import { createPendingIndex, discardPendingIndex, publishPendingIndex, sweepPendingIndexes } from "./publish.js";
-import { resolveIndexState, writeFileDiagnostics, writeParsedFile } from "./write.js";
+import { resolveIndexState, writeFileDiagnostics, writeParsedFile, type GroundingResolver } from "./write.js";
 
 /** Default index location: `.mex/wiki.db`, beside the scaffold it indexes. */
 export function defaultIndexPath(scaffoldRoot: string): string {
@@ -52,6 +52,18 @@ export interface RebuildOptions {
    * rather than only on the platforms where `chmod` means something.
    */
   readFile?: (absolutePath: string) => string;
+  /**
+   * How to resolve grounding health, when the caller has a code graph.
+   *
+   * Optional because the index must build in a checkout that has none — a
+   * fresh clone, CI before `mex graph`, a sandbox. Absent, every grounding's
+   * verdict column stays NULL, which is what "nothing looked" is stored as.
+   *
+   * **A rebuild and a refresh must be given the same resolver or neither**, or
+   * their dumps differ for a reason that is not a refresh bug: health depends
+   * on code, and code changes without the scaffold changing at all.
+   */
+  resolveGrounding?: GroundingResolver;
 }
 
 export interface RebuildResult {
@@ -155,6 +167,7 @@ export function rebuildWikiIndex(options: RebuildOptions): RebuildResult {
         buildKind: "rebuild",
         now: now(),
         scaffoldDiagnostics: discovery.diagnostics,
+        resolveGrounding: options.resolveGrounding,
       });
     });
 

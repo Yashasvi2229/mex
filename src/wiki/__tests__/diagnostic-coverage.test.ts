@@ -55,6 +55,7 @@ import { openWikiIndex } from "../index/open.js";
 import { rebuildWikiIndex } from "../index/rebuild.js";
 import { getEntity } from "../query/get.js";
 import { escapedSymlinkDiagnostic } from "../index/discover.js";
+import type { GroundingResolver } from "../index/write.js";
 
 /** Run `body` against a fresh scratch directory, cleaning up afterwards. */
 function inScratch<T>(body: (directory: string) => T): T {
@@ -80,9 +81,6 @@ function inScratch<T>(body: (directory: string) => T): T {
  * parked here after its phase lands, and a newly added code cannot be forgotten.
  */
 const NOT_YET_EMITTED: Record<string, string> = {
-  GROUNDING_UNRESOLVED: "P4 — grounding resolution against a live graph",
-  GROUNDING_STALE: "P4 — grounding resolution against a live graph",
-  GROUNDING_MISSING: "P4 — grounding resolution against a live graph",
   SOURCE_FILE_MISSING: "P9 — source validation against the filesystem",
   // P2b associates anchors with entities but cannot compare them against a
   // grounding: the mismatch is only observable once a declared equivalence
@@ -337,7 +335,74 @@ status: promoted
   // makes a coverage assertion depend on the environment. The walk that calls
   // it is exercised in discover.test.ts.
   PATH_OUTSIDE_SCAFFOLD: () => [escapedSymlinkDiagnostic("linked.md", "/elsewhere/outside.md")],
+
+  // The three grounding verdicts, each produced by building a real index over
+  // a real grounded entity and resolving it. The resolver is a stub because
+  // what is being covered is the *reporting*, not the verdict — the verdicts
+  // have their own tests, against a stub graph and against a real one.
+  GROUNDING_STALE: () =>
+    groundingDiagnostics((grounding) => ({
+      state: "stale",
+      health: "changed",
+      node: grounding.node,
+      resolvedNode: grounding.node,
+      currentBodyHash: "live",
+    })),
+
+  GROUNDING_MISSING: () =>
+    groundingDiagnostics((grounding) => ({
+      state: "missing",
+      health: "missing",
+      node: grounding.node,
+      reason: "the declaration is gone",
+    })),
+
+  GROUNDING_UNRESOLVED: () =>
+    groundingDiagnostics((grounding) => ({
+      state: "unresolved",
+      health: "unverified",
+      node: grounding.node,
+      reason: "no code graph in this checkout",
+    })),
 };
+
+/**
+ * Index one grounded entity, resolve it with `resolve`, and return whatever the
+ * index reported.
+ *
+ * Goes through a real rebuild rather than calling the diagnostic builder
+ * directly: these codes are only reachable when a grounding row exists, and a
+ * test that manufactured the diagnostic would keep passing after the path that
+ * produces it was removed.
+ */
+function groundingDiagnostics(resolve: GroundingResolver): readonly WikiDiagnostic[] {
+  return inScratch((directory) => {
+    const root = join(directory, "scaffold");
+    mkdirSync(join(root, "notes"), { recursive: true });
+    const id = generateEntityId();
+    writeFileSync(
+      join(root, "notes", "grounded.md"),
+      `---\nname: grounded\n---\n\n# Grounded\n\n` +
+        `<!-- mex:entity\nid: ${id}\ntype: decision\nstatus: promoted\nrevision: 1\n` +
+        `grounds_to:\n  - node: function:1a2b3c4d5e6f7a8b\n    fingerprint: mh:64:0a0b\n-->\n` +
+        `## A decision\n\nProse.\n`,
+      "utf-8",
+    );
+
+    const indexPath = join(directory, "wiki.db");
+    rebuildWikiIndex({ scaffoldRoot: root, indexPath, resolveGrounding: resolve });
+
+    const opened = openWikiIndex(indexPath);
+    if (!opened.ok) return [opened.diagnostic];
+    try {
+      return opened.index.db
+        .prepare(`SELECT code, severity, message, file, entity_id, path FROM wiki_diagnostics`)
+        .all() as WikiDiagnostic[];
+    } finally {
+      opened.index.close();
+    }
+  });
+}
 
 describe("diagnostic code coverage", () => {
   it("emits every code this phase owns", () => {

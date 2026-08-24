@@ -17,7 +17,7 @@
  */
 
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
-import type { GroundingHealth } from "../model/grounding.js";
+import { compareGroundingHealth, type GroundingHealth } from "../model/grounding.js";
 import { openWikiIndex, type WikiIndexHandle } from "../index/open.js";
 import type { SqliteDatabase } from "../../graph/db/sqlite.js";
 import {
@@ -362,6 +362,14 @@ export class WikiQuerySession {
    * Worst, not first: an entity with one fresh grounding and one missing one is
    * not fresh, and reporting it as fresh is exactly the kind of quiet wrong
    * answer this phase exists to prevent.
+   *
+   * **"Worst" is the model's precedence, not this layer's `HEALTH_RANK`.** The
+   * two orders genuinely disagree — the model calls `ambiguous` worse than
+   * `changed`, the ranking penalizes `changed` more — because they answer
+   * different questions: which finding should represent this entity, and how
+   * far a finding should push it down a result list. Aggregating with the
+   * ranking order answers the first question with the second's answer, which
+   * nothing caught while the column was always NULL.
    */
   private decorate(rows: readonly EntityRow[]): EntitySummary[] {
     if (rows.length === 0) return [];
@@ -378,7 +386,9 @@ export class WikiQuerySession {
     for (const row of healths) {
       const candidate = row.health as GroundingHealth;
       const current = worst.get(row.entity_key);
-      if (current === undefined || healthRank(candidate) > healthRank(current)) worst.set(row.entity_key, candidate);
+      if (current === undefined || compareGroundingHealth(candidate, current) < 0) {
+        worst.set(row.entity_key, candidate);
+      }
     }
 
     return rows.map((row) => ({
