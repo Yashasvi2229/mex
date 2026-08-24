@@ -16,7 +16,7 @@
 import { unified } from "unified";
 import remarkParse from "remark-parse";
 import remarkFrontmatter from "remark-frontmatter";
-import type { Root, RootContent, Heading, Html, Yaml } from "mdast";
+import type { Root, RootContent, Heading, Yaml } from "mdast";
 import { visit } from "unist-util-visit";
 import type { Link } from "mdast";
 import {
@@ -40,8 +40,28 @@ export interface RawHeading {
   title: string;
 }
 
+/**
+ * A region of YAML inside a Markdown file, located rather than re-serialized.
+ *
+ * Both places entity metadata can live reduce to this: the inner text of a
+ * frontmatter block, and the text between a `<!-- mex:entity` marker line and
+ * its closing `-->`. Naming the shape is what lets **one** key-splicing
+ * implementation serve both — see `frontmatter.ts`. Half the entities in a
+ * scaffold are block-level, and a metadata writer that only understands
+ * frontmatter has no way to touch them except by re-rendering the whole
+ * comment, which is the re-serialization D9 exists to prevent.
+ */
+export interface YamlRegion {
+  /** File offset of the first character of the YAML text. */
+  innerStart: number;
+  /** File offset just past its last character. */
+  innerEnd: number;
+  /** The YAML text itself, `text.slice(innerStart, innerEnd)`. */
+  text: string;
+}
+
 /** A top-level HTML block. */
-export interface RawHtml {
+export interface RawHtml extends YamlRegion {
   /** Range of `<!--` through `-->`, in file offsets. */
   start: number;
   end: number;
@@ -51,7 +71,7 @@ export interface RawHtml {
   yamlText: string;
 }
 
-export interface RawFrontmatter {
+export interface RawFrontmatter extends YamlRegion {
   /** The whole block including both `---` delimiters. */
   start: number;
   end: number;
@@ -163,11 +183,19 @@ export function parseDocument(text: string): RawDocument {
     if (node.type === "html") {
       const raw = text.slice(start, end);
       const isEntityMarker = ENTITY_MARKER.test(raw) && !isInsideRegion(conflictRegions, start);
+      // Measured against the file slice rather than the AST node's `value`, so
+      // the inner offsets and the inner text can never describe different
+      // things. `extractCommentYaml` performs the same two steps on a string
+      // with no coordinates; a test asserts the two agree.
+      const region = isEntityMarker ? commentYamlRegion(text, start, end) : { innerStart: start, innerEnd: start, text: "" };
       htmlBlocks.push({
         start,
         end,
         isEntityMarker,
-        yamlText: isEntityMarker ? extractCommentYaml((node as Html).value ?? raw) : "",
+        yamlText: region.text,
+        innerStart: region.innerStart,
+        innerEnd: region.innerEnd,
+        text: region.text,
       });
     }
   }
@@ -182,6 +210,23 @@ export function parseDocument(text: string): RawDocument {
   });
 
   return { frontmatter, headings, htmlBlocks, links, conflictRegions };
+}
+
+/**
+ * Locate the YAML inside a `<!-- mex:entity … -->` block, in file coordinates.
+ *
+ * The read side never needed the offsets — it parsed the text and threw the
+ * positions away — which is why nothing in the tree could write a block
+ * entity's metadata scoped. They are the same two steps `extractCommentYaml`
+ * performs, kept as arithmetic so a splice can be bounded by them.
+ */
+export function commentYamlRegion(text: string, start: number, end: number): YamlRegion {
+  const raw = text.slice(start, end);
+  const marker = ENTITY_MARKER.exec(raw);
+  const innerStart = start + (marker === null ? 0 : marker[0].length);
+  const closing = raw.lastIndexOf("-->");
+  const innerEnd = closing < 0 ? end : Math.max(innerStart, start + closing);
+  return { innerStart, innerEnd, text: text.slice(innerStart, innerEnd) };
 }
 
 /** The YAML between the `<!-- mex:entity` marker line and the closing `-->`. */

@@ -20,7 +20,7 @@
 
 import YAML from "yaml";
 import { applyEdits, type PatchResult } from "./patch.js";
-import { parseDocument, type RawFrontmatter } from "./parse.js";
+import { parseDocument, type RawFrontmatter, type YamlRegion } from "./parse.js";
 import { terminatorLengthAt } from "./positions.js";
 
 /** Absolute range of a top-level key and its value, in file offsets. */
@@ -50,27 +50,188 @@ function trimTrailingBlank(text: string, end: number, floor: number): number {
  * would the partition property that depends on it.
  */
 export function findTopLevelKeyRange(text: string, frontmatter: RawFrontmatter, key: string): KeyRange | null {
-  let document: YAML.Document.Parsed;
+  return findKeyPathRange(text, frontmatter, [key]);
+}
+
+/** Parse a region's YAML, returning null rather than throwing. */
+function regionDocument(region: YamlRegion): YAML.Document.Parsed | null {
   try {
-    document = YAML.parseDocument(frontmatter.text);
+    return YAML.parseDocument(region.text);
   } catch {
     return null;
   }
-  const contents = document.contents;
-  if (!YAML.isMap(contents)) return null;
+}
 
-  for (const item of contents.items) {
-    if (!YAML.isScalar(item.key) || item.key.value !== key) continue;
-    const keyRange = item.key.range;
-    const valueRange = item.value && "range" in item.value ? (item.value.range as [number, number, number]) : null;
-    if (!keyRange) return null;
+/** Walk `path` through nested maps, returning the pair the last segment names. */
+function pairAt(region: YamlRegion, path: readonly string[]): YAML.Pair<unknown, unknown> | null {
+  const document = regionDocument(region);
+  if (document === null) return null;
 
-    const keyStart = frontmatter.innerStart + keyRange[0];
-    const rawEnd = frontmatter.innerStart + (valueRange ? valueRange[1] : keyRange[1]);
-    const valueEnd = trimTrailingBlank(text, Math.min(rawEnd, frontmatter.innerEnd), keyStart);
-    return { keyStart, valueEnd, nodeEnd: valueEnd + terminatorLengthAt(text, valueEnd) };
+  let node: unknown = document.contents;
+  let pair: YAML.Pair<unknown, unknown> | null = null;
+  for (const key of path) {
+    if (!YAML.isMap(node)) return null;
+    const found = node.items.find((item) => YAML.isScalar(item.key) && item.key.value === key);
+    if (found === undefined) return null;
+    pair = found as YAML.Pair<unknown, unknown>;
+    node = found.value;
   }
-  return null;
+  return pair;
+}
+
+/**
+ * Locate a key at an arbitrary depth inside an arbitrary YAML region.
+ *
+ * The generalization the write side needs and the read side never did. A
+ * **file-level** entity keeps its metadata nested one level down, under the
+ * frontmatter's `mex:` key, so setting its status is `["mex", "status"]`. A
+ * **block-level** entity keeps the same fields at the top of its
+ * `<!-- mex:entity -->` comment, so the same operation is `["status"]` against
+ * a different region. One implementation, two callers — which is the only way
+ * the two paths can be relied on to have the same fidelity.
+ *
+ * The trailing trim of finding 24 applies to both, and matters more here: a
+ * nested value's reported end runs past its newline exactly as a top-level
+ * one's does, and left alone a `mex.status` range would swallow the line break
+ * separating it from the next key.
+ */
+export function findKeyPathRange(text: string, region: YamlRegion, path: readonly string[]): KeyRange | null {
+  if (path.length === 0) return null;
+  const item = pairAt(region, path);
+  if (item === null) return null;
+
+  const keyRange = YAML.isScalar(item.key) ? item.key.range : null;
+  const valueRange = item.value && typeof item.value === "object" && "range" in item.value
+    ? (item.value.range as [number, number, number])
+    : null;
+  if (!keyRange) return null;
+
+  const keyStart = region.innerStart + keyRange[0];
+  const rawEnd = region.innerStart + (valueRange ? valueRange[1] : keyRange[1]);
+  const valueEnd = trimTrailingBlank(text, Math.min(rawEnd, region.innerEnd), keyStart);
+  return { keyStart, valueEnd, nodeEnd: valueEnd + terminatorLengthAt(text, valueEnd) };
+}
+
+/** Where a new key goes inside the map at `path`, and how far it is indented. */
+export interface MapInsertion {
+  /** File offset to insert at: the end of the map's last entry. */
+  offset: number;
+  /** Whitespace every rendered line must carry to sit inside this map. */
+  indent: string;
+  /** True when the map already has entries, so the insert needs a line break first. */
+  needsLeadingBreak: boolean;
+}
+
+/** The whitespace between the start of `offset`'s line and `offset` itself. */
+function indentAt(text: string, offset: number): string {
+  let start = offset;
+  while (start > 0 && text.charCodeAt(start - 1) !== 0x0a) start -= 1;
+  return /^[ \t]*/.exec(text.slice(start, offset))![0]!;
+}
+
+/**
+ * Find the map at `path` and say where a new key would go inside it.
+ *
+ * Indentation is **measured from the map's first existing entry**, not computed
+ * from the depth. A hand-written file may indent by two spaces or by four, and
+ * a writer that assumes one produces a file that still parses as YAML but no
+ * longer matches its neighbours — a diff full of whitespace nobody asked for.
+ * An empty map has no entry to measure, which is reported as null rather than
+ * guessed at.
+ */
+export function findMapInsertion(text: string, region: YamlRegion, path: readonly string[]): MapInsertion | null {
+  const document = regionDocument(region);
+  if (document === null) return null;
+
+  const container = path.length === 0 ? document.contents : pairAt(region, path)?.value;
+  if (!YAML.isMap(container) || container.items.length === 0) return null;
+
+  const last = container.items[container.items.length - 1]!;
+  const first = container.items[0]!;
+  if (!YAML.isScalar(first.key) || !first.key.range) return null;
+
+  const lastValue = last.value && typeof last.value === "object" && "range" in last.value
+    ? (last.value.range as [number, number, number])
+    : null;
+  const lastKey = YAML.isScalar(last.key) ? last.key.range : null;
+  if (!lastKey) return null;
+  const rawEnd = region.innerStart + (lastValue ? lastValue[1] : lastKey[1]);
+  const offset = trimTrailingBlank(text, Math.min(rawEnd, region.innerEnd), region.innerStart);
+
+  return { offset, indent: indentAt(text, region.innerStart + first.key.range[0]), needsLeadingBreak: true };
+}
+
+/** Prefix every non-blank line with `indent`. Blank lines stay truly blank. */
+function withIndent(rendered: string, indent: string): string {
+  if (indent === "") return rendered;
+  return rendered
+    .split("\n")
+    .map((line) => (line === "" ? line : `${indent}${line}`))
+    .join("\n");
+}
+
+/**
+ * Set a key at `path` inside `region`, touching nothing else.
+ *
+ * Replaces the key's own range when it exists and appends inside its parent map
+ * when it does not. Either way the produced text is verified against the
+ * declared range by `applyEdits`, so the two `.mex` metadata dialects reach the
+ * same guarantee through the same check rather than through two writers that
+ * happen to agree today.
+ */
+export function spliceKeyPath(
+  content: string,
+  region: YamlRegion,
+  path: readonly string[],
+  value: unknown,
+): PatchResult | null {
+  if (path.length === 0) return null;
+  const key = path[path.length - 1]!;
+  const rendered = renderKeyValue(key, value);
+  const eol = dominantTerminator(content);
+
+  const existing = findKeyPathRange(content, region, path);
+  if (existing !== null) {
+    const indent = indentAt(content, existing.keyStart);
+    return applyEdits(content, [
+      {
+        start: existing.keyStart,
+        end: existing.valueEnd,
+        text: withIndent(rendered, indent).slice(indent.length),
+        label: `metadata key ${path.join(".")}`,
+      },
+    ]);
+  }
+
+  const insertion = findMapInsertion(content, region, path.slice(0, -1));
+  if (insertion === null) return null;
+  return applyEdits(content, [
+    {
+      start: insertion.offset,
+      end: insertion.offset,
+      text: `${insertion.needsLeadingBreak ? eol : ""}${withIndent(rendered, insertion.indent)}`,
+      label: `insert metadata key ${path.join(".")}`,
+    },
+  ]);
+}
+
+/** Remove a key at `path` inside `region`, leaving no blank-line residue. */
+export function removeKeyPath(content: string, region: YamlRegion, path: readonly string[]): PatchResult | null {
+  const existing = findKeyPathRange(content, region, path);
+  if (existing === null) return { text: content, declared: [] };
+  const insertion = findMapInsertion(content, region, path.slice(0, -1));
+  if (insertion === null) return null;
+
+  // Taking the preceding terminator when this is the map's last key is what
+  // keeps the block from ending on a stray blank line.
+  const isLast = existing.nodeEnd >= insertion.offset;
+  let start = existing.keyStart;
+  if (isLast && start > region.innerStart) {
+    if (content.charCodeAt(start - 1) === 0x0a) start -= 1;
+    if (content.charCodeAt(start - 1) === 0x0d) start -= 1;
+  }
+  const end = isLast ? existing.valueEnd : existing.nodeEnd;
+  return applyEdits(content, [{ start, end, text: "", label: `remove metadata key ${path.join(".")}` }]);
 }
 
 /** Top-level keys in document order, so a writer can preserve that order. */
@@ -127,7 +288,9 @@ export function spliceTopLevelKey(content: string, key: string, valueYaml: strin
 
   // Absent: append at the end of the block. Inserting at `innerEnd` keeps every
   // existing key — and every comment attached to one — exactly where it was.
-  const insertAtOffset = frontmatter.innerEnd;
+  // An *empty* frontmatter block has no last entry to append after, which is
+  // the one case `findMapInsertion` cannot answer and this can.
+  const insertAtOffset = findMapInsertion(content, frontmatter, [])?.offset ?? frontmatter.innerEnd;
   const needsLeadingBreak = insertAtOffset > frontmatter.innerStart;
   const text = `${needsLeadingBreak ? eol : ""}${valueYaml}`;
   return applyEdits(content, [
