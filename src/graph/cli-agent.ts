@@ -30,6 +30,22 @@ interface AgentGraphSession {
 export interface AgentCommandDeps {
   open?: (rootDir: string) => AgentGraphSession;
   write?: (line: string) => void;
+  /**
+   * Attach knowledge-graph entities grounded to the nodes Scope returned.
+   *
+   * **Injected, not imported.** The wiki reads the graph, and if the graph also
+   * imported the wiki the two would be mutually dependent — `wiki/query/budget`
+   * already imports `graph/agent-protocol`, so the cycle would be real rather
+   * than notional. Declaring the shape here and composing at the CLI entry
+   * point keeps `src/graph/` unaware that a wiki exists, which is also what
+   * makes the flag-off path provably unchanged: with no provider there is no
+   * code to skip.
+   *
+   * Returns records already shaped for the JSONL stream. They are charged to
+   * the same ledger as everything else, so this cannot smuggle output past the
+   * caller's token ceiling.
+   */
+  knowledgeFor?: (nodeIds: readonly string[]) => Rec[];
 }
 
 type RawOptions = Partial<Record<keyof AgentOptions, unknown>>;
@@ -663,11 +679,24 @@ export function runGraphScope(
     const suggestions = status === "partial" && facts.length > 0
       ? [`mex graph get ${facts[0]!.node.id} --detail source`] : [];
 
+    // Grounded knowledge, when a provider was supplied and only then. Charged
+    // to the same ledger, and appended after the graph's own records so the
+    // prefix of the stream is byte-for-byte what it was without the flag.
+    const knowledgeRecords: Rec[] = [];
+    for (const record of deps.knowledgeFor?.([...finalSourcedIds, ...facts.map((fact) => fact.node.id)]) ?? []) {
+      if (!ledger.tryAdd(record)) {
+        truncated = true;
+        break;
+      }
+      knowledgeRecords.push(record);
+    }
+
     emitAll(write, meta, [
       ...healthRecords,
       ...sourceRecords,
       ...flowRecords,
       ...facts.map((fact) => fact.record),
+      ...knowledgeRecords,
     ]);
     write(JSON.stringify(summaryRecord(ctx, {
       matchedNodes: selection.matchedCount,

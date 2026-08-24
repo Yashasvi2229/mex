@@ -18,6 +18,7 @@
 
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import { compareGroundingHealth, type GroundingHealth } from "../model/grounding.js";
+import { queryEntitiesGroundedIn, type ForCodeOptions, type GroundedEntity } from "./for-code.js";
 import { openWikiIndex, type WikiIndexHandle } from "../index/open.js";
 import type { SqliteDatabase } from "../../graph/db/sqlite.js";
 import {
@@ -354,6 +355,17 @@ export class WikiQuerySession {
       target: byId.get(edge.targetId) ?? null,
       resolved: edge.resolved && byId.has(edge.targetId),
     }));
+  }
+
+  /**
+   * Entities grounded to any of these code nodes — the code→knowledge join.
+   *
+   * The whole implementation is in `for-code.ts`; this is the session-shaped
+   * door onto it, so a caller already holding an open index does not have to
+   * open a second one.
+   */
+  forCode(nodeIds: readonly string[], options: ForCodeOptions = {}): Page<GroundedEntity> {
+    return queryEntitiesGroundedIn(this.db, nodeIds, options);
   }
 
   /**

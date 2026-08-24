@@ -231,8 +231,45 @@ graphCommand
   .option("--max-output-tokens <n>", "hard output token ceiling")
   .option("--max-source-lines <n>", "per-node source line cap (with --detail source)")
   .option("--fingerprint", "attach serialized node fingerprints (grounding workflow)")
-  .action((task: string[], options) => {
-    return import("./graph/cli-agent.js").then(({ runGraphScope }) => runGraphScope(task.join(" "), process.cwd(), {}, options));
+  .option("--wiki", "also return knowledge entities grounded to the nodes in scope")
+  .action(async (task: string[], options) => {
+    const { runGraphScope } = await import("./graph/cli-agent.js");
+    // Composed here, not imported by the graph. With the flag off there is no
+    // provider at all, so the graph's output path is the same code it was
+    // before this option existed — which is what makes "byte-identical when
+    // off" a structural property rather than a promise.
+    const deps = options.wiki === true
+      ? await import("./wiki/cli/for-code.js").then(({ knowledgeRecordsFor }) => ({
+          knowledgeFor: (nodeIds: readonly string[]): Array<Record<string, unknown>> =>
+            knowledgeRecordsFor(nodeIds).map((record) => ({ ...record })),
+        }))
+      : {};
+    return runGraphScope(task.join(" "), process.cwd(), deps, options);
+  });
+
+// ── Wiki ──
+//
+// P9 owns the full wiki command surface and the JSON envelope. This one command
+// exists now because the reverse join is the phase's product claim and a
+// library function does not demonstrate it. It is a thin shell over
+// `wiki/query/for-code.ts`.
+const wikiCommand = program
+  .command("wiki")
+  .description("Knowledge-graph commands over the .mex wiki");
+
+wikiCommand
+  .command("for-code <nodeId...>")
+  .description("Knowledge entities grounded to the given code-graph node ids")
+  .option("--json", "Emit one enveloped JSON object instead of JSONL records")
+  .option("--limit <n>", "maximum entities to return")
+  .option("--include-archived", "include archived entities, which are excluded by default")
+  .action(async (nodeIds: string[], options) => {
+    const { runWikiForCode } = await import("./wiki/cli/for-code.js");
+    runWikiForCode(nodeIds, process.cwd(), {
+      json: options.json === true,
+      limit: options.limit === undefined ? undefined : Number(options.limit),
+      includeArchived: options.includeArchived === true,
+    });
   });
 
 graphCommand
@@ -563,7 +600,7 @@ if (isMainModule) {
 
 function buildCompletion(shell: string): string {
   const commands = [
-    "setup", "check", "init", "graph", "impact", "sync", "pattern", "log", "timeline",
+    "setup", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
     "heartbeat", "doctor", "watch", "tui", "commands", "completion",
     "telemetry", "config", "feedback",
   ];
