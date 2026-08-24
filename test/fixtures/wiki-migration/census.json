@@ -3,7 +3,7 @@
   "provenance": {
     "realScaffoldCensus": false,
     "source": "mex's own shipped scaffold generators, scaled to the plan's section 4 targets: templates/context/*.md, templates/ROUTER.md, the `mex pattern add` template in src/pattern/index.ts, and the filling rules in src/setup/prompts.ts (notably 'Every context/ file should have at least 2 edges' and 'Minimum 3 decision entries').",
-    "refresh": "node scripts/wiki-scaffold-census.mjs <scaffold-path> > test/fixtures/wiki/migration/census.json, then node scripts/generate-wiki-migration-corpus.mjs to regenerate tier 1 against it. Only numbers ever enter this repo (plan section 6a).",
+    "refresh": "node scripts/wiki-scaffold-census.mjs <scaffold-path> > test/fixtures/wiki-migration/census.json, then node scripts/generate-wiki-migration-corpus.mjs to regenerate tier 1 against it. Only numbers ever enter this repo (plan section 6a).",
     "note": "Numbers only. No file name, heading, prose, or user-chosen key name from any real scaffold appears here or in the generated corpus."
   },
   "fileCount": 25,

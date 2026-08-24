@@ -17,7 +17,7 @@ import {
 import { parseWikiMarkdown } from "../../markdown/codec.js";
 import { parseDocument } from "../../markdown/parse.js";
 
-const CORPUS = resolve(__dirname, "..", "..", "..", "..", "test", "fixtures", "wiki", "migration", "tier1");
+const CORPUS = resolve(__dirname, "..", "..", "..", "..", "test", "fixtures", "wiki-migration", "tier1");
 
 const inventory = inventoryScaffold({ scaffoldRoot: CORPUS });
 

@@ -3,3 +3,10 @@
 # checkout or commit — normalization would silently rewrite the thing under test
 # and the CRLF fixture would pass everywhere by becoming an LF fixture.
 test/fixtures/wiki/** -text
+
+# The synthesized migration corpus is byte-exact for the same reason: the
+# insertion-only property compares prose before and after migration byte for
+# byte, and a checkout that rewrote line endings would compare the wrong thing.
+# It lives outside test/fixtures/wiki/ so the P2a oracle's "every fixture is
+# claimed by an expectation" meta-test keeps meaning exactly what it says.
+test/fixtures/wiki-migration/** -text

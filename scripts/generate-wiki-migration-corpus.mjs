@@ -18,7 +18,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_TARGET = resolve(HERE, "..", "test", "fixtures", "wiki", "migration", "tier1");
+const DEFAULT_TARGET = resolve(HERE, "..", "test", "fixtures", "wiki-migration", "tier1");
 
 /** A fixed date. A clock in a generator makes the fixture change on its own. */
 const DATE = "2026-03-14";

@@ -17,8 +17,8 @@ import { join, resolve, relative, sep } from "node:path";
 import { isEntityId } from "../../model/ids.js";
 
 const REPO_ROOT = resolve(__dirname, "..", "..", "..", "..");
-const CORPUS = join(REPO_ROOT, "test", "fixtures", "wiki", "migration", "tier1");
-const CENSUS = join(REPO_ROOT, "test", "fixtures", "wiki", "migration", "census.json");
+const CORPUS = join(REPO_ROOT, "test", "fixtures", "wiki-migration", "tier1");
+const CENSUS = join(REPO_ROOT, "test", "fixtures", "wiki-migration", "census.json");
 const CENSUS_SCRIPT = join(REPO_ROOT, "scripts", "wiki-scaffold-census.mjs");
 
 function markdownFiles(directory: string, out: string[] = []): string[] {

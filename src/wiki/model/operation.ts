@@ -92,13 +92,53 @@ export type InsertionPoint =
   | { at: "after-entity"; entityId: EntityId }
   | { at: "start-of-file" };
 
+/**
+ * Root-level frontmatter keys an adoption may take with it.
+ *
+ * A closed set of exactly one member, and the only non-prose deletion migration
+ * performs. Root `grounds_to` has a live owner — `extractGroundings` and
+ * `writeGroundings` read and write it on every `mex ground` run — so leaving it
+ * behind after its values move under `mex:` would leave **two stores of one
+ * fact** with no rule about which wins, which is what D1 exists to forbid.
+ * Naming it in the payload keeps the removal visible in the plan, the preview
+ * and the audit log, rather than happening as a side effect of adoption.
+ */
+export const ABSORBABLE_ROOT_KEYS = ["grounds_to"] as const;
+
+export type AbsorbableRootKey = (typeof ABSORBABLE_ROOT_KEYS)[number];
+
+/**
+ * An existing heading, or an existing file, to adopt as an entity.
+ *
+ * Migration's act is not "create an entity" but "declare that this prose,
+ * already on disk, is an entity". The distinction is load-bearing: a
+ * `create-entry` carrying `title` and `body` inserts a *second* copy of a
+ * heading and its prose when pointed at a file that already has both, and
+ * routing somebody's writing through a payload field gives up the byte
+ * guarantee even on the runs where the bytes happen to come back identical.
+ *
+ * Under `adopt`, the only bytes the operation contributes are the metadata
+ * block itself.
+ *
+ * `text` is asserted against the heading at `ordinal` when the plan is built,
+ * so a file that moved underneath the proposal is refused rather than
+ * annotated in the wrong place.
+ */
+export type AdoptTarget =
+  | { at: "file"; absorbRootKeys?: readonly AbsorbableRootKey[] }
+  | { at: "heading"; ordinal: number; text: string };
+
 export interface CreateEntryPayload {
   /** Scaffold-relative path of the file to write into. */
   file: string;
-  insertAt: InsertionPoint;
+  /** Where to insert new content. Mutually exclusive with `adopt`. */
+  insertAt?: InsertionPoint;
+  /** Adopt prose that is already there. Mutually exclusive with `insertAt`. */
+  adopt?: AdoptTarget;
   type: WikiEntityType;
   title: string;
-  body: string;
+  /** The entity's prose. Absent under `adopt`, where it is already on disk. */
+  body?: string;
   summary?: string;
   status?: WikiLifecycleState;
   topics?: EntityId[];
@@ -273,12 +313,41 @@ const scaffoldPathValidator: Validator<string> = (value, context) => {
   return succeed(path);
 };
 
-const createEntryValidator: Validator<CreateEntryPayload> = validateShape<CreateEntryPayload>({
+const adoptTargetValidator: Validator<AdoptTarget> = (value, context) => {
+  if (!isPlainObject(value)) return reject(context, "INVALID_OPERATION_PAYLOAD", "Expected an adopt target.");
+  if (value.at === "file") {
+    const keys = value.absorbRootKeys;
+    if (keys !== undefined) {
+      if (!Array.isArray(keys) || keys.some((key) => !(ABSORBABLE_ROOT_KEYS as readonly unknown[]).includes(key))) {
+        return reject(
+          context,
+          "INVALID_OPERATION_PAYLOAD",
+          `absorbRootKeys is a closed set: ${ABSORBABLE_ROOT_KEYS.join(", ")}.`,
+        );
+      }
+      return succeed({ at: "file", absorbRootKeys: keys as readonly AbsorbableRootKey[] });
+    }
+    return succeed({ at: "file" });
+  }
+  if (value.at === "heading") {
+    if (typeof value.ordinal !== "number" || !Number.isInteger(value.ordinal) || value.ordinal < 0) {
+      return reject(context, "INVALID_OPERATION_PAYLOAD", "An adopted heading needs a non-negative integer `ordinal`.");
+    }
+    if (typeof value.text !== "string" || value.text === "") {
+      return reject(context, "INVALID_OPERATION_PAYLOAD", "An adopted heading needs its `text`, so a shifted file is refused.");
+    }
+    return succeed({ at: "heading", ordinal: value.ordinal, text: value.text });
+  }
+  return reject(context, "INVALID_OPERATION_PAYLOAD", `Unknown adopt target "${String(value.at)}".`);
+};
+
+const createEntryShape = validateShape<CreateEntryPayload>({
   file: scaffoldPathValidator,
-  insertAt: insertionPointValidator,
+  insertAt: optional(insertionPointValidator),
+  adopt: optional(adoptTargetValidator),
   type: validateEnum(WIKI_ENTITY_TYPES, "INVALID_ENTITY_TYPE", "entity type"),
   title: validateString(),
-  body: validateString({ allowEmpty: true }),
+  body: optional(validateString({ allowEmpty: true })),
   summary: optional(validateString()),
   status: optional(validateEnum(WIKI_LIFECYCLE_STATES, "INVALID_LIFECYCLE_STATE", "lifecycle state")),
   topics: optional(validateArray(entityIdValidator)),
@@ -287,6 +356,44 @@ const createEntryValidator: Validator<CreateEntryPayload> = validateShape<Create
   groundsTo: optional(validateArray(validateGrounding)),
   headingDepth: optional(validateInteger({ min: 1, max: 6 })),
 });
+
+const createEntryValidator: Validator<CreateEntryPayload> = (value, context) => {
+  const result = createEntryShape(value, context);
+  if (!result.ok) return result;
+  const payload = result.value;
+
+  if ((payload.adopt === undefined) === (payload.insertAt === undefined)) {
+    return reject(
+      context,
+      "INVALID_OPERATION_PAYLOAD",
+      "create-entry needs exactly one of `insertAt` (write new prose) or `adopt` (declare prose already on disk to be an entity).",
+    );
+  }
+  if (payload.adopt === undefined) {
+    if (payload.body === undefined) {
+      return reject(context, "INVALID_OPERATION_PAYLOAD", "create-entry with `insertAt` needs a `body`.");
+    }
+    return result;
+  }
+  // Prose does not travel through a payload. Under `adopt` the body is already
+  // in the file, and a payload carrying one would mean the operation had a
+  // second opinion about what the file says.
+  if (payload.body !== undefined) {
+    return reject(
+      context,
+      "INVALID_OPERATION_PAYLOAD",
+      "create-entry with `adopt` must not carry a `body`: the prose is already in the file and is not rewritten.",
+    );
+  }
+  if (payload.adopt.at === "heading" && payload.headingDepth !== undefined) {
+    return reject(
+      context,
+      "INVALID_OPERATION_PAYLOAD",
+      "An adopted heading's depth is read from the heading, not declared.",
+    );
+  }
+  return result;
+};
 
 const updateEntryValidator: Validator<UpdateEntryPayload> = (value, context) => {
   const shape = validateShape<UpdateEntryPayload>({

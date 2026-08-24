@@ -30,7 +30,7 @@ import type { WikiEntity, WikiLifecycleState } from "../model/entity.js";
 import type { WikiGrounding } from "../model/grounding.js";
 import { deriveVerifiedGroundings } from "../grounding/provenance.js";
 import type { PatchEdit } from "../markdown/patch.js";
-import { renderKeyValues } from "../markdown/frontmatter.js";
+import { keyPathRemoveEdit, renderKeyValues } from "../markdown/frontmatter.js";
 import { entityTextOf } from "../markdown/codec.js";
 import { parseDocument } from "../markdown/parse.js";
 import { entityContentHash } from "../model/hash.js";
@@ -296,7 +296,13 @@ function createInto(context: OperationContext, payload: CreateEntryPayload, id: 
     return { files: [], entityIds: [], createdIds: [id], preconditions: [], revisions: [], diagnostics: [] };
   }
 
-  const offset = insertionOffset(file, payload.insertAt);
+  if (payload.adopt !== undefined) return adoptInto(file, payload, payload.adopt, id);
+
+  const insertAt = payload.insertAt;
+  if (insertAt === undefined) {
+    return reject("INVALID_OPERATION_PAYLOAD", "create-entry needs exactly one of `insertAt` or `adopt`.");
+  }
+  const offset = insertionOffset(file, insertAt);
   if (typeof offset !== "number") {
     return { files: [], entityIds: [], createdIds: [], preconditions: [], revisions: [], diagnostics: [offset] };
   }
@@ -304,6 +310,9 @@ function createInto(context: OperationContext, payload: CreateEntryPayload, id: 
   const eol = dominantEol(file.text.length === 0 ? "\n" : file.text);
   const fields = newEntityFields(id, payload);
   const edits: PatchEdit[] = [];
+  // The validator requires a body whenever `insertAt` is used; the fallback is
+  // for the type, not for a case that reaches here.
+  const body = payload.body ?? "";
 
   if (payload.headingDepth === undefined) {
     // File-level: metadata is the frontmatter `mex` key, which may have to be
@@ -329,18 +338,103 @@ function createInto(context: OperationContext, payload: CreateEntryPayload, id: 
     edits.push({
       start: headingOffset,
       end: headingOffset,
-      text: paddedInsertion(file.text, headingOffset, headingAndBody(1, payload.title, payload.body, eol)),
+      text: paddedInsertion(file.text, headingOffset, headingAndBody(1, payload.title, body, eol)),
       label: `heading and body of ${id}`,
     });
   } else {
     const metadata = `<!-- mex:entity${eol}${renderKeyValues(fields, eol)}${eol}-->`;
-    const block = `${metadata}${eol}${headingAndBody(payload.headingDepth, payload.title, payload.body, eol)}`;
+    const block = `${metadata}${eol}${headingAndBody(payload.headingDepth, payload.title, body, eol)}`;
     edits.push({
       start: offset,
       end: offset,
       text: paddedInsertion(file.text, offset, block),
       label: `entity ${id}`,
     });
+  }
+
+  return {
+    files: [{ path: file.path, absolutePath: file.absolutePath, baseText: file.text, existed: file.existed, edits }],
+    entityIds: [],
+    createdIds: [id],
+    preconditions: [],
+    revisions: [{ entityId: id, before: 0, after: 1 }],
+    diagnostics: [],
+  };
+}
+
+/**
+ * Adopt prose that is already on disk as an entity.
+ *
+ * The only bytes this contributes are the metadata block. No heading is
+ * written, no body is written, and the payload carries neither — so
+ * "insertion-only with respect to prose" holds by construction here rather
+ * than by a comparison after the fact.
+ */
+function adoptInto(
+  file: LocatedFile,
+  payload: CreateEntryPayload,
+  adopt: NonNullable<CreateEntryPayload["adopt"]>,
+  id: EntityId,
+): OperationEdits {
+  if (file.parsed.entities.some((entry) => entry.entity.id === id)) {
+    return { files: [], entityIds: [], createdIds: [id], preconditions: [], revisions: [], diagnostics: [] };
+  }
+
+  const eol = dominantEol(file.text.length === 0 ? "\n" : file.text);
+  const edits: PatchEdit[] = [];
+
+  if (adopt.at === "heading") {
+    const headings = parseDocument(file.text).headings;
+    const heading = headings[adopt.ordinal];
+    if (heading === undefined) {
+      return reject(
+        "AMBIGUOUS_MIGRATION",
+        `${file.path} has ${headings.length} heading(s); there is no heading ${adopt.ordinal} to adopt.`,
+      );
+    }
+    if (heading.title !== adopt.text) {
+      return reject(
+        "AMBIGUOUS_MIGRATION",
+        `Heading ${adopt.ordinal} of ${file.path} reads "${heading.title}", not "${adopt.text}". ` +
+          "The file moved since this was proposed; re-plan rather than annotating the wrong section.",
+      );
+    }
+    const fields = newEntityFields(id, { ...payload, headingDepth: heading.depth });
+    const metadata = `<!-- mex:entity${eol}${renderKeyValues(fields, eol)}${eol}-->`;
+    edits.push({
+      start: heading.start,
+      end: heading.start,
+      text: paddedInsertion(file.text, heading.start, metadata),
+      label: `metadata for adopted entity ${id}`,
+    });
+  } else {
+    const frontmatter = file.parsed.frontmatter;
+    if (frontmatter === null) {
+      return reject(
+        "AMBIGUOUS_MIGRATION",
+        `${file.path} has no frontmatter block to hold a \`mex\` key, so its file-level entity cannot be adopted in place.`,
+      );
+    }
+    if (file.parsed.entities.some((entry) => entry.metadataKind === "frontmatter")) {
+      return reject("INVALID_OPERATION_PAYLOAD", `${file.path} already has a file-level entity.`);
+    }
+    const fields = newEntityFields(id, { ...payload, headingDepth: undefined });
+    const map = Object.fromEntries(fields.filter(([, value]) => value !== undefined));
+    const target: MetadataTarget = { region: regionOfFrontmatter(file), prefix: [] };
+    const edit = metadataEdit(file.text, target, "mex", map);
+    if (edit === null) return reject("WIKI_PARSE_ERROR", `${file.path} has frontmatter that cannot hold a \`mex\` key.`);
+    edits.push(edit);
+
+    // The one non-prose deletion migration performs, and it is declared in the
+    // payload rather than implied: leaving a root key whose values have moved
+    // under `mex:` would leave two stores of one fact.
+    for (const key of adopt.absorbRootKeys ?? []) {
+      const removal = keyPathRemoveEdit(file.text, target.region, [key]);
+      if (removal === null) {
+        return reject("WIKI_PARSE_ERROR", `${file.path}: could not locate the root \`${key}\` key to absorb.`);
+      }
+      if (removal !== "absent") edits.push(removal);
+    }
   }
 
   return {
