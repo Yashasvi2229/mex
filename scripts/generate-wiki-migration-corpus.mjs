@@ -196,8 +196,8 @@ const TRIGGER_POOL = [
 
 /** Edge targets, invented, drawn from the corpus's own file list. */
 const EDGE_POOL = [
-  "context/architecture.md", "context/conventions.md", "context/decisions.md",
-  "context/setup.md", "context/stack.md", "context/risks.md",
+  "context/architecture.md", "context/conventions.md", "context/setup.md",
+  "context/decisions.md", "context/stack.md", "context/risks.md",
   "context/testing.md", "context/operations.md", "context/glossary.md",
   "context/data-model.md", "context/integrations.md", "context/security.md",
   "context/performance.md", "patterns/INDEX.md",
@@ -220,11 +220,25 @@ const CONDITIONS = [
   "at the start of a task, to find a matching pattern",
 ];
 
-function edgesFor(count, offset) {
+/**
+ * Edge targets for one file.
+ *
+ * The pool is ordered the way a real scaffold's edges point: at the few files
+ * everything refers back to first, then outward. That ordering is not
+ * constrained by the census — which counts edges and conditions, never
+ * targets — and it matters, because an edge converts only when its target
+ * resolves to exactly one entity. A pool that happened to point every edge at a
+ * file the classifier abstains on would leave the whole conversion path
+ * unexercised while every count still matched.
+ *
+ * A file never edges to itself.
+ */
+function edgesFor(count, selfPath) {
   const edges = [];
-  for (let index = 0; index < count; index += 1) {
-    const slot = (offset + index) % EDGE_POOL.length;
-    edges.push({ target: EDGE_POOL[slot], condition: CONDITIONS[slot] });
+  let slot = 0;
+  while (edges.length < count && slot < EDGE_POOL.length) {
+    if (EDGE_POOL[slot] !== selfPath) edges.push({ target: EDGE_POOL[slot], condition: CONDITIONS[slot] });
+    slot += 1;
   }
   return edges;
 }
@@ -301,7 +315,7 @@ function render(spec, index) {
           name: spec.name,
           description: spec.description,
           ...(spec.triggers === undefined ? {} : { triggers: triggersFor(spec.triggers, index * 3) }),
-          ...(spec.edges === undefined ? {} : { edges: edgesFor(spec.edges, index) }),
+          ...(spec.edges === undefined ? {} : { edges: edgesFor(spec.edges, spec.path) }),
         });
 
   lines.push(`# ${spec.title}`, "");

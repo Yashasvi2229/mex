@@ -12,14 +12,14 @@ triggers:
   - "runbook"
   - "on call"
 edges:
-  - target: context/operations.md
-    condition: when running the service in anger
-  - target: context/glossary.md
-    condition: when a term is used without definition
-  - target: context/data-model.md
-    condition: when the shape of stored data matters
-  - target: context/integrations.md
-    condition: when a third party is involved
+  - target: context/architecture.md
+    condition: when the boundary between two services matters
+  - target: context/conventions.md
+    condition: when writing or reviewing a change
+  - target: context/decisions.md
+    condition: when preparing a development machine
+  - target: context/stack.md
+    condition: when a library version is in question
 last_updated: 2026-03-14
 ---
 # Setup

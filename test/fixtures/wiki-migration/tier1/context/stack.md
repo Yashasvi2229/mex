@@ -12,12 +12,12 @@ triggers:
   - "routing"
   - "threading"
 edges:
-  - target: context/data-model.md
-    condition: when the shape of stored data matters
-  - target: context/integrations.md
-    condition: when a third party is involved
-  - target: context/security.md
-    condition: when the change touches credentials
+  - target: context/architecture.md
+    condition: when the boundary between two services matters
+  - target: context/conventions.md
+    condition: when writing or reviewing a change
+  - target: context/setup.md
+    condition: when a design choice needs its reasoning
 last_updated: 2026-03-14
 ---
 # Stack

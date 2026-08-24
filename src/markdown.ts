@@ -3,7 +3,8 @@ import remarkParse from "remark-parse";
 import remarkFrontmatter from "remark-frontmatter";
 import { visit } from "unist-util-visit";
 import YAML from "yaml";
-import { renderKeyValue, spliceTopLevelKey } from "./wiki/markdown/frontmatter.js";
+import { renderKeyValue, spliceKeyPath, spliceTopLevelKey } from "./wiki/markdown/frontmatter.js";
+import { parseDocument } from "./wiki/markdown/parse.js";
 import type { Grounding, ScaffoldFrontmatter } from "./types.js";
 import type { Root, Content, Link } from "mdast";
 
@@ -32,9 +33,35 @@ export function extractFrontmatter(
   return frontmatter;
 }
 
+/**
+ * Where a file's groundings live: under `mex:` once it has one, else at the root.
+ *
+ * A pre-wiki scaffold keeps `grounds_to` as a root frontmatter key, and that is
+ * the key `mex ground` has always read and written. Once migration adopts a
+ * file as a wiki entity, the entity's metadata is the `mex:` map and the
+ * grounding belongs inside it — section 13.4's "move it under `mex.grounds_to`".
+ *
+ * **Both the read and the write follow the same rule, and that is the point.**
+ * Teaching only the reader would leave `writeGroundings` splicing the root key
+ * back in on the next `mex ground` run, so the file would end up carrying the
+ * same grounding in two places, maintained by two writers that drift the moment
+ * either updates — the two-stores-of-one-fact failure D1 exists to forbid,
+ * arriving through a door D1 did not name. Migration removes the root key as it
+ * moves the values (`ABSORBABLE_ROOT_KEYS`), so exactly one store survives.
+ *
+ * A file with no `mex:` key is untouched by this: the path is the root key, and
+ * every shipped grounding test exercises that case unchanged.
+ */
+export function groundingKeyPath(content: string): readonly string[] {
+  const frontmatter = extractFrontmatter(content) as (ScaffoldFrontmatter & { mex?: unknown }) | null;
+  const mex = frontmatter?.mex;
+  return mex !== null && typeof mex === "object" ? ["mex", "grounds_to"] : ["grounds_to"];
+}
+
 /** Return validated code-graph groundings; malformed entries are rejected as a set. */
 export function extractGroundings(content: string): Grounding[] {
-  const value = extractFrontmatter(content)?.grounds_to;
+  const frontmatter = extractFrontmatter(content) as (ScaffoldFrontmatter & { mex?: { grounds_to?: unknown } }) | null;
+  const value = groundingKeyPath(content)[0] === "mex" ? frontmatter?.mex?.grounds_to : frontmatter?.grounds_to;
   return isGroundingArray(value) ? value : [];
 }
 
@@ -62,7 +89,18 @@ export function isGroundingArray(value: unknown): value is Grounding[] {
  */
 export function writeGroundings(content: string, groundings: Grounding[]): string {
   if (!isGroundingArray(groundings)) throw new Error("Invalid grounds_to entries");
-  return spliceTopLevelKey(content, "grounds_to", renderKeyValue("grounds_to", groundings)).text;
+  const path = groundingKeyPath(content);
+  if (path.length === 1) {
+    return spliceTopLevelKey(content, "grounds_to", renderKeyValue("grounds_to", groundings)).text;
+  }
+  const frontmatter = parseDocument(content).frontmatter;
+  if (frontmatter === null) {
+    return spliceTopLevelKey(content, "grounds_to", renderKeyValue("grounds_to", groundings)).text;
+  }
+  const spliced = spliceKeyPath(content, frontmatter, path, groundings);
+  // A `mex` map that cannot hold the key is not a reason to write a second copy
+  // at the root; it is a reason to leave the file alone and let validation say so.
+  return spliced === null ? content : spliced.text;
 }
 
 export interface MexAnchor {

@@ -19,9 +19,9 @@ edges:
     condition: when the boundary between two services matters
   - target: context/conventions.md
     condition: when writing or reviewing a change
-  - target: context/decisions.md
-    condition: when a design choice needs its reasoning
   - target: context/setup.md
+    condition: when a design choice needs its reasoning
+  - target: context/decisions.md
     condition: when preparing a development machine
   - target: context/stack.md
     condition: when a library version is in question

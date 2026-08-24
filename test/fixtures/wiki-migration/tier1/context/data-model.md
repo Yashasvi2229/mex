@@ -10,12 +10,12 @@ triggers:
   - "alternative"
   - "setup"
 edges:
-  - target: patterns/INDEX.md
-    condition: at the start of a task, to find a matching pattern
   - target: context/architecture.md
     condition: when the boundary between two services matters
   - target: context/conventions.md
     condition: when writing or reviewing a change
+  - target: context/setup.md
+    condition: when a design choice needs its reasoning
 last_updated: 2026-03-14
 ---
 # Data model

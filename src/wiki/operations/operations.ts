@@ -401,10 +401,18 @@ function adoptInto(
     }
     const fields = newEntityFields(id, { ...payload, headingDepth: heading.depth });
     const metadata = `<!-- mex:entity${eol}${renderKeyValues(fields, eol)}${eol}-->`;
+    // **Exactly the block and one terminator — never `paddedInsertion`.**
+    // Padding is right for `create-entry`, which drops a whole new section into
+    // prose and wants a blank line either side of it. Here the heading is
+    // already there and already spaced the way its author spaced it, so a
+    // padded insertion would add a blank line *between* the metadata and the
+    // heading: a character that is neither frontmatter nor part of the block,
+    // which is precisely what insertion-only forbids. Verified by the
+    // whole-corpus prose property, which fails on the padded form.
     edits.push({
       start: heading.start,
       end: heading.start,
-      text: paddedInsertion(file.text, heading.start, metadata),
+      text: `${metadata}${eol}`,
       label: `metadata for adopted entity ${id}`,
     });
   } else {

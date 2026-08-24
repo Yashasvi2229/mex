@@ -15,16 +15,16 @@ triggers:
   - "stack"
   - "dependency"
 edges:
+  - target: context/conventions.md
+    condition: when writing or reviewing a change
+  - target: context/setup.md
+    condition: when a design choice needs its reasoning
+  - target: context/decisions.md
+    condition: when preparing a development machine
   - target: context/stack.md
     condition: when a library version is in question
   - target: context/risks.md
     condition: when a failure mode is being weighed
-  - target: context/testing.md
-    condition: when adding or changing a test
-  - target: context/operations.md
-    condition: when running the service in anger
-  - target: context/glossary.md
-    condition: when a term is used without definition
 last_updated: 2026-03-14
 ---
 # Architecture

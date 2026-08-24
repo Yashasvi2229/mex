@@ -9,12 +9,12 @@ triggers:
   - "ingest"
   - "naming"
 edges:
-  - target: context/operations.md
-    condition: when running the service in anger
-  - target: context/glossary.md
-    condition: when a term is used without definition
-  - target: context/data-model.md
-    condition: when the shape of stored data matters
+  - target: context/architecture.md
+    condition: when the boundary between two services matters
+  - target: context/conventions.md
+    condition: when writing or reviewing a change
+  - target: context/setup.md
+    condition: when a design choice needs its reasoning
 last_updated: 2026-03-14
 ---
 # Split a thread that was joined wrongly

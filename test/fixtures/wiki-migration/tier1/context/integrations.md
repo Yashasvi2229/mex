@@ -13,7 +13,7 @@ edges:
     condition: when the boundary between two services matters
   - target: context/conventions.md
     condition: when writing or reviewing a change
-  - target: context/decisions.md
+  - target: context/setup.md
     condition: when a design choice needs its reasoning
 last_updated: 2026-03-14
 ---

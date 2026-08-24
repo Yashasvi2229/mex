@@ -8,10 +8,10 @@ triggers:
   - "setup"
   - "environment"
 edges:
-  - target: context/integrations.md
-    condition: when a third party is involved
-  - target: context/security.md
-    condition: when the change touches credentials
+  - target: context/architecture.md
+    condition: when the boundary between two services matters
+  - target: context/conventions.md
+    condition: when writing or reviewing a change
 last_updated: 2026-03-14
 ---
 # Trace a reply that never reached the customer
