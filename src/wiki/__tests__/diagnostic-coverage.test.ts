@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -55,6 +55,9 @@ import { openWikiIndex } from "../index/open.js";
 import { rebuildWikiIndex } from "../index/rebuild.js";
 import { getEntity } from "../query/get.js";
 import { escapedSymlinkDiagnostic } from "../index/discover.js";
+import { planOperation } from "../operations/plan.js";
+import { applyOperation } from "../operations/apply.js";
+import { readAuditLog } from "../operations/audit.js";
 import type { GroundingResolver } from "../index/write.js";
 
 /** Run `body` against a fresh scratch directory, cleaning up afterwards. */
@@ -88,9 +91,6 @@ const NOT_YET_EMITTED: Record<string, string> = {
   // codec's, and no corpus fixture asks for it.
   ANCHOR_GROUNDING_MISMATCH: "P9 — anchor/grounding equivalence check",
   AMBIGUOUS_MIGRATION: "P6 — migration classification",
-  WRITE_SCOPE_VIOLATION: "P5 — write-scope enforcement",
-  INDEX_REFRESH_REQUIRED: "P5 — post-write index refresh",
-  MALFORMED_OPERATION_LOG: "P5 — operation audit log",
   GENERATED_VIEW_DRIFT: "P6 — generated views",
 
 };
@@ -133,6 +133,16 @@ function codecDiagnostics(text: string): readonly WikiDiagnostic[] {
 }
 
 const CODEC_ID = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
+const OPS_ID = "mx_01D78XYFJ1PRM1WPBCBT3VHMNV";
+const OPS_OTHER = "mx_01BX5ZZKBKACTAV9WEVGEMMVRZ";
+
+/** One entity out of a file on disk, for building a live precondition. */
+function entityOf(absolutePath: string, id: string) {
+  const text = readFileSync(absolutePath, "utf-8");
+  const found = parseWikiMarkdown({ path: "context/notes.md", text }).entities.find((entry) => entry.entity.id === id);
+  if (found === undefined) throw new Error(`no entity ${id}`);
+  return found.entity;
+}
 
 const EMITTERS: Record<string, () => readonly WikiDiagnostic[]> = {
   INVALID_ENTITY_ID: () => validateEntity(entity({ id: "not-an-id" as unknown as EntityId }), rootContext()).diagnostics,
@@ -334,6 +344,67 @@ status: promoted
   // without developer mode, and an emitter that fires only on some machines
   // makes a coverage assertion depend on the environment. The walk that calls
   // it is exercised in discover.test.ts.
+  WRITE_SCOPE_VIOLATION: () =>
+    // A body carrying its own metadata block: every byte inside the declared
+    // range, and an entity the operation never named. The scope check cannot
+    // see it; the plan's re-parse can.
+    inScratch((directory) => {
+      const file = join(directory, "context", "notes.md");
+      mkdirSync(join(directory, "context"), { recursive: true });
+      writeFileSync(
+        file,
+        [`<!-- mex:entity`, `id: ${OPS_ID}`, "type: decision", "status: promoted", "revision: 1", "-->", "## A decision", "", "Body."].join(String.fromCharCode(10)),
+        "utf-8",
+      );
+      const planned = planOperation(
+        {
+          opId: "coverage-scope",
+          type: "update-entry",
+          entityId: OPS_ID,
+          baseContentHash: entityOf(file, OPS_ID).location.entityContentHash,
+          actor: { kind: "agent", id: "coverage" },
+          timestamp: "2026-08-24T10:00:00.000Z",
+          payload: {
+            body: ["Body.", "", "<!-- mex:entity", `id: ${OPS_OTHER}`, "type: decision", "status: promoted", "revision: 1", "-->", "## Smuggled", "", "In."].join(String.fromCharCode(10)),
+          },
+        },
+        { scaffoldRoot: directory },
+      );
+      return planned.ok ? [] : planned.diagnostics;
+    }),
+
+  INDEX_REFRESH_REQUIRED: () =>
+    // Applying with no `wiki.db` at all — the normal case in production, since
+    // nothing there builds one. The write stands and the cache is reported.
+    inScratch((directory) => {
+      const file = join(directory, "context", "notes.md");
+      mkdirSync(join(directory, "context"), { recursive: true });
+      writeFileSync(
+        file,
+        [`<!-- mex:entity`, `id: ${OPS_ID}`, "type: decision", "status: promoted", "revision: 1", "-->", "## A decision", "", "Body."].join(String.fromCharCode(10)),
+        "utf-8",
+      );
+      return applyOperation(
+        {
+          opId: "coverage-refresh",
+          type: "set-property",
+          entityId: OPS_ID,
+          baseContentHash: entityOf(file, OPS_ID).location.entityContentHash,
+          actor: { kind: "agent", id: "coverage" },
+          timestamp: "2026-08-24T10:00:00.000Z",
+          payload: { property: "status", value: "deprecated" },
+        },
+        { scaffoldRoot: directory },
+      ).diagnostics;
+    }),
+
+  MALFORMED_OPERATION_LOG: () =>
+    inScratch((directory) => {
+      mkdirSync(join(directory, "events"), { recursive: true });
+      writeFileSync(join(directory, "events", "operations.jsonl"), `{"v":1,"phase":"comp${String.fromCharCode(10)}`, "utf-8");
+      return readAuditLog(directory).diagnostics;
+    }),
+
   PATH_OUTSIDE_SCAFFOLD: () => [escapedSymlinkDiagnostic("linked.md", "/elsewhere/outside.md")],
 
   // The three grounding verdicts, each produced by building a real index over
