@@ -84,6 +84,7 @@ describe("the resolution table", () => {
   it("Tier-1 miss resolving MOVED rebinds, and the entity id is not involved", () => {
     const resolution = resolveGrounding(GROUNDED, stubGraph({
       nodes: { [MOVED_NODE]: node(MOVED_NODE, "body-1") },
+      fingerprints: { [MOVED_NODE]: FINGERPRINT },
       reconcile: () => ({ kind: "MOVED", nodeId: MOVED_NODE }),
     }));
     expect(resolution).toEqual({
@@ -98,14 +99,26 @@ describe("the resolution table", () => {
     });
   });
 
-  it("Tier-1 miss resolving MOVED to a body that also changed is stale, not fresh", () => {
-    // A deviation from the brief's table, which resolves MOVED to `fresh`
-    // outright. Reconciliation matches on *similarity*, so a symbol can move
-    // and be edited in one commit; reporting that as fresh would hide drift
-    // through the rename door. The move itself is still not drift — see the
-    // test above — but the rebound node is compared like any other.
+  it("compares a rebind by fingerprint, because a rename always moves the body hash", () => {
+    // Measured against a real graph: renaming a symbol changes its body hash,
+    // since the name is part of the body. If a rebind were compared by body
+    // hash, `fresh` with `rebound: true` would be unreachable and every rename
+    // would read as drift — the brief's MOVED row inverted.
+    const resolution = resolveGrounding(GROUNDED, stubGraph({
+      nodes: { [MOVED_NODE]: node(MOVED_NODE, "a-different-body-hash") },
+      fingerprints: { [MOVED_NODE]: FINGERPRINT },
+      reconcile: () => ({ kind: "MOVED", nodeId: MOVED_NODE }),
+    }));
+    expect(resolution).toMatchObject({ state: "fresh", health: "fresh", rebound: true, resolvedNode: MOVED_NODE });
+  });
+
+  it("Tier-1 miss resolving MOVED to a rewritten symbol is stale, not fresh", () => {
+    // The other half. Reconciliation matches on *similarity*, so a symbol can
+    // move and be rewritten in one commit; reporting that as fresh would let
+    // drift through the rename door.
     const resolution = resolveGrounding(GROUNDED, stubGraph({
       nodes: { [MOVED_NODE]: node(MOVED_NODE, "body-9") },
+      fingerprints: { [MOVED_NODE]: OTHER_FINGERPRINT },
       reconcile: () => ({ kind: "MOVED", nodeId: MOVED_NODE }),
     }));
     expect(resolution).toMatchObject({

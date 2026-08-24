@@ -27,8 +27,8 @@
  * |---|---|---|
  * | node found, committed reference matches | `fresh` | `fresh` |
  * | node found, committed reference diverges | `stale` | `changed` |
- * | Tier-1 miss → `MOVED`, rebound node matches | `fresh` (rebound) | `fresh` |
- * | Tier-1 miss → `MOVED`, rebound node diverges | `stale` (rebound) | `changed` |
+ * | Tier-1 miss → `MOVED`, rebound structure matches | `fresh` (rebound) | `fresh` |
+ * | Tier-1 miss → `MOVED`, rebound structure diverges | `stale` (rebound) | `changed` |
  * | Tier-1 miss → `AMBIGUOUS` | `unresolved` | `ambiguous` |
  * | Tier-1 miss → `GONE` | `missing` | `missing` |
  * | no graph, or nothing to compare against | `unresolved` | `unverified` |
@@ -45,12 +45,14 @@
  * not falls back to the fingerprint and can only see structural change.
  *
  * The second is the `MOVED` row, which the brief resolves to `fresh` outright.
- * Reconciliation matches on *similarity*, so a symbol can move and change in
- * the same edit; calling that `fresh` would reintroduce the blindness through
- * the other door. A move alone is still not drift — the entity id never
- * changes, and a matching rebound node is `fresh` — but the rebound node is
- * compared like any other. Whether a resolution was rebound is visible as
- * `resolvedNode !== node`, on every variant, so nothing needs a flag to say so.
+ * A move alone is still not drift — the entity id never changes and a rebound
+ * symbol whose structure matches is `fresh` — but a symbol can move *and* be
+ * rewritten in one commit, and calling that fresh would let real drift through
+ * the rename door. So the rebound node is compared, by fingerprint (see
+ * {@link compare} for why it cannot be by body hash).
+ *
+ * Whether a resolution was rebound is visible as `resolvedNode !== node` on
+ * every variant, and as `rebound` on the fresh one.
  */
 
 import {
@@ -143,15 +145,29 @@ function compare(
   declaredNode: string,
 ): GroundingResolution {
   const currentBodyHash = node.bodyHash ?? "";
+  const rebound = node.id !== declaredNode;
 
-  if (groundingComparator(grounding) === "bodyHash") {
+  // **A rebind is compared by fingerprint, never by body hash.** A symbol's
+  // name is part of its body, so renaming it changes the body hash by
+  // construction — measured, not assumed. Comparing it here would make
+  // `fresh` with `rebound: true` unreachable and every rename would read as
+  // drift, which is the brief's `MOVED` row inverted. Identity has already
+  // been re-established by fingerprint at this point, so fingerprint is the
+  // honest thing to compare.
+  //
+  // The residual, stated because it is real: a commit that renames a symbol
+  // *and* edits a constant inside it resolves fresh, since neither signal can
+  // see it. It does not stay hidden — the rebind means Markdown still names a
+  // node that no longer exists, so it has to be rewritten by an operation, and
+  // that write re-derives the body hash from the current node.
+  if (!rebound && groundingComparator(grounding) === "bodyHash") {
     if (grounding.bodyHash === currentBodyHash) {
       return {
         state: "fresh",
         health: "fresh",
         node: declaredNode,
         resolvedNode: node.id,
-        rebound: node.id !== declaredNode,
+        rebound,
         bodyHash: currentBodyHash,
       };
     }
@@ -167,9 +183,9 @@ function compare(
     };
   }
 
-  // No committed body hash: fall back to structure. This sees a symbol being
-  // rewritten and misses a constant being edited, which is why anything mex
-  // writes commits a body hash.
+  // Structure: either the grounding committed no body hash, or the symbol was
+  // rebound. This sees a symbol being rewritten and misses a constant being
+  // edited, which is why anything mex writes commits a body hash.
   const currentFingerprint = graph.getFingerprint(node.id);
   if (currentFingerprint === null) {
     return {
@@ -185,7 +201,7 @@ function compare(
       health: "fresh",
       node: declaredNode,
       resolvedNode: node.id,
-      rebound: node.id !== declaredNode,
+      rebound,
       bodyHash: currentBodyHash,
     };
   }
