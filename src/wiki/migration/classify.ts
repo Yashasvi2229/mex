@@ -215,6 +215,25 @@ export function classifyFile(file: InventoryFile): FileClassification {
     return { ...result, skipped: true, skipReason: "already carries entity metadata" };
   }
 
+  // A file the codec could not read is a file migration must not write into.
+  // Section 13.1: a failed file migration must not corrupt files it left alone,
+  // and splicing a `mex:` key into frontmatter that does not parse is how one
+  // file's damage becomes two.
+  if (file.parsed.diagnostics.some((entry) => entry.severity === "error")) {
+    result.abstentions.push({
+      file: file.path,
+      target: null,
+      reason:
+        `${file.path} could not be read cleanly: ` +
+        file.parsed.diagnostics
+          .filter((entry) => entry.severity === "error")
+          .map((entry) => entry.message)
+          .join("; ") +
+        ". Migration will not write into a file it cannot parse.",
+    });
+    return result;
+  }
+
   const role = roleFor(file.path);
   if (role === null) {
     result.abstentions.push({
@@ -356,7 +375,10 @@ export function fileTitleOf(file: InventoryFile): string | null {
     const match = /^name:\s*(.+?)\s*$/m.exec(file.text.slice(frontmatter.range.start, frontmatter.range.end));
     if (match !== undefined && match !== null) {
       const value = match[1]?.replace(/^["']|["']$/g, "") ?? "";
-      if (value !== "") return value;
+      // An explicitly null `name` is not a title. YAML distinguishes a missing
+      // key from one set to `null` and the second is nearly always a mistake
+      // (finding 11); taking it literally would title an entity "null".
+      if (value !== "" && value !== "null" && value !== "~") return value;
     }
   }
   const first = file.headings[0];

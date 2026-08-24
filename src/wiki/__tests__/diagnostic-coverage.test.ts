@@ -19,6 +19,9 @@ import { describe, it, expect } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { migrateScaffold } from "../migration/migrate.js";
+import { inventoryScaffold } from "../migration/inventory.js";
+import { planGeneratedView, GENERATED_BEGIN, GENERATED_END } from "../migration/generated.js";
 import {
   WIKI_DIAGNOSTIC_CODES,
   isWikiDiagnosticCode,
@@ -90,8 +93,6 @@ const NOT_YET_EMITTED: Record<string, string> = {
   // exists and a live graph can resolve it. That is P9's check, not the
   // codec's, and no corpus fixture asks for it.
   ANCHOR_GROUNDING_MISMATCH: "P9 — anchor/grounding equivalence check",
-  AMBIGUOUS_MIGRATION: "P6 — migration classification",
-  GENERATED_VIEW_DRIFT: "P6 — generated views",
 
 };
 
@@ -435,6 +436,90 @@ status: promoted
       node: grounding.node,
       reason: "no code graph in this checkout",
     })),
+
+  AMBIGUOUS_MIGRATION: () =>
+    // A legacy edge whose target file yields several entities and no
+    // file-level entity: "that file" names no single thing, and section 13.1
+    // says report rather than guess.
+    inScratch((directory) => {
+      mkdirSync(join(directory, "context"), { recursive: true });
+      mkdirSync(join(directory, "patterns"), { recursive: true });
+      const substantial = [
+        "Prose enough to clear the substantiality threshold, over several lines.",
+        "A second line of prose that carries several more words along with it.",
+        "And a third line of prose so the section is a claim rather than a note.",
+      ].join(String.fromCharCode(10));
+      writeFileSync(
+        join(directory, "patterns", "thing.md"),
+        [
+          "---",
+          "name: thing",
+          'description: "x"',
+          "edges:",
+          "  - target: context/risks.md",
+          "    condition: when weighing a failure mode",
+          "---",
+          "",
+          "# Thing",
+          "",
+          substantial,
+          "",
+        ].join(String.fromCharCode(10)),
+        "utf-8",
+      );
+      writeFileSync(
+        join(directory, "context", "risks.md"),
+        [
+          "---",
+          "name: risks",
+          'description: "x"',
+          "---",
+          "",
+          "# Risks",
+          "",
+          "## One",
+          "",
+          substantial,
+          "",
+          "## Two",
+          "",
+          substantial,
+          "",
+        ].join(String.fromCharCode(10)),
+        "utf-8",
+      );
+      return migrateScaffold({ scaffoldRoot: directory }).diagnostics;
+    }),
+
+  GENERATED_VIEW_DRIFT: () =>
+    // A generated block that no longer matches the entities it summarizes.
+    inScratch((directory) => {
+      mkdirSync(join(directory, "patterns"), { recursive: true });
+      writeFileSync(
+        join(directory, "patterns", "INDEX.md"),
+        [
+          "---",
+          "name: pattern-index",
+          'description: "x"',
+          "---",
+          "",
+          "# Pattern Index",
+          "",
+          GENERATED_BEGIN,
+          "",
+          "| Entity | Where |",
+          "|---|---|",
+          "| a row nothing produced | `nowhere` |",
+          "",
+          GENERATED_END,
+          "",
+        ].join(String.fromCharCode(10)),
+        "utf-8",
+      );
+      const inventory = inventoryScaffold({ scaffoldRoot: directory });
+      const index = inventory.files.find((file) => file.path === "patterns/INDEX.md")!;
+      return planGeneratedView(index, inventory, "pattern")?.diagnostics ?? [];
+    }),
 };
 
 /**
