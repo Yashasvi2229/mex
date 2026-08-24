@@ -161,13 +161,22 @@ export function findMapInsertion(text: string, region: YamlRegion, path: readonl
   return { offset, indent: indentAt(text, region.innerStart + first.key.range[0]), needsLeadingBreak: true };
 }
 
-/** Prefix every non-blank line with `indent`. Blank lines stay truly blank. */
-function withIndent(rendered: string, indent: string): string {
-  if (indent === "") return rendered;
+/**
+ * Prefix every non-blank line with `indent`, and join with `eol`.
+ *
+ * The line ending is neither cosmetic nor optional. `YAML.stringify` emits LF,
+ * so a multi-line value — a relation list, a source list, a grounding list —
+ * written into a CRLF file would leave lone LFs in the middle of a file that
+ * uses CRLF everywhere else. That is a corruption the scope check cannot see,
+ * because the mixed terminators sit *inside* the declared range, and it is
+ * exactly what the raw-versus-normalized distinction exists to prevent. Caught
+ * by an operation writing a relation into a CRLF fixture.
+ */
+function withIndent(rendered: string, indent: string, eol: string): string {
   return rendered
     .split("\n")
-    .map((line) => (line === "" ? line : `${indent}${line}`))
-    .join("\n");
+    .map((line) => (line === "" || indent === "" ? line : `${indent}${line}`))
+    .join(eol);
 }
 
 /**
@@ -208,6 +217,7 @@ export function keyPathEdit(
   if (path.length === 0) return null;
   const key = path[path.length - 1]!;
   const rendered = renderKeyValue(key, value);
+  const eol = dominantTerminator(content);
 
   const existing = findKeyPathRange(content, region, path);
   if (existing !== null) {
@@ -215,7 +225,7 @@ export function keyPathEdit(
     return {
       start: existing.keyStart,
       end: existing.valueEnd,
-      text: withIndent(rendered, indent).slice(indent.length),
+      text: withIndent(rendered, indent, eol).slice(indent.length),
       label: `metadata key ${path.join(".")}`,
     };
   }
@@ -225,7 +235,7 @@ export function keyPathEdit(
   return {
     start: insertion.offset,
     end: insertion.offset,
-    text: `${insertion.needsLeadingBreak ? dominantTerminator(content) : ""}${withIndent(rendered, insertion.indent)}`,
+    text: `${insertion.needsLeadingBreak ? eol : ""}${withIndent(rendered, insertion.indent, eol)}`,
     label: `insert metadata key ${path.join(".")}`,
   };
 }

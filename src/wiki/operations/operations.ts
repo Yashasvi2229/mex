@@ -232,7 +232,9 @@ function paddedInsertion(text: string, offset: number, block: string): string {
   const after = text.slice(offset);
 
   const lead = before.length === 0 ? "" : eol.repeat(Math.max(0, 2 - trailingBreaks(before)));
-  const tail = after.length === 0 ? eol : eol.repeat(Math.max(0, 2 - leadingBreaks(after)));
+  // Nothing after it: the block already ends with a terminator, so adding one
+  // would leave the file ending on a blank line it did not have before.
+  const tail = after.length === 0 ? "" : eol.repeat(Math.max(0, 2 - leadingBreaks(after)));
   return `${lead}${withEol(block, eol)}${tail}`;
 }
 
@@ -240,12 +242,19 @@ function paddedInsertion(text: string, offset: number, block: string): string {
 
 /** The metadata fields a new entity carries, in a fixed, readable order. */
 function newEntityFields(id: EntityId, payload: CreateEntryPayload): (readonly [string, unknown])[] {
+  const headingDepth = payload.headingDepth;
   return [
     ["id", id],
     ["type", payload.type],
     ["status", payload.status ?? "in_flight"],
     ["revision", 1],
-    ["title", payload.title],
+    // Omitted when the heading already says it. The codec reads the heading as
+    // the title unless metadata overrides it, so writing both puts one fact in
+    // two places — and a later `update-entry` that moved only one of them would
+    // leave the file showing one title and the index reporting another. A
+    // file-level entity has no heading of its own to carry it, so it keeps the
+    // key.
+    ["title", headingDepth === undefined ? payload.title : undefined],
     ["summary", payload.summary],
     ["topics", payload.topics === undefined || payload.topics.length === 0 ? undefined : payload.topics],
     ["relations", payload.relations === undefined || payload.relations.length === 0 ? undefined : payload.relations],
@@ -274,6 +283,17 @@ function createInto(context: OperationContext, payload: CreateEntryPayload, id: 
   const file = context.locate(payload.file);
   if (file === null) {
     return reject("WIKI_PARSE_ERROR", `${payload.file} exists but could not be read; refusing to write over it.`);
+  }
+
+  // **Already there: this is a resumed create, and the write landed.** A
+  // process killed between the rename and the audit's completion line leaves a
+  // create that looks un-replayed, and `create-entry` has no precondition that
+  // could catch a repeat — so a naive replay mints a *second* entity with a
+  // *new* id. Silent knowledge duplication, produced by implementing §11.3
+  // exactly as written. The resume reuses the id its intent line recorded, and
+  // finding that id already present means the remaining work is none.
+  if (file.parsed.entities.some((entry) => entry.entity.id === id)) {
+    return { files: [], entityIds: [], createdIds: [id], preconditions: [], revisions: [], diagnostics: [] };
   }
 
   const offset = insertionOffset(file, payload.insertAt);
@@ -686,7 +706,13 @@ function moveEntry(context: OperationContext, operation: Extract<WikiOperation, 
     return reject("INVALID_OPERATION_PAYLOAD", `${located.entity.id} is already in ${payload.file}.`, located.entity.id);
   }
 
-  const offset = insertionOffset(destination, payload.insertAt);
+  // **Already in the destination: this is a resumed move.** Gains are written
+  // before losses, so a crash between the two renames leaves the entity in both
+  // files. Re-planning the insert would put a *second* copy in the destination;
+  // the remaining work is the removal alone. That is what makes replaying the
+  // opId converge rather than compound.
+  const alreadyMoved = destination.parsed.entities.some((entry) => entry.entity.id === located.entity.id);
+  const offset = alreadyMoved ? 0 : insertionOffset(destination, payload.insertAt);
   if (typeof offset !== "number") {
     return { files: [], entityIds: [], createdIds: [], preconditions: [], revisions: [], diagnostics: [offset] };
   }
@@ -710,20 +736,24 @@ function moveEntry(context: OperationContext, operation: Extract<WikiOperation, 
         existed: true,
         edits: [{ start, end: bodyEnd, text: "", label: `remove ${located.entity.id} from ${located.path}` }],
       },
-      {
-        path: destination.path,
-        absolutePath: destination.absolutePath,
-        baseText: destination.text,
-        existed: destination.existed,
-        edits: [
-          {
-            start: offset,
-            end: offset,
-            text: paddedInsertion(destination.text, offset, block),
-            label: `insert ${located.entity.id} into ${destination.path}`,
-          },
-        ],
-      },
+      ...(alreadyMoved
+        ? []
+        : [
+            {
+              path: destination.path,
+              absolutePath: destination.absolutePath,
+              baseText: destination.text,
+              existed: destination.existed,
+              edits: [
+                {
+                  start: offset,
+                  end: offset,
+                  text: paddedInsertion(destination.text, offset, block),
+                  label: `insert ${located.entity.id} into ${destination.path}`,
+                },
+              ],
+            },
+          ]),
     ],
     entityIds: [located.entity.id],
     createdIds: [],
