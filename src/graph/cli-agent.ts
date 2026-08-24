@@ -1881,6 +1881,18 @@ function transitiveCallers(graph: GraphEngine, root: GraphNode, maxDepth: number
   return results;
 }
 
+/**
+ * Which scaffold files ground to any of these nodes.
+ *
+ * `scaffold_file IS NOT NULL` is the whole compatibility story with schema v3.
+ * In v2 the column is a real NOT NULL column and the predicate changes nothing;
+ * in v3 it is generated from the subject columns and is NULL for entity-kind
+ * rows, so the same query keeps meaning "scaffold files" now that the baseline
+ * table also holds wiki entities. One query serves both shapes, which matters
+ * because read-only opens deliberately tolerate a v2 database
+ * (MIN_READABLE_SCHEMA_VERSION) and this is the only reader of the baseline
+ * table on that path.
+ */
 function groundedFiles(db: SqliteDatabase, nodeIds: string[]): Array<{ scaffold_file: string; node_id: string }> {
   if (nodeIds.length === 0) return [];
   const placeholders = nodeIds.map(() => "?").join(",");
@@ -1889,8 +1901,9 @@ function groundedFiles(db: SqliteDatabase, nodeIds: string[]): Array<{ scaffold_
             COALESCE(aliases.canonical_node_id, grounded.node_id) AS node_id
      FROM _mex_grounded_source grounded
      LEFT JOIN node_aliases aliases ON aliases.alias_id = grounded.node_id
-     WHERE grounded.node_id IN (${placeholders})
-        OR aliases.canonical_node_id IN (${placeholders})
+     WHERE grounded.scaffold_file IS NOT NULL
+       AND (grounded.node_id IN (${placeholders})
+        OR aliases.canonical_node_id IN (${placeholders}))
      ORDER BY grounded.scaffold_file, node_id`,
   ).all(...nodeIds, ...nodeIds) as Array<{ scaffold_file: string; node_id: string }>;
 }
