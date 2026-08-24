@@ -257,6 +257,126 @@ const wikiCommand = program
   .command("wiki")
   .description("Knowledge-graph commands over the .mex wiki");
 
+/**
+ * The scaffold-shaped options every wiki command needs.
+ *
+ * One resolution, so ten commands cannot disagree about where the scaffold is
+ * or which paths are reserved. `wiki.exclude` and `wiki.readOnly` come from
+ * config (D10) rather than from flags: a reserved path is a property of the
+ * project, not of the invocation.
+ */
+function wikiIo(): import("./wiki/cli/commands.js").CommandIo {
+  const config = loadConfig();
+  return {
+    write: (line: string) => console.log(line),
+    setExitCode: (code: number) => {
+      process.exitCode = code;
+    },
+    scaffoldRoot: config.scaffoldRoot,
+    projectRoot: config.projectRoot,
+    ...(config.wiki?.exclude === undefined ? {} : { exclude: config.wiki.exclude }),
+    ...(config.wiki?.readOnly === undefined ? {} : { readOnly: config.wiki.readOnly }),
+  };
+}
+
+/** The §15.1 filters, added to whichever commands they apply to. */
+function withReadFilters(command: Command): Command {
+  return command
+    .option("--type <type>", "only entities of this type")
+    .option("--topic <id-or-alias>", "only entities in this topic")
+    .option("--status <status>", "only entities in this lifecycle state")
+    .option("--health <health>", "only entities whose worst grounding health is this")
+    .option("--limit <n>", "maximum records to return; clamped, never unbounded")
+    .option("--include-archived", "include archived entities, which are excluded by default")
+    .option("--json", "emit one enveloped JSON object instead of JSONL records");
+}
+
+withReadFilters(wikiCommand.command("list").description("Entities in this scaffold, bounded")).action(
+  async (options) => {
+    const { runList } = await import("./wiki/cli/commands.js");
+    runList(wikiIo(), options);
+  },
+);
+
+wikiCommand
+  .command("show <id>")
+  .description("One entity, with its body")
+  .option("--no-body", "omit the entity body")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (id: string, options) => {
+    const { runShow } = await import("./wiki/cli/commands.js");
+    runShow(wikiIo(), id, options);
+  });
+
+withReadFilters(wikiCommand.command("query <text...>").description("Full-text search, title before body")).action(
+  async (text: string[], options) => {
+    const { runQuery } = await import("./wiki/cli/commands.js");
+    runQuery(wikiIo(), text.join(" "), options);
+  },
+);
+
+withReadFilters(wikiCommand.command("related <id>").description("The bounded neighbourhood around an entity"))
+  .option("--depth <n>", "traversal depth; clamped")
+  .option("--max-tokens <n>", "token budget for the neighbourhood")
+  .action(async (id: string, options) => {
+    const { runRelated } = await import("./wiki/cli/commands.js");
+    runRelated(wikiIo(), id, options);
+  });
+
+withReadFilters(wikiCommand.command("backlinks <id>").description("Entities that point at this one")).action(
+  async (id: string, options) => {
+    const { runBacklinks } = await import("./wiki/cli/commands.js");
+    runBacklinks(wikiIo(), id, options);
+  },
+);
+
+wikiCommand
+  .command("validate")
+  .description("Check the whole scaffold; works with no index and no code graph")
+  .option("--limit <n>", "maximum diagnostics to report")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runValidate } = await import("./wiki/cli/commands.js");
+    runValidate(wikiIo(), options);
+  });
+
+withReadFilters(wikiCommand.command("graph").description("A bounded slice of the relation graph")).action(
+  async (options) => {
+    const { runGraph } = await import("./wiki/cli/commands.js");
+    runGraph(wikiIo(), options);
+  },
+);
+
+wikiCommand
+  .command("rebuild-index")
+  .description("Rebuild the disposable index; the only command that creates it")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runRebuildIndex } = await import("./wiki/cli/commands.js");
+    runRebuildIndex(wikiIo(), options);
+  });
+
+wikiCommand
+  .command("migrate")
+  .description("Convert a pre-wiki scaffold; --dry-run writes nothing and mints no id")
+  .option("--dry-run", "report what would happen and write nothing")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runMigrate } = await import("./wiki/cli/commands.js");
+    runMigrate(wikiIo(), options);
+  });
+
+wikiCommand
+  .command("apply <operation-file>")
+  .description("Plan an operation from a JSON file; writes only with --apply")
+  .option("--apply", "write the change, rather than only planning it")
+  .option("--dry-run", "plan only, even if --apply was given")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (file: string, options) => {
+    const { runApply } = await import("./wiki/cli/commands.js");
+    runApply(wikiIo(), file, options);
+  });
+
 wikiCommand
   .command("for-code <nodeId...>")
   .description("Knowledge entities grounded to the given code-graph node ids")

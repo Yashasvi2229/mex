@@ -402,6 +402,68 @@ function allTypeScriptFiles(): string[] {
   return found.sort();
 }
 
+/**
+ * Telemetry sees a command name and a scaffold id. Never an argument.
+ *
+ * §19 says wiki content does not leave the device. Every phase before this one
+ * shipped no commands, so nothing the wiki owned had arguments at all; P9 is
+ * the first surface whose arguments *are* user content — a query string, an
+ * entity id, a file path, an operation payload. `captureCommand(command,
+ * scaffoldId)` takes only those two and its own comment calls the second the
+ * PII firewall, so the rule is already right; what was missing is anything
+ * asserting a later command cannot widen it.
+ *
+ * Checked over the source rather than by running a command, because the
+ * property is "there is no code path that can", and a behavioural test only
+ * covers the paths someone thought to exercise.
+ */
+function findTelemetryLeaks(path: string, source: string): string[] {
+  const code = withoutComments(source);
+  const violations: string[] = [];
+  // The declaration itself is not a call site.
+  // One level of nesting is allowed inside the argument list, because the
+  // legitimate call passes `actionCommand.name()` and a pattern that stopped
+  // at the first `)` would read that as a truncated argument.
+  for (const match of code.matchAll(/(function\s+)?captureCommand\s*\((?:\s*)((?:[^()]|\([^()]*\))*)\)/g)) {
+    if (match[1] !== undefined) continue;
+    const args = (match[2] ?? "").split(",").map((part) => part.trim()).filter((part) => part.length > 0);
+    if (args.length > 2) {
+      violations.push(`${path}: captureCommand takes a command name and a scaffold id, not ${args.length} arguments`);
+      continue;
+    }
+    // The first argument must be the command's own name, never a value the
+    // user typed. Anything else is a leak whatever it is called.
+    const first = args[0] ?? "";
+    if (!/name\(\)$/.test(first) && !/^"[a-z][a-z -]*"$/.test(first)) {
+      violations.push(`${path}: captureCommand's first argument is ${first}, which is not a command name`);
+    }
+  }
+  return violations;
+}
+
+describe("telemetry never receives an argument", () => {
+  it("holds across every shipped module", () => {
+    // `sourceFiles()` rather than the whole tree: telemetry is called from
+    // `src/`, and this file's own planted violations are string literals that
+    // a walk over `test/` would read as real ones.
+    expect(FILES.flatMap((path) => findTelemetryLeaks(path, read(path)))).toEqual([]);
+  });
+
+  it("checks a file that actually calls it", () => {
+    const callers = FILES.filter((path) => withoutComments(read(path)).includes("captureCommand("));
+    expect(callers).toContain("src/cli.ts");
+    expect(callers.length).toBeGreaterThan(0);
+  });
+
+  it("catches a wiki command that passed its argument along", () => {
+    expect(
+      findTelemetryLeaks("src/cli.ts", 'captureCommand("wiki query", queryText, scaffoldId);'),
+    ).toHaveLength(1);
+    expect(findTelemetryLeaks("src/cli.ts", "captureCommand(userQuery, scaffoldId);")).toHaveLength(1);
+    expect(findTelemetryLeaks("src/cli.ts", "captureCommand(actionCommand.name(), scaffoldId);")).toEqual([]);
+  });
+});
+
 describe("no literal control bytes in source", () => {
   it("holds across src/ and test/", () => {
     expect(filesWithForbiddenBytes(allTypeScriptFiles())).toEqual([]);
