@@ -25,6 +25,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { defaultIndexPath } from "../index/rebuild.js";
+import { envelopeFor, renderEnvelope, exitCodeFor, type WikiEnvelope } from "./envelope.js";
 import { entitiesGroundedIn } from "../query/get.js";
 import type { GroundedEntity } from "../query/for-code.js";
 
@@ -35,16 +36,10 @@ export interface ForCodeData {
   truncated: boolean;
 }
 
-/** The envelope §15.2 fixes: never ANSI, never a bare array. */
-export interface WikiEnvelope<T> {
-  schemaVersion: number;
-  ok: boolean;
-  data: T;
-  diagnostics: Array<{ code: string; severity: string; message: string }>;
-}
-
-/** Bumped by P9 if it changes the envelope. Present from the first command. */
-export const WIKI_CLI_SCHEMA_VERSION = 1;
+// P9 hoisted the envelope into `cli/envelope.ts`, as this file's own comment
+// said it should. Re-exported here so P7's consumers keep their import, and
+// so there is visibly one definition rather than two that agree today.
+export { WIKI_CLI_SCHEMA_VERSION, type WikiEnvelope } from "./envelope.js";
 
 export interface ForCodeCommandOptions {
   scaffoldRoot?: string;
@@ -140,18 +135,12 @@ export function runWikiForCode(
     // A typed failure, in the envelope, with a non-zero exit — not a stack
     // trace. `wiki.db` being absent or stale is an ordinary state, and the
     // diagnostic carries a registry code the caller can match on.
-    const envelope: WikiEnvelope<ForCodeData> = {
-      schemaVersion: WIKI_CLI_SCHEMA_VERSION,
-      ok: false,
-      data: { entities: [], truncated: false },
-      diagnostics: [{
-        code: result.diagnostic.code,
-        severity: result.diagnostic.severity,
-        message: result.diagnostic.message,
-      }],
-    };
-    write(JSON.stringify(envelope));
-    process.exitCode = 1;
+    const envelope: WikiEnvelope<ForCodeData> = envelopeFor(
+      { entities: [], truncated: false },
+      [result.diagnostic],
+    );
+    write(renderEnvelope(envelope));
+    process.exitCode = exitCodeFor(envelope);
     return;
   }
 
@@ -161,13 +150,7 @@ export function runWikiForCode(
     // published vocabulary with a coverage test behind them; inventing one here
     // for "the list was bounded" would put a code in the contract that no
     // validator knows about.
-    const envelope: WikiEnvelope<ForCodeData> = {
-      schemaVersion: WIKI_CLI_SCHEMA_VERSION,
-      ok: true,
-      data: { entities: records, truncated: result.value.truncated },
-      diagnostics: [],
-    };
-    write(JSON.stringify(envelope));
+    write(renderEnvelope(envelopeFor({ entities: records, truncated: result.value.truncated })));
     return;
   }
 
