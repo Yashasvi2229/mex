@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, dirname, resolve } from "node:path";
 
 /**
@@ -344,6 +345,99 @@ export function findGraphSeamViolations(path: string, source: string): string[] 
 }
 
 // -- The rules, applied to the tree ------------------------------------------
+
+/**
+ * Bytes that make a source file binary to Git.
+ *
+ * Finding 45 caught two P5 modules embedding a raw U+0000 as a hash-field
+ * delimiter: Git calls a file binary the moment it sees one, so `git diff`
+ * renders "Bin 0 -> N bytes", `--numstat` reports nothing, review sees nothing,
+ * `core.autocrlf` skips the file and a later merge is binary rather than
+ * three-way. Finding 46 then concluded that "nothing in the tooling catches
+ * this and no test can."
+ *
+ * The second half of that is wrong, and P6 proved it the expensive way:
+ * `src/wiki/migration/ids.ts` shipped with three literal NULs in `6cc4647`,
+ * for the same reason and in the same shape, one phase after the fix. A byte
+ * scan is a test, and this is it. It reads the file as bytes rather than as
+ * text, because a decoded string is exactly where the distinction disappears.
+ *
+ * The escape byte is included for a different reason: §15.2 forbids ANSI in
+ * JSON output, and a colour sequence written literally into a source string is
+ * how one gets there without any call to a colour library.
+ */
+const FORBIDDEN_SOURCE_BYTES: ReadonlyArray<{ byte: number; name: string; why: string }> = [
+  { byte: 0x00, name: "U+0000", why: "makes the file binary to Git; write the escape instead" },
+  { byte: 0x1b, name: "U+001B", why: "a live terminal escape; build it with String.fromCharCode in a test" },
+];
+
+function filesWithForbiddenBytes(paths: readonly string[]): string[] {
+  const offenders: string[] = [];
+  for (const path of paths) {
+    const bytes = readFileSync(join(REPO_ROOT, path));
+    for (const { byte, name, why } of FORBIDDEN_SOURCE_BYTES) {
+      if (bytes.includes(byte)) offenders.push(`${path}: ${name} — ${why}`);
+    }
+  }
+  return offenders.sort();
+}
+
+/** Every tracked TypeScript file, tests included — the defect landed in both kinds. */
+function allTypeScriptFiles(): string[] {
+  const found: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "wasm" || entry.name === "node_modules") continue;
+        walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith(".ts") || entry.name.endsWith(".d.ts")) continue;
+      found.push(relative(REPO_ROOT, full).replace(/\\/g, "/"));
+    }
+  };
+  walk(SRC);
+  walk(join(REPO_ROOT, "test"));
+  return found.sort();
+}
+
+describe("no literal control bytes in source", () => {
+  it("holds across src/ and test/", () => {
+    expect(filesWithForbiddenBytes(allTypeScriptFiles())).toEqual([]);
+  });
+
+  it("scans a file list that actually contains the modules the rule was written for", () => {
+    const files = allTypeScriptFiles();
+    // Named because a rule that silently stopped walking would pass vacuously,
+    // and these three are the ones that have carried the defect.
+    expect(files).toContain("src/wiki/operations/plan.ts");
+    expect(files).toContain("src/wiki/operations/preview.ts");
+    expect(files).toContain("src/wiki/migration/ids.ts");
+    expect(files.length).toBeGreaterThan(100);
+  });
+
+  it("catches a planted byte of each kind", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mex-lint-"));
+    try {
+      const nul = join(dir, "nul.ts");
+      const esc = join(dir, "esc.ts");
+      const clean = join(dir, "clean.ts");
+      writeFileSync(nul, `const delimiter = "${String.fromCharCode(0)}";`);
+      writeFileSync(esc, `const red = "${String.fromCharCode(0x1b)}[31m";`);
+      // The same intent, spelled the way the rule asks for: an escape, not a byte.
+      writeFileSync(clean, `const delimiter = "${String.fromCharCode(92)}u0000";`);
+      const relativeTo = (file: string) => relative(REPO_ROOT, file).replace(/\\/g, "/");
+      const offenders = filesWithForbiddenBytes([nul, esc, clean].map(relativeTo));
+      expect(offenders).toHaveLength(2);
+      expect(offenders.some((entry) => entry.includes("U+0000"))).toBe(true);
+      expect(offenders.some((entry) => entry.includes("U+001B"))).toBe(true);
+      expect(offenders.some((entry) => entry.includes("clean.ts"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("wiki layering", () => {
   it("finds source files to check", () => {
