@@ -141,6 +141,32 @@ export interface ParsedFile {
   frontmatter: ParsedFrontmatter | null;
   legacy: ParsedLegacy;
   diagnostics: WikiDiagnostic[];
+  /**
+   * Metadata blocks that parsed as YAML but failed model validation.
+   *
+   * The codec reports one collapsed `WIKI_PARSE_ERROR` for each of these and
+   * does not produce an entity, deliberately: its own diagnostic surface must
+   * not depend on the model's internal shape (finding 26). But that decision
+   * left `wiki validate` — the layer finding 26 names as where a user is
+   * supposed to get field-level detail — with nothing to work from, because the
+   * entity it would re-validate was never handed back. Re-reading the metadata
+   * in the validation layer would be a second metadata reader, which is worse.
+   *
+   * So the per-field diagnostics are carried here, beside the collapsed one,
+   * for the one consumer that is allowed to depend on them. Nothing else reads
+   * this, and the collapsed `WIKI_PARSE_ERROR` in `diagnostics` is unchanged.
+   */
+  rejected: RejectedEntity[];
+}
+
+/** One metadata block the model refused, and every reason it gave. */
+export interface RejectedEntity {
+  /** The id the block declared, when it declared a string. */
+  entityId?: string;
+  /** Range of the metadata block, in UTF-16 code units. */
+  range: SourceRange;
+  /** The validator's own per-field diagnostics, uncollapsed. */
+  diagnostics: WikiDiagnostic[];
 }
 
 export interface ParseOptions {

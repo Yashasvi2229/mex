@@ -30,6 +30,7 @@ import { rootContext } from "../model/validate.js";
 import YAML from "yaml";
 import type { LabeledRange } from "./ranges.js";
 import type {
+  RejectedEntity,
   LegacyEdge,
   ParsedEntity,
   ParsedFile,
@@ -130,6 +131,7 @@ interface BuildContext {
   fileHash: string;
   registry: EntityTypeRegistry;
   diagnostics: WikiDiagnostic[];
+  rejected: RejectedEntity[];
 }
 
 function buildEntity(context: BuildContext, binding: Binding): ParsedEntity | null {
@@ -175,6 +177,14 @@ function buildEntity(context: BuildContext, binding: Binding): ParsedEntity | nu
     // codes belong to the model's own tests, and emitting them here would make
     // the codec's diagnostic surface depend on the model's internal shape.
     const reasons = result.diagnostics.map((entry) => entry.message).join(" ");
+    // The uncollapsed list, for `wiki validate` and nothing else. See
+    // `RejectedEntity` in `contract.ts` for why it is carried rather than
+    // re-derived by a second reader.
+    context.rejected.push({
+      ...(typeof metadata["id"] === "string" ? { entityId: metadata["id"] } : {}),
+      range: { start: binding.metadataStart, end: binding.metadataEnd },
+      diagnostics: result.diagnostics,
+    });
     context.diagnostics.push(
       diagnostic("WIKI_PARSE_ERROR", `Invalid entity metadata in ${path}. ${reasons}`.trim(), {
         file: path,
@@ -336,6 +346,7 @@ export function parseWikiMarkdown(options: ParseOptions): ParsedFile {
   resolveBodyExtents(text, document, all, metadataStarts);
 
   // -- entities -------------------------------------------------------------
+  const rejected: RejectedEntity[] = [];
   const context: BuildContext = {
     path,
     text,
@@ -343,6 +354,7 @@ export function parseWikiMarkdown(options: ParseOptions): ParsedFile {
     fileHash: fileContentHash(text),
     registry,
     diagnostics,
+    rejected,
   };
 
   const entities: ParsedEntity[] = [];
@@ -370,5 +382,6 @@ export function parseWikiMarkdown(options: ParseOptions): ParsedFile {
     frontmatter,
     legacy: readLegacy(rootMap),
     diagnostics,
+    rejected,
   };
 }

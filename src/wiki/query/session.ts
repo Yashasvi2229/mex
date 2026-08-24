@@ -288,6 +288,35 @@ export class WikiQuerySession {
     };
   }
 
+  /**
+   * The groundings one entity declares, in the order Markdown declares them.
+   *
+   * `EntitySummary.health` already carries the *worst* of these, aggregated
+   * with the model's precedence. This is the finer answer `wiki_grounding_status`
+   * needs: how many references an entity makes, and what became of each — which
+   * is a different question from how far a stale one pushes it down a list.
+   *
+   * `shadowed = 0`, like every other query by id (finding 31): the loser of a
+   * duplicate-id contest is a row `wiki validate` must see and a reader must not.
+   */
+  groundingsFor(id: string, options: BoundsInput = {}): { nodeId: string; health: GroundingHealth | null; state: string | null }[] {
+    const bounds = resolveBounds(options);
+    const rows = this.db
+      .prepare(
+        `SELECT g.node_id, g.health, g.state
+           FROM wiki_groundings g
+           JOIN wiki_entities e ON e.entity_key = g.entity_key
+          WHERE e.id = ? AND e.shadowed = 0
+          ORDER BY g.ordinal LIMIT ?`,
+      )
+      .all(id, bounds.edgeLimit) as { node_id: string; health: string | null; state: string | null }[];
+    return rows.map((row) => ({
+      nodeId: row.node_id,
+      health: row.health === null ? null : (row.health as GroundingHealth),
+      state: row.state,
+    }));
+  }
+
   /** Every diagnostic the index holds, bounded and deterministically ordered. */
   diagnostics(options: BoundsInput & { file?: string } = {}): Page<WikiDiagnostic> {
     const bounds = resolveBounds(options);
