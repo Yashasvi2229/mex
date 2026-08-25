@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-08-24
+last_updated: 2026-08-26
 ---
 
 # Session Bootstrap
@@ -52,22 +52,22 @@ Then read this file fully before doing anything else in this session.
   Hub graph reads preserve engine ranking and never maintain the index implicitly.
 - Graph evaluator determinism includes semantic snapshot provenance while
   excluding only operational timestamps and Git coordinates.
+- The pinned Wiki engine now has an internal repository WikiPort adapter with
+  exact-byte index freshness, immutable bounded reads, strict revision-bound
+  cursors, complete entity/relationship/grounding projections, pinned operation
+  and migration plans, and explicit cancellable maintenance. The real adapter
+  passes the consumer-owned conformance suite without skips.
 
 **Not Built:**
-- The real Wiki adapter and type-parity registration against the teammate engine.
-- Real Wiki Hub search, health, and maintenance; Workstream/Inbox/Relay/Playbook
+- Real Wiki Hub search, Knowledge pages, health, and maintenance;
+  Workstream/Inbox/Relay/Playbook
   persistence; Catch Up actions; activity creation; and later delivery
   checkpoints from the human-team program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
-- The teammate Wiki implementation is not yet complete and pinned at a
-  qualifying commit, so the consumer contract remains provisional.
 - The current scaffold architecture, conventions, decisions, stack, and setup
   context files are still largely unpopulated placeholders.
-- Real parser, filesystem, index, migration, and graph-grounding compliance must
-  be verified against the completed, pinned teammate implementation, not
-  inferred from the mock.
 - Hub Wiki controls remain unavailable until the real adapter is integrated;
   development fixtures are never production data. Graph repair controls appear
   only when a fresh status or executable Lane A remediation makes them safe.

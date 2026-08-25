@@ -11,7 +11,7 @@ edges:
     condition: "when deciding dependency direction and ownership boundaries"
   - target: "../context/decisions.md"
     condition: "when a provisional boundary becomes a durable project decision"
-last_updated: 2026-08-22
+last_updated: 2026-08-26
 ---
 
 # Contract-First External Adapter
@@ -52,6 +52,15 @@ spec establishes intent, but it does not establish type or runtime parity.
 - Index inspection and ordinary reads must not perform hidden refreshes.
 - Lexical path validation is insufficient at a filesystem boundary; adapters
   must also enforce realpath containment.
+- A real adapter needs a generation-bound read session, not a sequence of safe
+  individual queries. Buffer the whole projection, then revalidate the bound
+  database and canonical corpus before returning it.
+- Keep semantic entity revisions separate from exact containing-file hashes.
+  CRLF/LF or BOM-only changes can preserve meaning while invalidating byte
+  offsets and optimistic file expectations.
+- Opaque application plans should not serialize source or audit bodies. Store
+  the exact engine plan behind a bounded handle, make process lifetime explicit,
+  and require a new preview after restart.
 
 ## Verify
 
@@ -60,8 +69,8 @@ spec establishes intent, but it does not establish type or runtime parity.
 - [ ] `npm test` passes without concurrent-build timing interference.
 - [ ] `npm run eval:test` passes when graph behavior is in scope.
 - [ ] `npm run build` passes.
-- [ ] The real adapter and type-parity gate remain explicitly pending if no
-      implementation revision exists.
+- [ ] If an implementation revision exists, the real adapter is registered
+      against the same consumer suite with no skips.
 - [ ] Only intended paths are staged, especially in a dirty worktree.
 
 ## Debug
