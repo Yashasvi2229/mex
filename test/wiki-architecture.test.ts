@@ -84,6 +84,19 @@ const LAYER_RULES: LayerRule[] = [
     reason: "the model layer is pure data and validation; it must not reach for I/O, the code graph, or any layer above it",
   },
   {
+    layer: "src/wiki/synthesis/",
+    forbids: [
+      "src/wiki/operations/apply",
+      "src/wiki/operations/plan",
+      "src/wiki/operations/audit",
+      "src/wiki/index/",
+      "node:sqlite",
+      "node:child_process",
+    ],
+    reason:
+      "synthesis proposes and never applies: its output is operation envelopes, and a module that could call the pipeline itself would be a second writer wearing the proposer's name. It may read `operations/paths` for the one containment rule the whole engine shares",
+  },
+  {
     layer: "src/wiki/query/",
     forbids: [
       "src/wiki/operations/",
@@ -512,6 +525,20 @@ describe("wiki layering", () => {
   it("keeps the model layer free of I/O, the code graph and higher layers", () => {
     const violations = FILES.flatMap((path) => findLayeringViolations(path, read(path)));
     expect(violations).toEqual([]);
+  });
+
+  it("catches a synthesis module reaching for the pipeline it feeds", () => {
+    // The rule provoked rather than merely present: synthesis emits envelopes,
+    // and a module here that could call `applyOperation` would be a second
+    // writer with the proposer's name on it.
+    expect(
+      findLayeringViolations("src/wiki/synthesis/propose.ts", 'import { applyOperation } from "../operations/apply.js";'),
+    ).toHaveLength(1);
+    // …and the one import it legitimately needs still passes: containment is
+    // shared with the write side on purpose, so both answer alike for a path.
+    expect(
+      findLayeringViolations("src/wiki/synthesis/propose.ts", 'import { isReadOnlyPath } from "../operations/paths.js";'),
+    ).toEqual([]);
   });
 
   it("catches a planted layering violation", () => {
