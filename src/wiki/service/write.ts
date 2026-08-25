@@ -66,6 +66,18 @@ export interface PlanData {
   diff: string | null;
   /** Files the plan would touch. Empty on a refusal. */
   files: string[];
+  /**
+   * The exact bytes each touched file would contain, keyed by path.
+   *
+   * §21.3 requires that "dry-run returns the exact intended diff", and the
+   * rendered hunks cannot carry that: they are a *display* diff, line-based
+   * and deliberately lossy about trailing newlines, so a reviewer tool that
+   * reconstructed a file from them would not get the file back. The preview
+   * hash binds the proposal but cannot be compared against anything a caller
+   * can see. This is what makes the clause checkable from outside: plan, hold
+   * these bytes, apply, and compare.
+   */
+  proposedText: Record<string, string>;
 }
 
 /** §16 `wiki_plan_operation` — plan and diff, never write. */
@@ -76,7 +88,7 @@ export function wikiPlanOperation(
   const planned = planOperation(envelope, planOptionsFrom(options));
   if (!planned.ok) {
     return {
-      data: { planned: false, opId: null, preview: null, diff: null, files: [] },
+      data: { planned: false, opId: null, preview: null, diff: null, files: [], proposedText: {} },
       diagnostics: planned.diagnostics,
     };
   }
@@ -88,6 +100,7 @@ export function wikiPlanOperation(
       preview,
       diff: renderPreview(preview),
       files: planned.plan.files.map((file) => file.path),
+      proposedText: Object.fromEntries(planned.plan.files.map((file) => [file.path, file.proposedText])),
     },
     diagnostics: planned.diagnostics,
   };
