@@ -81,6 +81,7 @@ const REQUIRED_SCHEMA_OBJECTS = {
     "idx_files_language",
     "idx_files_modified_at",
     "idx_grounded_node",
+    "idx_grounded_subject",
     "idx_import_bindings_file",
     "idx_import_bindings_local",
     "idx_lsh",
@@ -141,7 +142,9 @@ const REQUIRED_TABLE_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   project_metadata: ["key", "value", "updated_at"],
   node_fingerprints: ["node_id", "minhash", "neighbors", "token_count"],
   lsh_buckets: ["band", "band_hash", "node_id"],
-  _mex_grounded_source: ["scaffold_file", "node_id", "source", "body_hash", "fingerprint"],
+  _mex_grounded_source: [
+    "subject_kind", "subject_id", "node_id", "source", "body_hash", "fingerprint", "scaffold_file",
+  ],
   source_chunks_fts_config: ["k", "v"],
   source_chunks_fts_data: ["id", "block"],
   source_chunks_fts_docsize: ["id", "sz"],
@@ -1757,7 +1760,7 @@ function inspectRequiredSchema(db: SqliteDatabase): string[] {
       }
     }
   }
-  // Missing FTS shadow tables can make even PRAGMA table_info on the virtual
+  // Missing FTS shadow tables can make even PRAGMA table_xinfo on the virtual
   // table fail with a generic SQL error. Report the precise missing objects
   // before attempting column-level validation.
   if ([...missingTables].some((name) => /_(?:fts)_(?:config|data|docsize|idx)$/u.test(name))) {
@@ -1768,7 +1771,9 @@ function inspectRequiredSchema(db: SqliteDatabase): string[] {
       throw new CorruptGraphIndexError("The required graph schema list contains an invalid identifier.");
     }
     if (missingTables.has(table)) continue;
-    const rows = db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name?: unknown }>;
+    // table_xinfo includes generated columns such as schema-v3's scaffold_file
+    // compatibility projection; table_info deliberately hides them.
+    const rows = db.prepare(`PRAGMA table_xinfo("${table}")`).all() as Array<{ name?: unknown }>;
     const columns = new Set(rows.map((row) => row.name).filter((name): name is string => typeof name === "string"));
     for (const column of requiredColumns) {
       if (!columns.has(column)) failures.push(`missing column ${table}.${column}`);

@@ -20,7 +20,8 @@ import { GraphRebuildRequiredError } from "../errors.js";
 import { openSqlite, type SqliteDatabase } from "./sqlite.js";
 
 /** The schema version this build writes/expects (matches schema.sql's seed). */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
+
 /** @deprecated Prefer the explicit DB_SCHEMA_VERSION name. */
 export const CURRENT_SCHEMA_VERSION = DB_SCHEMA_VERSION;
 
@@ -87,8 +88,15 @@ export function openGraphDatabase(
         `This mex build supports graph schema ${DB_SCHEMA_VERSION}, but the index uses ${current}.`,
       );
     }
-    if (current < DB_SCHEMA_VERSION) migrateV1ToV2(db, schema);
-    else db.exec(schema);
+    if (current < DB_SCHEMA_VERSION) {
+      if (!options.allowRebuild) {
+        db.close();
+        throw new GraphRebuildRequiredError(
+          `This mex build expects graph schema ${DB_SCHEMA_VERSION}; the index uses ${current}. Run \`mex graph rebuild\`.`,
+        );
+      }
+      migrate(db, schema, current);
+    } else db.exec(schema);
   }
 
   // Belt-and-suspenders: guarantee the version row exists even if the SQL seed
@@ -157,6 +165,22 @@ export function writeSchemaVersion(db: SqliteDatabase, version: number): void {
   ).run(version, Date.now(), "mex code-graph schema (Track A build)");
 }
 
+/**
+ * Record `version` as the highest schema this database has actually reached.
+ *
+ * Stamping is not a plain insert, because a migration step is allowed to
+ * `exec` the frozen schema — and the schema seeds its own version row. Without
+ * the delete, {@link migrateV1ToV2}'s schema exec would stamp the database with
+ * the *current* version halfway up the ladder; a crash in the next step would
+ * then leave a half-migrated database claiming to be finished, and the next
+ * open would skip every remaining step. Trimming anything above the step that
+ * actually completed is what makes the ladder resumable.
+ */
+function stampSchemaVersion(db: SqliteDatabase, version: number): void {
+  writeSchemaVersion(db, version);
+  db.prepare("DELETE FROM schema_versions WHERE version > ?").run(version);
+}
+
 /** The highest recorded schema version, or null if none is recorded. */
 export function readSchemaVersion(db: SqliteDatabase): number | null {
   const row = db
@@ -207,6 +231,93 @@ function addColumn(db: SqliteDatabase, table: string, name: string, definition: 
 }
 
 /**
+ * One rung of the version ladder: what it upgrades from, and to.
+ *
+ * A step never writes its own version row — {@link migrate} stamps it after the
+ * step returns, so a step that throws leaves the database at the version it
+ * actually still has.
+ */
+interface MigrationStep {
+  from: number;
+  to: number;
+  run(db: SqliteDatabase, schema: string): void;
+}
+
+/**
+ * Every migration, in order, each applying to exactly one version.
+ *
+ * **This replaced a single `if`.** The dispatch used to read
+ * `if (current < DB_SCHEMA_VERSION) migrateV1ToV2(db, schema)`, which is
+ * correct only while there is exactly one migration. The moment a second one
+ * exists, a v1 database runs the v1 step, is stamped with the current version,
+ * and never sees the v2 step — silently mislabelled, with no error and no
+ * rebuild prompt. A ladder cannot do that: it applies every step whose target
+ * is above the version the database actually has.
+ *
+ * A test asserts this list is contiguous from 1 and ends at
+ * {@link DB_SCHEMA_VERSION}, so adding a step without wiring it up fails
+ * loudly rather than skipping a rung.
+ */
+const MIGRATIONS: readonly MigrationStep[] = [
+  { from: 1, to: 2, run: migrateV1ToV2 },
+  { from: 2, to: 3, run: migrateV2ToV3 },
+];
+
+/** The ladder, exposed for the test that checks it has no gaps. */
+export function migrationSteps(): ReadonlyArray<{ from: number; to: number }> {
+  return MIGRATIONS.map((step) => ({ from: step.from, to: step.to }));
+}
+
+/** Apply every migration above `current`, in order, stamping each as it lands. */
+function migrate(db: SqliteDatabase, schema: string, current: number): void {
+  setAsideLegacyBaseline(db);
+  let version = current;
+  for (const step of MIGRATIONS) {
+    if (version >= step.to) continue;
+    step.run(db, schema);
+    stampSchemaVersion(db, step.to);
+    version = step.to;
+  }
+}
+
+/** Where a pre-v3 grounding baseline waits while the v3 table is created. */
+const LEGACY_GROUNDED_SOURCE = "_mex_grounded_source_v2";
+
+/**
+ * Move a pre-v3 grounding baseline aside **before any step execs the schema**.
+ *
+ * This is not tidiness, it is an ordering constraint with teeth. Every
+ * migration step ends by exec'ing the frozen schema, and the schema now
+ * declares `idx_grounded_subject` over v3-only columns. Exec'ing it against a
+ * table that still has the v2 (or v1) shape fails with `no such column:
+ * subject_kind` — so a v1 database would die inside the *v1* step, before the
+ * v3 step it needs ever runs. Renaming the old table first means every
+ * subsequent `exec(schema)` finds no table there and creates the v3 one from
+ * the single frozen definition, with no DDL duplicated into TypeScript.
+ *
+ * The rename is pure DDL and carries no dependency on the database's version,
+ * which is what lets it sit before the ladder rather than inside a rung. The
+ * rows are carried across in {@link migrateV2ToV3}, where they belong.
+ *
+ * Resumable by construction: if the process dies between the rename and the
+ * copy, the next open finds no `_mex_grounded_source` at all — so this returns
+ * early, the schema recreates the v3 table, and the v3 rung finds the legacy
+ * rows still waiting and finishes the job.
+ */
+function setAsideLegacyBaseline(db: SqliteDatabase): void {
+  if (!tableExists(db, "_mex_grounded_source")) return;
+  if (columns(db, "_mex_grounded_source").has("subject_kind")) return;
+
+  // The index has to go first: renaming a table does not rename its indexes, so
+  // `idx_grounded_node` would stay attached to the renamed table, the schema's
+  // `CREATE INDEX IF NOT EXISTS` would find the name taken and do nothing, and
+  // dropping the legacy table would then take the index with it — leaving v3
+  // without its reverse lookup and nothing failing.
+  db.exec("DROP INDEX IF EXISTS idx_grounded_node");
+  db.exec(`ALTER TABLE _mex_grounded_source RENAME TO ${LEGACY_GROUNDED_SOURCE}`);
+}
+
+/**
  * Schema v1 graph facts are not trustworthy under the v2 identity/resolution
  * contract. The migration is additive so grounding snapshots can be retained,
  * then marks the derived graph for a mandatory full rebuild.
@@ -249,6 +360,52 @@ function migrateV1ToV2(db: SqliteDatabase, schema: string): void {
   // Creates all new tables and indexes after the old tables have the v2 columns.
   db.exec(schema);
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_unresolved_ref_key ON unresolved_refs(ref_key)");
-  writeSchemaVersion(db, DB_SCHEMA_VERSION);
   markGraphRebuildRequired(db, "schema-v1");
+}
+
+/**
+ * v3 generalizes the grounding baseline's key from a scaffold file to a
+ * subject, so a wiki entity can carry its own baseline (D1: one baseline
+ * store, never two).
+ *
+ * SQLite cannot alter a primary key, so this is a table rebuild. It runs only
+ * for an explicitly isolated rebuild candidate (`allowRebuild: true`). Status
+ * and ordinary readers classify a live v2 database as rebuild-required; they
+ * never migrate the user's live bytes as a side effect of retrieval.
+ *
+ * Two things here are not obvious and both are load-bearing:
+ *
+ * **The old table's shape is not knowable in advance.** A database that
+ * reached v2 by migrating from v1 still has the *v1* grounding table, because
+ * {@link migrateV1ToV2} creates new tables with `CREATE TABLE IF NOT EXISTS`,
+ * which leaves an existing table alone — so it never gained `source` or
+ * `fingerprint`. A copy that names those columns unconditionally fails on
+ * exactly the v1-to-v3 path, which is the path most likely to exist in the
+ * wild and least likely to be tested. Missing columns are copied as empty
+ * strings: a baseline with no captured source can still be re-grounded, and
+ * pretending otherwise would mean dropping the row.
+ *
+ * **The new table comes from the frozen schema, not from SQL repeated here.**
+ * The old table is renamed out of the way first, so `exec(schema)` creates the
+ * v3 shape from the one definition that ships. A second copy of the DDL in
+ * TypeScript is a copy that drifts.
+ */
+function migrateV2ToV3(db: SqliteDatabase, schema: string): void {
+  db.transaction(() => {
+    // Creates the v3 table and both its indexes from the frozen schema. A
+    // second copy of that DDL in TypeScript is a copy that drifts.
+    db.exec(schema);
+    if (!tableExists(db, LEGACY_GROUNDED_SOURCE)) return;
+
+    const existing = columns(db, LEGACY_GROUNDED_SOURCE);
+    const subjectId = existing.has("subject_id") ? "subject_id" : "scaffold_file";
+    const carried = (column: string): string => (existing.has(column) ? column : "''");
+
+    db.exec(
+      `INSERT OR IGNORE INTO _mex_grounded_source (subject_kind, subject_id, node_id, source, body_hash, fingerprint)
+       SELECT 'scaffold', ${subjectId}, node_id, ${carried("source")}, ${carried("body_hash")}, ${carried("fingerprint")}
+       FROM ${LEGACY_GROUNDED_SOURCE}`,
+    );
+    db.exec(`DROP TABLE ${LEGACY_GROUNDED_SOURCE}`);
+  });
 }

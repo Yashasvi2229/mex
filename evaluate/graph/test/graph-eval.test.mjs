@@ -66,7 +66,7 @@ function completeGraphSnapshot(overrides = {}) {
     lastSuccessfulIndexAt: "2026-08-22T00:00:00.000Z",
     indexedBranch: "main",
     indexedHead: "1".repeat(40),
-    schemaVersion: 2,
+    schemaVersion: 3,
     compilerVersion: "5.9.3",
     extractorVersion: "typescript-5.9-v1+tree-sitter-v2",
     resolverVersion: "compiler-first-v2",
@@ -143,7 +143,7 @@ test("suite integrity thresholds must be finite numeric metric maps", () => {
   assert.throws(() => validateGraphSuite(wrongShape), /gates\.integrityCeilings must be an object/);
 });
 
-test("v2 integrity hashing includes graph rows and semantic metadata but ignores row timestamps", () => {
+test("current-schema integrity hashing includes graph rows and semantic metadata but ignores row timestamps", () => {
   const root = mkdtempSync(join(tmpdir(), "mex-integrity-v2-"));
   const path = join(root, "graph.db");
   const db = new DatabaseSync(path);
@@ -187,7 +187,7 @@ test("v2 integrity hashing includes graph rows and semantic metadata but ignores
   db.close();
 
   const first = inspectGraphDatabase(path, { nodesCreated: 1 });
-  assert.equal(first.schemaVersion, 2);
+  assert.equal(first.schemaVersion, 3);
   assert.deepEqual(first.parseStatusCounts, { partial: 1 });
   assert.equal(first.totalDiagnostics, 2);
   assert.equal(first.resolvedReferences, 1);
@@ -257,7 +257,7 @@ test("graph snapshot hashing retains every semantic provenance field", () => {
   writeGraphSnapshot(path, base);
   const baseHash = normalizedHash(path);
   const semanticVariants = [
-    ["schemaVersion", { ...base, schemaVersion: 3 }],
+    ["schemaVersion", { ...base, schemaVersion: 2 }],
     ["compilerVersion", { ...base, compilerVersion: "5.9.4" }],
     ["extractorVersion", { ...base, extractorVersion: "typescript-5.9-v2+tree-sitter-v2" }],
     ["resolverVersion", { ...base, resolverVersion: "compiler-first-v3" }],
