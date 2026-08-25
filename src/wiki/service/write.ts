@@ -21,9 +21,9 @@ import type { GroundingGraph } from "../grounding/adapter.js";
 import { createHash } from "node:crypto";
 import { rebuildWikiIndex } from "../index/rebuild.js";
 import { refreshWikiIndex } from "../index/refresh.js";
-import { planOperation, type PlanOptions } from "../operations/plan.js";
+import { planOperation, type PlanOptions, type WikiPatchPlan } from "../operations/plan.js";
 import { previewPlan, renderPreview, type WikiPreview } from "../operations/preview.js";
-import { applyGeneratedViews, applyOperation, type ApplyOptions, type GeneratedViewCandidate } from "../operations/apply.js";
+import { applyGeneratedViews, applyOperation, applyPlannedOperation, type ApplyOptions, type GeneratedViewCandidate } from "../operations/apply.js";
 import { inventoryScaffold } from "../migration/inventory.js";
 import { planGeneratedView } from "../migration/generated.js";
 import type { WikiEntityType } from "../model/entity.js";
@@ -36,6 +36,7 @@ import {
   type MigrationReport,
 } from "../migration/migrate.js";
 import { indexPathFor, type ServiceResult, type WikiServiceOptions } from "./read.js";
+import type { WikiMaintenanceContext } from "../index/maintenance.js";
 
 /** Everything a write needs beyond where the scaffold is. */
 export interface WikiWriteOptions extends WikiServiceOptions {
@@ -45,6 +46,7 @@ export interface WikiWriteOptions extends WikiServiceOptions {
   registry?: EntityTypeRegistry;
   /** The live code graph, required to mint or verify a grounding. */
   graph?: GroundingGraph | null;
+  maintenance?: WikiMaintenanceContext;
 }
 
 function planOptionsFrom(options: WikiWriteOptions): PlanOptions {
@@ -78,6 +80,8 @@ export interface PlanData {
    * these bytes, apply, and compare.
    */
   proposedText: Record<string, string>;
+  /** Validated executable value. Consumers treat this as opaque. */
+  plan: WikiPatchPlan | null;
 }
 
 /** §16 `wiki_plan_operation` — plan and diff, never write. */
@@ -88,7 +92,7 @@ export function wikiPlanOperation(
   const planned = planOperation(envelope, planOptionsFrom(options));
   if (!planned.ok) {
     return {
-      data: { planned: false, opId: null, preview: null, diff: null, files: [], proposedText: {} },
+      data: { planned: false, opId: null, preview: null, diff: null, files: [], proposedText: {}, plan: null },
       diagnostics: planned.diagnostics,
     };
   }
@@ -101,6 +105,7 @@ export function wikiPlanOperation(
       diff: renderPreview(preview),
       files: planned.plan.files.map((file) => file.path),
       proposedText: Object.fromEntries(planned.plan.files.map((file) => [file.path, file.proposedText])),
+      plan: planned.plan,
     },
     diagnostics: planned.diagnostics,
   };
@@ -126,7 +131,11 @@ export interface ApplyData extends PlanData {
  */
 export function wikiApplyOperation(
   envelope: unknown,
-  options: WikiWriteOptions & { apply?: boolean },
+  options: WikiWriteOptions & {
+    apply?: boolean;
+    plan?: WikiPatchPlan;
+    expectedPreviewRevision?: string;
+  },
 ): ServiceResult<ApplyData> {
   const planned = wikiPlanOperation(envelope, options);
   if (options.apply !== true || !planned.data.planned) {
@@ -137,7 +146,12 @@ export function wikiApplyOperation(
   }
 
   const applyOptions: ApplyOptions = planOptionsFrom(options);
-  const result = applyOperation(envelope, applyOptions);
+  const result = options.plan !== undefined && options.expectedPreviewRevision !== undefined
+    ? applyPlannedOperation(options.plan, {
+        ...applyOptions,
+        expectedPreviewHash: options.expectedPreviewRevision,
+      })
+    : applyOperation(envelope, applyOptions);
   return {
     data: {
       ...planned.data,
@@ -190,6 +204,7 @@ export function wikiRebuildIndex(options: WikiWriteOptions): ServiceResult<Rebui
     ...(options.indexPath === undefined ? {} : { indexPath: options.indexPath }),
     ...(options.exclude === undefined ? {} : { exclude: options.exclude }),
     ...(options.registry === undefined ? {} : { registry: options.registry }),
+    ...(options.maintenance === undefined ? {} : { maintenance: options.maintenance }),
   });
   return {
     data: {
@@ -240,6 +255,7 @@ export function wikiRefreshIndex(
     changed: options.changed,
     ...(options.exclude === undefined ? {} : { exclude: options.exclude }),
     ...(options.registry === undefined ? {} : { registry: options.registry }),
+    ...(options.maintenance === undefined ? {} : { maintenance: options.maintenance }),
   });
   if (!result.ok) {
     return {

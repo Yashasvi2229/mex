@@ -41,7 +41,10 @@ function corpusFiles(): string[] {
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
+      // The nested legacy scaffold is a migration fixture, not a Markdown
+      // codec oracle. Its pre-canonical files are asserted by the migration
+      // contract and must not silently become parser expectations here.
+      if (entry.isDirectory() && relative(FIXTURE_ROOT, full) !== "legacy-scaffold") walk(full);
       else if (entry.name.endsWith(".md")) found.push(relative(FIXTURE_ROOT, full).replace(/\\/g, "/"));
     }
   };

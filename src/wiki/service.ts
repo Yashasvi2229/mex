@@ -86,6 +86,8 @@ import {
 import { wikiValidate, type ValidateData } from "./service/validate.js";
 import { diagnostic } from "./model/diagnostic.js";
 import type { RelationEdge } from "./query/rank.js";
+import type { WikiPatchPlan } from "./operations/plan.js";
+import type { WikiMaintenanceContext } from "./index/maintenance.js";
 
 /** How to reach one scaffold, and what the engine may use while it is there. */
 export interface WikiEngineOptions {
@@ -140,8 +142,8 @@ export interface MigrationApplyResult extends MigrateData {
  * this.
  */
 export interface WikiEngine {
-  rebuildIndex(): Promise<ServiceResult<RebuildData>>;
-  refreshFiles(paths: readonly string[]): Promise<ServiceResult<RefreshData>>;
+  rebuildIndex(context?: WikiMaintenanceContext): Promise<ServiceResult<RebuildData>>;
+  refreshFiles(paths: readonly string[], context?: WikiMaintenanceContext): Promise<ServiceResult<RefreshData>>;
 
   list(query?: WikiFilterOptions): Promise<ServiceResult<ListData>>;
   get(id: string, options?: { includeBody?: boolean }): Promise<ServiceResult<GetData>>;
@@ -151,7 +153,14 @@ export interface WikiEngine {
 
   validate(options?: Partial<ValidateOptions>): Promise<ServiceResult<ValidateData>>;
   planOperation(operation: unknown): Promise<ServiceResult<PlanData>>;
-  applyOperation(operation: unknown, options?: { apply?: boolean }): Promise<ServiceResult<ApplyData>>;
+  applyOperation(
+    operation: unknown,
+    options?: {
+      apply?: boolean;
+      plan?: WikiPatchPlan;
+      expectedPreviewRevision?: string;
+    },
+  ): Promise<ServiceResult<ApplyData>>;
 
   planMigration(): Promise<ServiceResult<MigrationPlan>>;
   applyMigration(plan: MigrationPlan): Promise<ServiceResult<MigrationApplyResult>>;
@@ -196,12 +205,16 @@ class WikiEngineImpl implements WikiEngine, WikiEngineExtras {
     };
   }
 
-  async rebuildIndex(): Promise<ServiceResult<RebuildData>> {
-    return wikiRebuildIndex(this.write);
+  async rebuildIndex(context?: WikiMaintenanceContext): Promise<ServiceResult<RebuildData>> {
+    return wikiRebuildIndex({ ...this.write, ...(context === undefined ? {} : { maintenance: context }) });
   }
 
-  async refreshFiles(paths: readonly string[]): Promise<ServiceResult<RefreshData>> {
-    return wikiRefreshIndex({ ...this.write, changed: paths });
+  async refreshFiles(paths: readonly string[], context?: WikiMaintenanceContext): Promise<ServiceResult<RefreshData>> {
+    return wikiRefreshIndex({
+      ...this.write,
+      changed: paths,
+      ...(context === undefined ? {} : { maintenance: context }),
+    });
   }
 
   async list(query: WikiFilterOptions = {}): Promise<ServiceResult<ListData>> {
@@ -270,7 +283,14 @@ class WikiEngineImpl implements WikiEngine, WikiEngineExtras {
    * error — §5.4's posture, inherited from the service unchanged. An agent that
    * forgets the flag gets a diff, not a write.
    */
-  async applyOperation(operation: unknown, options: { apply?: boolean } = {}): Promise<ServiceResult<ApplyData>> {
+  async applyOperation(
+    operation: unknown,
+    options: {
+      apply?: boolean;
+      plan?: WikiPatchPlan;
+      expectedPreviewRevision?: string;
+    } = {},
+  ): Promise<ServiceResult<ApplyData>> {
     return wikiApplyOperation(operation, { ...this.write, ...options });
   }
 

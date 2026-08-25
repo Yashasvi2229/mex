@@ -16,7 +16,7 @@
  * reconcile.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { WikiDiagnostic } from "../model/diagnostic.js";
 import { diagnostic } from "../model/diagnostic.js";
@@ -24,9 +24,37 @@ import type { EntityTypeRegistry } from "../model/entity.js";
 import { parseWikiMarkdown } from "../markdown/codec.js";
 import type { ParsedFile } from "../markdown/contract.js";
 import { discoverMarkdownFiles } from "./discover.js";
-import { createPendingIndex, discardPendingIndex, publishPendingIndex, sweepPendingIndexes } from "./publish.js";
-import { IndexInUseError } from "./dbfile.js";
+import {
+  createPendingIndex,
+  discardPendingIndex,
+  discardSealedPendingIndex,
+  publishSealedPendingIndex,
+  sealPendingIndex,
+  sweepPendingIndexes,
+  type SealedPendingIndex,
+} from "./publish.js";
+import {
+  acquireWikiMaintenanceLease,
+  bindIndexGeneration,
+  IndexInUseError,
+  IndexPublishRecoveryError,
+  type IndexGenerationBinding,
+  type WikiMaintenanceLease,
+} from "./dbfile.js";
+import {
+  assertWikiCorpusUnchanged,
+  assertWikiCorpusFastUnchanged,
+  bindWikiCorpusFast,
+  maintenanceBoundary,
+  observeWikiCorpus,
+  type WikiCorpusObservation,
+  type WikiCorpusFastBinding,
+  type WikiMaintenanceContext,
+  WikiPreparedMaintenanceNotPreflightedError,
+  WikiPreparedMaintenanceSettledError,
+} from "./maintenance.js";
 import { resolveIndexState, writeFileDiagnostics, writeParsedFile, type GroundingResolver } from "./write.js";
+import { readContainedSource } from "./source-read.js";
 
 /** Default index location: `.mex/wiki.db`, beside the scaffold it indexes. */
 export function defaultIndexPath(scaffoldRoot: string): string {
@@ -65,6 +93,8 @@ export interface RebuildOptions {
    * on code, and code changes without the scaffold changing at all.
    */
   resolveGrounding?: GroundingResolver;
+  /** Cancellation and bounded phase progress for explicit maintenance jobs. */
+  maintenance?: WikiMaintenanceContext;
 }
 
 export interface RebuildResult {
@@ -79,7 +109,9 @@ export interface RebuildResult {
 
 /** Read a file as text. Never as a Buffer — offsets are UTF-16 units (D2a). */
 export function readText(absolutePath: string): string {
-  return readFileSync(absolutePath, "utf-8");
+  // Compatibility seam for callers that do not have a scaffold authority.
+  // Canonical engine paths below use readContainedSource instead.
+  return readContainedSource(resolve(absolutePath, ".."), absolutePath);
 }
 
 /** One file that could not be read, and the diagnostic that says so. */
@@ -106,23 +138,29 @@ export function unreadableFileDiagnostic(path: string, error: unknown): WikiDiag
  * their whole index.
  */
 export function parseAll(
+  scaffoldRoot: string,
   files: readonly { path: string; absolutePath: string }[],
   registry: EntityTypeRegistry | undefined,
-  readFile: (absolutePath: string) => string = readText,
+  readFile?: (absolutePath: string) => string,
+  maintenance?: WikiMaintenanceContext,
 ): { parsed: ParsedFile[]; unreadable: UnreadableFile[] } {
   const parsed: ParsedFile[] = [];
   const unreadable: UnreadableFile[] = [];
 
-  for (const file of files) {
+  maintenanceBoundary(maintenance, "parse", { completed: 0, total: files.length });
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index]!;
+    maintenanceBoundary(maintenance, "parse", { completed: index, total: files.length });
     let text: string;
     try {
-      text = readFile(file.absolutePath);
+      text = readContainedSource(scaffoldRoot, file.absolutePath, readFile === undefined ? {} : { readFile });
     } catch (error) {
       unreadable.push({ path: file.path, diagnostic: unreadableFileDiagnostic(file.path, error) });
       continue;
     }
     parsed.push(parseWikiMarkdown(registry === undefined ? { path: file.path, text } : { path: file.path, text, registry }));
   }
+  maintenanceBoundary(maintenance, "parse", { completed: files.length, total: files.length });
 
   return { parsed, unreadable };
 }
@@ -134,77 +172,210 @@ export function parseAll(
  * the old index on the way — a rebuild that consulted the thing it is replacing
  * would let a stale row survive forever.
  */
-export function rebuildWikiIndex(options: RebuildOptions): RebuildResult {
+export interface PreparedWikiRebuild {
+  readonly kind: "rebuild";
+  /** Exact Wiki-corpus preflight; call before the consumer's final Graph check. */
+  preflight(): void;
+  /** Rename-only publication after a successful preflight. */
+  commit(): RebuildResult;
+  discard(): void;
+}
+
+function parseObservedCorpus(
+  observation: WikiCorpusObservation,
+  registry: EntityTypeRegistry | undefined,
+  maintenance: WikiMaintenanceContext | undefined,
+): { parsed: ParsedFile[]; unreadable: UnreadableFile[] } {
+  const parsed: ParsedFile[] = [];
+  const unreadable: UnreadableFile[] = [];
+  maintenanceBoundary(maintenance, "parse", { completed: 0, total: observation.files.length });
+  for (let index = 0; index < observation.files.length; index += 1) {
+    const file = observation.files[index]!;
+    maintenanceBoundary(maintenance, "parse", { completed: index, total: observation.files.length });
+    try {
+      const text = observation.readFile(file.absolutePath);
+      parsed.push(parseWikiMarkdown(registry === undefined ? { path: file.path, text } : { path: file.path, text, registry }));
+    } catch (error) {
+      unreadable.push({ path: file.path, diagnostic: unreadableFileDiagnostic(file.path, error) });
+    }
+  }
+  maintenanceBoundary(maintenance, "parse", { completed: observation.files.length, total: observation.files.length });
+  return { parsed, unreadable };
+}
+
+function rebuildInterruptedResult(indexPath: string, sweptTempFiles: string[], error: IndexInUseError): RebuildResult {
+  return {
+    indexPath,
+    fileCount: 0,
+    entityCount: 0,
+    diagnostics: [diagnostic("WIKI_INDEX_REBUILD_REQUIRED", error.message, {
+      file: indexPath,
+      remediation: "Close anything holding the index open and run `mex wiki rebuild-index` again.",
+    })],
+    sweptTempFiles,
+  };
+}
+
+/**
+ * Build and validate a candidate while retaining the scaffold-wide lease.
+ * The returned value intentionally exposes no path, database or candidate
+ * bytes: a caller may only commit the exact prepared generation or discard it.
+ */
+export function prepareWikiRebuild(options: RebuildOptions): PreparedWikiRebuild {
   const scaffoldRoot = resolve(options.scaffoldRoot);
   const indexPath = options.indexPath ?? defaultIndexPath(scaffoldRoot);
   const now = options.now ?? (() => new Date().toISOString());
-
-  const sweptTempFiles = sweepPendingIndexes(indexPath);
-
-  // 1-2. Discover, applying exclusions.
-  const discovery = discoverMarkdownFiles({ root: scaffoldRoot, exclude: options.exclude });
-
-  // 3. Parse every file.
-  const { parsed, unreadable } = parseAll(discovery.files, options.registry, options.readFile);
-
-  const { handle, tempPath } = createPendingIndex(indexPath);
+  const lease = acquireWikiMaintenanceLease(indexPath, "rebuild", scaffoldRoot);
+  let handle: ReturnType<typeof createPendingIndex>["handle"] | undefined;
+  let tempPath: string | undefined;
   try {
+    const sweptTempFiles = sweepPendingIndexes(indexPath, lease.binding);
+    const live = bindIndexGeneration(indexPath, lease.binding);
+    maintenanceBoundary(options.maintenance, "discover");
+    const observation = observeWikiCorpus({
+      scaffoldRoot,
+      ...(options.exclude === undefined ? {} : { exclude: options.exclude }),
+      ...(options.readFile === undefined ? {} : { readFile: options.readFile }),
+    });
+
+    maintenanceBoundary(options.maintenance, "stage");
+    const pending = createPendingIndex(indexPath, lease.binding);
+    handle = pending.handle;
+    tempPath = pending.tempPath;
+    const { parsed, unreadable } = parseObservedCorpus(observation, options.registry, options.maintenance);
     handle.db.transaction(() => {
-      // 4-5, 7, 9. Per-file projection: entities, relations as written, topics,
-      // sources, groundings, full text, and this file's own diagnostics.
-      for (const file of parsed) writeParsedFile(handle.db, file, { now: now() });
-
-      // A file that could not be read is a fact about that file, recorded
-      // against it. Recording it against the build instead would make a later
-      // refresh of an unrelated file drop it.
-      for (const file of unreadable) writeFileDiagnostics(handle.db, file.path, [file.diagnostic]);
-
-      // 4-6. The second pass. Every reference is resolved here, over the
-      // complete set, never while files are still arriving. Discovery problems
-      // go in with it: a symlink that escapes the scaffold is a property of the
-      // scaffold, not of any file's row, and re-walking is what clears it.
-      resolveIndexState(handle.db, {
+      for (const file of parsed) writeParsedFile(handle!.db, file, { now: now() });
+      for (const file of unreadable) writeFileDiagnostics(handle!.db, file.path, [file.diagnostic]);
+      maintenanceBoundary(options.maintenance, "resolve");
+      resolveIndexState(handle!.db, {
         scaffoldRoot,
         buildKind: "rebuild",
         now: now(),
-        scaffoldDiagnostics: discovery.diagnostics,
+        scaffoldDiagnostics: observation.diagnostics,
         resolveGrounding: options.resolveGrounding,
       });
+      maintenanceBoundary(options.maintenance, "validate");
     });
-
-    const fileCount = parsed.length;
-    const entityCount = parsed.reduce((total, file) => total + file.entities.length, 0);
-
-    // 10. Make it active.
-    publishPendingIndex(handle, tempPath, indexPath);
-    return {
+    const sealed = sealPendingIndex(handle, tempPath, lease.binding);
+    handle = undefined;
+    const summary: RebuildResult = {
       indexPath,
-      fileCount,
-      entityCount,
-      diagnostics: [...discovery.diagnostics, ...unreadable.map((file) => file.diagnostic)],
+      fileCount: parsed.length,
+      entityCount: parsed.reduce((total, file) => total + file.entities.length, 0),
+      diagnostics: [...observation.diagnostics, ...unreadable.map((file) => file.diagnostic)],
       sweptTempFiles,
     };
+    return preparedRebuildHandle({
+      options,
+      scaffoldRoot,
+      indexPath,
+      lease,
+      tempPath,
+      sealed,
+      live,
+      observation,
+      summary,
+    });
   } catch (error) {
-    discardPendingIndex(handle, tempPath);
-    if (error instanceof IndexInUseError) {
-      // Not a build failure: the scaffold parsed, the new index was built, and
-      // only the swap could not happen because a reader has the live one open.
-      // A typed diagnostic rather than a thrown EPERM, because the caller's
-      // right response is to retry rather than to investigate — and because
-      // the live index is untouched, so nothing is broken.
-      return {
-        indexPath,
-        fileCount: 0,
-        entityCount: 0,
-        diagnostics: [
-          diagnostic("WIKI_INDEX_REBUILD_REQUIRED", error.message, {
-            file: indexPath,
-            remediation: "Close anything holding the index open and run `mex wiki rebuild-index` again.",
-          }),
-        ],
-        sweptTempFiles,
-      };
+    try {
+      if (handle !== undefined && tempPath !== undefined) discardPendingIndex(handle, tempPath, lease.binding);
+    } finally {
+      lease.release();
     }
     throw error;
   }
+}
+
+function preparedRebuildHandle(state: {
+  options: RebuildOptions;
+  scaffoldRoot: string;
+  indexPath: string;
+  lease: WikiMaintenanceLease;
+  tempPath: string;
+  sealed: SealedPendingIndex;
+  live: IndexGenerationBinding;
+  observation: WikiCorpusObservation;
+  summary: RebuildResult;
+}): PreparedWikiRebuild {
+  let settled = false;
+  let preflighted = false;
+  let fastBinding: WikiCorpusFastBinding | null = null;
+  const beginSettlement = (): void => {
+    if (settled) throw new WikiPreparedMaintenanceSettledError();
+    settled = true;
+  };
+  const discardCandidate = (): void => {
+    if (existsSync(state.tempPath)) discardSealedPendingIndex(state.tempPath, state.lease.binding, state.sealed);
+  };
+  return {
+    kind: "rebuild",
+    preflight: () => {
+      if (settled) throw new WikiPreparedMaintenanceSettledError();
+      preflighted = false;
+      fastBinding = null;
+      maintenanceBoundary(state.options.maintenance, "publish");
+      const corpusOptions = {
+        scaffoldRoot: state.scaffoldRoot,
+        ...(state.options.exclude === undefined ? {} : { exclude: state.options.exclude }),
+        ...(state.options.readFile === undefined ? {} : { readFile: state.options.readFile }),
+      };
+      const before = bindWikiCorpusFast(corpusOptions);
+      assertWikiCorpusUnchanged(state.observation, corpusOptions);
+      assertWikiCorpusFastUnchanged(before, corpusOptions);
+      maintenanceBoundary(state.options.maintenance, "publish");
+      fastBinding = before;
+      preflighted = true;
+    },
+    commit: () => {
+      if (!preflighted) throw new WikiPreparedMaintenanceNotPreflightedError();
+      beginSettlement();
+      try {
+        if (fastBinding === null) throw new WikiPreparedMaintenanceNotPreflightedError();
+        maintenanceBoundary(state.options.maintenance, "publish");
+        assertWikiCorpusFastUnchanged(fastBinding, {
+          scaffoldRoot: state.scaffoldRoot,
+          ...(state.options.exclude === undefined ? {} : { exclude: state.options.exclude }),
+          ...(state.options.readFile === undefined ? {} : { readFile: state.options.readFile }),
+        });
+        publishSealedPendingIndex(
+          state.tempPath,
+          state.indexPath,
+          state.lease.binding,
+          state.sealed,
+          state.live,
+        );
+        return state.summary;
+      } catch (error) {
+        try {
+          discardCandidate();
+        } catch (cleanupError) {
+          throw new IndexPublishRecoveryError(state.tempPath, state.tempPath, error, cleanupError);
+        }
+        if (error instanceof IndexInUseError) return rebuildInterruptedResult(state.indexPath, state.summary.sweptTempFiles, error);
+        throw error;
+      } finally {
+        state.lease.release();
+      }
+    },
+    discard: () => {
+      beginSettlement();
+      try {
+        discardCandidate();
+      } finally {
+        state.lease.release();
+      }
+    },
+  };
+}
+
+/** Compatibility one-shot API implemented through the two-phase boundary. */
+export function rebuildWikiIndex(options: RebuildOptions): RebuildResult {
+  const prepared = prepareWikiRebuild(options);
+  try {
+    prepared.preflight();
+  } catch (error) {
+    prepared.discard();
+    throw error;
+  }
+  return prepared.commit();
 }

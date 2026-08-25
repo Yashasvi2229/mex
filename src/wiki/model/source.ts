@@ -11,6 +11,7 @@ import {
   type ValidationContext,
   type Validator,
 } from "./validate.js";
+import { isCanonicalRepoPath } from "./path.js";
 
 /**
  * Sources — the evidence supporting an entity.
@@ -138,7 +139,13 @@ function validateSourceKind(source: WikiSource, context: ValidationContext): Wik
       break;
 
     case "file":
-      requireRef("a repository-relative file path");
+      if (requireRef("a repository-relative file path") && !isCanonicalRepoPath(source.ref)) {
+        diagnostics.push(contextDiagnostic(
+          context,
+          "MALFORMED_SOURCE",
+          `"${source.ref}" is not a normalized repository-relative POSIX path.`,
+        ));
+      }
       break;
 
     case "test":

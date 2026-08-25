@@ -12,6 +12,17 @@ export * from "./discover.js";
 export * from "./dump.js";
 export * from "./rebuild.js";
 export * from "./refresh.js";
+export * from "./maintenance.js";
 export { entityKeyOf, canonicalJson, detectRangeOverlaps, ftsBodyFor } from "./write.js";
 export { sweepPendingIndexes } from "./publish.js";
-export { assertIndexPath, indexExists, IndexPathError, removeIndexFiles } from "./dbfile.js";
+export {
+  acquireWikiMaintenanceLease,
+  assertIndexPath,
+  bindIndexDirectory,
+  indexExists,
+  IndexPublishRecoveryError,
+  IndexPathError,
+  removeIndexFiles,
+  WikiMaintenanceLockedError,
+} from "./dbfile.js";
+export type { IndexDirectoryBinding, WikiMaintenanceKind, WikiMaintenanceLease } from "./dbfile.js";

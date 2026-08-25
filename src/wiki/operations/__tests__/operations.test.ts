@@ -398,6 +398,35 @@ describe("the index really is refreshed", () => {
 });
 
 describe("what each operation means", () => {
+  it.each([
+    ["add-source", { source: { type: "file", ref: "../outside.md" } }, JWT],
+    ["set-grounding", {
+      groundsTo: [{ node: NODE, fingerprint: FINGERPRINT, bodyHash: BODY_HASH, file: "/etc/passwd" }],
+    }, JWT],
+    ["create-entry", {
+      file: "context/architecture.md",
+      insertAt: { at: "end-of-file" },
+      type: "convention",
+      title: "Unsafe source must not land",
+      body: "This proposed entity is rejected before preview.",
+      sources: [{ type: "file", ref: "src\\secret.ts" }],
+      headingDepth: 2,
+    }, undefined],
+  ] as const)("rejects unsafe path metadata in %s before producing a preview", (type, payload, entityId) => {
+    const target = scaffold();
+    const before = target.files();
+    const planned = planOperation(
+      envelope(target, type, payload, entityId === undefined ? {} : { entityId }),
+      { scaffoldRoot: target.root },
+    );
+    expect(planned.ok).toBe(false);
+    expect(planned.ok ? [] : codesOf(planned.diagnostics)).toEqual(expect.arrayContaining([
+      type === "set-grounding" ? "MALFORMED_GROUNDING" : "MALFORMED_SOURCE",
+    ]));
+    expect(target.files()).toEqual(before);
+    expect(existsSync(operationLogPath(target.root))).toBe(false);
+  });
+
   it("create-entry never overwrites existing prose", () => {
     const target = scaffold();
     const before = target.read("context/architecture.md");

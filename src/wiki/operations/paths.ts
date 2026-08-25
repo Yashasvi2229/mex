@@ -47,7 +47,9 @@ const MARKDOWN = /\.mdx?$/i;
  * rebuild would index a half-written `foo.md.tmp` as a real file and briefly
  * publish an index containing a truncated entity — or a duplicate of one.
  */
-const TEMP_SUFFIX = /\.mdx?\.tmp-[0-9a-z]+$/i;
+const TEMP_SUFFIX = /\.mdx?(?:\.recovery-[0-9a-z]+)?\.tmp-[0-9a-z]+$/i;
+/** Exact prior bytes retained only when in-process rollback itself fails. */
+const RECOVERY_SUFFIX = /\.mdx?\.recovery-[0-9a-z]+$/i;
 
 export class WritePathError extends Error {
   readonly path: string;
@@ -173,7 +175,7 @@ export function assertWritablePath(scaffoldRoot: string, absolute: string): void
   const target = resolve(absolute);
   const name = basename(target);
 
-  if (!MARKDOWN.test(name) && !TEMP_SUFFIX.test(name)) {
+  if (!MARKDOWN.test(name) && !TEMP_SUFFIX.test(name) && !RECOVERY_SUFFIX.test(name)) {
     throw new WritePathError(target, "the operation pipeline only writes Markdown files.");
   }
   if (!insideRoot(root, target) || !insideRoot(existsSync(root) ? realpathSync(root) : root, resolveThroughSymlinks(target))) {

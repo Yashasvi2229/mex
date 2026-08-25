@@ -4,6 +4,7 @@ import { validateGrounding, type WikiGrounding } from "./grounding.js";
 import { validateRelationRef, type WikiRelationRef } from "./relation.js";
 import { validateSource, type WikiSource } from "./source.js";
 import { isContentHash } from "./hash.js";
+import { isCanonicalRepoPath } from "./path.js";
 import { WIKI_ENTITY_TYPES, WIKI_LIFECYCLE_STATES, type WikiEntityType, type WikiLifecycleState } from "./entity.js";
 import {
   contextDiagnostic,
@@ -95,15 +96,16 @@ export type InsertionPoint =
 /**
  * Root-level frontmatter keys an adoption may take with it.
  *
- * A closed set of exactly one member, and the only non-prose deletion migration
- * performs. Root `grounds_to` has a live owner — `extractGroundings` and
- * `writeGroundings` read and write it on every `mex ground` run — so leaving it
- * behind after its values move under `mex:` would leave **two stores of one
- * fact** with no rule about which wins, which is what D1 exists to forbid.
+ * A closed set, and the only non-prose deletion migration performs. Root
+ * `grounds_to` has a live owner — `extractGroundings` and `writeGroundings`
+ * read and write it on every `mex ground` run — and legacy topic labels can be
+ * explicitly resolved to canonical topic ids. Leaving either root key behind
+ * after its values move under `mex:` would leave **two stores of one fact**
+ * with no rule about which wins, which is what D1 exists to forbid.
  * Naming it in the payload keeps the removal visible in the plan, the preview
  * and the audit log, rather than happening as a side effect of adoption.
  */
-export const ABSORBABLE_ROOT_KEYS = ["grounds_to"] as const;
+export const ABSORBABLE_ROOT_KEYS = ["grounds_to", "topics"] as const;
 
 export type AbsorbableRootKey = (typeof ABSORBABLE_ROOT_KEYS)[number];
 
@@ -316,14 +318,14 @@ const scaffoldPathValidator: Validator<string> = (value, context) => {
   if (typeof value !== "string" || value.trim() === "") {
     return reject(context, "INVALID_OPERATION_PAYLOAD", "Expected a scaffold-relative file path.");
   }
-  const path = value.replace(/\\/g, "/");
-  if (path.startsWith("/") || /^[a-zA-Z]:/.test(path)) {
-    return reject(context, "INVALID_OPERATION_PAYLOAD", `File path must be scaffold-relative, got "${value}".`);
+  if (!isCanonicalRepoPath(value)) {
+    return reject(
+      context,
+      "INVALID_OPERATION_PAYLOAD",
+      `File path must be a normalized scaffold-relative POSIX path, got "${value}".`,
+    );
   }
-  if (path.split("/").includes("..")) {
-    return reject(context, "INVALID_OPERATION_PAYLOAD", `File path must not escape the scaffold root, got "${value}".`);
-  }
-  return succeed(path);
+  return succeed(value);
 };
 
 const adoptTargetValidator: Validator<AdoptTarget> = (value, context) => {

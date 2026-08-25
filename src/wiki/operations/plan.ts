@@ -64,7 +64,7 @@ import {
 import { diagnostic, hasBlockingDiagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import { rootContext } from "../model/validate.js";
 import { generateEntityId, type EntityId } from "../model/ids.js";
-import { entityContentHash, fileContentHash } from "../model/hash.js";
+import { entityContentHash, exactFileContentHash } from "../model/hash.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 import { applyEdits, WriteScopeError, type PatchEdit } from "../markdown/patch.js";
 import type { LabeledRange } from "../markdown/ranges.js";
@@ -73,6 +73,7 @@ import type { GroundingGraph } from "../grounding/adapter.js";
 import { checkContainment, isReadOnlyPath, readOnlyDiagnostic } from "./paths.js";
 import { locateEntity, locateFile, parseCached, type LocateOptions } from "./locate.js";
 import { buildOperationEdits, type OperationContext, type OperationEdits } from "./operations.js";
+import { auditRecord, operationLogPath, readOperationLogExact } from "./audit.js";
 
 /** One file's worth of a plan: the exact bytes, and the ranges they may occupy. */
 export interface PlannedFileEdit {
@@ -109,6 +110,16 @@ export interface RevisionChange {
   after: number;
 }
 
+/** Exact append that completes the reviewed operation ledger change. */
+export interface PlannedAuditAppend {
+  /** Scaffold-relative path. The application adapter adds the `.mex/` prefix. */
+  path: "events/operations.jsonl";
+  absolutePath: string;
+  baseText: string;
+  baseFileHash: string | null;
+  proposedText: string;
+}
+
 export interface WikiPatchPlan {
   opId: string;
   type: WikiOperationType;
@@ -131,6 +142,8 @@ export interface WikiPatchPlan {
   preconditions: EntityPrecondition[];
   revisions: RevisionChange[];
   diagnostics: WikiDiagnostic[];
+  /** Exact ledger bytes included in the preview revision. */
+  audit: PlannedAuditAppend;
 }
 
 export type PlanResult =
@@ -153,6 +166,16 @@ export interface PlanOptions extends LocateOptions {
    * touching — migration, and nothing else so far.
    */
   unconditional?: boolean;
+  /**
+   * Virtual audit bytes for an in-memory multi-operation planner.
+   *
+   * Ordinary callers leave this absent and the current committed ledger is
+   * read. Migration supplies the result of the preceding virtual operation so
+   * every stored plan is still exact without writing during preview.
+   */
+  auditText?: string;
+  /** Whether a virtual empty audit text represents an existing empty file. */
+  auditExists?: boolean;
 }
 
 /**
@@ -219,6 +242,19 @@ export function planOperation(envelope: unknown, options: PlanOptions): PlanResu
   if (!validated.ok) return fail(validated.diagnostics);
   const operation: WikiOperation = validated.value;
   const carried = validated.diagnostics;
+
+  // File-bearing operations must establish containment before attempting to
+  // read an existing target. Otherwise an escaping symlink degrades to a
+  // generic unreadable-file error and, more importantly, the semantic builder
+  // reaches the read boundary before the path authority boundary.
+  const declaredFile = operation.payload && typeof operation.payload === "object"
+    && "file" in operation.payload && typeof operation.payload.file === "string"
+      ? operation.payload.file
+      : undefined;
+  if (declaredFile !== undefined) {
+    const containment = checkContainment(scaffoldRoot, declaredFile);
+    if (containment.diagnostic !== null) return fail([...carried, containment.diagnostic]);
+  }
 
   // -- step 2: resolve the subject and its file -----------------------------
   const located = operation.entityId === undefined ? null : locateEntity(operation.entityId, options);
@@ -292,7 +328,7 @@ export function planOperation(envelope: unknown, options: PlanOptions): PlanResu
         path: file.path,
         absolutePath: file.absolutePath,
         baseText: file.baseText,
-        baseFileHash: file.existed ? fileContentHash(file.baseText) : "",
+        baseFileHash: file.existed ? exactFileContentHash(file.baseText) : "",
         existed: file.existed,
         declared: patched.declared,
         edits: [...file.edits].sort((left, right) => left.start - right.start),
@@ -303,7 +339,7 @@ export function planOperation(envelope: unknown, options: PlanOptions): PlanResu
     return fail([...diagnostics, writeScopeDiagnostic(error, located?.path)]);
   }
 
-  const plan: WikiPatchPlan = {
+  const core = {
     opId: operation.opId,
     type: operation.type,
     actor: operation.actor,
@@ -317,11 +353,46 @@ export function planOperation(envelope: unknown, options: PlanOptions): PlanResu
     revisions: built.revisions,
     diagnostics,
   };
+  const audit = plannedAuditAppend(core, scaffoldRoot, options.auditText, options.auditExists);
+  const plan: WikiPatchPlan = { ...core, audit };
 
   const verified = verifyPlan(plan, options);
   if (verified.length > 0) return fail([...diagnostics, ...verified]);
 
   return { ok: true, plan, diagnostics };
+}
+
+type AuditPlan = Parameters<typeof auditRecord>[0];
+
+/**
+ * Bind the audit append to the same exact-byte plan as the Markdown edits.
+ *
+ * The log remains append-only at apply time. Holding its complete proposed
+ * bytes here is what lets a consumer preview the real canonical change and
+ * what makes a concurrent append a revision conflict rather than interleaved
+ * JSONL.
+ */
+function plannedAuditAppend(
+  plan: AuditPlan,
+  scaffoldRoot: string,
+  virtualText: string | undefined,
+  virtualExists: boolean | undefined,
+): PlannedAuditAppend {
+  const absolutePath = operationLogPath(scaffoldRoot);
+  const exact = virtualText === undefined
+    ? readOperationLogExact(scaffoldRoot)
+    : { exists: virtualExists ?? virtualText.length > 0, text: virtualText };
+  const existed = exact.exists;
+  const baseText = exact.text;
+  const intent = `${JSON.stringify(auditRecord(plan, "intent"))}\n`;
+  const complete = `${JSON.stringify(auditRecord(plan, "complete"))}\n`;
+  return {
+    path: "events/operations.jsonl",
+    absolutePath,
+    baseText,
+    baseFileHash: existed ? exactFileContentHash(baseText) : null,
+    proposedText: `${baseText}${intent}${complete}`,
+  };
 }
 
 /**

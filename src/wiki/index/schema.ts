@@ -29,7 +29,7 @@
  * `openWikiIndex`, never a throw from inside an open and never a silent
  * rebuild on a read path.
  */
-export const WIKI_SCHEMA_VERSION = 2;
+export const WIKI_SCHEMA_VERSION = 3;
 
 /** Every table the schema declares, for the packaging and dump tests. */
 export const WIKI_TABLES = [
@@ -54,6 +54,7 @@ export const WIKI_META_KEYS = {
   scaffoldRoot: "scaffold_root",
   fileCount: "file_count",
   entityCount: "entity_count",
+  indexedRevision: "indexed_revision",
 } as const;
 
 export const WIKI_SCHEMA_SQL = `
@@ -206,6 +207,10 @@ CREATE TABLE wiki_groundings (
   state         TEXT,
   resolved_node TEXT,
   health        TEXT,
+  -- Canonical JSON of the complete derived resolution. The scalar columns
+  -- remain queryable; this preserves candidates/reasons and drift evidence for
+  -- the application projection without inventing them on reads.
+  resolution    TEXT,
   PRIMARY KEY (entity_key, ordinal)
 );
 

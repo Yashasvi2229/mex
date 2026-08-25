@@ -11,14 +11,13 @@
  * (finding 29.9), and a migration that walked the tree itself would disagree
  * with the index about what the scaffold contains.
  */
-import { readFileSync } from "node:fs";
-
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import type { RawHeading } from "../markdown/parse.js";
 import type { ParsedFile } from "../markdown/contract.js";
 import { discoverMarkdownFiles } from "../index/discover.js";
 import { parseCached, parseDocumentCached, type ParseCache } from "../operations/locate.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
+import { readContainedSource } from "../index/source-read.js";
 
 /** One scaffold file, read and parsed. */
 export interface InventoryFile {
@@ -73,7 +72,6 @@ function message(error: unknown): string {
  */
 export function inventoryScaffold(options: InventoryOptions): ScaffoldInventory {
   const root = options.scaffoldRoot;
-  const read = options.readFile ?? ((absolutePath: string) => readFileSync(absolutePath, "utf-8"));
   const discovered = discoverMarkdownFiles(
     options.exclude === undefined ? { root } : { root, exclude: options.exclude },
   );
@@ -85,7 +83,11 @@ export function inventoryScaffold(options: InventoryOptions): ScaffoldInventory 
     const absolutePath = entry.absolutePath;
     let text: string;
     try {
-      text = read(absolutePath);
+      text = readContainedSource(
+        root,
+        absolutePath,
+        options.readFile === undefined ? {} : { readFile: options.readFile },
+      );
     } catch (error) {
       diagnostics.push(
         diagnostic("WIKI_PARSE_ERROR", `Could not read ${entry.path}: ${message(error)}`, { file: entry.path }),

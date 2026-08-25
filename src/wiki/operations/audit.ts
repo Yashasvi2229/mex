@@ -39,7 +39,23 @@
  * fabricate an actor for them.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
+import { randomBytes } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import type { WikiActor } from "../model/operation.js";
@@ -97,8 +113,90 @@ export function assertOperationLogPath(scaffoldRoot: string, path: string): void
   if (target !== operationLogPath(root)) throw new OperationLogPathError(target);
 }
 
+interface OperationLogBinding {
+  root: string;
+  realRoot: string;
+  rootDev: number;
+  rootIno: number;
+  directory: string;
+  realDirectory: string;
+  directoryDev: number;
+  directoryIno: number;
+}
+
+export interface AppendAuditOptions {
+  /** Deterministic adversarial seam; production callers leave it absent. */
+  beforeOpen?: () => void;
+  /** Deterministic ordinary-failure seam after exact bytes land, before fsync. */
+  afterWrite?: () => void;
+  /** Exact ledger bytes the caller reviewed immediately before this append. */
+  expectedText?: string;
+  /** Distinguish a reviewed absent ledger from an existing zero-byte ledger. */
+  expectedExists?: boolean;
+}
+
+function writeExact(fd: number, bytes: Buffer, path: string): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset);
+    if (written <= 0) throw new OperationLogPathError(path);
+    offset += written;
+  }
+}
+
+function assertFdText(fd: number, expectedText: string, path: string): void {
+  const expected = Buffer.from(expectedText, "utf8");
+  const before = fstatSync(fd, { bigint: true });
+  if (!before.isFile() || before.size !== BigInt(expected.length)) throw new OperationLogPathError(path);
+  const actual = Buffer.alloc(expected.length);
+  let offset = 0;
+  while (offset < actual.length) {
+    const read = readSync(fd, actual, offset, actual.length - offset, offset);
+    if (read <= 0) throw new OperationLogPathError(path);
+    offset += read;
+  }
+  if (!actual.equals(expected)) throw new OperationLogPathError(path);
+  const after = fstatSync(fd, { bigint: true });
+  if (
+    after.dev !== before.dev
+    || after.ino !== before.ino
+    || after.size !== before.size
+    || after.mtimeNs !== before.mtimeNs
+    || after.ctimeNs !== before.ctimeNs
+  ) throw new OperationLogPathError(path);
+}
+
+function readFdText(fd: number, path: string): string {
+  const stats = fstatSync(fd);
+  if (!stats.isFile()) throw new OperationLogPathError(path);
+  const bytes = Buffer.alloc(stats.size);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const read = readSync(fd, bytes, offset, bytes.length - offset, offset);
+    if (read <= 0) throw new OperationLogPathError(path);
+    offset += read;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new OperationLogPathError(path);
+  }
+}
+
+function fsyncDirectory(path: string, errorPath: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0));
+    fsyncSync(fd);
+  } catch {
+    throw new OperationLogPathError(errorPath);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 /** Build the record for one phase of a plan. Field by field, deliberately. */
-export function auditRecord(plan: WikiPatchPlan, phase: AuditPhase): AuditEntry {
+export function auditRecord(plan: Omit<WikiPatchPlan, "audit">, phase: AuditPhase): AuditEntry {
   const entry: AuditEntry = {
     v: 1,
     phase,
@@ -118,17 +216,359 @@ export function auditRecord(plan: WikiPatchPlan, phase: AuditPhase): AuditEntry 
 }
 
 /** Append one line. Creates `events/` if it is not there yet. */
-export function appendAudit(scaffoldRoot: string, entry: AuditEntry): void {
+export function appendAudit(
+  scaffoldRoot: string,
+  entry: AuditEntry,
+  options: AppendAuditOptions = {},
+): void {
   const path = operationLogPath(scaffoldRoot);
   assertOperationLogPath(scaffoldRoot, path);
-  mkdirSync(dirname(path), { recursive: true });
-  assertOperationLogPath(scaffoldRoot, path);
-  appendFileSync(path, `${JSON.stringify(entry)}\n`, "utf-8");
+  const binding = bindOperationLog(scaffoldRoot, path);
+  options.beforeOpen?.();
+  assertOperationLogBinding(binding, path);
+
+  let fd: number | undefined;
+  try {
+    const flags = constants.O_APPEND
+      | constants.O_RDWR
+      | (options.expectedExists === true ? 0 : constants.O_CREAT)
+      | (options.expectedExists === false ? constants.O_EXCL : 0)
+      | (constants.O_NOFOLLOW ?? 0);
+    fd = openSync(path, flags, 0o600);
+    const opened = fstatSync(fd, { bigint: true });
+    if (!opened.isFile()) throw new OperationLogPathError(path);
+    assertOperationLogBinding(binding, path);
+    const current = lstatSync(path);
+    if (
+      current.isSymbolicLink()
+      || Number(current.dev) !== Number(opened.dev)
+      || Number(current.ino) !== Number(opened.ino)
+    ) throw new OperationLogPathError(path);
+    const expectedBefore = options.expectedText ?? readFdText(fd, path);
+    assertFdText(fd, expectedBefore, path);
+    const line = `${JSON.stringify(entry)}\n`;
+    const bytes = Buffer.from(line, "utf8");
+    writeExact(fd, bytes, path);
+    options.afterWrite?.();
+    assertFdText(fd, `${expectedBefore}${line}`, path);
+    fsyncSync(fd);
+    assertFdText(fd, `${expectedBefore}${line}`, path);
+    fsyncDirectory(binding.directory, path);
+  } catch (error) {
+    if (error instanceof OperationLogPathError) throw error;
+    throw new OperationLogPathError(path);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function bindOperationLog(
+  scaffoldRoot: string,
+  path: string,
+  createDirectory = true,
+): OperationLogBinding {
+  const root = resolve(scaffoldRoot);
+  const rootLexical = lstatSync(root);
+  if (!rootLexical.isDirectory() || rootLexical.isSymbolicLink()) throw new OperationLogPathError(path);
+  const realRoot = realpathSync(root);
+  const rootStats = lstatSync(realRoot);
+  const directory = dirname(path);
+  assertRootIdentity(root, realRoot, rootStats.dev, rootStats.ino, path);
+  if (!existsSync(directory)) {
+    if (!createDirectory) throw new OperationLogPathError(path);
+    mkdirSync(directory, { recursive: false, mode: 0o700 });
+    // Persist the new `events` directory entry before an operation can rely on
+    // its ledger for crash recovery.
+    fsyncDirectory(root, path);
+  }
+  const directoryLexical = lstatSync(directory);
+  if (!directoryLexical.isDirectory() || directoryLexical.isSymbolicLink()) throw new OperationLogPathError(path);
+  const realDirectory = realpathSync(directory);
+  if (!insideRoot(realRoot, realDirectory)) throw new OperationLogPathError(path);
+  const directoryStats = lstatSync(realDirectory);
+  assertNoFollowOperationLogLeaf(path);
+  return {
+    root,
+    realRoot,
+    rootDev: Number(rootStats.dev),
+    rootIno: Number(rootStats.ino),
+    directory,
+    realDirectory,
+    directoryDev: Number(directoryStats.dev),
+    directoryIno: Number(directoryStats.ino),
+  };
+}
+
+function assertOperationLogBinding(binding: OperationLogBinding, path: string): void {
+  assertOperationLogPath(binding.root, path);
+  assertRootIdentity(binding.root, binding.realRoot, binding.rootDev, binding.rootIno, path);
+  let realDirectory: string;
+  let directoryStats;
+  try {
+    const lexical = lstatSync(binding.directory);
+    if (!lexical.isDirectory() || lexical.isSymbolicLink()) throw new OperationLogPathError(path);
+    realDirectory = realpathSync(binding.directory);
+    directoryStats = lstatSync(realDirectory);
+  } catch {
+    throw new OperationLogPathError(path);
+  }
+  if (
+    realDirectory !== binding.realDirectory
+    || Number(directoryStats.dev) !== binding.directoryDev
+    || Number(directoryStats.ino) !== binding.directoryIno
+  ) throw new OperationLogPathError(path);
+  assertNoFollowOperationLogLeaf(path);
+}
+
+function assertRootIdentity(
+  root: string,
+  realRoot: string,
+  dev: number | bigint,
+  ino: number | bigint,
+  path: string,
+): void {
+  try {
+    const lexical = lstatSync(root);
+    const currentReal = realpathSync(root);
+    const current = lstatSync(currentReal);
+    if (
+      !lexical.isDirectory()
+      || lexical.isSymbolicLink()
+      || currentReal !== realRoot
+      || Number(current.dev) !== Number(dev)
+      || Number(current.ino) !== Number(ino)
+    ) throw new OperationLogPathError(path);
+  } catch (error) {
+    if (error instanceof OperationLogPathError) throw error;
+    throw new OperationLogPathError(path);
+  }
+}
+
+function assertNoFollowOperationLogLeaf(path: string): void {
+  try {
+    const stats = lstatSync(path);
+    if (!stats.isFile() || stats.isSymbolicLink()) throw new OperationLogPathError(path);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+    if (code !== "ENOENT") throw error;
+  }
 }
 
 export interface AuditLog {
   entries: AuditEntry[];
   diagnostics: WikiDiagnostic[];
+}
+
+export interface ExactOperationLog {
+  exists: boolean;
+  text: string;
+}
+
+/**
+ * Restore an exact ledger snapshot after an ordinary, catchable writer error.
+ *
+ * This is intentionally not used by the crash seam: an intent without a
+ * completion is the durable resume oracle.  Rollback callers must name the
+ * exact bytes they believe are current so an unrelated/manual ledger edit is
+ * never overwritten.
+ */
+export function restoreOperationLogExact(
+  scaffoldRoot: string,
+  expectedCurrentText: string,
+  original: ExactOperationLog,
+  options: { beforeRename?: (tempPath: string) => void } = {},
+): void {
+  const path = operationLogPath(scaffoldRoot);
+  const current = readOperationLogExact(scaffoldRoot);
+  if (current.text !== expectedCurrentText) throw new OperationLogPathError(path);
+  const binding = bindOperationLog(scaffoldRoot, path, true);
+  assertOperationLogBinding(binding, path);
+
+  if (!original.exists) {
+    if (!current.exists) return;
+    let fd: number | undefined;
+    try {
+      fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      const opened = fstatSync(fd);
+      const lexical = lstatSync(path);
+      if (
+        !opened.isFile()
+        || lexical.isSymbolicLink()
+        || Number(opened.dev) !== Number(lexical.dev)
+        || Number(opened.ino) !== Number(lexical.ino)
+      ) throw new OperationLogPathError(path);
+      assertOperationLogBinding(binding, path);
+      assertFdText(fd, expectedCurrentText, path);
+      rmSync(path);
+      fsyncDirectory(binding.directory, path);
+    } catch (error) {
+      if (error instanceof OperationLogPathError) throw error;
+      throw new OperationLogPathError(path);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    return;
+  }
+
+  const temp = `${path}.rollback-${randomBytes(6).toString("hex")}`;
+  let fd: number | undefined;
+  let created = false;
+  let tempBinding: LedgerTempBinding | undefined;
+  const originalBytes = Buffer.from(original.text, "utf8");
+  try {
+    assertOperationLogBinding(binding, path);
+    fd = openSync(
+      temp,
+      constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | (constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    created = true;
+    const opened = fstatSync(fd, { bigint: true });
+    const lexical = lstatSync(temp);
+    if (
+      !opened.isFile()
+      || lexical.isSymbolicLink()
+      || Number(opened.dev) !== Number(lexical.dev)
+      || Number(opened.ino) !== Number(lexical.ino)
+    ) throw new OperationLogPathError(path);
+    writeExact(fd, originalBytes, path);
+    fsyncSync(fd);
+    tempBinding = bindLedgerTemp(temp, fd, original.text);
+    closeSync(fd);
+    fd = undefined;
+    assertOperationLogBinding(binding, path);
+    if (readOperationLogExact(scaffoldRoot).text !== expectedCurrentText) throw new OperationLogPathError(path);
+    options.beforeRename?.(temp);
+    fd = openSync(temp, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    if (tempBinding === undefined) throw new OperationLogPathError(path);
+    assertLedgerTemp(temp, fd, tempBinding, original.text);
+    if (readOperationLogExact(scaffoldRoot).text !== expectedCurrentText) throw new OperationLogPathError(path);
+    renameSync(temp, path);
+    assertLedgerTemp(path, fd, tempBinding, original.text, true);
+    closeSync(fd);
+    fd = undefined;
+    created = false;
+    fsyncDirectory(binding.directory, path);
+  } catch (error) {
+    if (error instanceof OperationLogPathError) throw error;
+    throw new OperationLogPathError(path);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    if (created) {
+      try {
+        const cleanupFd = openSync(temp, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+        try {
+          if (tempBinding !== undefined) {
+            assertLedgerTemp(temp, cleanupFd, tempBinding, original.text);
+            rmSync(temp, { force: true });
+          }
+        } finally {
+          closeSync(cleanupFd);
+        }
+      } catch {
+        // A path swapped after failure is not ours to remove.
+      }
+    }
+  }
+}
+
+interface LedgerTempBinding {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}
+
+function bindLedgerTemp(path: string, fd: number, text: string): LedgerTempBinding {
+  assertFdText(fd, text, path);
+  const stats = fstatSync(fd, { bigint: true });
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mtimeNs: stats.mtimeNs,
+    ctimeNs: stats.ctimeNs,
+  };
+}
+
+function assertLedgerTemp(
+  path: string,
+  fd: number,
+  expected: LedgerTempBinding,
+  text: string,
+  allowRenameCtime = false,
+): void {
+  const stats = fstatSync(fd, { bigint: true });
+  const lexical = lstatSync(path, { bigint: true });
+  if (
+    !stats.isFile()
+    || lexical.isSymbolicLink()
+    || stats.dev !== expected.dev
+    || stats.ino !== expected.ino
+    || stats.size !== expected.size
+    || stats.mtimeNs !== expected.mtimeNs
+    || (!allowRenameCtime && stats.ctimeNs !== expected.ctimeNs)
+    || lexical.dev !== stats.dev
+    || lexical.ino !== stats.ino
+  ) throw new OperationLogPathError(path);
+  assertFdText(fd, text, path);
+}
+
+/** Descriptor-bound, no-follow exact ledger read shared by every planner. */
+export function readOperationLogExact(scaffoldRoot: string): ExactOperationLog {
+  const path = operationLogPath(scaffoldRoot);
+  const directory = dirname(path);
+  if (!existsSync(path)) {
+    // An existing `events` path still has to be a bound real directory; a
+    // symlink with no ledger must not be captured into a preview as "absent".
+    if (existsSync(directory)) bindOperationLog(scaffoldRoot, path, false);
+    else {
+      const root = resolve(scaffoldRoot);
+      const lexical = lstatSync(root);
+      if (!lexical.isDirectory() || lexical.isSymbolicLink()) throw new OperationLogPathError(path);
+      const realRoot = realpathSync(root);
+      const stats = lstatSync(realRoot);
+      assertRootIdentity(root, realRoot, stats.dev, stats.ino, path);
+    }
+    return { exists: false, text: "" };
+  }
+
+  const binding = bindOperationLog(scaffoldRoot, path, false);
+  assertOperationLogBinding(binding, path);
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const opened = fstatSync(fd, { bigint: true });
+    assertOperationLogBinding(binding, path);
+    const current = lstatSync(path);
+    if (
+      !opened.isFile()
+      || current.isSymbolicLink()
+      || BigInt(current.dev) !== opened.dev
+      || BigInt(current.ino) !== opened.ino
+    ) throw new OperationLogPathError(path);
+    const text = readFileSync(fd, "utf-8");
+    const after = fstatSync(fd, { bigint: true });
+    assertOperationLogBinding(binding, path);
+    const leafAfter = lstatSync(path, { bigint: true });
+    if (
+      leafAfter.isSymbolicLink()
+      || leafAfter.dev !== opened.dev
+      || leafAfter.ino !== opened.ino
+      || after.dev !== opened.dev
+      || after.ino !== opened.ino
+      || after.size !== opened.size
+      || after.mtimeNs !== opened.mtimeNs
+      || after.ctimeNs !== opened.ctimeNs
+    ) throw new OperationLogPathError(path);
+    return { exists: true, text };
+  } catch (error) {
+    if (error instanceof OperationLogPathError) throw error;
+    throw new OperationLogPathError(path);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 /** True when `value` has the shape this reader will act on. */
@@ -156,12 +596,11 @@ function isAuditEntry(value: unknown): value is AuditEntry {
  * idempotency guarantee has a hole in it at that point.
  */
 export function readAuditLog(scaffoldRoot: string): AuditLog {
-  const path = operationLogPath(scaffoldRoot);
-  if (!existsSync(path)) return { entries: [], diagnostics: [] };
-
   let text: string;
   try {
-    text = readFileSync(path, "utf-8");
+    const exact = readOperationLogExact(scaffoldRoot);
+    if (!exact.exists) return { entries: [], diagnostics: [] };
+    text = exact.text;
   } catch (error) {
     return {
       entries: [],

@@ -96,7 +96,12 @@ export function openWikiIndex(path: string, options: OpenIndexOptions = {}): Ope
 
   let db: SqliteDatabase;
   try {
-    db = openSqlite(path, { readOnly: options.readOnly !== false });
+    const readOnly = options.readOnly !== false;
+    // Immutable read-only mode is both a consistency boundary and a
+    // nonmutation guarantee: a normal SQLite read of a WAL database may create
+    // `-wal`/`-shm`, which would make an ordinary query block the next explicit
+    // refresh/rebuild. Writers always opt out explicitly.
+    db = openSqlite(path, { readOnly, ...(readOnly ? { immutable: true } : {}) });
     configureConnection(db);
   } catch (error) {
     return {

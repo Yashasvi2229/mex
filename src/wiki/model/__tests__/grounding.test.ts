@@ -183,6 +183,15 @@ describe("validateGrounding", () => {
     expect(codes(result.diagnostics)).toContain("MALFORMED_GROUNDING");
   });
 
+  it.each(["/etc/passwd", "../outside.ts", "src\\secret.ts", "src/../secret.ts", "src/\0secret.ts"])(
+    "rejects unsafe canonical grounding file path %j",
+    (file) => {
+      const result = validateGrounding({ ...grounding(), file }, rootContext());
+      expect(result.ok).toBe(false);
+      expect(codes(result.diagnostics)).toContain("MALFORMED_GROUNDING");
+    },
+  );
+
   it("rejects a non-object", () => {
     expect(validateGrounding("function:abc", rootContext()).ok).toBe(false);
     expect(validateGrounding(null, rootContext()).ok).toBe(false);

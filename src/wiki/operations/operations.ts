@@ -591,6 +591,9 @@ function addRelation(context: OperationContext, operation: Extract<WikiOperation
   if (relation.target === located.entity.id) {
     return reject("SELF_RELATION", `${located.entity.id} cannot relate to itself.`, located.entity.id);
   }
+  if (context.locateEntity(relation.target) === null) {
+    return reject("INVALID_RELATION_TARGET", `Relation target ${relation.target} does not exist.`, located.entity.id);
+  }
   if (relation.type === "supersedes") {
     const cycle = supersessionCycle(context, located.entity.id, relation.target);
     if (cycle !== null) return cycle;

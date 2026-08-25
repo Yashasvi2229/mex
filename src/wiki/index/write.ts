@@ -21,7 +21,7 @@
  */
 
 import { diagnostic, sortDiagnostics, type WikiDiagnostic } from "../model/diagnostic.js";
-import { fileContentHash } from "../model/hash.js";
+import { exactFileContentHash, indexedCorpusRevision } from "../model/hash.js";
 import type { EntityId } from "../model/ids.js";
 import { validateRelationGraph, type RelationSubject, type WikiRelationRef } from "../model/relation.js";
 import {
@@ -175,7 +175,7 @@ export function writeParsedFile(db: SqliteDatabase, parsed: ParsedFile, options:
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(
     parsed.path,
-    parsed.entities[0]?.entity.location.fileContentHash ?? fileContentHash(parsed.text),
+    parsed.entities[0]?.entity.location.fileContentHash ?? exactFileContentHash(parsed.text),
     diagnostics.length === 0 ? "ok" : "diagnostics",
     parsed.entities.length,
     parsed.text.length,
@@ -454,6 +454,16 @@ export function resolveIndexState(db: SqliteDatabase, meta: ResolveOptions): voi
   put.run(WIKI_META_KEYS.scaffoldRoot, meta.scaffoldRoot);
   put.run(WIKI_META_KEYS.fileCount, String(fileCount));
   put.run(WIKI_META_KEYS.entityCount, String(entityCount));
+  const indexedFiles = db.prepare(
+    `SELECT path, content_hash FROM wiki_files ORDER BY path`,
+  ).all() as { path: string; content_hash: string }[];
+  put.run(
+    WIKI_META_KEYS.indexedRevision,
+    indexedCorpusRevision(indexedFiles.map((file) => ({
+      path: file.path,
+      contentHash: file.content_hash,
+    }))),
+  );
 }
 
 interface GroundingRow {
@@ -487,7 +497,7 @@ interface GroundingRow {
  * loser's grounding is noise pointing at a row no query returns.
  */
 function resolveGroundings(db: SqliteDatabase, resolve?: GroundingResolver): WikiDiagnostic[] {
-  db.prepare(`UPDATE wiki_groundings SET state = NULL, resolved_node = NULL, health = NULL`).run();
+  db.prepare(`UPDATE wiki_groundings SET state = NULL, resolved_node = NULL, health = NULL, resolution = NULL`).run();
   if (resolve === undefined) return [];
 
   const rows = db
@@ -502,14 +512,21 @@ function resolveGroundings(db: SqliteDatabase, resolve?: GroundingResolver): Wik
     .all() as Array<GroundingRow & { shadowed: number }>;
 
   const update = db.prepare(
-    `UPDATE wiki_groundings SET state = ?, resolved_node = ?, health = ? WHERE entity_key = ? AND ordinal = ?`,
+    `UPDATE wiki_groundings SET state = ?, resolved_node = ?, health = ?, resolution = ? WHERE entity_key = ? AND ordinal = ?`,
   );
   const diagnostics: WikiDiagnostic[] = [];
 
   for (const row of rows) {
     const resolution = resolve(groundingOf(row));
     const resolvedNode = "resolvedNode" in resolution ? resolution.resolvedNode : null;
-    update.run(resolution.state, resolvedNode, resolution.health, row.entity_key, row.ordinal);
+    update.run(
+      resolution.state,
+      resolvedNode,
+      resolution.health,
+      canonicalJson(resolution),
+      row.entity_key,
+      row.ordinal,
+    );
     if (row.shadowed === 1) continue;
     const entry = groundingDiagnostic(row, resolution);
     if (entry !== null) diagnostics.push(entry);

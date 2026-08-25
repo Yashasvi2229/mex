@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   CONTENT_HASH_PATTERN,
   entityContentHash,
+  exactFileContentHash,
   fileContentHash,
+  indexedCorpusRevision,
   isContentHash,
   normalizeForHashing,
 } from "../hash.js";
@@ -54,6 +56,26 @@ describe("content hashes", () => {
     // Deliberate: they must be interchangeable in mechanism but never in role.
     // The names are what stop a file hash being used as a precondition.
     expect(entityContentHash("text")).toBe(fileContentHash("text"));
+  });
+
+  it("keeps exact containing-file hashes distinct from semantic hashes", () => {
+    expect(exactFileContentHash("a\r\nb\r\n")).not.toBe(exactFileContentHash("a\nb\n"));
+    expect(exactFileContentHash("\ufeffa\n")).not.toBe(exactFileContentHash("a\n"));
+    expect(entityContentHash("a\r\nb\r\n")).toBe(entityContentHash("a\nb\n"));
+  });
+
+  it("derives corpus revisions from sorted paths and exact hashes", () => {
+    const a = exactFileContentHash("a\n");
+    const b = exactFileContentHash("b\n");
+    expect(indexedCorpusRevision([
+      { path: "z.md", contentHash: b },
+      { path: "a.md", contentHash: a },
+    ])).toBe(indexedCorpusRevision([
+      { path: "a.md", contentHash: a },
+      { path: "z.md", contentHash: b },
+    ]));
+    expect(indexedCorpusRevision([{ path: "a.md", contentHash: a }]))
+      .not.toBe(indexedCorpusRevision([{ path: "a.md", contentHash: b }]));
   });
 });
 

@@ -11,6 +11,7 @@
 export * from "./ulid.js";
 export * from "./ids.js";
 export * from "./hash.js";
+export * from "./path.js";
 export * from "./diagnostic.js";
 export * from "./validate.js";
 export * from "./entity.js";

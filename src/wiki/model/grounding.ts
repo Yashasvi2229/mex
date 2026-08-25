@@ -10,6 +10,7 @@ import {
   type ValidationContext,
   type Validator,
 } from "./validate.js";
+import { isCanonicalRepoPath } from "./path.js";
 
 /**
  * Code grounding — how a knowledge entity points at real code.
@@ -288,6 +289,13 @@ export const validateGrounding: Validator<WikiGrounding> = (value, context) => {
     diagnostics.push(
       contextDiagnostic(context, "MALFORMED_GROUNDING", `"${grounding.fingerprint}" is not a serialized fingerprint (mh:<K>:<hex>).`),
     );
+  }
+  if (grounding.file !== undefined && !isCanonicalRepoPath(grounding.file)) {
+    diagnostics.push(contextDiagnostic(
+      context,
+      "MALFORMED_GROUNDING",
+      `"${grounding.file}" is not a normalized repository-relative POSIX path.`,
+    ));
   }
   if (grounding.verifiedAt !== undefined && Number.isNaN(Date.parse(grounding.verifiedAt))) {
     diagnostics.push(contextDiagnostic(context, "MALFORMED_GROUNDING", `"${grounding.verifiedAt}" is not an ISO 8601 timestamp.`));

@@ -366,7 +366,10 @@ status: promoted
       const scaffoldRoot = join(directory, "scaffold");
       mkdirSync(scaffoldRoot, { recursive: true });
       writeFileSync(join(scaffoldRoot, "notes.md"), "# Prose, and no entity\n", "utf-8");
-      const built = rebuildWikiIndex({ scaffoldRoot, indexPath: join(directory, "wiki.db") });
+      // Repository-bound maintenance only mutates the scaffold's exact index
+      // directory; a fixture outside it would test an authority the production
+      // engine deliberately does not grant.
+      const built = rebuildWikiIndex({ scaffoldRoot, indexPath: join(scaffoldRoot, "wiki.db") });
       const result = getEntity(built.indexPath, generateEntityId());
       return result.ok ? [] : [result.diagnostic];
     }),
@@ -619,7 +622,7 @@ function groundingDiagnostics(resolve: GroundingResolver): readonly WikiDiagnost
       "utf-8",
     );
 
-    const indexPath = join(directory, "wiki.db");
+    const indexPath = join(root, "wiki.db");
     rebuildWikiIndex({ scaffoldRoot: root, indexPath, resolveGrounding: resolve });
 
     const opened = openWikiIndex(indexPath);

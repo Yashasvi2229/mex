@@ -3,13 +3,13 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openSqlite } from "../../../graph/db/sqlite.js";
 import { WIKI_META_KEYS, WIKI_SCHEMA_SQL, WIKI_SCHEMA_VERSION, WIKI_TABLES } from "../schema.js";
 import { DUMP_EXCLUSIONS, DUMP_TABLES, dumpColumnsFor, excludedColumnsFor } from "../dump.js";
 import { createWikiIndex, openWikiIndex } from "../open.js";
-import { assertIndexPath, IndexPathError, removeIndexFiles } from "../dbfile.js";
+import { assertIndexPath, bindIndexDirectory, indexSiblingPaths, IndexPathError } from "../dbfile.js";
 import { sweepPendingIndexes } from "../publish.js";
 import { rebuildWikiIndex } from "../rebuild.js";
 import { refreshWikiIndex } from "../refresh.js";
@@ -159,8 +159,8 @@ describe("the database module's path guard", () => {
     expect(() => assertIndexPath("/x/notes")).toThrow(IndexPathError);
   });
 
-  it("refuses to delete anything that is not a database", () => {
-    expect(() => removeIndexFiles("/x/ROUTER.md")).toThrow(IndexPathError);
+  it("refuses to bind anything that is not a database", () => {
+    expect(() => bindIndexDirectory("/x/ROUTER.md")).toThrow(IndexPathError);
   });
 });
 
@@ -193,13 +193,17 @@ describe("atomic publish", () => {
     rebuildWikiIndex({ scaffoldRoot: scaffold.root, indexPath, now: steppingClock() });
     expect(titles(indexPath)).toEqual(["First"]);
 
-    // Plant a stale WAL beside the old database. Renaming over `wiki.db` alone
-    // would leave it there, and SQLite may then try to recover a write-ahead log
-    // belonging to a database that no longer exists — which is why publish
-    // clears the target's siblings before the rename rather than after.
+    // A live sidecar may belong to an active reader/writer. Publication must
+    // refuse it rather than deleting bytes it cannot prove are stale.
     writeFileSync(`${indexPath}-wal`, "stale write-ahead log", "utf-8");
 
     scaffold.write("a.md", entityFile("mx_01KR2E4K002H3ZYA9G0C4XV531", "Second"));
+    const refused = rebuildWikiIndex({ scaffoldRoot: scaffold.root, indexPath, now: steppingClock() });
+    expect(refused.diagnostics.map((entry) => entry.code)).toContain("WIKI_INDEX_REBUILD_REQUIRED");
+    expect(titles(indexPath)).toEqual(["First"]);
+    expect(readFileSync(`${indexPath}-wal`, "utf8")).toBe("stale write-ahead log");
+
+    for (const sidecar of indexSiblingPaths(indexPath)) rmSync(sidecar, { force: true });
     rebuildWikiIndex({ scaffoldRoot: scaffold.root, indexPath, now: steppingClock() });
     expect(titles(indexPath)).toEqual(["Second"]);
 
@@ -223,7 +227,10 @@ describe("atomic publish", () => {
     expect(result.sweptTempFiles).toEqual(["wiki.db.tmp-deadbeef"]);
     expect(existsSync(orphan)).toBe(false);
     // And the sweep is scoped by name: it never touches another database.
-    expect(sweepPendingIndexes(join(scaffold.root, "other.db"))).toEqual([]);
+    expect(sweepPendingIndexes(
+      join(scaffold.root, "other.db"),
+      bindIndexDirectory(join(scaffold.root, "other.db"), scaffold.root),
+    )).toEqual([]);
   });
 });
 

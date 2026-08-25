@@ -60,6 +60,15 @@ describe("source vocabulary", () => {
     expect(check({ type: "tweet", ref: "x" })).toMatchObject({ ok: false });
     expect(check({ type: "tweet", ref: "x" }).codes).toContain("MALFORMED_SOURCE");
   });
+
+  it.each(["/etc/passwd", "../outside.md", "src\\secret.ts", "src/../secret.ts", "src/\0secret.ts"])(
+    "rejects unsafe canonical file source path %j",
+    (ref) => {
+      const result = check({ type: "file", ref });
+      expect(result.ok).toBe(false);
+      expect(result.codes).toContain("MALFORMED_SOURCE");
+    },
+  );
 });
 
 describe("commit sources", () => {

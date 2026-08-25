@@ -46,22 +46,48 @@
  * behind the user's back in the middle of an apply.
  */
 
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
+import { dirname, relative, resolve, sep } from "node:path";
 import { randomBytes } from "node:crypto";
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import type { EntityId } from "../model/ids.js";
-import { entityContentHash, fileContentHash } from "../model/hash.js";
+import { entityContentHash, exactFileContentHash } from "../model/hash.js";
 import { entityTextOf } from "../markdown/codec.js";
 import type { GroundingResolver } from "../index/write.js";
 import { refreshWikiIndex } from "../index/refresh.js";
 import { defaultIndexPath } from "../index/rebuild.js";
-import { assertWritablePath, checkContainment, isReadOnlyPath, readOnlyDiagnostic } from "./paths.js";
+import { readContainedSource } from "../index/source-read.js";
+import { acquireWikiMaintenanceLease, type WikiMaintenanceLease } from "../index/dbfile.js";
+import { assertWritablePath, checkContainment, isReadOnlyPath, readOnlyDiagnostic, WritePathError } from "./paths.js";
 import { locateEntity } from "./locate.js";
 import { applyEdits } from "../markdown/patch.js";
-import { payloadHashOf, planOperation, writeScopeDiagnostic, type PlanOptions, type PlannedFileEdit, type RevisionChange, type WikiPatchPlan } from "./plan.js";
+import { payloadHashOf, planOperation, verifyPlan, writeScopeDiagnostic, type PlanOptions, type PlannedFileEdit, type RevisionChange, type WikiPatchPlan } from "./plan.js";
 import { previewHashOf, previewPlan, type WikiPreview } from "./preview.js";
-import { appendAudit, auditRecord, readAuditLog, recordFor, type AuditEntry } from "./audit.js";
+import {
+  appendAudit,
+  auditRecord,
+  OperationLogPathError,
+  readAuditLog,
+  readOperationLogExact,
+  recordFor,
+  restoreOperationLogExact,
+  type AuditEntry,
+} from "./audit.js";
 
 export interface ApplyOptions extends PlanOptions {
   /** Where `wiki.db` lives. Absent is normal, not an error. */
@@ -81,6 +107,44 @@ export interface ApplyOptions extends PlanOptions {
    * than against a mock.
    */
   onFileWritten?: (path: string) => void;
+  /** Deterministic adversarial seam before the bound parent is revalidated. */
+  beforeFileOpen?: (path: string) => void;
+  /** Deterministic adversarial seam before the final same-directory rename. */
+  beforeFileRename?: (path: string) => void;
+  /** Deterministic ordinary-failure seam after rename but before durability. */
+  afterFileRename?: (path: string) => void;
+  /** Deterministic ordinary-failure seam used to prove ledger rollback. */
+  beforeAuditAppend?: (phase: "intent" | "complete", opId: string) => void;
+  /** Deterministic failure after ledger bytes land but before their fsync. */
+  afterAuditWrite?: (phase: "intent" | "complete", opId: string) => void;
+  /** Internal final corpus/revision assertion, still inside rollback scope. */
+  beforeSequenceCommit?: () => void;
+  /** Existing migration/operation lease; internal callers use it to avoid re-entry. */
+  maintenanceLease?: WikiMaintenanceLease;
+}
+
+/** A test-only process-death seam. Ordinary exceptions are rolled back. */
+export class SimulatedWikiCrashError extends Error {
+  readonly cause: unknown;
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "SimulatedWikiCrashError";
+    this.cause = cause;
+  }
+}
+
+export class WikiWriteRecoveryError extends Error {
+  readonly cause: unknown;
+  readonly recoveryPaths: readonly string[];
+  constructor(cause: unknown, recoveryPaths: readonly string[] = []) {
+    super(
+      "The Wiki write failed and its exact prior bytes could not be fully restored; manual recovery is required."
+      + (recoveryPaths.length === 0 ? "" : ` Recovery artifacts: ${recoveryPaths.join(", ")}.`),
+    );
+    this.name = "WikiWriteRecoveryError";
+    this.cause = cause;
+    this.recoveryPaths = recoveryPaths;
+  }
 }
 
 export interface ApplyResult {
@@ -94,6 +158,11 @@ export interface ApplyResult {
   replayed: boolean;
   preview: WikiPreview | null;
   diagnostics: WikiDiagnostic[];
+}
+
+export interface ApplyPlannedOptions extends ApplyOptions {
+  /** Must be the revision returned with this exact opaque plan. */
+  expectedPreviewHash: string;
 }
 
 function failure(opId: string, diagnostics: WikiDiagnostic[]): ApplyResult {
@@ -133,6 +202,18 @@ function typeOf(envelope: unknown): string {
  * fiction, since one line would then describe two different changes.
  */
 export function applyOperation(envelope: unknown, options: ApplyOptions): ApplyResult {
+  const scaffoldRoot = resolve(options.scaffoldRoot);
+  const indexPath = options.indexPath ?? defaultIndexPath(scaffoldRoot);
+  const ownedLease = options.maintenanceLease === undefined;
+  const lease = options.maintenanceLease ?? acquireWikiMaintenanceLease(indexPath, "operation", scaffoldRoot);
+  try {
+    return applyOperationHeld(envelope, { ...options, maintenanceLease: lease });
+  } finally {
+    if (ownedLease) lease.release();
+  }
+}
+
+function applyOperationHeld(envelope: unknown, options: ApplyOptions): ApplyResult {
   const scaffoldRoot = resolve(options.scaffoldRoot);
   const opId = opIdOf(envelope);
   const log = readAuditLog(scaffoldRoot);
@@ -190,7 +271,12 @@ export function applyOperation(envelope: unknown, options: ApplyOptions): ApplyR
       // The interrupted work had in fact landed; the process died before it
       // could say so. Record the completion rather than reporting a failure
       // for an operation that succeeded.
-      appendAudit(scaffoldRoot, { ...resuming, phase: "complete", ...(options.now ? { timestamp: options.now() } : {}) });
+      const exactAudit = readOperationLogExact(scaffoldRoot);
+      appendAudit(
+        scaffoldRoot,
+        { ...resuming, phase: "complete", ...(options.now ? { timestamp: options.now() } : {}) },
+        { expectedText: exactAudit.text, expectedExists: exactAudit.exists },
+      );
       return {
         ok: true,
         opId,
@@ -219,36 +305,471 @@ export function applyOperation(envelope: unknown, options: ApplyOptions): ApplyR
 
   const stale = revalidate(plan, options);
   if (stale.length > 0) return failure(opId, [...carried, ...stale]);
+  const revision = previewHashOf(plan);
+  const applied = applyPlannedOperationSequence([plan], {
+    ...options,
+    expectedSequenceRevision: revision,
+    sequenceRevision: revision,
+  });
+  return {
+    ok: applied.ok,
+    opId,
+    changedFiles: applied.changedFiles,
+    revisions: applied.ok ? plan.revisions.map((change) => ({ ...change })) : [],
+    createdIds: applied.ok ? [...plan.createdIds] : [],
+    replayed: applied.replayed,
+    preview: applied.ok ? previewPlan(plan) : null,
+    diagnostics: applied.diagnostics,
+  };
+}
 
-  // -- step 10, first half: say what is about to happen ---------------------
-  if (resuming === null) appendAudit(scaffoldRoot, auditRecord(plan, "intent"));
+/**
+ * Apply the exact bytes a caller reviewed, without re-planning or re-minting.
+ *
+ * The compatibility `applyOperation(envelope)` above intentionally retains the
+ * original CLI behaviour. Application adapters use this function: the plan is
+ * the executable value, the preview hash binds every base and proposed byte,
+ * and revalidation happens immediately before the first append/rename.
+ */
+export function applyPlannedOperation(plan: WikiPatchPlan, options: ApplyPlannedOptions): ApplyResult {
+  const computed = previewHashOf(plan);
+  if (options.expectedPreviewHash !== computed) {
+    return failure(plan.opId, [
+      diagnostic("INVALID_OPERATION_ENVELOPE", "The supplied preview revision does not identify this operation plan."),
+    ]);
+  }
+  const result = applyPlannedOperationSequence([plan], {
+    ...options,
+    expectedSequenceRevision: options.expectedPreviewHash,
+    sequenceRevision: computed,
+  });
+  return {
+    ok: result.ok,
+    opId: plan.opId,
+    changedFiles: result.changedFiles,
+    revisions: result.ok ? plan.revisions.map((change) => ({ ...change })) : [],
+    createdIds: result.ok ? [...plan.createdIds] : [],
+    replayed: result.replayed,
+    preview: result.ok ? previewPlan(plan) : null,
+    diagnostics: result.diagnostics,
+  };
+}
 
-  // -- step 8: write, gains before losses -----------------------------------
-  const ordered = [...plan.files].sort((left, right) => gain(right) - gain(left));
-  const changedFiles: string[] = [];
-  for (const file of ordered) {
-    if (file.proposedText === file.baseText && file.existed) continue;
-    writeAtomically(scaffoldRoot, file);
-    changedFiles.push(file.path);
-    options.onFileWritten?.(file.path);
+export interface ApplyPlannedSequenceOptions extends ApplyOptions {
+  /** One digest for the ordered, exact operation-plan sequence. */
+  expectedSequenceRevision: string;
+  /** Recomputed by the batch planner; never accepted from the caller alone. */
+  sequenceRevision: string;
+}
+
+export interface ApplyPlannedSequenceResult {
+  ok: boolean;
+  changedFiles: string[];
+  replayed: boolean;
+  diagnostics: WikiDiagnostic[];
+}
+
+interface SequenceFileBase {
+  path: string;
+  absolutePath: string;
+  existed: boolean;
+  text: string;
+}
+
+/**
+ * Apply an ordered set of already-reviewed plans as one canonical transaction.
+ *
+ * All virtual file/audit links and all current bytes are checked before the
+ * first intent append. Ordinary in-process failures restore the sequence's
+ * exact initial Markdown and ledger bytes. The explicit crash seam is not
+ * caught: it deliberately leaves an intent/prefix for the next invocation to
+ * resume, matching a real process death.
+ */
+export function applyPlannedOperationSequence(
+  plans: readonly WikiPatchPlan[],
+  options: ApplyPlannedSequenceOptions,
+): ApplyPlannedSequenceResult {
+  const scaffoldRoot = resolve(options.scaffoldRoot);
+  if (options.expectedSequenceRevision !== options.sequenceRevision) {
+    return {
+      ok: false,
+      changedFiles: [],
+      replayed: false,
+      diagnostics: [diagnostic("INVALID_OPERATION_ENVELOPE", "The supplied preview revision does not identify this operation batch.")],
+    };
+  }
+  if (plans.length === 0) return { ok: true, changedFiles: [], replayed: true, diagnostics: [] };
+
+  const indexPath = options.indexPath ?? defaultIndexPath(scaffoldRoot);
+  const ownedLease = options.maintenanceLease === undefined;
+  const lease = options.maintenanceLease ?? acquireWikiMaintenanceLease(indexPath, "operation", scaffoldRoot);
+  try {
+    return applyPlannedOperationSequenceHeld(plans, { ...options, scaffoldRoot, maintenanceLease: lease });
+  } finally {
+    if (ownedLease) lease.release();
+  }
+}
+
+function applyPlannedOperationSequenceHeld(
+  plans: readonly WikiPatchPlan[],
+  options: ApplyPlannedSequenceOptions & { maintenanceLease: WikiMaintenanceLease },
+): ApplyPlannedSequenceResult {
+  const scaffoldRoot = resolve(options.scaffoldRoot);
+  const log = readAuditLog(scaffoldRoot);
+  const diagnostics = [...log.diagnostics];
+  const ids = new Set<string>();
+  let completed = 0;
+  let inFlight = false;
+  for (let index = 0; index < plans.length; index += 1) {
+    const plan = plans[index]!;
+    if (ids.has(plan.opId)) {
+      return { ok: false, changedFiles: [], replayed: false, diagnostics: [
+        ...diagnostics,
+        diagnostic("INVALID_OPERATION_ENVELOPE", `Operation ${plan.opId} appears more than once in the reviewed batch.`),
+      ] };
+    }
+    ids.add(plan.opId);
+    const record = recordFor(log, plan.opId);
+    const priorHash = record.complete?.payloadHash ?? record.intent?.payloadHash ?? null;
+    if (priorHash !== null && priorHash !== plan.payloadHash) {
+      return { ok: false, changedFiles: [], replayed: false, diagnostics: [
+        ...diagnostics,
+        diagnostic("INVALID_OPERATION_ENVELOPE", `Operation ${plan.opId} is recorded with a different payload.`),
+      ] };
+    }
+    if (record.complete !== null) {
+      if (inFlight || completed !== index) {
+        return { ok: false, changedFiles: [], replayed: false, diagnostics: [
+          ...diagnostics,
+          diagnostic("CONTENT_HASH_CONFLICT", "Batch operation records are not a valid prefix of the reviewed plan."),
+        ] };
+      }
+      completed += 1;
+    } else if (record.intent !== null) {
+      if (inFlight || completed !== index) {
+        return { ok: false, changedFiles: [], replayed: false, diagnostics: [
+          ...diagnostics,
+          diagnostic("CONTENT_HASH_CONFLICT", "Batch operation intents are not a valid prefix of the reviewed plan."),
+        ] };
+      }
+      inFlight = true;
+    }
   }
 
-  // -- step 10, second half -------------------------------------------------
-  appendAudit(scaffoldRoot, auditRecord(plan, "complete"));
+  const linked = validateSequenceLinks(plans, options);
+  if (linked.length > 0) {
+    return { ok: false, changedFiles: [], replayed: false, diagnostics: [...diagnostics, ...linked] };
+  }
+  const invocationAudit = readOperationLogExact(scaffoldRoot);
+  const current = validateSequenceCurrent(plans, scaffoldRoot, completed, inFlight, invocationAudit.text);
+  if (current.length > 0) {
+    return { ok: false, changedFiles: [], replayed: false, diagnostics: [...diagnostics, ...current] };
+  }
+  if (completed === plans.length) {
+    return { ok: true, changedFiles: [], replayed: true, diagnostics };
+  }
 
-  // -- step 9: the cache, which may fail without undoing anything -----------
-  const diagnostics = [...carried, ...plan.diagnostics, ...refreshIndex(scaffoldRoot, changedFiles, options)];
+  // Roll an ordinary exception back to this invocation's starting point, not
+  // to the beginning of a batch that may have a durable crash-resume prefix.
+  const originalAudit = invocationAudit;
+  const originals = sequenceInvocationFiles(plans, scaffoldRoot);
+  const expectedFiles = new Map(originals.map((file) => [file.path, file.existed ? file.text : null]));
+  const changed = new Set<string>();
+  let expectedAudit = invocationAudit.text;
+  let expectedAuditExists = invocationAudit.exists;
+  let pendingAudit: string | null = null;
+  try {
+    for (let index = completed; index < plans.length; index += 1) {
+      const plan = plans[index]!;
+      const hasDurableIntent = inFlight && index === completed;
+      if (!hasDurableIntent) {
+        options.beforeAuditAppend?.("intent", plan.opId);
+        const entry = auditRecord(plan, "intent");
+        pendingAudit = `${expectedAudit}${JSON.stringify(entry)}\n`;
+        appendAudit(scaffoldRoot, entry, {
+          expectedText: expectedAudit,
+          expectedExists: expectedAuditExists,
+          ...(options.afterAuditWrite === undefined ? {} : {
+            afterWrite: () => options.afterAuditWrite?.("intent", plan.opId),
+          }),
+        });
+        expectedAudit = pendingAudit;
+        expectedAuditExists = true;
+        pendingAudit = null;
+      }
 
-  return {
-    ok: true,
-    opId,
-    changedFiles,
-    revisions: plan.revisions,
-    createdIds: [...plan.createdIds],
-    replayed: false,
-    preview: previewPlan(plan),
-    diagnostics,
-  };
+      for (const file of [...plan.files].sort((left, right) => gain(right) - gain(left))) {
+        if (!fileChanges(file)) continue;
+        const currentText = readCanonicalOrNull(scaffoldRoot, file.absolutePath);
+        if (currentText === file.proposedText) {
+          changed.add(file.path);
+          continue;
+        }
+        try {
+          writeAtomically(scaffoldRoot, file, options);
+        } catch (error) {
+          const afterFailure = readCanonicalOrNull(scaffoldRoot, file.absolutePath);
+          if (afterFailure !== currentText) {
+            // Enrol a post-rename failure in the outer transaction. Exact
+            // proposed bytes can be rolled back; any third-party value will
+            // fail the expected-current check and retain recovery artifacts.
+            changed.add(file.path);
+            expectedFiles.set(file.path, file.proposedText);
+          }
+          throw error;
+        }
+        changed.add(file.path);
+        expectedFiles.set(file.path, file.proposedText);
+        try {
+          options.onFileWritten?.(file.path);
+        } catch (error) {
+          throw new SimulatedWikiCrashError(error);
+        }
+      }
+
+      options.beforeAuditAppend?.("complete", plan.opId);
+      const entry = auditRecord(plan, "complete");
+      pendingAudit = `${expectedAudit}${JSON.stringify(entry)}\n`;
+      appendAudit(scaffoldRoot, entry, {
+        expectedText: expectedAudit,
+        expectedExists: expectedAuditExists,
+        ...(options.afterAuditWrite === undefined ? {} : {
+          afterWrite: () => options.afterAuditWrite?.("complete", plan.opId),
+        }),
+      });
+      expectedAudit = pendingAudit;
+      expectedAuditExists = true;
+      pendingAudit = null;
+    }
+    options.beforeSequenceCommit?.();
+    const finalAudit = readOperationLogExact(scaffoldRoot);
+    if (finalAudit.exists !== expectedAuditExists || finalAudit.text !== expectedAudit) {
+      throw new OperationLogPathError("events/operations.jsonl");
+    }
+    for (const [path, expectedText] of [...expectedFiles.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
+      const absolutePath = resolve(scaffoldRoot, path);
+      if (readCanonicalOrNull(scaffoldRoot, absolutePath) !== expectedText) {
+        throw new WritePathError(absolutePath, "the canonical bytes changed before sequence commit.");
+      }
+    }
+  } catch (error) {
+    if (error instanceof SimulatedWikiCrashError) throw error;
+    const recoveryErrors: unknown[] = [];
+    try {
+      const actualAudit = readOperationLogExact(scaffoldRoot).text;
+      const knownAudit = actualAudit === expectedAudit
+        || (pendingAudit !== null && actualAudit.startsWith(expectedAudit) && pendingAudit.startsWith(actualAudit));
+      if (!knownAudit) throw new OperationLogPathError("events/operations.jsonl");
+      restoreOperationLogExact(scaffoldRoot, actualAudit, originalAudit);
+    } catch (recoveryError) {
+      recoveryErrors.push(recoveryError);
+    }
+    try {
+      restoreSequenceFiles(scaffoldRoot, originals, expectedFiles, changed, options);
+    } catch (recoveryError) {
+      recoveryErrors.push(recoveryError);
+    }
+    if (recoveryErrors.length > 0) {
+      const recoveryPaths = retainSequenceRecoveryArtifacts(scaffoldRoot, originals);
+      throw new WikiWriteRecoveryError({ writeError: error, recoveryErrors }, recoveryPaths);
+    }
+    throw error;
+  }
+
+  diagnostics.push(...plans.flatMap((plan) => plan.diagnostics));
+  diagnostics.push(...refreshIndex(scaffoldRoot, [...changed], options));
+  return { ok: true, changedFiles: [...changed].sort(), replayed: false, diagnostics };
+}
+
+function retainSequenceRecoveryArtifacts(
+  scaffoldRoot: string,
+  originals: readonly SequenceFileBase[],
+): string[] {
+  const retained: string[] = [];
+  for (let index = 0; index < originals.length; index += 1) {
+    const original = originals[index]!;
+    if (!original.existed) continue;
+    const path = `.wiki-recovery-${index}-${randomBytes(5).toString("hex")}.md.recovery-${randomBytes(5).toString("hex")}`;
+    const absolutePath = resolve(scaffoldRoot, path);
+    try {
+      writeAtomically(scaffoldRoot, {
+        path,
+        absolutePath,
+        baseText: "",
+        baseFileHash: "",
+        existed: false,
+        declared: [],
+        edits: [],
+        proposedText: original.text,
+      }, { scaffoldRoot });
+      retained.push(path);
+    } catch {
+      // Report only artifacts whose exact bytes were durably published.
+    }
+  }
+  return retained;
+}
+
+function validateSequenceLinks(plans: readonly WikiPatchPlan[], options: ApplyOptions): WikiDiagnostic[] {
+  const diagnostics: WikiDiagnostic[] = [];
+  const scaffoldRoot = resolve(options.scaffoldRoot);
+  let audit = plans[0]?.audit.baseText ?? "";
+  const files = new Map<string, { text: string; existed: boolean }>();
+  for (const plan of plans) {
+    if (
+      resolve(plan.audit.absolutePath) !== resolve(scaffoldRoot, "events", "operations.jsonl")
+      || plan.audit.path !== "events/operations.jsonl"
+      || (plan.audit.baseFileHash === null
+        ? plan.audit.baseText !== ""
+        : exactFileContentHash(plan.audit.baseText) !== plan.audit.baseFileHash)
+    ) diagnostics.push(diagnostic("INVALID_OPERATION_ENVELOPE", "The operation batch names an invalid reviewed ledger."));
+    if (plan.audit.baseText !== audit) {
+      diagnostics.push(diagnostic("INVALID_OPERATION_ENVELOPE", "The operation batch has a broken ledger overlay."));
+    }
+    const intent = `${JSON.stringify(auditRecord(plan, "intent"))}\n`;
+    const complete = `${JSON.stringify(auditRecord(plan, "complete"))}\n`;
+    if (plan.audit.proposedText !== `${plan.audit.baseText}${intent}${complete}`) {
+      diagnostics.push(diagnostic("INVALID_OPERATION_ENVELOPE", "The operation batch contains an invalid reviewed ledger append."));
+    }
+    audit = plan.audit.proposedText;
+    for (const file of plan.files) {
+      const containment = checkContainment(scaffoldRoot, file.path);
+      if (
+        resolve(file.absolutePath) !== resolve(scaffoldRoot, file.path)
+        || containment.diagnostic !== null
+        || (file.existed && exactFileContentHash(file.baseText) !== file.baseFileHash)
+      ) {
+        diagnostics.push(
+          containment.diagnostic
+          ?? diagnostic("WRITE_SCOPE_VIOLATION", `The operation batch names an invalid target for ${file.path}.`, { file: file.path }),
+        );
+        continue;
+      }
+      const prior = files.get(file.path);
+      if (prior !== undefined && (file.baseText !== prior.text || file.existed !== prior.existed)) {
+        diagnostics.push(diagnostic("INVALID_OPERATION_ENVELOPE", `${file.path} is not chained to the preceding reviewed bytes.`, { file: file.path }));
+      }
+      files.set(file.path, { text: file.proposedText, existed: true });
+    }
+    diagnostics.push(...verifyPlan(plan, options));
+  }
+  return diagnostics;
+}
+
+function validateSequenceCurrent(
+  plans: readonly WikiPatchPlan[],
+  scaffoldRoot: string,
+  completed: number,
+  inFlight: boolean,
+  currentAudit: string,
+): WikiDiagnostic[] {
+  const diagnostics: WikiDiagnostic[] = [];
+  const expected = new Map<string, { text: string; existed: boolean }>();
+  for (const plan of plans) {
+    for (const file of plan.files) if (!expected.has(file.path)) {
+      expected.set(file.path, { text: file.baseText, existed: file.existed });
+    }
+  }
+  for (let index = 0; index < completed; index += 1) {
+    for (const file of plans[index]!.files) expected.set(file.path, { text: file.proposedText, existed: true });
+  }
+  const active = inFlight ? plans[completed] : undefined;
+  for (const [path, wanted] of expected) {
+    const absolute = resolve(scaffoldRoot, path);
+    const actual = readCanonicalOrNull(scaffoldRoot, absolute);
+    const activeProposal = active?.files.find((file) => file.path === path)?.proposedText;
+    if (actual !== (wanted.existed ? wanted.text : null) && actual !== activeProposal) {
+      diagnostics.push(diagnostic("CONTENT_HASH_CONFLICT", `${path} changed since this batch was previewed.`, { file: path }));
+    }
+  }
+  let expectedAudit = completed === plans.length
+    ? plans.at(-1)!.audit.proposedText
+    : plans[completed]!.audit.baseText;
+  const resumedBase = expectedAudit;
+  if (inFlight) expectedAudit += `${JSON.stringify(auditRecord(plans[completed]!, "intent"))}\n`;
+  if (currentAudit !== expectedAudit && !(inFlight && currentAudit === resumedBase)) {
+    diagnostics.push(diagnostic("CONTENT_HASH_CONFLICT", "The operation ledger changed since this batch was previewed."));
+  }
+  return diagnostics;
+}
+
+function sequenceInvocationFiles(
+  plans: readonly WikiPatchPlan[],
+  scaffoldRoot: string,
+): SequenceFileBase[] {
+  const files = new Map<string, SequenceFileBase>();
+  for (const plan of plans) for (const file of plan.files) if (!files.has(file.path)) {
+    const current = readCanonicalOrNull(scaffoldRoot, file.absolutePath);
+    files.set(file.path, {
+      path: file.path,
+      absolutePath: file.absolutePath,
+      existed: current !== null,
+      text: current ?? "",
+    });
+  }
+  return [...files.values()];
+}
+
+function restoreSequenceFiles(
+  scaffoldRoot: string,
+  originals: readonly SequenceFileBase[],
+  expectedFiles: ReadonlyMap<string, string | null>,
+  touched: ReadonlySet<string>,
+  options: ApplyOptions,
+): void {
+  for (const original of [...originals].reverse()) {
+    if (!touched.has(original.path)) continue;
+    const current = readCanonicalOrNull(scaffoldRoot, original.absolutePath);
+    if (current !== expectedFiles.get(original.path)) {
+      throw new WritePathError(original.absolutePath, "the file changed after this operation wrote it; automatic rollback refused.");
+    }
+    if (original.existed) {
+      if (current === original.text) continue;
+      if (current === null) throw new WritePathError(original.absolutePath, "the file vanished before rollback.");
+      writeAtomically(scaffoldRoot, {
+        path: original.path,
+        absolutePath: original.absolutePath,
+        baseText: current,
+        baseFileHash: exactFileContentHash(current),
+        existed: true,
+        declared: [],
+        edits: [],
+        proposedText: original.text,
+      }, {
+        ...options,
+        beforeFileOpen: undefined,
+        beforeFileRename: undefined,
+        afterFileRename: undefined,
+        onFileWritten: undefined,
+      });
+    } else if (current !== null) {
+      removeExactFile(scaffoldRoot, original.absolutePath, current);
+    }
+  }
+}
+
+function removeExactFile(scaffoldRoot: string, absolutePath: string, expected: string): void {
+  const target = resolve(absolutePath);
+  const binding = bindWriteDirectory(scaffoldRoot, target);
+  assertLeafMatches(target, expected);
+  let fd: number | undefined;
+  try {
+    fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    if (!pathMatchesFd(target, fd)) throw new WritePathError(target, "the rollback target changed.");
+    assertWriteDirectoryBinding(binding, target);
+    rmSync(target);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function fileChanges(file: PlannedFileEdit): boolean {
+  return !file.existed || file.proposedText !== file.baseText;
+}
+
+function readCanonicalOrNull(scaffoldRoot: string, absolutePath: string): string | null {
+  if (!existsSync(absolutePath)) return null;
+  return readContainedSource(scaffoldRoot, absolutePath);
 }
 
 /** Net bytes a file gains. Gains are written first; see the module comment. */
@@ -334,23 +855,329 @@ function revalidate(plan: WikiPatchPlan, options: ApplyOptions): WikiDiagnostic[
  * one — which for an entity block means indexing a truncated body, or a second
  * copy of an entity that is about to exist once.
  */
-function writeAtomically(scaffoldRoot: string, file: PlannedFileEdit): void {
+interface WriteDirectoryBinding {
+  root: string;
+  realRoot: string;
+  rootDev: number;
+  rootIno: number;
+  parent: string;
+  realParent: string;
+  parentDev: number;
+  parentIno: number;
+}
+
+/**
+ * Bind both the scaffold and the target directory before creating a temp file.
+ *
+ * Node does not expose `openat(2)`, so every pathname mutation is bracketed by
+ * a realpath + device/inode check of both directories.  The temp and existing
+ * leaf are separately opened with `O_NOFOLLOW` and tied back to the pathname by
+ * inode before the final same-directory rename.
+ */
+function bindWriteDirectory(scaffoldRoot: string, target: string): WriteDirectoryBinding {
+  const root = resolve(scaffoldRoot);
+  assertWritablePath(root, target);
+  let rootLexical;
+  try {
+    rootLexical = lstatSync(root);
+  } catch {
+    throw new WritePathError(target, "the scaffold root does not exist.");
+  }
+  if (!rootLexical.isDirectory() || rootLexical.isSymbolicLink()) {
+    throw new WritePathError(target, "the scaffold root is not a real directory.");
+  }
+  const realRoot = realpathSync(root);
+  const rootStats = lstatSync(realRoot);
+  const parent = dirname(target);
+  const rel = relative(root, parent);
+  if (rel === ".." || rel.startsWith(`..${sep}`)) {
+    throw new WritePathError(target, "its parent is outside the scaffold root.");
+  }
+
+  // Create missing ancestors one segment at a time. Recursive mkdir would
+  // follow a directory swapped to a symlink between the initial check and the
+  // creation of a deeper descendant.
+  let cursor = root;
+  for (const segment of rel === "" ? [] : rel.split(sep)) {
+    assertWriteRoot(root, realRoot, rootStats.dev, rootStats.ino, target);
+    cursor = resolve(cursor, segment);
+    if (!existsSync(cursor)) mkdirSync(cursor, { recursive: false, mode: 0o700 });
+    const lexical = lstatSync(cursor);
+    if (!lexical.isDirectory() || lexical.isSymbolicLink()) {
+      throw new WritePathError(target, "a containing directory is a symlink or not a directory.");
+    }
+    const realCursor = realpathSync(cursor);
+    const cursorRel = relative(realRoot, realCursor);
+    if (cursorRel === ".." || cursorRel.startsWith(`..${sep}`)) {
+      throw new WritePathError(target, "a containing directory escapes the scaffold root.");
+    }
+  }
+
+  const parentLexical = lstatSync(parent);
+  if (!parentLexical.isDirectory() || parentLexical.isSymbolicLink()) {
+    throw new WritePathError(target, "the target parent is not a real directory.");
+  }
+  const realParent = realpathSync(parent);
+  const parentStats = lstatSync(realParent);
+  const binding = {
+    root,
+    realRoot,
+    rootDev: Number(rootStats.dev),
+    rootIno: Number(rootStats.ino),
+    parent,
+    realParent,
+    parentDev: Number(parentStats.dev),
+    parentIno: Number(parentStats.ino),
+  };
+  assertWriteDirectoryBinding(binding, target);
+  return binding;
+}
+
+function assertWriteRoot(
+  root: string,
+  realRoot: string,
+  dev: number | bigint,
+  ino: number | bigint,
+  target: string,
+): void {
+  try {
+    const lexical = lstatSync(root);
+    const currentReal = realpathSync(root);
+    const current = lstatSync(currentReal);
+    if (
+      !lexical.isDirectory()
+      || lexical.isSymbolicLink()
+      || currentReal !== realRoot
+      || Number(current.dev) !== Number(dev)
+      || Number(current.ino) !== Number(ino)
+    ) throw new WritePathError(target, "the scaffold directory changed during the write.");
+  } catch (error) {
+    if (error instanceof WritePathError) throw error;
+    throw new WritePathError(target, "the scaffold directory changed during the write.");
+  }
+}
+
+function assertWriteDirectoryBinding(binding: WriteDirectoryBinding, target: string): void {
+  assertWritablePath(binding.root, target);
+  if (dirname(resolve(target)) !== binding.parent) {
+    throw new WritePathError(target, "the target moved outside its bound parent.");
+  }
+  assertWriteRoot(binding.root, binding.realRoot, binding.rootDev, binding.rootIno, target);
+  try {
+    const lexical = lstatSync(binding.parent);
+    const currentReal = realpathSync(binding.parent);
+    const current = lstatSync(currentReal);
+    if (
+      !lexical.isDirectory()
+      || lexical.isSymbolicLink()
+      || currentReal !== binding.realParent
+      || Number(current.dev) !== binding.parentDev
+      || Number(current.ino) !== binding.parentIno
+    ) throw new WritePathError(target, "the target directory changed during the write.");
+  } catch (error) {
+    if (error instanceof WritePathError) throw error;
+    throw new WritePathError(target, "the target directory changed during the write.");
+  }
+}
+
+function assertLeafMatches(path: string, expected: string | null): void {
+  if (expected === null) {
+    try {
+      lstatSync(path);
+      throw new WritePathError(path, "a new target appeared during the write.");
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+      if (code !== "ENOENT") throw error;
+    }
+    return;
+  }
+
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const opened = fstatSync(fd, { bigint: true });
+    const lexical = lstatSync(path, { bigint: true });
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd, { bigint: true });
+    const leafAfter = lstatSync(path, { bigint: true });
+    if (
+      !opened.isFile()
+      || lexical.isSymbolicLink()
+      || opened.dev !== lexical.dev
+      || opened.ino !== lexical.ino
+      || after.dev !== opened.dev
+      || after.ino !== opened.ino
+      || after.size !== opened.size
+      || after.mtimeNs !== opened.mtimeNs
+      || after.ctimeNs !== opened.ctimeNs
+      || leafAfter.isSymbolicLink()
+      || leafAfter.dev !== opened.dev
+      || leafAfter.ino !== opened.ino
+      || new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes) !== expected
+    ) throw new WritePathError(path, "the target bytes changed during the write.");
+  } catch (error) {
+    if (error instanceof WritePathError) throw error;
+    throw new WritePathError(path, "the target could not be bound without following links.");
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function pathMatchesFd(path: string, fd: number): boolean {
+  try {
+    const opened = fstatSync(fd);
+    const lexical = lstatSync(path);
+    return !lexical.isSymbolicLink()
+      && Number(opened.dev) === Number(lexical.dev)
+      && Number(opened.ino) === Number(lexical.ino);
+  } catch {
+    return false;
+  }
+}
+
+interface WrittenTempBinding {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}
+
+function bindWrittenTemp(fd: number, bytes: Buffer, path: string): WrittenTempBinding {
+  const stats = fstatSync(fd, { bigint: true });
+  if (!stats.isFile() || stats.size !== BigInt(bytes.length)) {
+    throw new WritePathError(path, "the temp file does not contain the reviewed byte count.");
+  }
+  assertFdBytes(fd, bytes, path);
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    size: stats.size,
+    mtimeNs: stats.mtimeNs,
+    ctimeNs: stats.ctimeNs,
+  };
+}
+
+function assertWrittenTemp(
+  path: string,
+  fd: number,
+  expected: WrittenTempBinding,
+  bytes: Buffer,
+  allowRenameCtime = false,
+): void {
+  const stats = fstatSync(fd, { bigint: true });
+  const lexical = lstatSync(path, { bigint: true });
+  if (
+    !stats.isFile()
+    || lexical.isSymbolicLink()
+    || stats.dev !== expected.dev
+    || stats.ino !== expected.ino
+    || stats.size !== expected.size
+    || stats.mtimeNs !== expected.mtimeNs
+    || (!allowRenameCtime && stats.ctimeNs !== expected.ctimeNs)
+    || lexical.dev !== stats.dev
+    || lexical.ino !== stats.ino
+  ) throw new WritePathError(path, "the exact reviewed temp generation changed before publication.");
+  assertFdBytes(fd, bytes, path);
+}
+
+function assertFdBytes(fd: number, expected: Buffer, path: string): void {
+  const actual = Buffer.alloc(expected.length);
+  let offset = 0;
+  while (offset < actual.length) {
+    const read = readSync(fd, actual, offset, actual.length - offset, offset);
+    if (read <= 0) throw new WritePathError(path, "the temp file could not be read exactly.");
+    offset += read;
+  }
+  if (!actual.equals(expected)) throw new WritePathError(path, "the temp bytes differ from the reviewed plan.");
+}
+
+function writeAtomically(scaffoldRoot: string, file: PlannedFileEdit, options: ApplyOptions): void {
   const target = resolve(file.absolutePath);
-  assertWritablePath(scaffoldRoot, target);
-  mkdirSync(dirname(target), { recursive: true });
+  const binding = bindWriteDirectory(scaffoldRoot, target);
+  const expected = file.existed ? file.baseText : null;
+  assertLeafMatches(target, expected);
+  options.beforeFileOpen?.(file.path);
+  assertWriteDirectoryBinding(binding, target);
+  assertLeafMatches(target, expected);
 
   const temp = `${target}.tmp-${randomBytes(6).toString("hex")}`;
   assertWritablePath(scaffoldRoot, temp);
+  let tempFd: number | undefined;
+  let ourTemp = false;
+  let tempBinding: WrittenTempBinding | undefined;
+  const proposedBytes = Buffer.from(file.proposedText, "utf8");
   try {
-    writeFileSync(temp, file.proposedText, "utf-8");
-    assertWritablePath(scaffoldRoot, target);
-    renameSync(temp, target);
+    tempFd = openSync(
+      temp,
+      constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | (constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    ourTemp = true;
+    if (!fstatSync(tempFd).isFile()) throw new WritePathError(temp, "the temp target is not a regular file.");
+    assertWriteDirectoryBinding(binding, target);
+    if (!pathMatchesFd(temp, tempFd)) throw new WritePathError(temp, "the temp path changed during the write.");
+    writeExact(tempFd, proposedBytes, temp);
+    fsyncSync(tempFd);
+    tempBinding = bindWrittenTemp(tempFd, proposedBytes, temp);
+    closeSync(tempFd);
+    tempFd = undefined;
+
+    options.beforeFileRename?.(file.path);
+    assertWriteDirectoryBinding(binding, target);
+    let verifyFd: number | undefined;
+    try {
+      verifyFd = openSync(temp, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      if (tempBinding === undefined) throw new WritePathError(temp, "the temp generation was not bound.");
+      assertWrittenTemp(temp, verifyFd, tempBinding, proposedBytes);
+      assertLeafMatches(target, expected);
+      renameSync(temp, target);
+      assertWrittenTemp(target, verifyFd, tempBinding, proposedBytes, true);
+      ourTemp = false;
+      options.afterFileRename?.(file.path);
+    } finally {
+      if (verifyFd !== undefined) closeSync(verifyFd);
+    }
+    const parentFd = openSync(binding.parent, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0));
+    try {
+      fsyncSync(parentFd);
+    } finally {
+      closeSync(parentFd);
+    }
   } catch (error) {
-    if (existsSync(temp)) {
-      assertWritablePath(scaffoldRoot, temp);
-      rmSync(temp, { force: true });
+    if (tempFd !== undefined) closeSync(tempFd);
+    if (ourTemp) {
+      // Never unlink by a pathname that no longer denotes our bound directory
+      // or our own temp inode.
+      try {
+        assertWriteDirectoryBinding(binding, target);
+        const cleanupFd = openSync(temp, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+        const ours = tempBinding !== undefined
+          && (() => {
+            try {
+              assertWrittenTemp(temp, cleanupFd, tempBinding, proposedBytes);
+              return true;
+            } catch {
+              return false;
+            }
+          })();
+        closeSync(cleanupFd);
+        if (ours) rmSync(temp, { force: true });
+      } catch {
+        // Failing closed can retain a temp file; it must never remove a path an
+        // attacker swapped in after the failed write.
+      }
     }
     throw error;
+  }
+}
+
+function writeExact(fd: number, bytes: Buffer, path: string): void {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset);
+    if (written <= 0) throw new WritePathError(path, "the filesystem did not accept the complete file.");
+    offset += written;
   }
 }
 
@@ -380,6 +1207,7 @@ function refreshIndex(scaffoldRoot: string, changedFiles: readonly string[], opt
       ...(options.registry === undefined ? {} : { registry: options.registry }),
       ...(options.now === undefined ? {} : { now: options.now }),
       ...(options.resolveGrounding === undefined ? {} : { resolveGrounding: options.resolveGrounding }),
+      ...(options.maintenanceLease === undefined ? {} : { maintenanceLease: options.maintenanceLease }),
     });
     if (refreshed.ok) return refreshed.diagnostics;
     return [
@@ -469,12 +1297,12 @@ export function applyGeneratedViews(options: GeneratedViewApplyOptions): Generat
       path: candidate.file,
       absolutePath,
       baseText: candidate.baseText,
-      baseFileHash: fileContentHash(candidate.baseText),
+      baseFileHash: exactFileContentHash(candidate.baseText),
       existed: true,
       declared: patched.declared,
       edits: [],
       proposedText: patched.text,
-    });
+    }, options);
     changedFiles.push(candidate.file);
     options.onFileWritten?.(candidate.file);
   }

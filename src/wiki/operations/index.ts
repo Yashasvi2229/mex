@@ -12,6 +12,7 @@ export type {
   EntityPrecondition,
   PlanOptions,
   PlanResult,
+  PlannedAuditAppend,
   PlannedFileEdit,
   RevisionChange,
   WikiPatchPlan,
@@ -20,8 +21,20 @@ export type {
 export { previewPlan, previewHashOf, renderPreview } from "./preview.js";
 export type { DiffHunk, FileDiff, WikiPreview } from "./preview.js";
 
-export { applyOperation } from "./apply.js";
-export type { ApplyOptions, ApplyResult } from "./apply.js";
+export { applyOperation, applyPlannedOperation } from "./apply.js";
+export type { ApplyOptions, ApplyPlannedOptions, ApplyResult } from "./apply.js";
+
+export {
+  applyPlannedOperationBatch,
+  batchPreviewRevisionOf,
+  planOperationBatch,
+} from "./batch.js";
+export type {
+  ApplyPlannedOperationBatchOptions,
+  ApplyPlannedOperationBatchResult,
+  PlanOperationBatchResult,
+  WikiOperationBatchPlan,
+} from "./batch.js";
 
 export {
   OPERATION_LOG_FILE,

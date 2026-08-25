@@ -42,6 +42,43 @@ function sha256Hex(text: string): string {
   return createHash("sha256").update(normalizeForHashing(text), "utf8").digest("hex");
 }
 
+/**
+ * Hash the exact UTF-8 bytes of a containing canonical file.
+ *
+ * This is intentionally different from {@link entityContentHash}. Entity
+ * hashes are semantic operation preconditions and remain line-ending neutral;
+ * an `EntityVersion`, index freshness observation, and indexed corpus revision
+ * describe the exact file bytes that were observed. CRLF, LF, and a UTF-8 BOM
+ * therefore produce different exact-file hashes.
+ */
+export function exactFileContentHash(bytes: string | Uint8Array): string {
+  return createHash("sha256")
+    .update(typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes)
+    .digest("hex");
+}
+
+/**
+ * Stable revision of an indexed corpus, derived only from sorted relative paths
+ * and their exact byte hashes. Length-prefixed fields make the encoding
+ * injective without relying on a path delimiter.
+ */
+export function indexedCorpusRevision(
+  files: readonly { path: string; contentHash: string }[],
+): string {
+  const hash = createHash("sha256");
+  for (const file of [...files].sort((left, right) => (
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+  ))) {
+    hash.update(String(Buffer.byteLength(file.path, "utf8")), "ascii");
+    hash.update(":", "ascii");
+    hash.update(file.path, "utf8");
+    hash.update(":", "ascii");
+    hash.update(file.contentHash, "ascii");
+    hash.update("\n", "ascii");
+  }
+  return hash.digest("hex");
+}
+
 /** Hash of one entity's own text. The operation precondition. */
 export function entityContentHash(entityText: string): string {
   return sha256Hex(entityText);

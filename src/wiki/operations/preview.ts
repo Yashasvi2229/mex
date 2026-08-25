@@ -100,6 +100,9 @@ export function previewHashOf(plan: WikiPatchPlan): string {
     hash.update(file.proposedText);
     hash.update("\u0000");
   }
+  hash.update(`${plan.audit.path}\u0000${plan.audit.baseFileHash ?? ""}\u0000`);
+  hash.update(plan.audit.proposedText);
+  hash.update("\u0000");
   return hash.digest("hex");
 }
 

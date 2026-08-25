@@ -141,7 +141,7 @@ export const TABLE_COLUMNS: Record<string, { columns: string[]; orderBy: string 
     // for.
     columns: [
       "entity_key", "ordinal", "node_id", "fingerprint", "body_hash", "file", "commit_sha",
-      "verified_at", "reason", "state", "resolved_node", "health",
+      "verified_at", "reason", "state", "resolved_node", "health", "resolution",
     ],
     orderBy: "entity_key, ordinal",
   },

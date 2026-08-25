@@ -18,7 +18,7 @@
  */
 
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
-import { entityContentHash, fileContentHash } from "../model/hash.js";
+import { entityContentHash, exactFileContentHash } from "../model/hash.js";
 import {
   createEntityValidator,
   DEFAULT_ENTITY_TYPE_REGISTRY,
@@ -251,7 +251,7 @@ function collectGaps(text: string, entities: readonly ParsedEntity[]): LabeledRa
 }
 
 function readLegacy(root: Record<string, unknown> | null): ParsedLegacy {
-  const legacy: ParsedLegacy = { groundsTo: [], edges: [] };
+  const legacy: ParsedLegacy = { groundsTo: [], edges: [], topics: [] };
   if (root === null) return legacy;
 
   const grounds = root["grounds_to"];
@@ -273,6 +273,15 @@ function readLegacy(root: Record<string, unknown> | null): ParsedLegacy {
       const edge: LegacyEdge = { target: record["target"] };
       if (typeof record["condition"] === "string") edge.condition = record["condition"];
       legacy.edges.push(edge);
+    }
+  }
+
+  // These are deliberately kept as labels. A label is not an EntityId, and
+  // migration may resolve it only through an explicit, reviewed mapping.
+  const topics = root["topics"];
+  if (Array.isArray(topics)) {
+    for (const topic of topics) {
+      if (typeof topic === "string" && topic.trim() !== "") legacy.topics.push(topic);
     }
   }
 
@@ -351,7 +360,7 @@ export function parseWikiMarkdown(options: ParseOptions): ParsedFile {
     path,
     text,
     starts: lineStarts(text),
-    fileHash: fileContentHash(text),
+    fileHash: exactFileContentHash(text),
     registry,
     diagnostics,
     rejected,

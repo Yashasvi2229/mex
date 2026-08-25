@@ -33,7 +33,8 @@ import type { WikiEntity, EntityTypeRegistry } from "../model/entity.js";
 import { discoverMarkdownFiles } from "../index/discover.js";
 import { entityKeyOf } from "../index/write.js";
 import { openWikiIndex } from "../index/open.js";
-import { defaultIndexPath, readText } from "../index/rebuild.js";
+import { defaultIndexPath } from "../index/rebuild.js";
+import { readContainedSource } from "../index/source-read.js";
 
 export interface LocatedEntity {
   /** Scaffold-relative POSIX path. */
@@ -129,10 +130,13 @@ export function readParsed(
   path: string,
   absolutePath: string,
 ): { text: string; parsed: ParsedFile } | null {
-  const read = options.readFile ?? readText;
   let text: string;
   try {
-    text = read(absolutePath);
+    text = readContainedSource(
+      options.scaffoldRoot,
+      absolutePath,
+      options.readFile === undefined ? {} : { readFile: options.readFile },
+    );
   } catch {
     return null;
   }

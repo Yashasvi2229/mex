@@ -177,6 +177,19 @@ describe("create-entry payload", () => {
     const payload = { ...(PAYLOADS["create-entry"] as object), type: "runbook" };
     expect(check(envelope("create-entry", payload)).codes).toContain("INVALID_ENTITY_TYPE");
   });
+
+  it("rejects unsafe file-source metadata before a create can be planned", () => {
+    const payload = { ...(PAYLOADS["create-entry"] as object), sources: [{ type: "file", ref: "../secret.md" }] };
+    expect(check(envelope("create-entry", payload)).codes).toContain("MALFORMED_SOURCE");
+  });
+});
+
+describe("source operation payload", () => {
+  it("rejects an unsafe repository path before add-source can be planned", () => {
+    const result = check(envelope("add-source", { source: { type: "file", ref: "/etc/passwd" } }));
+    expect(result.ok).toBe(false);
+    expect(result.codes).toContain("MALFORMED_SOURCE");
+  });
 });
 
 describe("update-entry payload", () => {
@@ -239,6 +252,12 @@ describe("set-grounding payload", () => {
   it("leaves inline anchors alone unless asked", () => {
     expect(check(envelope("set-grounding", { groundsTo: [grounding()], updateAnchors: true })).ok).toBe(true);
     expect(check(envelope("set-grounding", { groundsTo: [grounding()], updateAnchors: "yes" })).ok).toBe(false);
+  });
+
+  it("rejects an unsafe cached file path before grounding provenance is considered", () => {
+    const result = check(envelope("set-grounding", { groundsTo: [{ ...grounding(), file: "src/../../secret.ts" }] }));
+    expect(result.ok).toBe(false);
+    expect(result.codes).toContain("MALFORMED_GROUNDING");
   });
 });
 

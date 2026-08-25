@@ -21,16 +21,24 @@
  * wrong row survive, because the row is replaced either way when it is written.
  */
 
-import { resolve } from "node:path";
-import { relative } from "node:path";
+import { existsSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { toPosix } from "../../paths.js";
 import type { WikiDiagnostic } from "../model/diagnostic.js";
-import { fileContentHash } from "../model/hash.js";
+import { exactFileContentHash } from "../model/hash.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 import { parseWikiMarkdown } from "../markdown/codec.js";
-import { discoverMarkdownFiles, type DiscoveredFile } from "./discover.js";
-import { openWikiIndexForWrite } from "./open.js";
-import { defaultIndexPath, readText, unreadableFileDiagnostic } from "./rebuild.js";
+import type { DiscoveredFile } from "./discover.js";
+import { openWikiIndex } from "./open.js";
+import { defaultIndexPath, unreadableFileDiagnostic } from "./rebuild.js";
+import {
+  clonePendingIndex,
+  discardPendingIndex,
+  discardSealedPendingIndex,
+  publishSealedPendingIndex,
+  sealPendingIndex,
+  type SealedPendingIndex,
+} from "./publish.js";
 import {
   deleteFileRows,
   resolveIndexState,
@@ -38,6 +46,27 @@ import {
   writeParsedFile,
   type GroundingResolver,
 } from "./write.js";
+import {
+  acquireWikiMaintenanceLease,
+  assertIndexPath,
+  bindIndexGeneration,
+  IndexInUseError,
+  IndexPublishRecoveryError,
+  type IndexGenerationBinding,
+  type WikiMaintenanceLease,
+} from "./dbfile.js";
+import {
+  assertWikiCorpusUnchanged,
+  assertWikiCorpusFastUnchanged,
+  bindWikiCorpusFast,
+  maintenanceBoundary,
+  observeWikiCorpus,
+  type WikiCorpusObservation,
+  type WikiCorpusFastBinding,
+  type WikiMaintenanceContext,
+  WikiPreparedMaintenanceNotPreflightedError,
+  WikiPreparedMaintenanceSettledError,
+} from "./maintenance.js";
 
 export interface RefreshOptions {
   scaffoldRoot: string;
@@ -65,6 +94,10 @@ export interface RefreshOptions {
    * on code, and code changes without the scaffold changing at all.
    */
   resolveGrounding?: GroundingResolver;
+  /** Cancellation and bounded phase progress for explicit maintenance jobs. */
+  maintenance?: WikiMaintenanceContext;
+  /** Existing operation/migration lease; prevents self-contention. */
+  maintenanceLease?: WikiMaintenanceLease;
 }
 
 export type RefreshResult =
@@ -78,93 +111,302 @@ export type RefreshResult =
     }
   | { ok: false; diagnostic: WikiDiagnostic };
 
+export interface PreparedWikiRefresh {
+  readonly kind: "refresh";
+  /** Exact selected-path preflight; call before the consumer's final Graph check. */
+  preflight(): void;
+  /** Rename-only publication after a successful preflight. */
+  commit(): RefreshResult;
+  discard(): void;
+}
+
+export type PrepareWikiRefreshResult =
+  | { ok: true; prepared: PreparedWikiRefresh }
+  | { ok: false; diagnostic: WikiDiagnostic };
+
 /** Normalize a caller's path to the scaffold-relative POSIX form used as a key. */
 export function toScaffoldPath(scaffoldRoot: string, path: string): string {
+  if (
+    path.length === 0
+    || path.includes("\0")
+    || path.includes("\\")
+    || isAbsolute(path)
+    || path.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+  ) throw new WikiRefreshPathError(path);
   const asRelative = toPosix(relative(scaffoldRoot, resolve(scaffoldRoot, path)));
+  if (asRelative === ".." || asRelative.startsWith("../") || asRelative !== path) {
+    throw new WikiRefreshPathError(path);
+  }
   return asRelative;
 }
 
-export function refreshWikiIndex(options: RefreshOptions): RefreshResult {
+export class WikiRefreshPathError extends Error {
+  readonly code = "PATH_OUTSIDE_SCAFFOLD";
+  constructor(readonly path: string) {
+    super("Wiki refresh paths must be normalized repository-relative POSIX paths inside the scaffold.");
+    this.name = "WikiRefreshPathError";
+  }
+}
+
+export function prepareWikiRefresh(options: RefreshOptions): PrepareWikiRefreshResult {
   const scaffoldRoot = resolve(options.scaffoldRoot);
   const indexPath = options.indexPath ?? defaultIndexPath(scaffoldRoot);
   const now = options.now ?? (() => new Date().toISOString());
 
-  const opened = openWikiIndexForWrite(indexPath);
-  if (!opened.ok) return { ok: false, diagnostic: opened.diagnostic };
-  const { index } = opened;
+  // Strictly reject direct API path injection before acquiring a writer lease
+  // or constructing a candidate.
+  const targets = [...new Set(options.changed.map((path) => toScaffoldPath(scaffoldRoot, path)))].sort();
 
+  const ownedLease = options.maintenanceLease === undefined;
+  const lease = options.maintenanceLease ?? acquireWikiMaintenanceLease(indexPath, "refresh", scaffoldRoot);
   try {
-    // Re-walk. It costs a readdir per directory and no parsing, and it is what
-    // makes the refresh's answer to "what is in this scaffold" identical to the
-    // rebuild's — including which files are excluded and which symlinks escape.
-    const discovery = discoverMarkdownFiles({ root: scaffoldRoot, exclude: options.exclude });
-    const indexable = new Map<string, DiscoveredFile>(discovery.files.map((file) => [file.path, file]));
+    assertIndexPath(indexPath, lease.binding);
+    const inspected = openWikiIndex(indexPath);
+    if (!inspected.ok) {
+      if (ownedLease) lease.release();
+      return { ok: false, diagnostic: inspected.diagnostic };
+    }
+    inspected.index.close();
 
-    const targets = [...new Set(options.changed.map((path) => toScaffoldPath(scaffoldRoot, path)))].sort();
+    maintenanceBoundary(options.maintenance, "discover");
+    // Refresh pins only the explicit changed set. Unrelated concurrent corpus
+    // changes leave the result honestly stale instead of blocking a targeted
+    // repair; selected additions/removals/bytes must remain exact through
+    // preflight.
+    const observation = observeWikiCorpus({
+      scaffoldRoot,
+      ...(options.exclude === undefined ? {} : { exclude: options.exclude }),
+      ...(options.readFile === undefined ? {} : { readFile: options.readFile }),
+      paths: targets,
+    });
+    const indexable = new Map<string, DiscoveredFile>(observation.files.map((file) => [file.path, file]));
+    const live = bindIndexGeneration(indexPath, lease.binding);
 
     const reparsed: string[] = [];
     const removed: string[] = [];
     const unchanged: string[] = [];
     const unreadable: WikiDiagnostic[] = [];
-    const readFile = options.readFile ?? readText;
 
-    index.db.transaction(() => {
-      const storedHash = index.db.prepare(`SELECT content_hash FROM wiki_files WHERE path = ?`);
-
-      for (const path of targets) {
-        const file = indexable.get(path);
-        if (file === undefined) {
-          // Deleted, excluded, or never Markdown. The rows go; the references
-          // into them are left to dangle and be reported, not cascaded away.
-          deleteFileRows(index.db, path);
-          removed.push(path);
-          continue;
-        }
-
-        let text: string;
-        try {
-          text = readFile(file.absolutePath);
-        } catch (error) {
-          // The rows go, and the report stays — attached to this file, so it
-          // survives a later refresh of an unrelated one and is cleared by the
-          // refresh that finally reads this file successfully. A rebuild
-          // derives exactly the same row.
-          deleteFileRows(index.db, path);
-          const entry = unreadableFileDiagnostic(path, error);
-          writeFileDiagnostics(index.db, path, [entry]);
-          unreadable.push(entry);
-          removed.push(path);
-          continue;
-        }
-
-        const previous = storedHash.get(path) as { content_hash?: string } | undefined;
-        if (previous?.content_hash === fileContentHash(text)) {
-          unchanged.push(path);
-          continue;
-        }
-
-        deleteFileRows(index.db, path);
-        writeParsedFile(
-          index.db,
-          parseWikiMarkdown(
-            options.registry === undefined ? { path, text } : { path, text, registry: options.registry },
-          ),
-          { now: now() },
-        );
-        reparsed.push(path);
+    maintenanceBoundary(options.maintenance, "stage");
+    let pending: ReturnType<typeof clonePendingIndex>;
+    try {
+      pending = clonePendingIndex(indexPath, lease.binding);
+    } catch (error) {
+      if (error instanceof IndexInUseError) {
+        if (ownedLease) lease.release();
+        return { ok: false, diagnostic: indexInUseDiagnostic(error) };
       }
+      throw error;
+    }
+    if (!pending.ok) {
+      if (ownedLease) lease.release();
+      return { ok: false, diagnostic: pending.diagnostic };
+    }
+    const candidate = pending.handle;
+    const tempPath = pending.tempPath;
+    try {
+      candidate.db.transaction(() => {
+        const storedHash = candidate.db.prepare(`SELECT content_hash FROM wiki_files WHERE path = ?`);
 
-      resolveIndexState(index.db, {
-        scaffoldRoot,
-        buildKind: "refresh",
-        now: now(),
-        scaffoldDiagnostics: discovery.diagnostics,
-        resolveGrounding: options.resolveGrounding,
+        maintenanceBoundary(options.maintenance, "parse", { completed: 0, total: targets.length });
+        for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+          const path = targets[targetIndex]!;
+          maintenanceBoundary(options.maintenance, "parse", { completed: targetIndex, total: targets.length });
+          const file = indexable.get(path);
+          if (file === undefined) {
+            // Deleted, excluded, or never Markdown. The rows go; the references
+            // into them are left to dangle and be reported, not cascaded away.
+            deleteFileRows(candidate.db, path);
+            removed.push(path);
+            continue;
+          }
+
+          let text: string;
+          try {
+            text = observation.readFile(file.absolutePath);
+          } catch (error) {
+            // The rows go, and the report stays — attached to this file, so it
+            // survives a later refresh of an unrelated one and is cleared by the
+            // refresh that finally reads this file successfully. A rebuild
+            // derives exactly the same row.
+            deleteFileRows(candidate.db, path);
+            const entry = unreadableFileDiagnostic(path, error);
+            writeFileDiagnostics(candidate.db, path, [entry]);
+            unreadable.push(entry);
+            removed.push(path);
+            continue;
+          }
+
+          const previous = storedHash.get(path) as { content_hash?: string } | undefined;
+          if (previous?.content_hash === exactFileContentHash(text)) {
+            unchanged.push(path);
+            continue;
+          }
+
+          deleteFileRows(candidate.db, path);
+          writeParsedFile(
+            candidate.db,
+            parseWikiMarkdown(
+              options.registry === undefined ? { path, text } : { path, text, registry: options.registry },
+            ),
+            { now: now() },
+          );
+          reparsed.push(path);
+        }
+        maintenanceBoundary(options.maintenance, "parse", { completed: targets.length, total: targets.length });
+
+        maintenanceBoundary(options.maintenance, "resolve");
+        resolveIndexState(candidate.db, {
+          scaffoldRoot,
+          buildKind: "refresh",
+          now: now(),
+          scaffoldDiagnostics: observation.diagnostics,
+          resolveGrounding: options.resolveGrounding,
+        });
+        maintenanceBoundary(options.maintenance, "validate");
       });
-    });
 
-    return { ok: true, reparsed, removed, unchanged, diagnostics: [...discovery.diagnostics, ...unreadable] };
-  } finally {
-    index.close();
+      const sealed = sealPendingIndex(candidate, tempPath, lease.binding);
+      return {
+        ok: true,
+        prepared: preparedRefreshHandle({
+          options,
+          scaffoldRoot,
+          indexPath,
+          targets,
+          lease,
+          ownedLease,
+          tempPath,
+          sealed,
+          live,
+          observation,
+          summary: {
+            ok: true,
+            reparsed,
+            removed,
+            unchanged,
+            diagnostics: [...observation.diagnostics, ...unreadable],
+          },
+        }),
+      };
+    } catch (error) {
+      discardPendingIndex(candidate, tempPath, lease.binding);
+      throw error;
+    }
+  } catch (error) {
+    if (ownedLease) lease.release();
+    if (error instanceof IndexInUseError) return { ok: false, diagnostic: indexInUseDiagnostic(error) };
+    throw error;
   }
+}
+
+function preparedRefreshHandle(state: {
+  options: RefreshOptions;
+  scaffoldRoot: string;
+  indexPath: string;
+  targets: readonly string[];
+  lease: WikiMaintenanceLease;
+  ownedLease: boolean;
+  tempPath: string;
+  sealed: SealedPendingIndex;
+  live: IndexGenerationBinding;
+  observation: WikiCorpusObservation;
+  summary: Extract<RefreshResult, { ok: true }>;
+}): PreparedWikiRefresh {
+  let settled = false;
+  let preflighted = false;
+  let fastBinding: WikiCorpusFastBinding | null = null;
+  const beginSettlement = (): void => {
+    if (settled) throw new WikiPreparedMaintenanceSettledError();
+    settled = true;
+  };
+  const release = (): void => {
+    if (state.ownedLease) state.lease.release();
+  };
+  const discardCandidate = (): void => {
+    if (existsSync(state.tempPath)) discardSealedPendingIndex(state.tempPath, state.lease.binding, state.sealed);
+  };
+  return {
+    kind: "refresh",
+    preflight: () => {
+      if (settled) throw new WikiPreparedMaintenanceSettledError();
+      preflighted = false;
+      fastBinding = null;
+      maintenanceBoundary(state.options.maintenance, "publish");
+      const corpusOptions = {
+        scaffoldRoot: state.scaffoldRoot,
+        ...(state.options.exclude === undefined ? {} : { exclude: state.options.exclude }),
+        ...(state.options.readFile === undefined ? {} : { readFile: state.options.readFile }),
+        paths: state.targets,
+      };
+      const before = bindWikiCorpusFast(corpusOptions);
+      assertWikiCorpusUnchanged(state.observation, corpusOptions);
+      assertWikiCorpusFastUnchanged(before, corpusOptions);
+      maintenanceBoundary(state.options.maintenance, "publish");
+      fastBinding = before;
+      preflighted = true;
+    },
+    commit: () => {
+      if (!preflighted) throw new WikiPreparedMaintenanceNotPreflightedError();
+      beginSettlement();
+      try {
+        if (fastBinding === null) throw new WikiPreparedMaintenanceNotPreflightedError();
+        maintenanceBoundary(state.options.maintenance, "publish");
+        assertWikiCorpusFastUnchanged(fastBinding, {
+          scaffoldRoot: state.scaffoldRoot,
+          ...(state.options.exclude === undefined ? {} : { exclude: state.options.exclude }),
+          ...(state.options.readFile === undefined ? {} : { readFile: state.options.readFile }),
+          paths: state.targets,
+        });
+        publishSealedPendingIndex(
+          state.tempPath,
+          state.indexPath,
+          state.lease.binding,
+          state.sealed,
+          state.live,
+        );
+        return state.summary;
+      } catch (error) {
+        try {
+          discardCandidate();
+        } catch (cleanupError) {
+          throw new IndexPublishRecoveryError(state.tempPath, state.tempPath, error, cleanupError);
+        }
+        if (error instanceof IndexInUseError) return { ok: false, diagnostic: indexInUseDiagnostic(error) };
+        throw error;
+      } finally {
+        release();
+      }
+    },
+    discard: () => {
+      beginSettlement();
+      try {
+        discardCandidate();
+      } finally {
+        release();
+      }
+    },
+  };
+}
+
+export function refreshWikiIndex(options: RefreshOptions): RefreshResult {
+  const result = prepareWikiRefresh(options);
+  if (!result.ok) return result;
+  try {
+    result.prepared.preflight();
+  } catch (error) {
+    result.prepared.discard();
+    throw error;
+  }
+  return result.prepared.commit();
+}
+
+function indexInUseDiagnostic(error: IndexInUseError): WikiDiagnostic {
+  return {
+    code: "WIKI_INDEX_REBUILD_REQUIRED",
+    severity: "error",
+    message: error.message,
+    file: error.path,
+    remediation: "Close anything holding the index open and retry the explicit Wiki maintenance operation.",
+  };
 }

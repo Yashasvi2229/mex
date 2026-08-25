@@ -121,6 +121,8 @@ export interface ParsedFrontmatter {
 export interface ParsedLegacy {
   groundsTo: WikiGrounding[];
   edges: LegacyEdge[];
+  /** Unresolved root-level labels; migration maps these only when configured. */
+  topics: string[];
 }
 
 export interface ParsedFile {

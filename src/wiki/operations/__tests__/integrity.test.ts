@@ -10,13 +10,23 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseWikiMarkdown } from "../../markdown/codec.js";
-import { applyOperation } from "../apply.js";
+import { applyOperation, applyPlannedOperation, WikiWriteRecoveryError } from "../apply.js";
 import { planOperation } from "../plan.js";
+import { applyPlannedOperationBatch, planOperationBatch } from "../batch.js";
 import { previewHashOf, previewPlan } from "../preview.js";
-import { acceptedOperations, operationLogPath, readAuditLog, recordFor } from "../audit.js";
+import {
+  acceptedOperations,
+  appendAudit,
+  auditRecord,
+  OperationLogPathError,
+  operationLogPath,
+  readAuditLog,
+  recordFor,
+  restoreOperationLogExact,
+} from "../audit.js";
 import { assertWritablePath, checkContainment, resolveThroughSymlinks, WritePathError } from "../paths.js";
 import { GATEWAY, JWT, PATTERN, codesOf, envelope, makeScaffold, type Scaffold } from "./helpers.js";
 
@@ -171,7 +181,7 @@ describe("a crash between two renames", () => {
 describe("replay, and the log as its only oracle", () => {
   it("survives deleting wiki.db, because the log is not in it", async () => {
     const { rebuildWikiIndex } = await import("../../index/rebuild.js");
-    const { removeIndexFiles } = await import("../../index/dbfile.js");
+    const { bindIndexDirectory, removeIndexFiles } = await import("../../index/dbfile.js");
     const target = scaffold();
     const indexPath = join(target.root, "wiki.db");
     rebuildWikiIndex({ scaffoldRoot: target.root, indexPath });
@@ -182,7 +192,7 @@ describe("replay, and the log as its only oracle", () => {
 
     // The index is disposable by invariant. If idempotency lived in it, this
     // line would destroy the guarantee.
-    removeIndexFiles(indexPath);
+    removeIndexFiles(indexPath, bindIndexDirectory(indexPath, target.root));
     expect(existsSync(indexPath)).toBe(false);
 
     const replayed = applyOperation(env, { scaffoldRoot: target.root, indexPath });
@@ -241,6 +251,55 @@ describe("replay, and the log as its only oracle", () => {
 });
 
 describe("the audit log's privacy boundary", () => {
+  it("rejects symlinked directories and deterministic ancestor/leaf retarget races", () => {
+    const makeEntry = (target: Scaffold, opId: string) => {
+      const planned = planOperation(
+        envelope(target, "set-property", { property: "status", value: "deprecated" }, { entityId: JWT, opId }),
+        { scaffoldRoot: target.root },
+      );
+      expect(planned.ok).toBe(true);
+      if (!planned.ok) throw new Error("expected a valid audit fixture plan");
+      return auditRecord(planned.plan, "intent");
+    };
+
+    const directoryTarget = scaffold();
+    const directoryOutside = resolve(directoryTarget.root, "..", `audit-dir-${Date.now()}`);
+    mkdirSync(directoryOutside);
+    symlinkSync(directoryOutside, join(directoryTarget.root, "events"), "dir");
+    expect(() => appendAudit(directoryTarget.root, makeEntry(directoryTarget, "op-audit-dir")))
+      .toThrow(OperationLogPathError);
+    expect(existsSync(join(directoryOutside, "operations.jsonl"))).toBe(false);
+    rmSync(directoryOutside, { recursive: true, force: true });
+
+    const ancestorTarget = scaffold();
+    const ancestorOutside = resolve(ancestorTarget.root, "..", `audit-ancestor-${Date.now()}`);
+    mkdirSync(join(ancestorTarget.root, "events"));
+    mkdirSync(ancestorOutside);
+    expect(() => appendAudit(ancestorTarget.root, makeEntry(ancestorTarget, "op-audit-ancestor"), {
+      beforeOpen: () => {
+        renameSync(join(ancestorTarget.root, "events"), join(ancestorTarget.root, "events-original"));
+        symlinkSync(ancestorOutside, join(ancestorTarget.root, "events"), "dir");
+      },
+    })).toThrow(OperationLogPathError);
+    expect(existsSync(join(ancestorOutside, "operations.jsonl"))).toBe(false);
+    rmSync(ancestorOutside, { recursive: true, force: true });
+
+    const leafTarget = scaffold();
+    const first = makeEntry(leafTarget, "op-audit-leaf-first");
+    appendAudit(leafTarget.root, first);
+    const leafOutside = resolve(leafTarget.root, "..", `audit-leaf-${Date.now()}.jsonl`);
+    writeFileSync(leafOutside, "outside stays exact\n", "utf8");
+    expect(() => appendAudit(leafTarget.root, makeEntry(leafTarget, "op-audit-leaf-second"), {
+      beforeOpen: () => {
+        renameSync(operationLogPath(leafTarget.root), `${operationLogPath(leafTarget.root)}.original`);
+        symlinkSync(leafOutside, operationLogPath(leafTarget.root), "file");
+      },
+    })).toThrow(OperationLogPathError);
+    expect(readFileSync(leafOutside, "utf8")).toBe("outside stays exact\n");
+    expect(readAuditLog(leafTarget.root).diagnostics.map((entry) => entry.code)).toContain("MALFORMED_OPERATION_LOG");
+    rmSync(leafOutside, { force: true });
+  });
+
   it("carries no body, prompt or transcript", () => {
     const target = scaffold();
     const secret = "PROPRIETARY-PROSE-THAT-MUST-NOT-BE-LOGGED";
@@ -655,8 +714,9 @@ describe("preconditions and the preview binding", () => {
 
   it("is bound to the payload as well as the tree", () => {
     const target = scaffold();
+    const stableOpId = "op-stable-preview";
     const first = planOperation(
-      envelope(target, "set-property", { property: "status", value: "deprecated" }, { entityId: JWT }),
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, { entityId: JWT, opId: stableOpId }),
       { scaffoldRoot: target.root },
     );
     const second = planOperation(
@@ -670,12 +730,549 @@ describe("preconditions and the preview binding", () => {
     // And stable: the same plan over the same tree hashes the same, or the
     // first spurious mismatch teaches everyone to bypass the check.
     const again = planOperation(
-      envelope(target, "set-property", { property: "status", value: "deprecated" }, { entityId: JWT }),
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, { entityId: JWT, opId: stableOpId }),
       { scaffoldRoot: target.root },
     );
     expect(again.ok).toBe(true);
     if (!again.ok) return;
     expect(previewPlan(again.plan).previewHash).toBe(previewPlan(first.plan).previewHash);
+  });
+});
+
+describe("the executable preview plan", () => {
+  it("holds the shared cross-process writer lease across revalidation and every write", async () => {
+    const { acquireWikiMaintenanceLease, WikiMaintenanceLockedError } = await import("../../index/dbfile.js");
+    const target = scaffold();
+    const planned = planOperation(
+      envelope(
+        target,
+        "set-property",
+        { property: "status", value: "deprecated" },
+        { entityId: JWT, opId: "op-lease-boundary" },
+      ),
+      { scaffoldRoot: target.root },
+    );
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    let contentionObserved = false;
+
+    const result = applyPlannedOperation(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewHash: previewHashOf(planned.plan),
+      onFileWritten: () => {
+        try {
+          const competing = acquireWikiMaintenanceLease(join(target.root, "wiki.db"), "rebuild", target.root);
+          competing.release();
+        } catch (error) {
+          contentionObserved = error instanceof WikiMaintenanceLockedError;
+        }
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(contentionObserved).toBe(true);
+    expect(existsSync(join(target.root, "wiki.db.lock"))).toBe(false);
+  });
+
+  it("applies the exact reviewed Markdown and ledger bytes without re-planning", () => {
+    const target = scaffold();
+    const env = envelope(
+      target,
+      "create-entry",
+      {
+        file: "context/architecture.md",
+        insertAt: { at: "end-of-file" },
+        type: "convention",
+        title: "Keep exact plans",
+        body: "Apply what was reviewed.",
+        headingDepth: 2,
+      },
+      { opId: "op-exact-plan" },
+    );
+    const planned = planOperation(env, { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const revision = previewHashOf(planned.plan);
+    const result = applyPlannedOperation(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewHash: revision,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.createdIds).toEqual(planned.plan.createdIds);
+    for (const file of planned.plan.files) expect(target.read(file.path)).toBe(file.proposedText);
+    expect(readFileSync(operationLogPath(target.root), "utf8")).toBe(planned.plan.audit.proposedText);
+
+    const after = target.files();
+    const replay = applyPlannedOperation(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewHash: revision,
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.replayed).toBe(true);
+    expect(replay.createdIds).toEqual(planned.plan.createdIds);
+    expect(target.files()).toEqual(after);
+  });
+
+  it("rejects changed base bytes before appending intent or touching Markdown", () => {
+    const target = scaffold();
+    const env = envelope(
+      target,
+      "set-property",
+      { property: "status", value: "deprecated" },
+      { entityId: JWT, opId: "op-stale-exact-plan" },
+    );
+    const planned = planOperation(env, { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    target.write(
+      "context/architecture.md",
+      target.read("context/architecture.md").replace("Terminates TLS", "Terminates TLS (edited)"),
+    );
+    const before = target.files();
+
+    const result = applyPlannedOperation(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewHash: previewHashOf(planned.plan),
+    });
+    expect(result.ok).toBe(false);
+    expect(codesOf(result.diagnostics)).toContain("CONTENT_HASH_CONFLICT");
+    expect(target.files()).toEqual(before);
+    expect(recordFor(readAuditLog(target.root), planned.plan.opId).intent).toBeNull();
+  });
+
+  it("rejects a plan whose reviewed audit bytes do not equal its exact records", () => {
+    const target = scaffold();
+    const planned = planOperation(
+      envelope(
+        target,
+        "set-property",
+        { property: "status", value: "deprecated" },
+        { entityId: JWT, opId: "op-tampered-audit-plan" },
+      ),
+      { scaffoldRoot: target.root },
+    );
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const tampered = {
+      ...planned.plan,
+      audit: { ...planned.plan.audit, proposedText: `${planned.plan.audit.proposedText}{"arbitrary":"line"}\n` },
+    };
+    const before = target.files();
+
+    const result = applyPlannedOperation(tampered, {
+      scaffoldRoot: target.root,
+      expectedPreviewHash: previewHashOf(tampered),
+    });
+
+    expect(result.ok).toBe(false);
+    expect(codesOf(result.diagnostics)).toContain("INVALID_OPERATION_ENVELOPE");
+    expect(target.files()).toEqual(before);
+    expect(existsSync(operationLogPath(target.root))).toBe(false);
+  });
+
+  it("validates the expected preview revision before honoring replay", () => {
+    const target = scaffold();
+    const env = envelope(
+      target,
+      "set-property",
+      { property: "status", value: "deprecated" },
+      { entityId: JWT, opId: "op-replay-preview" },
+    );
+    const planned = planOperation(env, { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const revision = previewHashOf(planned.plan);
+    expect(applyPlannedOperation(planned.plan, { scaffoldRoot: target.root, expectedPreviewHash: revision }).ok).toBe(true);
+    const after = target.files();
+    const invalid = applyPlannedOperation(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewHash: "0".repeat(64),
+    });
+    expect(invalid.ok).toBe(false);
+    expect(codesOf(invalid.diagnostics)).toContain("INVALID_OPERATION_ENVELOPE");
+    expect(target.files()).toEqual(after);
+  });
+});
+
+describe("atomic executable batches", () => {
+  it("plans over one virtual overlay and rejects a later invalid item without writing the valid prefix", () => {
+    const target = scaffold();
+    const before = target.files();
+    const first = envelope(
+      target,
+      "update-entry",
+      { summary: "This virtual edit must never land." },
+      { entityId: JWT, opId: "op-batch-valid" },
+    );
+    const second = envelope(
+      target,
+      "add-relation",
+      { relation: { type: "depends_on", target: "mx_01J0000000000000000000000Z" } },
+      { entityId: JWT, opId: "op-batch-invalid" },
+    );
+
+    const planned = planOperationBatch([first, second], { scaffoldRoot: target.root });
+
+    expect(planned.ok).toBe(false);
+    expect(target.files()).toEqual(before);
+    expect(existsSync(operationLogPath(target.root))).toBe(false);
+  });
+
+  it("applies a valid sequence exactly once without replanning", () => {
+    const target = scaffold();
+    const planned = planOperationBatch([
+      envelope(target, "update-entry", { summary: "Reviewed summary." }, { entityId: JWT, opId: "op-batch-one" }),
+      envelope(target, "update-entry", { body: "Reviewed body." }, { entityId: JWT, opId: "op-batch-two" }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+
+    const applied = applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+    });
+    expect(applied.ok).toBe(true);
+    expect(target.read("context/architecture.md")).toContain("Reviewed summary.");
+    expect(target.read("context/architecture.md")).toContain("Reviewed body.");
+
+    const after = target.files();
+    const replay = applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+    });
+    expect(replay.ok).toBe(true);
+    expect(replay.replayed).toBe(true);
+    expect(target.files()).toEqual(after);
+  });
+
+  it("restores exact Markdown and ledger bytes when the completion append fails", () => {
+    const target = scaffold();
+    const before = target.files();
+    const planned = planOperationBatch([
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, { entityId: JWT, opId: "op-batch-audit-fail" }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      beforeAuditAppend: (phase) => {
+        if (phase === "complete") throw new Error("completion append failed");
+      },
+    })).toThrow("completion append failed");
+    expect(target.files()).toEqual(before);
+    expect(existsSync(operationLogPath(target.root))).toBe(false);
+  });
+
+  it("restores exact bytes when a completion line lands but its fsync path fails", () => {
+    const target = scaffold();
+    const before = target.files();
+    const planned = planOperationBatch([
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, { entityId: JWT, opId: "op-batch-audit-fsync" }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      afterAuditWrite: (phase) => {
+        if (phase === "complete") throw new Error("fsync failed after bytes landed");
+      },
+    })).toThrow();
+    expect(target.files()).toEqual(before);
+    expect(existsSync(operationLogPath(target.root))).toBe(false);
+  });
+
+  it("refuses a foreign ledger append between preflight and intent without erasing it", () => {
+    const target = scaffold();
+    const before = target.files();
+    const planned = planOperationBatch([
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, {
+        entityId: JWT,
+        opId: "op-foreign-ledger",
+      }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const foreign = "{\"foreign\":true}\n";
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      beforeAuditAppend: (phase) => {
+        if (phase !== "intent") return;
+        mkdirSync(join(target.root, "events"), { recursive: true });
+        writeFileSync(operationLogPath(target.root), foreign, "utf8");
+      },
+    })).toThrow(WikiWriteRecoveryError);
+
+    expect(target.files()).toEqual(before);
+    expect(readFileSync(operationLogPath(target.root), "utf8")).toBe(foreign);
+  });
+
+  it("restores a multi-file prefix when the later rename fails", () => {
+    const target = scaffold();
+    const before = target.files();
+    const planned = planOperationBatch([
+      envelope(
+        target,
+        "move-entry",
+        { file: "patterns/problem-documents.md", insertAt: { at: "end-of-file" } },
+        { entityId: GATEWAY, opId: "op-batch-file-fail" },
+      ),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    let renames = 0;
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      beforeFileRename: () => {
+        renames += 1;
+        if (renames === 2) throw new Error("second rename failed");
+      },
+    })).toThrow("second rename failed");
+    expect(target.files()).toEqual(before);
+    expect(existsSync(operationLogPath(target.root))).toBe(false);
+  });
+
+  it("rolls back exact canonical bytes when durability fails after rename", () => {
+    const target = scaffold();
+    const before = target.files();
+    const planned = planOperationBatch([
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, {
+        entityId: JWT,
+        opId: "op-post-rename-failure",
+      }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      afterFileRename: () => { throw new Error("directory fsync failed after rename"); },
+    })).toThrow("directory fsync failed after rename");
+    expect(target.files()).toEqual(before);
+    expect(existsSync(operationLogPath(target.root))).toBe(false);
+  });
+
+  it("rejects a regular-file replacement of the exact reviewed temp generation", () => {
+    const target = scaffold();
+    const before = target.files();
+    const planned = planOperationBatch([
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, {
+        entityId: JWT,
+        opId: "op-temp-regular-replacement",
+      }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      beforeFileRename: (path) => {
+        const directory = resolve(target.root, path, "..");
+        const name = readdirSync(directory).find((entry) => entry.includes(".tmp-"));
+        if (name === undefined) throw new Error("expected owned temp");
+        const temp = join(directory, name);
+        renameSync(temp, `${temp}.displaced`);
+        writeFileSync(temp, "unreviewed replacement bytes", "utf8");
+      },
+    })).toThrow(WritePathError);
+
+    expect(target.files()).toEqual(before);
+    expect(Object.values(target.files()).join("\n")).not.toContain("unreviewed replacement bytes");
+  });
+
+  it("does not accept or erase a foreign append after the final audit write", () => {
+    const target = scaffold();
+    const before = target.files();
+    const planned = planOperationBatch([
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, {
+        entityId: JWT,
+        opId: "op-final-ledger-race",
+      }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const foreign = "{\"foreignAfterWrite\":true}\n";
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      afterAuditWrite: (phase) => {
+        if (phase === "complete") appendFileSync(operationLogPath(target.root), foreign, "utf8");
+      },
+    })).toThrow(WikiWriteRecoveryError);
+    expect(target.files()).toEqual(before);
+    expect(readFileSync(operationLogPath(target.root), "utf8")).toContain(foreign.trim());
+  });
+
+  it("rechecks the exact final ledger after the sequence commit hook", () => {
+    const target = scaffold();
+    const before = target.files();
+    const planned = planOperationBatch([
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, {
+        entityId: JWT,
+        opId: "op-final-ledger-postcondition",
+      }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const foreign = "{\"foreignBeforeCommit\":true}\n";
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      beforeSequenceCommit: () => appendFileSync(operationLogPath(target.root), foreign, "utf8"),
+    })).toThrow(WikiWriteRecoveryError);
+    expect(target.files()).toEqual(before);
+    expect(readFileSync(operationLogPath(target.root), "utf8")).toContain(foreign.trim());
+  });
+
+  it("rejects a regular-file replacement of the bound rollback ledger temp", () => {
+    const target = scaffold();
+    const path = operationLogPath(target.root);
+    mkdirSync(join(target.root, "events"), { recursive: true });
+    const current = "{\"current\":true}\n";
+    const original = "{\"original\":true}\n";
+    writeFileSync(path, current, "utf8");
+
+    expect(() => restoreOperationLogExact(target.root, current, { exists: true, text: original }, {
+      beforeRename: (temp) => {
+        renameSync(temp, `${temp}.displaced`);
+        writeFileSync(temp, original, "utf8");
+      },
+    })).toThrow(OperationLogPathError);
+    expect(readFileSync(path, "utf8")).toBe(current);
+  });
+
+  it("refuses a target-parent retarget before temp creation without writing through the symlink", () => {
+    const target = scaffold();
+    const outside = `${target.root}-outside`;
+    const moved = join(target.root, "context-bound");
+    mkdirSync(outside, { recursive: true });
+    const original = target.read("context/architecture.md");
+    const planned = planOperationBatch([
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, { entityId: JWT, opId: "op-parent-retarget" }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+
+    try {
+      expect(() => applyPlannedOperationBatch(planned.plan, {
+        scaffoldRoot: target.root,
+        expectedPreviewRevision: planned.plan.previewRevision,
+        beforeFileOpen: () => {
+          renameSync(join(target.root, "context"), moved);
+          symlinkSync(outside, join(target.root, "context"), "dir");
+        },
+      })).toThrow();
+      expect(readFileSync(join(moved, "architecture.md"), "utf8")).toBe(original);
+      expect(existsSync(join(outside, "architecture.md"))).toBe(false);
+      expect(existsSync(operationLogPath(target.root))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("does not rewind a durable completed prefix when a resumed later operation fails", () => {
+    const target = scaffold();
+    const planned = planOperationBatch([
+      envelope(target, "update-entry", { summary: "Durable prefix." }, { entityId: JWT, opId: "op-prefix-one" }),
+      envelope(target, "update-entry", { body: "Later body." }, { entityId: JWT, opId: "op-prefix-two" }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const first = planned.plan.operations[0]!;
+    expect(applyPlannedOperation(first, {
+      scaffoldRoot: target.root,
+      expectedPreviewHash: previewHashOf(first),
+    }).ok).toBe(true);
+    const invocationStart = target.files();
+    const ledgerStart = readFileSync(operationLogPath(target.root), "utf8");
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      beforeAuditAppend: (phase, opId) => {
+        if (phase === "complete" && opId === "op-prefix-two") throw new Error("later completion failed");
+      },
+    })).toThrow("later completion failed");
+    expect(target.files()).toEqual(invocationStart);
+    expect(readFileSync(operationLogPath(target.root), "utf8")).toBe(ledgerStart);
+  });
+
+  it("does not erase an in-flight crash prefix when its resumed completion fails ordinarily", () => {
+    const target = scaffold();
+    const planned = planOperationBatch([
+      envelope(target, "set-property", { property: "status", value: "deprecated" }, { entityId: JWT, opId: "op-inflight-prefix" }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      onFileWritten: () => { throw new Error("SIGKILL"); },
+    })).toThrow("SIGKILL");
+    const invocationStart = target.files();
+    const ledgerStart = readFileSync(operationLogPath(target.root), "utf8");
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      beforeAuditAppend: (phase) => {
+        if (phase === "complete") throw new Error("resume completion failed");
+      },
+    })).toThrow("resume completion failed");
+    expect(target.files()).toEqual(invocationStart);
+    expect(readFileSync(operationLogPath(target.root), "utf8")).toBe(ledgerStart);
+  });
+
+  it("refuses to overwrite an external post-write edit and retains exact recovery artifacts", () => {
+    const target = scaffold();
+    const planned = planOperationBatch([
+      envelope(
+        target,
+        "move-entry",
+        { file: "patterns/problem-documents.md", insertAt: { at: "end-of-file" } },
+        { entityId: GATEWAY, opId: "op-recovery-artifact" },
+      ),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    let renames = 0;
+    let externallyEdited = false;
+    let caught: unknown;
+    try {
+      applyPlannedOperationBatch(planned.plan, {
+        scaffoldRoot: target.root,
+        expectedPreviewRevision: planned.plan.previewRevision,
+        onFileWritten: (path) => {
+          if (externallyEdited) return;
+          externallyEdited = true;
+          const absolute = join(target.root, path);
+          writeFileSync(absolute, `${readFileSync(absolute, "utf8")}external edit\n`, "utf8");
+        },
+        beforeFileRename: () => {
+          renames += 1;
+          if (renames === 2) throw new Error("later write failed");
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(WikiWriteRecoveryError);
+    const recovery = caught as WikiWriteRecoveryError;
+    expect(recovery.recoveryPaths.length).toBeGreaterThan(0);
+    for (const path of recovery.recoveryPaths) expect(readFileSync(join(target.root, path), "utf8").length).toBeGreaterThan(0);
+    expect(Object.values(target.files()).join("\n")).toContain("external edit");
   });
 });
 
