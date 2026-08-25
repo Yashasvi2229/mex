@@ -233,6 +233,7 @@ export const DEFAULT_WIKI_SYNTHESIS: WikiSynthesisConfig = {
   maxCandidates: 60,
   maxPerUnit: 6,
   maxGroups: 40,
+  maxNodes: 60,
 };
 
 /** A positive finite number, or the default. A garbage value costs one setting. */

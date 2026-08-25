@@ -138,6 +138,7 @@ describe("wiki config", () => {
       "maxCandidates",
       "maxFileLines",
       "maxGroups",
+      "maxNodes",
       "maxPerUnit",
       "maxTokens",
       "minFiles",

@@ -15,6 +15,7 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractAllClusterContexts, extractClusterContext } from "../context.js";
+import { estimateTokens } from "../../query/budget.js";
 import type { Cluster, ContextGraphNode, ContextGraphReader } from "../types.js";
 
 let dir: string | undefined;
@@ -366,31 +367,46 @@ describe("the token budget", () => {
     expect(context.truncated).toBe(false);
   });
 
-  it("drops supporting evidence, keeps primary, and says so", () => {
+  it("drops from the tail and counts exactly what it dropped", () => {
     const { repoRoot, cluster, graph } = bigCluster();
     const unbounded = extractClusterContext(graph, cluster, repoRoot);
-    const supporting = unbounded.codeBlocks.filter((block) => block.importance === "supporting");
-    expect(supporting.length).toBeGreaterThan(0);
 
-    const bounded = extractClusterContext(graph, cluster, repoRoot, { maxTokens: 220 });
+    // A ceiling that fits the first block and not the second, so exactly one
+    // survives and the arithmetic below is checkable rather than approximate.
+    const first = estimateTokens(unbounded.codeBlocks[0]!);
+    const bounded = extractClusterContext(graph, cluster, repoRoot, { maxTokens: first });
 
     expect(bounded.truncated).toBe(true);
-    expect(bounded.codeBlocks.length).toBeLessThan(unbounded.codeBlocks.length);
-    // Primary evidence survives: a context that silently lost the code its
-    // claim is about is worse than one that is plainly too big.
-    expect(bounded.codeBlocks.some((block) => block.importance === "primary")).toBe(true);
-    expect(bounded.codeBlocks.filter((block) => block.importance === "supporting").length).toBeLessThan(
-      supporting.length,
-    );
+    expect(bounded.codeBlocks).toHaveLength(1);
+    // Primary survives longest, because the sort put it first — which is what
+    // makes dropping from the tail the right thing rather than an arbitrary one.
+    expect(bounded.codeBlocks[0]!.importance).toBe("primary");
+    // The count is the whole point: an agent told "40 blocks are missing" will
+    // not write a unit claiming this cluster does not do something.
+    const dropped = bounded.dropped!;
+    expect(dropped.primaryBlocks + dropped.supportingBlocks).toBe(unbounded.codeBlocks.length - 1);
   });
 
-  it("never drops a primary block, even under an absurd ceiling", () => {
+  it("bounds primary evidence too, rather than emitting a prompt no model can read", () => {
+    // The correction a measured run forced: exempting primary blocks produced
+    // a 4.5 MB prompt for one real cluster, so the exemption protected nothing.
     const { repoRoot, cluster, graph } = bigCluster();
     const bounded = extractClusterContext(graph, cluster, repoRoot, { maxTokens: 1 });
-    const primary = bounded.codeBlocks.filter((block) => block.importance === "primary");
-    expect(primary.length).toBe(1);
-    expect(bounded.codeBlocks.filter((block) => block.importance === "supporting")).toHaveLength(0);
+    expect(bounded.codeBlocks).toHaveLength(0);
     expect(bounded.truncated).toBe(true);
+    expect(bounded.dropped!.primaryBlocks).toBeGreaterThan(0);
+  });
+
+  it("bounds the symbol list, which is what may be grounded to", () => {
+    const { repoRoot, cluster, graph } = bigCluster();
+    const bounded = extractClusterContext(graph, cluster, repoRoot, { maxNodes: 1 });
+    expect(bounded.nodes).toHaveLength(1);
+    expect(bounded.dropped!.nodes).toBe(2);
+    // And no evidence survives for a symbol the agent cannot see: an id it
+    // cannot read is an id it cannot ground to, so the block is pure cost.
+    for (const block of bounded.codeBlocks) {
+      if (block.nodeId !== undefined) expect(block.nodeId).toBe(bounded.nodes[0]!.id);
+    }
   });
 
   it("is deterministic over the same repository", () => {

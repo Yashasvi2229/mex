@@ -228,10 +228,20 @@ export function renderClusterContext(context: ClusterContext): string {
 
   if (cluster.description !== undefined) lines.push("", cluster.description);
   if (context.truncated === true) {
+    const dropped = context.dropped;
+    const parts: string[] = [];
+    if (dropped !== undefined) {
+      if (dropped.nodes > 0) parts.push(`${dropped.nodes} symbol(s)`);
+      if (dropped.primaryBlocks > 0) parts.push(`${dropped.primaryBlocks} primary code block(s)`);
+      if (dropped.supportingBlocks > 0) parts.push(`${dropped.supportingBlocks} supporting code block(s)`);
+    }
     lines.push(
       "",
-      "NOTE: this context was trimmed to fit a token budget. Supporting evidence was dropped from the end;",
-      "every primary symbol and primary code block is present. Treat an absence as unknown, never as a fact.",
+      `NOTE: this cluster is larger than the budget for one context, so it was trimmed${
+        parts.length === 0 ? "" : ` — ${parts.join(", ")} are not shown`
+      }.`,
+      "What remains is the highest-ranked evidence, primary first. Treat anything absent as UNKNOWN, never as a",
+      "fact about the code: do not write a unit claiming this cluster does not do something you cannot see here.",
     );
   }
 

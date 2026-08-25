@@ -84,6 +84,7 @@ export interface SynthesisScope {
   maxCandidates: number;
   maxPerUnit: number;
   maxGroups: number;
+  maxNodes: number;
 }
 
 const DEFAULT_SCOPE: SynthesisScope = {
@@ -95,6 +96,7 @@ const DEFAULT_SCOPE: SynthesisScope = {
   maxCandidates: 60,
   maxPerUnit: 6,
   maxGroups: 40,
+  maxNodes: 60,
 };
 
 function scopeOf(options: SynthesisOptions): SynthesisScope {
@@ -246,6 +248,7 @@ export function wikiSynthesisPrepare(
     maxFileLines: scope.maxFileLines,
     supportingMaxLines: scope.supportingMaxLines,
     maxTokens: scope.maxTokens,
+    maxNodes: scope.maxNodes,
   });
   const prompt = renderPrompt(context, options.stage);
   return {

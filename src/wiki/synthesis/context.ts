@@ -118,6 +118,8 @@ function codeBlockId(
 
 type ResolvedOptions = Required<Omit<ExtractClusterContextOptions, "maxTokens">> & { maxTokens?: number };
 
+const DEFAULT_MAX_NODES = 60;
+
 function resolveOptions(options: ExtractClusterContextOptions): ResolvedOptions {
   return {
     callGraphForCallablesOnly: options.callGraphForCallablesOnly ?? true,
@@ -126,6 +128,7 @@ function resolveOptions(options: ExtractClusterContextOptions): ResolvedOptions 
     maxFileLines: options.maxFileLines ?? 400,
     supportingMaxLines: options.supportingMaxLines ?? 120,
     includeFileSummaries: options.includeFileSummaries ?? true,
+    maxNodes: options.maxNodes ?? DEFAULT_MAX_NODES,
     ...(options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens }),
   };
 }
@@ -255,41 +258,73 @@ function buildFileSummaries(
 }
 
 /**
- * Fit the code blocks inside a token ceiling, dropping supporting evidence only.
+ * Fit the evidence inside the bounds, and count what was dropped.
  *
- * The blocks are already sorted primary-first, so the tail is exactly the
- * evidence that matters least — which is why the sort is a correctness property
- * here and not a presentation choice. Primary blocks are kept whatever the
- * ceiling says: a caller that asked for an impossible budget gets an honest
- * over-budget context flagged `truncated`, not a context missing the code its
- * claim would be about.
+ * Supporting evidence goes first, then primary evidence from the tail — the
+ * sort already put the least useful evidence there, which is what makes this a
+ * correctness property of the sort rather than a presentation choice.
+ *
+ * **Primary evidence is bounded too.** The first version of this exempted it,
+ * on the reasoning that a context missing the code its claim is about is worse
+ * than one that is merely large. A measured run against a real repository
+ * produced a 4.5 MB prompt for one 133-file cluster, which no model can read,
+ * so the exemption protected nothing and cost everything. What matters is not
+ * whether evidence is dropped but whether the agent is told it was: the counts
+ * come back here and the renderer states them.
  */
-function fitCodeBlocks(
+function fitEvidence(
+  nodes: readonly ClusterContextNode[],
   blocks: readonly ClusterCodeBlock[],
-  maxTokens: number | undefined,
-): { blocks: ClusterCodeBlock[]; truncated: boolean } {
-  if (maxTokens === undefined) return { blocks: [...blocks], truncated: false };
+  options: ResolvedOptions,
+): {
+  nodes: ClusterContextNode[];
+  blocks: ClusterCodeBlock[];
+  truncated: boolean;
+  dropped: { nodes: number; primaryBlocks: number; supportingBlocks: number };
+} {
+  const keptNodes = nodes.slice(0, options.maxNodes);
+  const droppedNodes = nodes.length - keptNodes.length;
+
+  // Only evidence for a node the agent can actually see: an id it cannot read
+  // is an id it cannot ground to, and a block for one is pure cost.
+  const visible = new Set(keptNodes.map((node) => node.id));
+  const eligible = blocks.filter((block) => block.nodeId === undefined || visible.has(block.nodeId));
+
+  if (options.maxTokens === undefined) {
+    return {
+      nodes: keptNodes,
+      blocks: eligible,
+      truncated: droppedNodes > 0 || eligible.length < blocks.length,
+      dropped: {
+        nodes: droppedNodes,
+        primaryBlocks: blocks.filter((block) => block.importance === "primary").length - eligible.filter((block) => block.importance === "primary").length,
+        supportingBlocks:
+          blocks.filter((block) => block.importance === "supporting").length -
+          eligible.filter((block) => block.importance === "supporting").length,
+      },
+    };
+  }
 
   const kept: ClusterCodeBlock[] = [];
   let used = 0;
-  let truncated = false;
+  let droppedPrimary = blocks.filter((block) => block.importance === "primary").length;
+  let droppedSupporting = blocks.filter((block) => block.importance === "supporting").length;
 
-  for (const block of blocks) {
+  for (const block of eligible) {
     const cost = estimateTokens(block);
-    if (block.importance === "primary") {
-      kept.push(block);
-      used += cost;
-      continue;
-    }
-    if (used + cost > maxTokens) {
-      truncated = true;
-      continue;
-    }
+    if (used + cost > options.maxTokens) continue;
     kept.push(block);
     used += cost;
+    if (block.importance === "primary") droppedPrimary -= 1;
+    else droppedSupporting -= 1;
   }
 
-  return { blocks: kept, truncated };
+  return {
+    nodes: keptNodes,
+    blocks: kept,
+    truncated: droppedNodes > 0 || droppedPrimary > 0 || droppedSupporting > 0,
+    dropped: { nodes: droppedNodes, primaryBlocks: droppedPrimary, supportingBlocks: droppedSupporting },
+  };
 }
 
 /** Extract the evidence for one cluster. */
@@ -352,13 +387,14 @@ export function extractClusterContext(
   nodes.sort(compareNodes);
   codeBlocks.sort(compareCodeBlocks);
 
-  const fitted = fitCodeBlocks(codeBlocks, resolved.maxTokens);
+  const fitted = fitEvidence(nodes, codeBlocks, resolved);
 
   return {
     cluster,
-    nodes,
+    nodes: fitted.nodes,
     codeBlocks: fitted.blocks,
     truncated: fitted.truncated,
+    dropped: fitted.dropped,
     ...(resolved.includeFileSummaries ? { fileSummaries: buildFileSummaries(cluster, perFile) } : {}),
   };
 }

@@ -269,10 +269,18 @@ describe("the prompts", () => {
     expect(rendered).toContain("### Supporting symbols (1)");
   });
 
-  it("says so when the context was trimmed", () => {
-    const trimmed = { ...context(), truncated: true };
-    expect(renderClusterContext(trimmed)).toContain("trimmed to fit a token budget");
-    expect(renderClusterContext(context())).not.toContain("trimmed to fit a token budget");
+  it("says what a trim dropped, in counts, so an absence is not read as a fact", () => {
+    const trimmed = {
+      ...context(),
+      truncated: true,
+      dropped: { nodes: 12, primaryBlocks: 3, supportingBlocks: 40 },
+    };
+    const rendered = renderClusterContext(trimmed);
+    expect(rendered).toContain("12 symbol(s)");
+    expect(rendered).toContain("3 primary code block(s)");
+    expect(rendered).toContain("40 supporting code block(s)");
+    expect(rendered).toContain("UNKNOWN");
+    expect(renderClusterContext(context())).not.toContain("was trimmed");
   });
 
   it("fences source that contains its own fence", () => {

@@ -104,13 +104,15 @@ export interface ClusterContext {
   codeBlocks: ClusterCodeBlock[];
   fileSummaries?: ClusterFileSummary[];
   /**
-   * True when a bound dropped supporting evidence.
+   * True when a bound dropped evidence.
    *
    * Data, never a diagnostic: a bounded context is the normal outcome on a
    * large cluster, and a caller that cannot tell a complete context from a
    * trimmed one will read an absence as a fact about the code.
    */
   truncated?: boolean;
+  /** What the bound dropped, counted, so the prompt can say so in words. */
+  dropped?: { nodes: number; primaryBlocks: number; supportingBlocks: number };
 }
 
 /** Structural detail for one node, as context extraction needs it. */
@@ -153,10 +155,33 @@ export interface ExtractClusterContextOptions {
    *
    * D10 requires that the wiki compose with the graph's budget rather than
    * inventing a second one, and a cluster context handed to an agent is the
-   * largest payload this engine produces. Supporting evidence is dropped from
-   * the tail until it fits; primary evidence is never dropped, because a
-   * context that silently lost the code the claim is about is worse than one
-   * that is plainly too big.
+   * largest payload this engine produces.
+   *
+   * Supporting evidence is dropped first, then primary evidence from the tail.
+   * **Primary evidence is bounded too, and that is a correction rather than a
+   * concession.** The first version never dropped a primary block, reasoning
+   * that a context missing the code its claim is about is worse than one that
+   * is large. Measured against a real repository that produced a 4.5 MB prompt
+   * for one cluster — unusable by any model, so the guarantee protected
+   * nothing. What actually distinguishes the two is not whether evidence is
+   * dropped but whether the agent is *told*: the count is carried in
+   * `dropped` and stated in the rendered context, so an absence is never read
+   * as a fact about the code.
    */
   maxTokens?: number;
+  /**
+   * Cap on structural nodes listed. Default 60.
+   *
+   * Separate from the token budget because the node list is what grounding is
+   * checked against: an agent can only copy an id it can see, so this bounds
+   * what may be grounded to rather than merely what is shown.
+   *
+   * A count rather than a share of the budget, deliberately — a symbol whose
+   * evidence was trimmed is still worth grounding to, so the two bounds answer
+   * different questions and one number could not serve both. The consequence,
+   * stated rather than hidden: on a very large cluster this is the dominant
+   * cost of the rendered prompt, and the real answer there is a finer cluster
+   * rather than a bigger context.
+   */
+  maxNodes?: number;
 }

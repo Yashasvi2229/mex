@@ -82,6 +82,8 @@ export interface WikiSynthesisConfig {
   maxPerUnit: number;
   /** Cap on consolidation groups proposed in one pass. */
   maxGroups: number;
+  /** Cap on symbols listed in one cluster context — what may be grounded to. */
+  maxNodes: number;
 }
 
 export interface WikiConfig {
