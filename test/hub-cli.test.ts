@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   isTelemetryExemptCommand,
+  createHubRunOptions,
   parsePortArg,
   program,
 } from "../src/cli.js";
+import { createConfig } from "../src/config.js";
 
 describe("mex hub command surface", () => {
   it("registers the Hub command and its two public options", () => {
@@ -26,5 +28,36 @@ describe("mex hub command surface", () => {
   it("keeps Hub launch and actions outside command telemetry", () => {
     expect(isTelemetryExemptCommand("hub", "mex")).toBe(true);
     expect(isTelemetryExemptCommand("check", "mex")).toBe(false);
+  });
+
+  it("passes normalized Wiki ownership and corpus scope into production Hub startup", () => {
+    const config = createConfig({
+      projectRoot: "/project",
+      scaffoldRoot: "/project/.mex",
+      wiki: {
+        exclude: ["private/**"],
+        readOnly: ["imported/**"],
+        synthesis: {
+          minFiles: 1,
+          maxTokens: 4_000,
+          primaryContextLines: 3,
+          maxFileLines: 400,
+          supportingMaxLines: 120,
+          maxCandidates: 60,
+          maxPerUnit: 6,
+          maxGroups: 40,
+          maxNodes: 60,
+        },
+      },
+    });
+    expect(createHubRunOptions(config, "scaffold-configured", { port: 48123, open: false }))
+      .toMatchObject({
+        projectRoot: "/project",
+        scaffoldId: "scaffold-configured",
+        port: 48123,
+        openBrowser: false,
+        wikiExclude: ["private/**"],
+        wikiReadOnly: ["imported/**"],
+      });
   });
 });

@@ -4,10 +4,12 @@ import { createHubApp } from "./app.js";
 import { openHubBrowser } from "./browser.js";
 import { HubJobManager } from "./jobs/index.js";
 import { createGraphJobExecutors } from "./jobs/graph.js";
+import { createWikiJobExecutors } from "./jobs/wiki.js";
 import { startHubNodeServer } from "./node-server.js";
 import { createLocalHubReadServices } from "./services.js";
 import { TeamLocalState } from "../team/local-state/index.js";
 import { createRepositoryGraphPort } from "../graph/application-adapter.js";
+import { createRepositoryWikiPort } from "../wiki/application-adapter.js";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +18,8 @@ export interface RunHubCommandOptions {
   readonly scaffoldId: string;
   readonly port?: number;
   readonly openBrowser: boolean;
+  readonly wikiExclude?: readonly string[];
+  readonly wikiReadOnly?: readonly string[];
 }
 
 /**
@@ -28,9 +32,17 @@ export async function runHubCommand(options: RunHubCommandOptions): Promise<void
     scaffoldId: options.scaffoldId,
   });
   const graph = createRepositoryGraphPort(options.projectRoot);
+  const wiki = createRepositoryWikiPort(options.projectRoot, {
+    groundingBridge: graph,
+    ...(options.wikiExclude === undefined ? {} : { exclude: options.wikiExclude }),
+    ...(options.wikiReadOnly === undefined ? {} : { readOnly: options.wikiReadOnly }),
+  });
   const jobs = new HubJobManager({
     localState,
-    executors: createGraphJobExecutors(graph),
+    executors: {
+      ...createGraphJobExecutors(graph),
+      ...createWikiJobExecutors(wiki),
+    },
     shutdownTimeoutMs: 60_000,
   });
   jobs.initialize();
@@ -47,6 +59,7 @@ export async function runHubCommand(options: RunHubCommandOptions): Promise<void
       scaffoldId: options.scaffoldId,
       jobs,
       graph,
+      wiki,
     });
     const assets = new HubAssetManifest(resolveHubAssetRoot());
     const app = createHubApp({ security, services, jobs, assets });
