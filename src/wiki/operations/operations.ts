@@ -256,6 +256,10 @@ function newEntityFields(id: EntityId, payload: CreateEntryPayload): (readonly [
     // key.
     ["title", headingDepth === undefined ? payload.title : undefined],
     ["summary", payload.summary],
+    [
+      METADATA_KEYS.metadata,
+      payload.metadata === undefined || Object.keys(payload.metadata).length === 0 ? undefined : payload.metadata,
+    ],
     ["topics", payload.topics === undefined || payload.topics.length === 0 ? undefined : payload.topics],
     ["relations", payload.relations === undefined || payload.relations.length === 0 ? undefined : payload.relations],
     ["sources", payload.sources === undefined || payload.sources.length === 0 ? undefined : payload.sources],
@@ -297,6 +301,26 @@ function createInto(context: OperationContext, payload: CreateEntryPayload, id: 
   }
 
   if (payload.adopt !== undefined) return adoptInto(file, payload, payload.adopt, id);
+
+  // **§12.4, on the operation that mints rather than moves.** `set-grounding`
+  // has always re-derived what it is asked to write; `create-entry` wrote its
+  // `groundsTo` straight into metadata, so the one invariant that says an agent
+  // may not invent a node id had a hole in the operation an agent reaches for
+  // first. P8 is its first caller and the first to reach it.
+  //
+  // `adopt` is deliberately not covered by this and is not an oversight: an
+  // adoption *moves* values that are already in the user's Markdown, and a
+  // missing graph fails every grounding by design (§38), so verifying there
+  // would delete a legacy grounding from a checkout with no graph rather than
+  // preserve it. The residue is recorded as a finding rather than closed here,
+  // because narrowing adoption is a change to migration's contract.
+  if (payload.groundsTo !== undefined && payload.groundsTo.length > 0) {
+    const derived = deriveVerifiedGroundings(payload.groundsTo, context.options.graph ?? null);
+    if (!derived.ok) {
+      return { files: [], entityIds: [], createdIds: [], preconditions: [], revisions: [], diagnostics: derived.diagnostics };
+    }
+    payload = { ...payload, groundsTo: derived.groundings.map((entry) => ({ ...entry })) };
+  }
 
   const insertAt = payload.insertAt;
   if (insertAt === undefined) {

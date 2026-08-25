@@ -145,6 +145,19 @@ export interface CreateEntryPayload {
   relations?: WikiRelationRef[];
   sources?: WikiSource[];
   groundsTo?: WikiGrounding[];
+  /**
+   * The entity's open metadata map, §8.3's extension point.
+   *
+   * Additive, and it closes a gap rather than opening one: the codec has always
+   * read a `metadata` key back off an entity, `set-property` has always been
+   * able to change it, and only the *creating* operation had no way to carry
+   * one — so a caller with a fact to record at creation time had to write two
+   * operations and two audit lines to record it. P8 is the first caller with
+   * such a fact (the confidence that proposed the entity's lifecycle state,
+   * which must stay visible beside the state it chose, or the number that made
+   * the decision is unauditable).
+   */
+  metadata?: Record<string, unknown>;
   /** Heading depth for a block-level entity; omit for a file-level entity. */
   headingDepth?: number;
 }
@@ -341,6 +354,21 @@ const adoptTargetValidator: Validator<AdoptTarget> = (value, context) => {
   return reject(context, "INVALID_OPERATION_PAYLOAD", `Unknown adopt target "${String(value.at)}".`);
 };
 
+/**
+ * An open metadata map: any plain object, values untouched.
+ *
+ * Deliberately unconstrained beyond "is an object". §8.3 makes `metadata` the
+ * extension point, so a schema here would be this engine deciding what a user's
+ * own key may hold. It is still validated as a *shape*, because a string or an
+ * array under `metadata:` is a mistake rather than an extension.
+ */
+const metadataMapValidator: Validator<Record<string, unknown>> = (value, context) => {
+  if (!isPlainObject(value)) {
+    return reject(context, "INVALID_FIELD_TYPE", "`metadata` must be a map of keys to values.");
+  }
+  return succeed(value);
+};
+
 const createEntryShape = validateShape<CreateEntryPayload>({
   file: scaffoldPathValidator,
   insertAt: optional(insertionPointValidator),
@@ -354,6 +382,7 @@ const createEntryShape = validateShape<CreateEntryPayload>({
   relations: optional(validateArray(validateRelationRef)),
   sources: optional(validateArray(validateSource)),
   groundsTo: optional(validateArray(validateGrounding)),
+  metadata: optional(metadataMapValidator),
   headingDepth: optional(validateInteger({ min: 1, max: 6 })),
 });
 

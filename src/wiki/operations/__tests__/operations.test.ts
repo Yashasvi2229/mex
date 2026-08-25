@@ -670,3 +670,121 @@ See [the handler](mex://${other}) for the shape.
     expect(after.topics).toContain(TOPIC);
   });
 });
+
+describe("create-entry, on the two things P8 needed from it", () => {
+  it("re-derives the groundings it is handed, and refuses the ones the graph cannot produce", () => {
+    // The §12.4 gate, on the operation that mints rather than moves. Before
+    // this, `set-grounding` re-derived and `create-entry` wrote its `groundsTo`
+    // straight into metadata — so the invariant that an agent may not invent a
+    // node id had a hole in the operation an agent reaches for first.
+    const target = scaffold();
+    const fabricated = {
+      file: "context/architecture.md",
+      insertAt: { at: "end-of-file" },
+      type: "component",
+      title: "Invented",
+      body: "Grounded to a node that does not exist.",
+      headingDepth: 2,
+      groundsTo: [{ node: "function:0000000000000000000000000000000f", fingerprint: "mh:64:deadbeef" }],
+    };
+
+    const before = target.read("context/architecture.md");
+    const refused = applyOperation(envelope(target, "create-entry", fabricated), {
+      scaffoldRoot: target.root,
+      graph: stubGraph,
+    });
+
+    expect(refused.ok).toBe(false);
+    expect(codesOf(refused.diagnostics)).toContain("GROUNDING_UNVERIFIED");
+    expect(target.read("context/architecture.md")).toBe(before);
+  });
+
+  it("accepts a grounding the graph does produce, and writes what came back", () => {
+    // The other polarity, so the check above is not passing because the gate
+    // refuses everything.
+    const target = scaffold();
+    const applied = applyOperation(
+      envelope(target, "create-entry", {
+        file: "context/architecture.md",
+        insertAt: { at: "end-of-file" },
+        type: "component",
+        title: "Token minting",
+        body: "One function mints every token.",
+        headingDepth: 2,
+        ...groundingPayload(),
+      }),
+      { scaffoldRoot: target.root, graph: stubGraph },
+    );
+
+    expect(applied.ok).toBe(true);
+    const created = target.entity(applied.createdIds[0]!);
+    expect(created.groundsTo).toEqual([
+      { node: NODE, fingerprint: FINGERPRINT, bodyHash: BODY_HASH, file: "src/token.ts" },
+    ]);
+  });
+
+  it("refuses a grounding when there is no graph at all", () => {
+    // §38's asymmetry, on this path too: a read with no graph degrades, a write
+    // that mints a permanent canonical reference does not.
+    const target = scaffold();
+    const refused = applyOperation(
+      envelope(target, "create-entry", {
+        file: "context/architecture.md",
+        insertAt: { at: "end-of-file" },
+        type: "component",
+        title: "No graph here",
+        body: "Should not be written without a graph to verify against.",
+        headingDepth: 2,
+        ...groundingPayload(),
+      }),
+      { scaffoldRoot: target.root },
+    );
+
+    expect(refused.ok).toBe(false);
+    expect(codesOf(refused.diagnostics)).toContain("GROUNDING_UNVERIFIED");
+  });
+
+  it("writes a metadata map, and the codec reads it back", () => {
+    // The payload field P8 needed: a fact recorded at creation time rather than
+    // in a second operation with a second audit line.
+    const target = scaffold();
+    const applied = applyOperation(
+      envelope(target, "create-entry", {
+        file: "context/architecture.md",
+        insertAt: { at: "end-of-file" },
+        type: "component",
+        title: "Carries metadata",
+        body: "An entity with an open metadata map attached at creation.",
+        headingDepth: 2,
+        metadata: { synthesis: { confidence: 0.82, stage: "architecture_component" } },
+      }),
+      { scaffoldRoot: target.root },
+    );
+
+    expect(applied.ok).toBe(true);
+    expect(target.entity(applied.createdIds[0]!).metadata).toEqual({
+      synthesis: { confidence: 0.82, stage: "architecture_component" },
+    });
+  });
+
+  it("omits the metadata key when the map is empty", () => {
+    // An empty map in the frontmatter is noise in a diff, and it is the shape
+    // every other optional field in `newEntityFields` already avoids.
+    const target = scaffold();
+    const applied = applyOperation(
+      envelope(target, "create-entry", {
+        file: "context/architecture.md",
+        insertAt: { at: "end-of-file" },
+        type: "component",
+        title: "No metadata",
+        body: "An entity created with an empty metadata map.",
+        headingDepth: 2,
+        metadata: {},
+      }),
+      { scaffoldRoot: target.root },
+    );
+
+    expect(applied.ok).toBe(true);
+    expect(target.read("context/architecture.md")).not.toContain("metadata:");
+  });
+});
