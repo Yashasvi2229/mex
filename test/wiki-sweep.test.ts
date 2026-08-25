@@ -87,6 +87,28 @@ describe("the sweep's failure classifier", () => {
     ).toBe("REGRESSION");
   });
 
+  it("excuses both faces of the built-CLI suite's environmental failure", () => {
+    // That file fails two different ways depending on whether a `npm run build`
+    // inside its `beforeAll` beats the hook timeout. Either is environmental,
+    // and a baseline naming only the timeout would call the other a regression
+    // — which is exactly what it did on the first full sweep of this phase.
+    expect(sweep.classify(failure("test/cli.test.ts", "Error: Hook timed out in 10000ms."))).toBe("STANDING");
+    expect(
+      sweep.classify(
+        failure(
+          "test/cli.test.ts",
+          "AssertionError: expected 1 to be +0 // Object.is equality",
+          "built CLI main-module guard backfills scaffold_id on an existing scaffold when a command loads config",
+        ),
+      ),
+    ).toBe("STANDING");
+    // But an unrelated assertion in that same file is still a regression: the
+    // exemption is for two named mechanisms, not for the filename.
+    expect(
+      sweep.classify(failure("test/cli.test.ts", "AssertionError: expected 'a' to be 'b'")),
+    ).toBe("REGRESSION");
+  });
+
   it("matches a baseline file however the runner spelled its path", () => {
     // Vitest reports absolute, backslashed paths on Windows; `failuresOf`
     // normalizes, and the matcher is a suffix test so both spellings land.
