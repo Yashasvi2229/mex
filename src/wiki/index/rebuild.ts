@@ -25,6 +25,7 @@ import { parseWikiMarkdown } from "../markdown/codec.js";
 import type { ParsedFile } from "../markdown/contract.js";
 import { discoverMarkdownFiles } from "./discover.js";
 import { createPendingIndex, discardPendingIndex, publishPendingIndex, sweepPendingIndexes } from "./publish.js";
+import { IndexInUseError } from "./dbfile.js";
 import { resolveIndexState, writeFileDiagnostics, writeParsedFile, type GroundingResolver } from "./write.js";
 
 /** Default index location: `.mex/wiki.db`, beside the scaffold it indexes. */
@@ -185,6 +186,25 @@ export function rebuildWikiIndex(options: RebuildOptions): RebuildResult {
     };
   } catch (error) {
     discardPendingIndex(handle, tempPath);
+    if (error instanceof IndexInUseError) {
+      // Not a build failure: the scaffold parsed, the new index was built, and
+      // only the swap could not happen because a reader has the live one open.
+      // A typed diagnostic rather than a thrown EPERM, because the caller's
+      // right response is to retry rather than to investigate — and because
+      // the live index is untouched, so nothing is broken.
+      return {
+        indexPath,
+        fileCount: 0,
+        entityCount: 0,
+        diagnostics: [
+          diagnostic("WIKI_INDEX_REBUILD_REQUIRED", error.message, {
+            file: indexPath,
+            remediation: "Close anything holding the index open and run `mex wiki rebuild-index` again.",
+          }),
+        ],
+        sweptTempFiles,
+      };
+    }
     throw error;
   }
 }

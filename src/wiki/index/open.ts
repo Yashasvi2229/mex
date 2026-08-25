@@ -67,6 +67,25 @@ function readSchemaVersion(db: SqliteDatabase): number | null {
  *
  * Never creates, never migrates, never rebuilds.
  */
+/**
+ * Per-connection settings every wiki-index connection needs.
+ *
+ * **`busy_timeout` first, before any pragma that touches the file.** Under WAL
+ * a second connection that finds the database locked fails immediately with
+ * `SQLITE_BUSY` rather than waiting, so two `mex wiki` processes over one
+ * scaffold — a rebuild while an editor's language server reads, an apply while
+ * a refresh is in flight — turn a moment's contention into a hard error the
+ * user sees. Five seconds is the graph's own figure (`src/graph/db/database.ts`
+ * sets exactly this, with the same comment about ordering) and one number for
+ * both databases is worth more than a second opinion.
+ *
+ * This is a fix rather than a tidy-up: the wiki index has had WAL since P3 and
+ * has never had a busy timeout, so every concurrent access has been racing.
+ */
+function configureConnection(db: SqliteDatabase): void {
+  db.pragma("busy_timeout = 5000");
+}
+
 export function openWikiIndex(path: string, options: OpenIndexOptions = {}): OpenIndexResult {
   if (!indexExists(path)) {
     return {
@@ -78,6 +97,7 @@ export function openWikiIndex(path: string, options: OpenIndexOptions = {}): Ope
   let db: SqliteDatabase;
   try {
     db = openSqlite(path, { readOnly: options.readOnly !== false });
+    configureConnection(db);
   } catch (error) {
     return {
       ok: false,
@@ -127,6 +147,7 @@ export function openWikiIndex(path: string, options: OpenIndexOptions = {}): Ope
  */
 export function createWikiIndex(path: string): WikiIndexHandle {
   const db = openSqlite(path);
+  configureConnection(db);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.exec(WIKI_SCHEMA_SQL);

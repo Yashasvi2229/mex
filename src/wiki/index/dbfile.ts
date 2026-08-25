@@ -80,8 +80,50 @@ export function publishIndexFile(tempPath: string, targetPath: string): void {
   assertIndexPath(tempPath);
   assertIndexPath(targetPath);
 
-  for (const sibling of indexSiblingPaths(targetPath)) rmSync(sibling, { force: true });
-  renameSync(tempPath, targetPath);
+  for (const sibling of indexSiblingPaths(targetPath)) {
+    try {
+      rmSync(sibling, { force: true });
+    } catch (error) {
+      // `force: true` swallows a missing file but not a locked one. On Windows
+      // a reader holding the old database open holds its `-wal` too, and the
+      // delete fails with EPERM.
+      //
+      // **This must not be skipped.** Renaming over `wiki.db` while its
+      // predecessor's WAL survives beside it leaves SQLite a WAL belonging to
+      // a database that no longer exists, which it may try to recover into the
+      // new one. Publishing anyway would trade a visible failure for a
+      // corrupted index, so the refusal is typed and the old index is left
+      // exactly as it was.
+      throw new IndexInUseError(sibling, error);
+    }
+  }
+  try {
+    renameSync(tempPath, targetPath);
+  } catch (error) {
+    throw new IndexInUseError(targetPath, error);
+  }
+}
+
+/**
+ * The index could not be replaced because something else has it open.
+ *
+ * A distinct type rather than a raw `EPERM`, because the two mean different
+ * things to a caller: this one is "try again in a moment", and it is the
+ * ordinary outcome of rebuilding while an editor extension reads the same
+ * scaffold. The build that raised it wrote nothing — the live index is
+ * untouched and still correct.
+ */
+export class IndexInUseError extends Error {
+  constructor(
+    readonly path: string,
+    readonly cause: unknown,
+  ) {
+    super(
+      `The wiki index at ${path} is open in another process, so it could not be replaced. ` +
+        `The existing index is unchanged.`,
+    );
+    this.name = "IndexInUseError";
+  }
 }
 
 /** True when a database file exists at `path`. */
