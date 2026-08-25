@@ -17,6 +17,7 @@ import {
   COMMAND_BINDINGS,
   COMMANDS_WITHOUT_TOOLS,
   TOOLS_WITHOUT_COMMANDS,
+  SPEC_15_1_COMMANDS,
   WIKI_COMMANDS,
   WIKI_TOOLS,
 } from "../surface.js";
@@ -98,9 +99,16 @@ function scaffold(indexed = true): string {
 }
 
 describe("the tool and command surfaces", () => {
-  it("names eight tools and ten commands, as §16 and §15.1 do", () => {
+  it("names eight tools, and §15.1's ten are a subset of what mex implements", () => {
     expect(WIKI_TOOLS).toHaveLength(8);
-    expect(WIKI_COMMANDS).toHaveLength(10);
+    // The spec's list is a floor rather than a closed surface. Keeping it
+    // separate is what lets an added command be counted without making the
+    // spec appear to name it — and what stops an added command from sitting
+    // outside the table the suites below walk, which is how `regenerate-views`
+    // came to be uncovered by the envelope suite that counts its own cases.
+    expect(SPEC_15_1_COMMANDS).toHaveLength(10);
+    for (const command of SPEC_15_1_COMMANDS) expect(WIKI_COMMANDS).toContain(command);
+    expect(WIKI_COMMANDS).toHaveLength(14);
   });
 
   it("binds every command to a service function", () => {
@@ -123,10 +131,12 @@ describe("the tool and command surfaces", () => {
     expect(toolless.sort()).toEqual([...COMMANDS_WITHOUT_TOOLS].sort());
   });
 
-  it("marks exactly the two commands that can write", () => {
+  it("marks exactly the commands that can write", () => {
     expect(COMMAND_BINDINGS.filter((entry) => entry.mutates).map((entry) => entry.command)).toEqual([
       "migrate",
       "apply",
+      "regenerate-views",
+      "propose",
     ]);
   });
 

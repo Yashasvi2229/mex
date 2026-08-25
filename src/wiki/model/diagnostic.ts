@@ -311,6 +311,24 @@ export const WIKI_DIAGNOSTICS = {
     severity: "info",
     remediation: "A generated section no longer matches the index. Regenerate it.",
   },
+
+  // -- Synthesis (§12) --------------------------------------------------------
+
+  /**
+   * The agent's response file is not the shape the stage expects.
+   *
+   * Distinct from every rejection a candidate can collect, and the distinction
+   * is the point: a rejected candidate is the quality gate working, and a run
+   * that refuses half of what it was given is a healthy run. This says the file
+   * could not be read as a response at all, which is a different problem with a
+   * different fix, and a caller that cannot tell them apart will read a broken
+   * hand-off as a clean run that proposed nothing.
+   */
+  INVALID_AGENT_RESPONSE: {
+    severity: "error",
+    remediation:
+      "The response must be JSON carrying the array this stage expects — `units`, `actions` or `judgments`. Re-run the stage and save the model's raw JSON output.",
+  },
 } as const satisfies Record<string, DiagnosticDefinition>;
 
 export type WikiDiagnosticCode = keyof typeof WIKI_DIAGNOSTICS;

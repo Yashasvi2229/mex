@@ -17,6 +17,7 @@ import {
   normalizeWikiConfig,
   DEFAULT_WIKI_EXCLUDE,
   DEFAULT_WIKI_READ_ONLY,
+  DEFAULT_WIKI_SYNTHESIS,
 } from "../src/config.js";
 
 let root: string;
@@ -88,6 +89,7 @@ describe("wiki config", () => {
     expect(minimal.wiki).toEqual({
       exclude: [...DEFAULT_WIKI_EXCLUDE],
       readOnly: [...DEFAULT_WIKI_READ_ONLY],
+      synthesis: { ...DEFAULT_WIKI_SYNTHESIS },
     });
 
     const explicit = createConfig({
@@ -105,7 +107,43 @@ describe("wiki config", () => {
     expect(normalizeWikiConfig(undefined)).toEqual({
       exclude: [...DEFAULT_WIKI_EXCLUDE],
       readOnly: [...DEFAULT_WIKI_READ_ONLY],
+      synthesis: { ...DEFAULT_WIKI_SYNTHESIS },
     });
     expect(normalizeWikiConfig({ exclude: ["a/**"] }).exclude).toEqual(["a/**"]);
+  });
+
+  it("degrades a malformed synthesis block to defaults, one field at a time", () => {
+    // The same rule the two lists follow: config parsing runs on the path of
+    // every mex command, so a hand-edited garbage value costs the user that
+    // setting rather than the whole CLI.
+    expect(normalizeWikiConfig({ synthesis: "yes" } as never).synthesis).toEqual({ ...DEFAULT_WIKI_SYNTHESIS });
+    expect(normalizeWikiConfig({ synthesis: { minFiles: 0 } } as never).synthesis.minFiles).toBe(
+      DEFAULT_WIKI_SYNTHESIS.minFiles,
+    );
+    expect(normalizeWikiConfig({ synthesis: { maxTokens: "lots" } } as never).synthesis.maxTokens).toBe(
+      DEFAULT_WIKI_SYNTHESIS.maxTokens,
+    );
+    const partial = normalizeWikiConfig({ synthesis: { minFiles: 3 } } as never).synthesis;
+    expect(partial.minFiles).toBe(3);
+    expect(partial.maxTokens).toBe(DEFAULT_WIKI_SYNTHESIS.maxTokens);
+  });
+
+  it("has no knob that changes what synthesis accepts", () => {
+    // The line the config draws, asserted rather than described: every field
+    // here widens or narrows what mex *looks at*. The confidence gates and the
+    // relationship thresholds are constants in `src/wiki/synthesis/`, because a
+    // setting that lowers the bar for writing into a user's files has exactly
+    // one use.
+    expect(Object.keys(DEFAULT_WIKI_SYNTHESIS).sort()).toEqual([
+      "maxCandidates",
+      "maxFileLines",
+      "maxGroups",
+      "maxPerUnit",
+      "maxTokens",
+      "minFiles",
+      "primaryContextLines",
+      "supportingMaxLines",
+    ]);
+    expect(JSON.stringify(DEFAULT_WIKI_SYNTHESIS)).not.toMatch(/confidence|threshold/i);
   });
 });

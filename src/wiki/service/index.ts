@@ -32,3 +32,16 @@ export * from "./surface.js";
 export * from "./read.js";
 export * from "./write.js";
 export { wikiValidate, type ValidateData } from "./validate.js";
+export {
+  isPrepareStage,
+  SYNTHESIS_PREPARE_STAGES,
+  wikiSynthesisBuild,
+  wikiSynthesisPrepare,
+  wikiSynthesisPropose,
+  type BuildData,
+  type PrepareData,
+  type PrepareStage,
+  type ProposeData,
+  type SynthesisOptions,
+  type SynthesisScope,
+} from "./synthesis.js";

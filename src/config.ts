@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname, isAbsolute, basename } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { MexConfig, AiTool, StalenessThresholds, WatchConfig, HeartbeatConfig, ScaffoldIdentity, WikiConfig } from "./types.js";
+import type { MexConfig, AiTool, StalenessThresholds, WatchConfig, HeartbeatConfig, ScaffoldIdentity, WikiConfig, WikiSynthesisConfig } from "./types.js";
 import { DEFAULT_STALENESS_THRESHOLDS } from "./drift/checkers/staleness.js";
 
 /**
@@ -216,11 +216,47 @@ function globList(value: unknown, fallback: readonly string[]): string[] {
   return globs.length > 0 ? globs : [...fallback];
 }
 
+/**
+ * §12 scope defaults.
+ *
+ * Measured rather than invented: every number is the reference pipeline's own,
+ * except `maxTokens`, which is D10's default neighbourhood budget — a cluster
+ * context is handed to an agent the same way a neighbourhood is, and having one
+ * number for both is what D10 asks for.
+ */
+export const DEFAULT_WIKI_SYNTHESIS: WikiSynthesisConfig = {
+  minFiles: 1,
+  maxTokens: 4000,
+  primaryContextLines: 3,
+  maxFileLines: 400,
+  supportingMaxLines: 120,
+  maxCandidates: 60,
+  maxPerUnit: 6,
+  maxGroups: 40,
+};
+
+/** A positive finite number, or the default. A garbage value costs one setting. */
+function positiveNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function normalizeSynthesisConfig(value: unknown): WikiSynthesisConfig {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return { ...DEFAULT_WIKI_SYNTHESIS };
+  const raw = value as Record<string, unknown>;
+  const out = { ...DEFAULT_WIKI_SYNTHESIS };
+  const keys = Object.keys(DEFAULT_WIKI_SYNTHESIS) as Array<keyof WikiSynthesisConfig>;
+  for (const key of keys) {
+    out[key] = positiveNumber(raw[key], DEFAULT_WIKI_SYNTHESIS[key]);
+  }
+  return out;
+}
+
 /** Fill in D10's defaults around whatever the caller supplied. */
 export function normalizeWikiConfig(value: Partial<WikiConfig> | undefined): WikiConfig {
   return {
     exclude: globList(value?.exclude, DEFAULT_WIKI_EXCLUDE),
     readOnly: globList(value?.readOnly, DEFAULT_WIKI_READ_ONLY),
+    synthesis: normalizeSynthesisConfig(value?.synthesis),
   };
 }
 

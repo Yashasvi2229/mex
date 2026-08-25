@@ -387,6 +387,103 @@ wikiCommand
     runApply(wikiIo(), file, options);
   });
 
+/**
+ * The synthesis wiring: the code graph, and an agent launcher.
+ *
+ * Composed here rather than imported anywhere under `src/wiki/`, for the same
+ * reason `knowledgeFor` is (handoff §39.7): a `src/graph/` to `src/wiki/`
+ * import would be a genuine cycle, and injection makes "synthesis does nothing
+ * without a graph" a structural property rather than a promise. Everything
+ * below is lazily imported so a `mex check` pays none of it.
+ */
+async function synthesisIo(): Promise<import("./wiki/cli/commands.js").CommandIo> {
+  const base = wikiIo();
+  const config = loadConfig();
+  const { resolve } = await import("node:path");
+  const { existsSync } = await import("node:fs");
+  const dbPath = resolve(config.projectRoot, ".mex", "graph.db");
+  if (!existsSync(dbPath)) return base;
+
+  const [
+    { createGroundingGraph, createSynthesisGraph },
+    { openGraphDatabase },
+    { createGraphEngine },
+    { MinHashReconciler },
+    { FingerprintStore },
+    { AI_TOOLS },
+    { isCliAvailable },
+    { runToolInteractive },
+  ] = await Promise.all([
+    import("./wiki/grounding/adapter.js"),
+    import("./graph/db/database.js"),
+    import("./graph/engine-impl.js"),
+    import("./graph/reconcile-engine.js"),
+    import("./graph/fingerprint-store.js"),
+    import("./types.js"),
+    import("./cli-tools.js"),
+    import("./sync/index.js"),
+  ]);
+
+  const db = openGraphDatabase(dbPath);
+  const engine = createGraphEngine({ rootDir: config.projectRoot, dbPath });
+  return {
+    ...base,
+    repoRoot: config.projectRoot,
+    codeGraph: createSynthesisGraph(engine, db),
+    graph: createGroundingGraph(engine, new MinHashReconciler(new FingerprintStore(db)), db),
+    ...(config.wiki?.synthesis === undefined ? {} : { synthesisScope: config.wiki.synthesis }),
+    launchAgent: (playbook: string) => {
+      // mex's own launcher, not a second one: six tools, cross-platform
+      // detection, and the Windows shim handling that issue #85 paid for.
+      // The configured tools first, then whatever else is installed. No
+      // interactive question: an agent-facing command that stopped to ask which
+      // CLI to use would hang the run it was supposed to start.
+      const candidates = [...config.aiTools, ...(Object.keys(AI_TOOLS) as import("./types.js").AiTool[])];
+      for (const tool of candidates) {
+        const meta = AI_TOOLS[tool];
+        if (meta.cli === null || !isCliAvailable(meta.cli)) continue;
+        return runToolInteractive(tool, playbook, config.projectRoot);
+      }
+      return false;
+    },
+  };
+}
+
+wikiCommand
+  .command("build")
+  .description("Discover clusters and hand an agent the synthesis playbook")
+  .option("--cluster <name>", "restrict the run to one cluster")
+  .option("--print", "print the playbook rather than launching an agent")
+  .option("--json", "emit one enveloped JSON object; never launches an agent")
+  .action(async (options) => {
+    const { runBuild } = await import("./wiki/cli/commands.js");
+    runBuild(await synthesisIo(), { ...options, print: options.print === true || options.json === true });
+  });
+
+wikiCommand
+  .command("prepare")
+  .description("The deterministic scope and prompt for one synthesis stage")
+  .option("--stage <stage>", "architecture_component | pattern | convention | global | relationships")
+  .option("--cluster <name>", "which cluster, for the per-cluster stages")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runPrepare } = await import("./wiki/cli/commands.js");
+    runPrepare(await synthesisIo(), options);
+  });
+
+wikiCommand
+  .command("propose <response-file>")
+  .description("Validate an agent's synthesis response into operation plans; writes only with --apply")
+  .option("--apply", "write the changes, rather than only planning them")
+  .option("--dry-run", "plan only, even if --apply was given")
+  .option("--stage <stage>", "the stage this response answers, when the file does not say")
+  .option("--cluster <name>", "the cluster this response is for, when the file does not say")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (file: string, options) => {
+    const { runPropose } = await import("./wiki/cli/commands.js");
+    runPropose(await synthesisIo(), file, options);
+  });
+
 wikiCommand
   .command("for-code <nodeId...>")
   .description("Knowledge entities grounded to the given code-graph node ids")

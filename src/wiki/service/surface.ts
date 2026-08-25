@@ -28,8 +28,19 @@ export const WIKI_TOOLS = [
 
 export type WikiToolName = (typeof WIKI_TOOLS)[number];
 
-/** §15.1's commands, in the order the spec lists them. */
-export const WIKI_COMMANDS = [
+/**
+ * §15.1's ten, in the order the spec lists them.
+ *
+ * A fact about the spec, kept separate from what mex actually implements. The
+ * spec's list is a floor rather than a closed surface — P9 added an eleventh
+ * command, and P8 adds three more — and collapsing the two lists would either
+ * make the spec appear to name commands it does not, or leave the extra
+ * commands outside the table every parity test walks. It is the second failure
+ * that actually happened: `regenerate-views` shipped outside this table, so the
+ * envelope suite that asserts its own count "so a command dropped from the list
+ * fails here" was counting ten of eleven.
+ */
+export const SPEC_15_1_COMMANDS = [
   "list",
   "show",
   "query",
@@ -40,6 +51,15 @@ export const WIKI_COMMANDS = [
   "rebuild-index",
   "migrate",
   "apply",
+] as const;
+
+/** Every command mex implements under `mex wiki`. */
+export const WIKI_COMMANDS = [
+  ...SPEC_15_1_COMMANDS,
+  "regenerate-views",
+  "build",
+  "prepare",
+  "propose",
 ] as const;
 
 export type WikiCommandName = (typeof WIKI_COMMANDS)[number];
@@ -73,6 +93,10 @@ export const COMMAND_BINDINGS: readonly CommandBinding[] = [
   { command: "rebuild-index", tool: null, service: "wikiRebuildIndex", mutates: false },
   { command: "migrate", tool: null, service: "wikiMigrate", mutates: true },
   { command: "apply", tool: "wiki_apply_operation", service: "wikiApplyOperation", mutates: true },
+  { command: "regenerate-views", tool: null, service: "wikiRegenerateViews", mutates: true },
+  { command: "build", tool: null, service: "wikiSynthesisBuild", mutates: false },
+  { command: "prepare", tool: null, service: "wikiSynthesisPrepare", mutates: false },
+  { command: "propose", tool: null, service: "wikiSynthesisPropose", mutates: true },
 ];
 
 /**
@@ -94,5 +118,21 @@ export const TOOLS_WITHOUT_COMMANDS: readonly WikiToolName[] = [
   "wiki_plan_operation",
 ];
 
-/** Commands answering a question §16 does not pose. */
-export const COMMANDS_WITHOUT_TOOLS: readonly WikiCommandName[] = ["graph", "rebuild-index", "migrate"];
+/**
+ * Commands answering a question §16 does not pose.
+ *
+ * Synthesis is not in §16 at all — the spec's tool list predates it — and the
+ * right response is to leave `WIKI_TOOLS` alone rather than to invent a ninth
+ * entry. §16 is a statement about a published contract; the command surface is
+ * a statement about what mex can do, and they are allowed to differ as long as
+ * the difference is written down where a test reads it.
+ */
+export const COMMANDS_WITHOUT_TOOLS: readonly WikiCommandName[] = [
+  "graph",
+  "rebuild-index",
+  "migrate",
+  "regenerate-views",
+  "build",
+  "prepare",
+  "propose",
+];

@@ -55,6 +55,35 @@ export interface HeartbeatConfig {
  * consumer has to remember what the default was — that is how a default drifts
  * between the two places that apply it.
  */
+/**
+ * Scope knobs for §12's synthesis pipeline.
+ *
+ * **Every field here changes what mex *looks at*. None of them changes what
+ * mex *accepts*.** The confidence gates and the relationship thresholds are
+ * deliberately absent: a setting that lowers the bar for writing into a user's
+ * files has exactly one use, and it would make two checkouts of one repository
+ * disagree about what counts as knowledge with no record of why. Those numbers
+ * live in `src/wiki/synthesis/` as constants and are asserted by tests.
+ */
+export interface WikiSynthesisConfig {
+  /** Source files a folder needs before it is worth proposing knowledge about. */
+  minFiles: number;
+  /** Token ceiling for one cluster context. Supporting evidence is dropped first. */
+  maxTokens: number;
+  /** Lines of surrounding context around a primary symbol's span. */
+  primaryContextLines: number;
+  /** Upper bound on lines in any file-level code block. */
+  maxFileLines: number;
+  /** Tighter bound for supporting file-level blocks. */
+  supportingMaxLines: number;
+  /** Cap on relationship candidate pairs proposed in one pass. */
+  maxCandidates: number;
+  /** Cap on candidates referencing any one entity, so a hub cannot flood the batch. */
+  maxPerUnit: number;
+  /** Cap on consolidation groups proposed in one pass. */
+  maxGroups: number;
+}
+
 export interface WikiConfig {
   /** Paths never indexed. Default: node_modules anywhere under the scaffold. */
   exclude: string[];
@@ -65,6 +94,8 @@ export interface WikiConfig {
    * here, enforced there.
    */
   readOnly: string[];
+  /** §12 scope knobs. Always present, with defaults, like the two lists above. */
+  synthesis: WikiSynthesisConfig;
 }
 
 /**

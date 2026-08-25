@@ -59,13 +59,34 @@ import {
   wikiRebuildIndex,
   wikiRegenerateViews,
   wikiSearch,
+  wikiSynthesisBuild,
+  wikiSynthesisPrepare,
+  wikiSynthesisPropose,
   wikiValidate,
+  isPrepareStage,
+  type PrepareStage,
   type ServiceResult,
+  type SynthesisScope,
   type WikiFilterOptions,
 } from "../service/index.js";
 
 /** Everything the CLI layer needs that is not a service concern. */
 export interface CommandIo {
+  /**
+   * The repository the code graph indexes, when synthesis is wired.
+   *
+   * Separate from `scaffoldRoot`: the wiki lives in `.mex/` and the code lives
+   * above it, and synthesis is the first surface that reads both.
+   */
+  repoRoot?: string;
+  /** Enumeration over the code graph, composed at the CLI entry point. */
+  codeGraph?: import("../grounding/adapter.js").SynthesisGraph | null;
+  /** Grounding resolution, for the §12.4 gate. */
+  graph?: import("../grounding/adapter.js").GroundingGraph | null;
+  /** §12 scope knobs from `wiki.synthesis`. */
+  synthesisScope?: SynthesisScope;
+  /** Launch an agent with the playbook. Returns false when none is available. */
+  launchAgent?: (playbook: string) => boolean;
   /** Where lines go. Injected so a test reads output instead of a terminal. */
   write: (line: string) => void;
   /** Set instead of calling `process.exit`, so a test can assert the status. */
@@ -92,6 +113,12 @@ export interface CommandFlags {
   dryRun?: boolean;
   apply?: boolean;
   body?: boolean;
+  /** `wiki prepare` / `wiki propose`: which stage this is. */
+  stage?: string;
+  /** `wiki build` / `wiki prepare`: which cluster. */
+  cluster?: string;
+  /** `wiki build`: print the playbook rather than launching an agent. */
+  print?: boolean;
 }
 
 /**
@@ -353,3 +380,140 @@ export function runApply(io: CommandIo, file: string, flags: CommandFlags): void
 
 /** Exported for the exit-code table's test, which asserts the CLI uses it. */
 export { WIKI_EXIT };
+
+// -- §12 synthesis: build, prepare, propose ----------------------------------
+
+/**
+ * Options every synthesis command needs, assembled once.
+ *
+ * `repoRoot` falls back to `projectRoot` and then to the scaffold's parent,
+ * because the code graph indexes the repository and the wiki lives inside it.
+ */
+function synthesisOptions(io: CommandIo): Parameters<typeof wikiSynthesisBuild>[0] {
+  return {
+    ...serviceOptions(io),
+    repoRoot: io.repoRoot ?? io.projectRoot ?? resolve(io.scaffoldRoot, ".."),
+    ...(io.codeGraph === undefined ? {} : { codeGraph: io.codeGraph }),
+    ...(io.graph === undefined ? {} : { graph: io.graph }),
+    ...(io.synthesisScope === undefined ? {} : { scope: io.synthesisScope }),
+  };
+}
+
+/**
+ * `wiki build` — prepare a run and hand the playbook to an agent.
+ *
+ * Follows `mex sync`'s idiom rather than the reference's: mex already detects
+ * six agent CLIs cross-platform, and a launcher written here would be a second
+ * one that knew about one of them. Under `--json` or `--print` it never
+ * launches, because a command an agent is parsing must not open an interactive
+ * session inside itself.
+ */
+export function runBuild(io: CommandIo, flags: CommandFlags): void {
+  const result = wikiSynthesisBuild({
+    ...synthesisOptions(io),
+    ...(flags.cluster === undefined ? {} : { cluster: flags.cluster }),
+  });
+  emit(io, result, flags, (data) => {
+    if (data.clusters.length === 0) return;
+    io.write(`${data.clusters.length} cluster(s) to synthesize:`);
+    for (const cluster of data.clusters) {
+      io.write(`  ${cluster.name} — ${cluster.files} file(s), ${cluster.symbols} symbol(s)`);
+    }
+    io.write("");
+
+    const launched = flags.print === true ? false : (io.launchAgent?.(data.playbook) ?? false);
+    if (launched) return;
+    io.write(chalk.dim("─".repeat(20) + " COPY BELOW THIS LINE " + "─".repeat(20)));
+    io.write(data.playbook);
+    io.write(chalk.dim("─".repeat(20) + " COPY ABOVE THIS LINE " + "─".repeat(20)));
+  });
+}
+
+/** The typed refusal for a stage name that is not one. */
+function unknownStage(value: string | undefined): WikiDiagnostic[] {
+  return [
+    {
+      code: "INVALID_AGENT_RESPONSE",
+      severity: "error",
+      message:
+        value === undefined
+          ? "This command needs --stage."
+          : `"${value}" is not a synthesis stage.`,
+      remediation:
+        "Use one of: architecture_component, pattern, convention, global, relationships.",
+    },
+  ];
+}
+
+/**
+ * `wiki prepare` — the deterministic scope and prompt for one stage.
+ *
+ * A read: it opens no write path and returns the same bytes for the same graph
+ * and scaffold. The prompt is what the agent sends to its own model; mex sends
+ * nothing anywhere.
+ */
+export function runPrepare(io: CommandIo, flags: CommandFlags): void {
+  if (!isPrepareStage(flags.stage)) {
+    const envelope = envelopeFor(null, unknownStage(flags.stage));
+    if (flags.json === true) io.write(renderEnvelope(envelope));
+    else renderDiagnostics(io, unknownStage(flags.stage));
+    io.setExitCode(exitCodeFor(envelope));
+    return;
+  }
+  const stage: PrepareStage = flags.stage;
+  const result = wikiSynthesisPrepare({
+    ...synthesisOptions(io),
+    stage,
+    ...(flags.cluster === undefined ? {} : { cluster: flags.cluster }),
+  });
+  emit(io, result, flags, (data) => {
+    if (data.prompt === null) return;
+    io.write(`stage ${data.stage}${data.cluster === null ? "" : ` · cluster ${data.cluster}`}`);
+    if (data.groups.length > 0) io.write(`${data.groups.length} candidate group(s)`);
+    if (data.candidates.length > 0) io.write(`${data.candidates.length} candidate pair(s)`);
+    if (data.truncated) {
+      io.write(chalk.dim("this is a bounded view; raise wiki.synthesis limits to widen it"));
+    }
+    io.write("");
+    io.write(chalk.dim("── system ──"));
+    io.write(data.prompt.system);
+    io.write("");
+    io.write(chalk.dim("── user ──"));
+    io.write(data.prompt.user);
+  });
+}
+
+/**
+ * `wiki propose <response-file>` — the agent's answer becomes operation plans.
+ *
+ * `--apply` is the explicit authority §16 requires. Without it this validates,
+ * plans, prints the diff and writes nothing, which is the safe outcome when a
+ * caller says nothing at all.
+ */
+export function runPropose(io: CommandIo, file: string, flags: CommandFlags): void {
+  const result = wikiSynthesisPropose({
+    ...synthesisOptions(io),
+    responsePath: file,
+    ...(flags.apply === true && flags.dryRun !== true ? { apply: true } : {}),
+    ...(isPrepareStage(flags.stage) ? { stage: flags.stage } : {}),
+    ...(flags.cluster === undefined ? {} : { cluster: flags.cluster }),
+  });
+  emit(io, result, flags, (data) => {
+    io.write(
+      `${data.received} candidate(s) received, ${data.accepted} accepted, ${data.rejected.length} refused`,
+    );
+    for (const entry of data.rejected) io.write(chalk.dim(`  refused: ${entry.reasons.join("; ")}`));
+    if (data.operations.length === 0) {
+      io.write("Nothing to propose.");
+      return;
+    }
+    io.write("");
+    for (const operation of data.operations) io.write(`  ${operation.summary}`);
+    if (data.diff !== null) {
+      io.write("");
+      io.write(data.diff);
+    }
+    if (data.applied) io.write(chalk.green(`applied — ${data.changedFiles.join(", ")}`));
+    else io.write(chalk.dim("planned only — re-run with --apply to write"));
+  });
+}

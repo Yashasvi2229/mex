@@ -17,11 +17,15 @@ import chalk from "chalk";
 import {
   runApply,
   runBacklinks,
+  runBuild,
   runGraph,
   runList,
   runMigrate,
+  runPrepare,
+  runPropose,
   runQuery,
   runRebuildIndex,
+  runRegenerateViews,
   runRelated,
   runShow,
   runValidate,
@@ -129,7 +133,33 @@ function harness(indexed = true, files: Record<string, string> = {}): Captured {
   };
 }
 
-/** Every command, driven the same way, so an assertion can be made over all ten. */
+/**
+ * A code graph that knows about exactly one file with one symbol.
+ *
+ * Enough for `build` and `prepare` to have something to cluster, and small
+ * enough to write inline: the point of these cases is the envelope, not the
+ * pipeline, which has its own suite.
+ */
+const CODE_GRAPH = {
+  listFiles: () => [{ path: "src/auth/tokens.ts" }],
+  nodesInFile: () => [{ id: "function:issueToken", kind: "function" }],
+  describeNode: (id: string) =>
+    id === "function:issueToken"
+      ? {
+          id,
+          kind: "function",
+          name: "issueToken",
+          filePath: "src/auth/tokens.ts",
+          startLine: 1,
+          endLine: 2,
+        }
+      : null,
+  callersOf: () => [],
+  calleesOf: () => [],
+  outgoingEdges: () => [],
+};
+
+/** Every command, driven the same way, so an assertion can be made over all of them. */
 function allCommands(
   harnessed: Captured,
   flags: CommandFlags,
@@ -146,15 +176,26 @@ function allCommands(
     { command: "rebuild-index", run: () => runRebuildIndex(io, flags) },
     { command: "migrate", run: () => runMigrate(io, { ...flags, dryRun: true }) },
     { command: "apply", run: () => runApply(io, join(harnessed.root, "op.json"), flags) },
+    { command: "regenerate-views", run: () => runRegenerateViews(io, { ...flags, dryRun: true }) },
+    { command: "build", run: () => runBuild({ ...io, codeGraph: CODE_GRAPH }, { ...flags, print: true }) },
+    {
+      command: "prepare",
+      run: () =>
+        runPrepare({ ...io, codeGraph: CODE_GRAPH }, { ...flags, stage: "architecture_component" }),
+    },
+    {
+      command: "propose",
+      run: () => runPropose({ ...io, codeGraph: CODE_GRAPH }, join(harnessed.root, "response.json"), flags),
+    },
   ];
 }
 
 describe("stable JSON envelopes", () => {
-  it("every one of the ten returns the §15.2 shape", () => {
+  it("every implemented command returns the §15.2 shape", () => {
     const cases = allCommands(harness(), { json: true });
     // The count is asserted so a command dropped from the list fails here
     // rather than quietly reducing what this suite covers.
-    expect(cases).toHaveLength(10);
+    expect(cases).toHaveLength(14);
     expect(cases.map((entry) => entry.command).sort()).toEqual(
       COMMAND_BINDINGS.map((entry) => entry.command).sort(),
     );
@@ -164,6 +205,7 @@ describe("stable JSON envelopes", () => {
     for (const { command } of allCommands(harness(), { json: true })) {
       const local = harness();
       writeFileSync(join(local.root, "op.json"), "{}", "utf-8");
+      writeFileSync(join(local.root, "response.json"), "{}", "utf-8");
       const entry = allCommands(local, { json: true }).find((candidate) => candidate.command === command)!;
       entry.run();
       expect(local.lines, command).toHaveLength(1);
@@ -186,6 +228,7 @@ describe("no ANSI in JSON", () => {
     for (const { command } of allCommands(harness(), { json: true })) {
       const local = harness();
       writeFileSync(join(local.root, "op.json"), "{}", "utf-8");
+      writeFileSync(join(local.root, "response.json"), "{}", "utf-8");
       allCommands(local, { json: true }).find((candidate) => candidate.command === command)!.run();
       for (const line of local.lines) expect(line.includes(escape), `${command}: ${line}`).toBe(false);
     }
@@ -201,7 +244,7 @@ describe("no ANSI in JSON", () => {
 });
 
 describe("typed exit statuses", () => {
-  it("never pairs ok:false with exit 0, across all ten", () => {
+  it("never pairs ok:false with exit 0, across every command", () => {
     let checked = 0;
     for (const { command } of allCommands(harness(), { json: true })) {
       // No index and no operation file: several of the ten now fail.
@@ -212,7 +255,7 @@ describe("typed exit statuses", () => {
       else expect(local.exit(), command).toBe(WIKI_EXIT.ok);
       checked += 1;
     }
-    expect(checked).toBe(10);
+    expect(checked).toBe(14);
   });
 
   it("reports a missing index as its own status, distinct from a diagnostic failure", () => {

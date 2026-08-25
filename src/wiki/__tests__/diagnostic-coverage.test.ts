@@ -23,6 +23,7 @@ import { migrateScaffold } from "../migration/migrate.js";
 import { inventoryScaffold } from "../migration/inventory.js";
 import { planGeneratedView, GENERATED_BEGIN, GENERATED_END } from "../migration/generated.js";
 import { validateScaffold } from "../validation/validate.js";
+import { wikiSynthesisPropose } from "../service/synthesis.js";
 import {
   WIKI_DIAGNOSTIC_CODES,
   isWikiDiagnosticCode,
@@ -582,6 +583,16 @@ See [the code](mex://function:0123456789abcdef).
       const inventory = inventoryScaffold({ scaffoldRoot: directory });
       const index = inventory.files.find((file) => file.path === "patterns/INDEX.md")!;
       return planGeneratedView(index, inventory, "pattern")?.diagnostics ?? [];
+    }),
+
+  INVALID_AGENT_RESPONSE: () =>
+    // A response file that is not the shape the stage expects. Through the real
+    // command path, so the code stays reachable rather than merely registered.
+    inScratch((directory) => {
+      const response = join(directory, "response.json");
+      writeFileSync(response, JSON.stringify({ stage: "pattern", cluster: "auth", notUnits: [] }), "utf-8");
+      return wikiSynthesisPropose({ scaffoldRoot: directory, repoRoot: directory, responsePath: response })
+        .diagnostics;
     }),
 };
 
