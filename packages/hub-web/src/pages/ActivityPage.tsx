@@ -31,11 +31,14 @@ import type {
 import {
   ErrorState,
   PageHeader,
-  Panel,
   StatePanel,
   StatusPill,
 } from "../components/ui";
-import styles from "../styles/hub.module.css";
+import { Badge } from "../components/primitives/badge";
+import { Button } from "../components/primitives/button";
+import { Card } from "../components/primitives/card";
+import styles from "../styles/activity.module.css";
+import hubStyles from "../styles/hub.module.css";
 
 type ActivityFilter = "all" | ActivitySource;
 
@@ -152,6 +155,10 @@ function ActivityDetails({ item }: { item: ActivityItem }) {
   const legacy = item.source === "legacy" ? item : null;
   return (
     <div className={styles.activityDetails}>
+      <div className={styles.activityEvidenceHeader}>
+        <p>Event evidence</p>
+        <span>{canonical ? "Canonical record" : "Legacy record"}</span>
+      </div>
       <dl className={styles.activityDetailGrid}>
         <div><dt>Action</dt><DetailValue mono>{item.action}</DetailValue></div>
         <div><dt>Event ID</dt><DetailValue mono>{item.id}</DetailValue></div>
@@ -191,7 +198,7 @@ function ActivityDetails({ item }: { item: ActivityItem }) {
 
       {item.subjectCount > 0 ? (
         <section className={styles.activitySubjectDetail} aria-label="Subject references">
-          <p className={styles.panelEyebrow}>Bounded subject references</p>
+          <p className={styles.sectionLabel}>Bounded subject references</p>
           {item.subjects.length > 0 ? (
             <>
               <ul>
@@ -214,7 +221,7 @@ function ActivityDetails({ item }: { item: ActivityItem }) {
 
       {canonical?.actorDiagnostics.length ? (
         <section className={styles.activityActorDiagnostics} aria-label="Actor resolution diagnostics">
-          <p className={styles.panelEyebrow}>Identity resolution</p>
+          <p className={styles.sectionLabel}>Identity resolution</p>
           <ul>{canonical.actorDiagnostics.map((diagnostic) => <li key={`${diagnostic.code}-${diagnostic.message}`}><strong>{diagnostic.code}</strong><span>{diagnostic.message}</span></li>)}</ul>
         </section>
       ) : null}
@@ -235,7 +242,7 @@ function ActivityEntry({ item, expanded, onToggle }: { item: ActivityItem; expan
       <span className={styles.activityEntryMarker} data-source={item.source}><EntryIcon aria-hidden="true" /></span>
       <article className={styles.activityEntryCard} data-source={item.source}>
         <div className={styles.activityEntryTopline}>
-          <span className={styles.activitySourceBadge} data-source={item.source}>{canonical ? "Canonical" : "Legacy"}</span>
+          <Badge className={styles.activitySourceBadge} data-source={item.source} variant="outline">{canonical ? "Canonical" : "Legacy"}</Badge>
           {canonical?.workstream ? <span className={styles.activityWorkstream}>{canonical.workstream.title ?? canonical.workstream.id}</span> : null}
           {canonical?.actorDiagnostics.length ? <span className={styles.activityIdentityFlag}><CircleDot aria-hidden="true" /> Identity note</span> : null}
         </div>
@@ -246,16 +253,18 @@ function ActivityEntry({ item, expanded, onToggle }: { item: ActivityItem; expan
         </p>
         {actorRemapped && canonical ? <p className={styles.activityRemap}>Recorded as {actorLabel(canonical.recordedActor)}</p> : null}
         <SubjectChips item={item} />
-        <button
+        <Button
           aria-controls={detailsId}
           aria-expanded={expanded}
           className={styles.activityDisclosure}
           onClick={onToggle}
+          size="sm"
           type="button"
+          variant="ghost"
         >
           {expanded ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />}
           {expanded ? "Hide details" : "Show details"}
-        </button>
+        </Button>
         {expanded ? <div id={detailsId}><ActivityDetails item={item} /></div> : null}
       </article>
     </li>
@@ -408,12 +417,10 @@ export function ActivityPage() {
   };
 
   return (
-    <div className={styles.page}>
+    <div className={hubStyles.page}>
       <PageHeader
-        eyebrow="Team history"
         title="Activity"
-        description="Immutable repository-backed events and the legacy decision log, projected into one bounded timeline without changing either source."
-        actions={<span className={styles.lockBadge}><ShieldCheck aria-hidden="true" /> Read only</span>}
+        actions={<Badge className={styles.readOnlyBadge} variant="outline"><ShieldCheck aria-hidden="true" /> Read only</Badge>}
       />
 
       {capabilities === undefined ? (
@@ -421,116 +428,134 @@ export function ActivityPage() {
       ) : !activityAvailable ? (
         <StatePanel state="unavailable" title="Activity is unavailable" detail={capabilities.activity.reason ?? "The read-only activity reader is not connected in this Hub process."} />
       ) : (
-        <Panel className={styles.activityWorkbench}>
-          <div className={styles.activityToolbar}>
-            <div>
-              <p className={styles.panelEyebrow}>Timeline source</p>
+        <section aria-label="Activity timeline">
+          <Card className={styles.activityWorkbench}>
+            <header className={styles.activityToolbar}>
+            <div className={styles.activitySourceControl}>
+              <p className={styles.sectionLabel}>Timeline source</p>
               <div className={styles.segmented} aria-label="Filter activity source" role="group">
                 {(["all", "activity", "legacy"] as const).map((value) => (
-                  <button aria-pressed={source === value} key={value} onClick={() => updateSource(value)} type="button">
+                  <Button
+                    aria-pressed={source === value}
+                    className={styles.sourceButton}
+                    key={value}
+                    onClick={() => updateSource(value)}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
                     {value === "all" ? "All" : value === "activity" ? "Canonical" : "Legacy"}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
-            <label className={styles.activityDateField}>
-              <span><CalendarDays aria-hidden="true" /> Since</span>
-              <input onChange={(event) => updateSince(event.currentTarget.value)} type="date" value={since} />
-            </label>
-            {since ? <button className={styles.activityClearFilter} onClick={() => updateSince("")} type="button">Clear date</button> : null}
+            <div className={styles.activityDateControl}>
+              <label className={styles.activityDateField}>
+                <span><CalendarDays aria-hidden="true" /> Since</span>
+                <input onChange={(event) => updateSince(event.currentTarget.value)} type="date" value={since} />
+              </label>
+              {since ? <Button className={styles.activityClearFilter} onClick={() => updateSince("")} size="sm" type="button" variant="ghost">Clear date</Button> : null}
+            </div>
             <div className={styles.activityLoadedCount} aria-live="polite" ref={resultStatusRef} role="status" tabIndex={-1}>
               <strong>{items.length}</strong>
               <span>{items.length === 1 ? "event loaded" : "events loaded"}</span>
             </div>
-          </div>
+            </header>
 
-          {timeline.isPending ? (
-            <StatePanel compact state="loading" title="Reading immutable history" detail="Combining bounded canonical activity and legacy rows." />
-          ) : timeline.isError && timeline.data === undefined ? (
-            <ErrorState error={timeline.error} retry={() => void timeline.refetch()} />
-          ) : items.length === 0 ? (
-            <>
-              <DiagnosticsNotice diagnostics={diagnostics} hasTrustedItems={false} truncated={diagnosticsTruncated} />
-              {sourceTruncated ? (
-                <div className={styles.activitySafetyNotice} role="status">
-                  <History aria-hidden="true" />
-                  <span><strong>The source scan reached a safety limit.</strong> No complete trusted result could be assembled from this scan.</span>
-                </div>
-              ) : null}
-              <StatePanel
-                compact
-                state="empty"
-                title={sourceTruncated
-                  ? "No trusted rows available"
-                  : source !== "all" || since
-                    ? "No activity matches these filters"
-                    : "No activity recorded"}
-                detail={sourceTruncated
-                  ? "The source scan is incomplete, so this result cannot confirm that no matching activity exists."
-                  : source !== "all" || since
-                    ? "Clear or adjust the source and date filters to widen the timeline."
-                    : "Canonical events and valid legacy rows will appear here when they exist."}
-              />
-            </>
-          ) : (
-            <>
-              <DiagnosticsNotice diagnostics={diagnostics} hasTrustedItems truncated={diagnosticsTruncated} />
-              {sourceTruncated ? (
-                <div className={styles.activitySafetyNotice} role="status">
-                  <History aria-hidden="true" />
-                  <span><strong>The source scan reached a safety limit.</strong> This is a trustworthy partial timeline, not a complete history.</span>
-                </div>
-              ) : null}
-              <div className={styles.activityFeed}>
-                {groups.map(([day, dayItems]) => (
-                  <section className={styles.activityDay} key={day} aria-labelledby={`activity-day-${day}`}>
-                    <header className={styles.activityDayHeader}>
-                      <h2 id={`activity-day-${day}`}>{formatDay(dayItems[0].timestamp)}</h2>
-                      <span>{dayItems.length} {dayItems.length === 1 ? "event" : "events"}</span>
-                    </header>
-                    <ol className={styles.activityEntries} aria-label={`Activity for ${formatDay(dayItems[0].timestamp)}`}>
-                      {dayItems.map((item) => (
-                        <ActivityEntry
-                          expanded={expanded.has(item.id)}
-                          item={item}
-                          key={`${item.source}:${item.id}`}
-                          onToggle={() => setExpanded((current) => {
-                            const next = new Set(current);
-                            if (next.has(item.id)) next.delete(item.id);
-                            else next.add(item.id);
-                            return next;
-                          })}
-                        />
-                      ))}
-                    </ol>
-                  </section>
-                ))}
+            <div className={styles.activityResult}>
+            {timeline.isPending ? (
+              <div className={styles.activityState}>
+                <StatePanel compact state="loading" title="Reading immutable history" detail="Combining bounded canonical activity and legacy rows." />
               </div>
+            ) : timeline.isError && timeline.data === undefined ? (
+              <div className={styles.activityState}>
+                <ErrorState error={timeline.error} retry={() => void timeline.refetch()} />
+              </div>
+            ) : items.length === 0 ? (
+              <div className={styles.activityStateStack}>
+                <DiagnosticsNotice diagnostics={diagnostics} hasTrustedItems={false} truncated={diagnosticsTruncated} />
+                {sourceTruncated ? (
+                  <div className={styles.activitySafetyNotice} role="status">
+                    <History aria-hidden="true" />
+                    <span><strong>The source scan reached a safety limit.</strong> No complete trusted result could be assembled from this scan.</span>
+                  </div>
+                ) : null}
+                <StatePanel
+                  compact
+                  state="empty"
+                  title={sourceTruncated
+                    ? "No trusted rows available"
+                    : source !== "all" || since
+                      ? "No activity matches these filters"
+                      : "No activity recorded"}
+                  detail={sourceTruncated
+                    ? "The source scan is incomplete, so this result cannot confirm that no matching activity exists."
+                    : source !== "all" || since
+                      ? "Clear or adjust the source and date filters to widen the timeline."
+                      : "Canonical events and valid legacy rows will appear here when they exist."}
+                />
+              </div>
+            ) : (
+              <>
+                <DiagnosticsNotice diagnostics={diagnostics} hasTrustedItems truncated={diagnosticsTruncated} />
+                {sourceTruncated ? (
+                  <div className={styles.activitySafetyNotice} role="status">
+                    <History aria-hidden="true" />
+                    <span><strong>The source scan reached a safety limit.</strong> This is a trustworthy partial timeline, not a complete history.</span>
+                  </div>
+                ) : null}
+                <div className={styles.activityFeed}>
+                  {groups.map(([day, dayItems]) => (
+                    <section className={styles.activityDay} key={day} aria-labelledby={`activity-day-${day}`}>
+                      <header className={styles.activityDayHeader}>
+                        <h2 id={`activity-day-${day}`}>{formatDay(dayItems[0].timestamp)}</h2>
+                        <span>{dayItems.length} {dayItems.length === 1 ? "event" : "events"}</span>
+                      </header>
+                      <ol className={styles.activityEntries} aria-label={`Activity for ${formatDay(dayItems[0].timestamp)}`}>
+                        {dayItems.map((item) => (
+                          <ActivityEntry
+                            expanded={expanded.has(item.id)}
+                            item={item}
+                            key={`${item.source}:${item.id}`}
+                            onToggle={() => setExpanded((current) => {
+                              const next = new Set(current);
+                              if (next.has(item.id)) next.delete(item.id);
+                              else next.add(item.id);
+                              return next;
+                            })}
+                          />
+                        ))}
+                      </ol>
+                    </section>
+                  ))}
+                </div>
 
-              <div className={styles.activityPagination}>
-                {paginationConflict ? (
-                  <div className={styles.activityPaginationProblem} role="alert">
-                    <RotateCcw aria-hidden="true" />
-                    <span><strong>Activity changed while you were reading.</strong> Loaded rows were not mixed with the newer revision.</span>
-                    <button className={styles.secondaryButton} onClick={reloadNewest} type="button">Reload newest</button>
-                  </div>
-                ) : timeline.isFetchNextPageError ? (
-                  <div className={styles.activityPaginationProblem} role="alert">
-                    <AlertTriangle aria-hidden="true" />
-                    <span><strong>Older activity could not be loaded.</strong> The events already on screen remain trustworthy.</span>
-                    <button className={styles.secondaryButton} onClick={() => void timeline.fetchNextPage()} type="button">Try again</button>
-                  </div>
-                ) : timeline.hasNextPage ? (
-                  <button className={styles.activityLoadMore} disabled={timeline.isFetchingNextPage} onClick={() => void timeline.fetchNextPage()} type="button">
-                    {timeline.isFetchingNextPage ? "Loading older activity…" : "Load older activity"}
-                  </button>
-                ) : (
-                  <p><CircleDot aria-hidden="true" /> {sourceTruncated ? "End of available history" : "End of trustworthy history"}</p>
-                )}
-              </div>
-            </>
-          )}
-        </Panel>
+                <div className={styles.activityPagination}>
+                  {paginationConflict ? (
+                    <div className={styles.activityPaginationProblem} role="alert">
+                      <RotateCcw aria-hidden="true" />
+                      <span><strong>Activity changed while you were reading.</strong> Loaded rows were not mixed with the newer revision.</span>
+                      <Button className={styles.paginationAction} onClick={reloadNewest} size="sm" type="button" variant="outline">Reload newest</Button>
+                    </div>
+                  ) : timeline.isFetchNextPageError ? (
+                    <div className={styles.activityPaginationProblem} role="alert">
+                      <AlertTriangle aria-hidden="true" />
+                      <span><strong>Older activity could not be loaded.</strong> The events already on screen remain trustworthy.</span>
+                      <Button className={styles.paginationAction} onClick={() => void timeline.fetchNextPage()} size="sm" type="button" variant="outline">Try again</Button>
+                    </div>
+                  ) : timeline.hasNextPage ? (
+                    <Button className={styles.activityLoadMore} disabled={timeline.isFetchingNextPage} onClick={() => void timeline.fetchNextPage()} type="button">
+                      {timeline.isFetchingNextPage ? "Loading older activity…" : "Load older activity"}
+                    </Button>
+                  ) : (
+                    <p><CircleDot aria-hidden="true" /> {sourceTruncated ? "End of available history" : "End of trustworthy history"}</p>
+                  )}
+                </div>
+              </>
+            )}
+            </div>
+          </Card>
+        </section>
       )}
     </div>
   );

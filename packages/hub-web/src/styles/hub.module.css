@@ -26,36 +26,38 @@
   flex-direction: column;
   width: 232px;
   height: 100vh;
-  padding: 19px 14px 15px;
+  padding: 16px 12px 14px;
   overflow: auto;
-  color: #f5f6f7;
-  background: #25282c;
-  border-right: 1px solid #34383e;
+  color: var(--sidebar-foreground);
+  background: var(--sidebar-token);
+  border-right: 1px solid var(--sidebar-border);
+  scrollbar-color: var(--border) transparent;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 0 7px 18px;
-  border-bottom: 1px solid #3b3e43;
+  gap: 10px;
+  padding: 2px 8px 16px;
+  border-bottom: 1px solid var(--sidebar-border);
 }
 
 .brandMark {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   place-items: center;
-  color: #ffffff;
-  background: var(--primary);
-  border-radius: 10px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border: 1px solid rgba(240, 136, 62, 0.32);
+  border-radius: 8px;
 }
 
 .brandMark svg {
   width: 19px;
 }
 
-.brand > span:last-child,
+.brandWordmark,
 .sessionMeta > span:last-child,
 .localOnly > span,
 .repoIdentity > span:last-child {
@@ -64,23 +66,24 @@
 }
 
 .brand strong {
-  font-size: 14px;
+  color: var(--foreground);
+  font-size: 13.5px;
   line-height: 1.15;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.1em;
 }
 
 .brand small {
   margin-top: 3px;
-  color: #aeb2b8;
-  font-size: 11px;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
 }
 
 .nav {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 17px;
-  padding: 19px 0 22px;
+  gap: 15px;
+  padding: 18px 0 22px;
 }
 
 .navGroup {
@@ -91,10 +94,10 @@
 
 .navGroup > p {
   margin: 0 10px 6px;
-  color: #969ba2;
-  font-size: 9px;
+  color: #7d8590;
+  font-size: 9.5px;
   font-weight: 650;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
@@ -102,26 +105,27 @@
   display: grid;
   grid-template-columns: 19px minmax(0, 1fr) 9px;
   align-items: center;
-  min-height: 35px;
+  min-height: 36px;
   padding: 7px 10px;
-  color: #bfc3c8;
+  color: var(--muted-foreground);
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 6px;
   font-size: 12.5px;
-  font-weight: 520;
+  font-weight: 500;
   text-decoration: none;
   transition: color var(--transition-fast), background var(--transition-fast), border-color var(--transition-fast);
 }
 
 .navLink:hover {
-  color: #ffffff;
-  background: #30343a;
+  color: var(--sidebar-accent-foreground);
+  background: var(--sidebar-accent);
+  border-color: var(--sidebar-border);
 }
 
 .navLinkActive {
-  color: #ffffff;
-  background: #343942;
-  border-color: #454b55;
+  color: var(--foreground);
+  background: #1c2128;
+  border-color: var(--border);
 }
 
 .navLinkActive::before {
@@ -129,7 +133,7 @@
   left: 0;
   width: 3px;
   height: 19px;
-  background: #6e93ff;
+  background: var(--primary);
   border-radius: 0 4px 4px 0;
   content: "";
 }
@@ -143,7 +147,7 @@
 .navUnavailable {
   width: 6px !important;
   height: 6px !important;
-  color: #70757d;
+  color: #484f58;
   fill: currentColor;
 }
 
@@ -151,27 +155,27 @@
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 11px 10px;
-  color: #b8bdc3;
-  background: #2d3035;
-  border: 1px solid #3d4147;
-  border-radius: 9px;
+  padding: 10px;
+  color: var(--muted-foreground);
+  background: var(--background);
+  border: 1px solid var(--sidebar-border);
+  border-radius: 6px;
 }
 
 .localOnly > svg {
   width: 17px;
-  color: #73ba92;
+  color: var(--success);
 }
 
 .localOnly strong {
-  color: #e5e7e9;
+  color: var(--text-secondary);
   font-size: 10.5px;
   font-weight: 600;
 }
 
 .localOnly small {
   margin-top: 2px;
-  color: #a5a9af;
+  color: var(--muted-foreground);
   font-size: 9px;
 }
 
@@ -184,8 +188,9 @@
   align-items: center;
   height: 62px;
   padding: 0 28px;
-  background: rgba(255, 255, 255, 0.96);
+  background: rgba(13, 17, 23, 0.94);
   border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(14px);
 }
 
 .repoIdentity,
@@ -206,7 +211,7 @@
   height: 30px;
   place-items: center;
   color: var(--text-secondary);
-  background: var(--surface-subtle);
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
 }
@@ -262,12 +267,12 @@
   height: 7px;
   background: var(--success);
   border-radius: 50%;
-  box-shadow: 0 0 0 4px var(--success-soft);
+  box-shadow: 0 0 0 3px var(--success-soft);
 }
 
 .main {
   min-height: calc(100vh - 62px);
-  padding: 31px clamp(24px, 3vw, 44px) 54px;
+  padding: 28px clamp(24px, 3vw, 42px) 54px;
   outline: none;
 }
 
@@ -281,25 +286,25 @@
   align-items: flex-end;
   justify-content: space-between;
   gap: 32px;
-  margin-bottom: 27px;
+  margin-bottom: 24px;
 }
 
 .pageHeader h1,
 .notFound h1,
 .desktopRequired h1 {
-  margin: 4px 0 8px;
+  margin: 5px 0 8px;
   color: var(--text);
-  font-size: clamp(29px, 2.6vw, 40px);
-  font-weight: 630;
-  letter-spacing: -0.043em;
-  line-height: 1.05;
+  font-size: clamp(28px, 2.25vw, 34px);
+  font-weight: 560;
+  letter-spacing: -0.035em;
+  line-height: 1.08;
 }
 
 .eyebrow,
 .panelEyebrow {
   margin: 0;
   color: var(--primary);
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -309,8 +314,8 @@
   max-width: 700px;
   margin: 0;
   color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: 13.5px;
+  line-height: 1.55;
 }
 
 .headerActions {
@@ -324,6 +329,7 @@
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 .panelHeader {
@@ -331,7 +337,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
-  padding: 20px 21px 16px;
+  padding: 18px 20px 15px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -343,23 +349,23 @@
   margin: 3px 0 0;
   color: var(--text);
   font-size: 15px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: -0.015em;
 }
 
 .panelHeader p:not(.panelEyebrow) {
   margin: 5px 0 0;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 .inlineLink {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--primary);
-  font-size: 11px;
-  font-weight: 650;
+  color: var(--link);
+  font-size: 11.5px;
+  font-weight: 600;
   text-decoration: none;
 }
 
@@ -380,10 +386,10 @@
   padding: 2px 7px;
   color: var(--text-secondary);
   background: var(--surface-strong);
-  border: 1px solid transparent;
+  border: 1px solid var(--border);
   border-radius: 999px;
   font-size: 9.5px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.015em;
   white-space: nowrap;
 }
@@ -391,21 +397,25 @@
 .statusPill[data-tone="success"] {
   color: var(--success);
   background: var(--success-soft);
+  border-color: var(--success-border);
 }
 
 .statusPill[data-tone="warning"] {
   color: var(--warning);
   background: var(--warning-soft);
+  border-color: var(--warning-border);
 }
 
 .statusPill[data-tone="danger"] {
   color: var(--danger);
   background: var(--danger-soft);
+  border-color: var(--danger-border);
 }
 
 .statusPill[data-tone="info"] {
   color: var(--info);
   background: var(--info-soft);
+  border-color: var(--info-border);
 }
 
 .primaryButton,
@@ -425,7 +435,7 @@
 }
 
 .primaryButton {
-  color: #ffffff;
+  color: var(--primary-foreground);
   background: var(--primary);
   border: 1px solid var(--primary);
 }
@@ -444,14 +454,14 @@
 .secondaryButton:hover:not(:disabled) {
   color: var(--primary);
   background: var(--primary-soft);
-  border-color: #aebff0;
+  border-color: rgba(240, 136, 62, 0.55);
 }
 
 .dangerButton {
   width: 100%;
   color: var(--danger);
   background: var(--danger-soft);
-  border: 1px solid #efc2bd;
+  border: 1px solid rgba(255, 123, 114, 0.28);
 }
 
 .primaryButton:disabled,
@@ -510,7 +520,7 @@
   margin: 15px;
   padding: 16px;
   background: var(--surface-subtle);
-  border-style: dashed;
+  border-style: solid;
 }
 
 .statePanel h2 {
@@ -534,7 +544,8 @@
   place-items: center;
   color: var(--text-secondary);
   background: var(--surface-strong);
-  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
 }
 
 .stateIcon[data-state="error"] {
@@ -574,21 +585,30 @@
 .metricGrid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  gap: 0;
   margin-bottom: 14px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
 }
 
 .metricCard {
   position: relative;
   min-width: 0;
-  min-height: 132px;
-  padding: 17px 18px;
+  min-height: 118px;
+  padding: 16px 18px;
   overflow: hidden;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
   color: inherit;
   text-decoration: none;
+}
+
+.metricCard:last-child {
+  border-right: 0;
 }
 
 a.metricCard {
@@ -596,22 +616,28 @@ a.metricCard {
 }
 
 a.metricCard:hover {
-  background: var(--canvas-raised);
-  border-color: var(--border-strong);
+  background: var(--surface-subtle);
+}
+
+a.metricCard:focus-visible {
+  z-index: 1;
+  outline: 0;
+  box-shadow: inset 0 0 0 2px var(--focus);
 }
 
 .metricCard::before {
   position: absolute;
-  top: 0;
+  top: 17px;
   left: 0;
-  width: 100%;
-  height: 2px;
+  width: 2px;
+  height: 27px;
   background: var(--border-strong);
+  border-radius: 0 2px 2px 0;
   content: "";
 }
 
 .metricCard[data-tone="info"]::before {
-  background: var(--primary);
+  background: var(--info);
 }
 
 .metricCard[data-tone="warning"]::before {
@@ -627,28 +653,34 @@ a.metricCard:hover {
   align-items: center;
   justify-content: space-between;
   color: var(--text-secondary);
-  font-size: 10.5px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 560;
 }
 
 .metricTopline svg {
-  width: 14px;
-  color: var(--text-tertiary);
+  width: 15px;
+  height: 15px;
+  padding: 5px;
+  box-sizing: content-box;
+  color: var(--text-secondary);
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
 .metricCard > strong {
   display: block;
-  margin-top: 15px;
-  font-size: clamp(24px, 2.3vw, 32px);
-  font-weight: 620;
-  letter-spacing: -0.045em;
+  margin-top: 13px;
+  font-size: clamp(24px, 2.2vw, 30px);
+  font-weight: 560;
+  letter-spacing: -0.035em;
   line-height: 1;
 }
 
 .metricCard > p {
-  margin: 8px 0 0;
+  margin: 7px 0 0;
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: 10.5px;
 }
 
 .notice {
@@ -658,10 +690,10 @@ a.metricCard:hover {
   gap: 11px;
   margin-bottom: 14px;
   padding: 12px 15px;
-  color: #604718;
+  color: var(--text-secondary);
   background: var(--warning-soft);
-  border: 1px solid #ecd7a7;
-  border-radius: 10px;
+  border: 1px solid rgba(210, 153, 34, 0.28);
+  border-radius: var(--radius-card);
 }
 
 .notice > svg {
@@ -673,12 +705,13 @@ a.metricCard:hover {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.45;
 }
 
 .notice strong {
-  font-size: 11px;
+  color: var(--foreground);
+  font-size: 11.5px;
 }
 
 .notice > a,
@@ -695,15 +728,16 @@ a.metricCard:hover {
 .overviewGrid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 14px;
+  align-items: start;
+  gap: 12px;
 }
 
 .attentionPanel {
-  grid-column: span 7;
+  grid-column: span 8;
 }
 
 .activityPanel {
-  grid-column: span 5;
+  grid-column: span 4;
 }
 
 .repositoryPanel {
@@ -725,7 +759,7 @@ a.metricCard:hover {
   grid-template-columns: 7px minmax(0, 1fr) 24px;
   align-items: center;
   gap: 11px;
-  min-height: 70px;
+  min-height: 68px;
   padding: 13px 19px;
   border-bottom: 1px solid var(--border);
 }
@@ -755,15 +789,15 @@ a.metricCard:hover {
 }
 
 .attentionTitle strong {
-  font-size: 11.5px;
-  font-weight: 620;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .attentionTitle time,
 .attentionItem p,
 .activityList time {
   color: var(--text-tertiary);
-  font-size: 9.5px;
+  font-size: 10px;
 }
 
 .attentionItem p {
@@ -781,8 +815,8 @@ a.metricCard:hover {
 }
 
 .attentionItem > a:hover {
-  color: var(--primary);
-  background: var(--primary-soft);
+  color: var(--link);
+  background: var(--info-soft);
 }
 
 .attentionItem > a svg {
@@ -805,7 +839,7 @@ a.metricCard:hover {
 
 .sectionSummary {
   display: flex;
-  min-height: 54px;
+  min-height: 56px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -824,13 +858,13 @@ a.metricCard:hover {
 }
 
 .sectionSummary strong {
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
 .sectionSummary small {
   overflow: hidden;
   color: var(--text-tertiary);
-  font-size: 8.5px;
+  font-size: 9.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -885,7 +919,7 @@ a.metricCard:hover {
   grid-template-columns: 42px minmax(0, 1fr);
   align-items: center;
   gap: 12px;
-  padding: 22px;
+  padding: 20px;
 }
 
 .repositoryCardBody > .statusPill {
@@ -901,7 +935,8 @@ a.metricCard:hover {
   place-items: center;
   color: var(--primary);
   background: var(--primary-soft);
-  border-radius: 10px;
+  border: 1px solid rgba(240, 136, 62, 0.2);
+  border-radius: 7px;
 }
 
 .largeGlyph svg {
@@ -909,13 +944,13 @@ a.metricCard:hover {
 }
 
 .repositoryCardBody strong {
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
 .repositoryCardBody p {
   margin: 3px 0 0;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 10.5px;
 }
 
 .jobMiniRow {
@@ -923,7 +958,7 @@ a.metricCard:hover {
   grid-template-columns: 30px minmax(0, 1fr) auto 70px;
   align-items: center;
   gap: 10px;
-  min-height: 58px;
+  min-height: 60px;
   padding: 10px 18px;
   color: var(--text);
   border-bottom: 1px solid var(--border);
@@ -932,7 +967,7 @@ a.metricCard:hover {
 }
 
 .jobMiniRow:hover {
-  background: var(--surface-subtle);
+  background: var(--muted);
 }
 
 .jobMiniIcon {
@@ -942,7 +977,8 @@ a.metricCard:hover {
   place-items: center;
   color: var(--text-secondary);
   background: var(--surface-strong);
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
 .jobMiniIcon svg {
@@ -957,19 +993,19 @@ a.metricCard:hover {
 }
 
 .jobMiniMain strong {
-  font-size: 10.5px;
+  font-size: 11px;
 }
 
 .jobMiniMain small {
   overflow: hidden;
   color: var(--text-tertiary);
-  font-size: 8.5px;
+  font-size: 9px;
   text-overflow: ellipsis;
 }
 
 .jobMiniRow time {
   color: var(--text-tertiary);
-  font-size: 9px;
+  font-size: 9.5px;
   text-align: right;
 }
 
@@ -1215,7 +1251,7 @@ a.metricCard:hover {
   padding: 14px;
   color: var(--danger);
   background: var(--danger-soft);
-  border: 1px solid #efc2bd;
+  border: 1px solid var(--danger-border);
   border-radius: 9px;
 }
 
@@ -1240,7 +1276,7 @@ a.metricCard:hover {
   padding: 9px 15px;
   color: var(--warning);
   background: var(--warning-soft);
-  border-top: 1px solid #ecd7a7;
+  border-top: 1px solid var(--warning-border);
   font-size: 8.5px;
 }
 
@@ -1752,7 +1788,7 @@ a.metricCard:hover {
 .problemNote {
   color: var(--danger);
   background: var(--danger-soft);
-  border-color: #efc2bd;
+  border-color: var(--danger-border);
 }
 
 .detailNote strong,
@@ -1828,7 +1864,7 @@ a.metricCard:hover {
 }
 
 .graphPhaseRail > span[data-state="complete"] i {
-  color: #ffffff;
+  color: var(--background);
   background: var(--success);
   border-color: var(--success);
 }
@@ -1839,7 +1875,7 @@ a.metricCard:hover {
 }
 
 .graphPhaseRail > span[data-state="current"] i {
-  color: #ffffff;
+  color: var(--primary-foreground);
   background: var(--primary);
   border-color: var(--primary);
   box-shadow: 0 0 0 3px var(--primary-soft);
@@ -1851,7 +1887,7 @@ a.metricCard:hover {
 }
 
 .graphPhaseRail > span[data-state="stopped"] i {
-  color: #ffffff;
+  color: var(--background);
   background: var(--danger);
   border-color: var(--danger);
   box-shadow: 0 0 0 3px var(--danger-soft);
@@ -1913,7 +1949,7 @@ a.metricCard:hover {
   padding: 12px;
   color: var(--warning);
   background: var(--warning-soft);
-  border: 1px solid #ecd7a7;
+  border: 1px solid var(--warning-border);
   border-radius: 9px;
 }
 
@@ -1923,7 +1959,7 @@ a.metricCard:hover {
 
 .confirmDialogBody p {
   margin: 0;
-  color: #765018;
+  color: var(--text-secondary);
   font-size: 10.5px;
   line-height: 1.55;
 }
@@ -2069,7 +2105,7 @@ a.metricCard:hover {
   overflow: hidden;
   color: var(--warning);
   background: var(--warning-soft);
-  border: 1px solid #ead9b5;
+  border: 1px solid var(--warning-border);
   border-radius: 9px;
 }
 
@@ -2160,7 +2196,7 @@ a.metricCard:hover {
   padding: 10px 12px;
   color: var(--info);
   background: var(--info-soft);
-  border: 1px solid #d5e1f7;
+  border: 1px solid var(--info-border);
   border-radius: 9px;
   font-size: 9.5px;
 }
@@ -2626,7 +2662,7 @@ a.metricCard:hover {
   padding: 7px 16px;
   color: var(--primary);
   background: var(--primary-soft);
-  border: 1px solid #d5e0fb;
+  border: 1px solid var(--primary-border);
   border-radius: var(--radius-control);
   font-size: 9.5px;
   font-weight: 670;
@@ -2634,7 +2670,7 @@ a.metricCard:hover {
 
 .activityLoadMore:hover:not(:disabled) {
   color: var(--primary-hover);
-  border-color: #b8c9f2;
+  border-color: var(--primary);
 }
 
 .activityLoadMore:disabled {
@@ -2697,7 +2733,7 @@ a.metricCard:hover {
   place-items: center;
   color: var(--primary);
   background: var(--primary-soft);
-  border: 1px solid #d8e2ff;
+  border: 1px solid var(--primary-border);
   border-radius: 13px;
 }
 
@@ -2901,7 +2937,7 @@ a.metricCard:hover {
   left: 250px;
   z-index: 20;
   padding: 8px 11px;
-  color: #ffffff;
+  color: var(--primary-foreground);
   background: var(--primary);
   border-radius: 8px;
   font-size: 11px;
@@ -2933,7 +2969,7 @@ a.metricCard:hover {
   display: block;
   margin: 5px 0 8px;
   overflow: hidden;
-  color: #43506a;
+  color: var(--text-secondary);
   font-family: "IBM Plex Mono", monospace;
   font-size: 8px;
   line-height: 1.5;
@@ -2946,7 +2982,7 @@ a.metricCard:hover {
   max-height: 48px;
   margin: 7px 0 9px;
   overflow: hidden;
-  color: #3f464f;
+  color: var(--text-secondary);
   font-family: "IBM Plex Mono", monospace;
   font-size: 8px;
   line-height: 1.5;
@@ -2960,7 +2996,7 @@ a.metricCard:hover {
   color: var(--primary) !important;
   background: var(--primary-soft);
   border-radius: 999px;
-  font-family: "Instrument Sans Variable", "Instrument Sans", sans-serif !important;
+  font-family: "Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
 }
 
 .groupPaginationProblem,
@@ -2973,7 +3009,7 @@ a.metricCard:hover {
   padding: 11px 13px;
   color: var(--warning);
   background: var(--warning-soft);
-  border-top: 1px solid #ecd7a7;
+  border-top: 1px solid var(--warning-border);
 }
 
 .groupPaginationProblem > svg,
@@ -2985,7 +3021,7 @@ a.metricCard:hover {
 .groupPaginationProblem span,
 .inlinePaginationProblem span,
 .graphRevisionConflict span {
-  color: #765018;
+  color: var(--text-secondary);
   font-size: 9px;
   line-height: 1.4;
 }
@@ -3100,7 +3136,7 @@ a.metricCard:hover {
 
 .graphRevisionConflict {
   margin-bottom: 14px;
-  border: 1px solid #ecd7a7;
+  border: 1px solid var(--warning-border);
   border-radius: 9px;
 }
 
@@ -3154,9 +3190,9 @@ a.metricCard:hover {
   margin-bottom: 16px;
   padding: 10px;
   overflow-wrap: anywhere;
-  color: #3e4b63;
-  background: #f4f6fb;
-  border: 1px solid #dce2ef;
+  color: var(--text-secondary);
+  background: var(--canvas-raised);
+  border: 1px solid var(--border-strong);
   border-radius: 8px;
   font-family: "IBM Plex Mono", monospace;
   font-size: 8px;
@@ -3368,7 +3404,7 @@ a.metricCard:hover {
 
 .traversalOverview > div > a:hover {
   background: var(--primary-soft);
-  border-color: #bdcaf1;
+  border-color: var(--primary-border);
 }
 
 .traversalOverview > div > a > svg {
@@ -3569,7 +3605,7 @@ a.metricCard:hover {
 }
 
 .inlinePaginationProblem {
-  border-top: 1px solid #ecd7a7;
+  border-top: 1px solid var(--warning-border);
 }
 
 .graphHealthReadout {
@@ -3717,7 +3753,7 @@ a.metricCard:hover {
   padding: 9px;
   color: var(--warning);
   background: var(--warning-soft);
-  border: 1px solid #ecd7a7;
+  border: 1px solid var(--warning-border);
   border-radius: 8px;
 }
 
@@ -3733,7 +3769,7 @@ a.metricCard:hover {
 
 .graphChangeEvidence p {
   margin-bottom: 5px;
-  color: #765018;
+  color: var(--text-secondary);
   font-size: 8px;
   font-weight: 650;
 }
@@ -3747,7 +3783,7 @@ a.metricCard:hover {
 .graphFailedPaths li,
 .graphChangeEvidence small,
 .graphFailedPaths small {
-  color: #84632e;
+  color: var(--text-secondary);
   font-size: 7.5px;
   line-height: 1.55;
 }
@@ -3756,7 +3792,7 @@ a.metricCard:hover {
   display: block;
   color: var(--danger);
   background: var(--danger-soft);
-  border-color: #efc2bd;
+  border-color: var(--danger-border);
 }
 
 .graphFailedPaths strong {
@@ -3809,6 +3845,29 @@ a.metricCard:hover {
 
   .metricGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .metricCard {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .metricCard:nth-child(odd) {
+    border-right: 1px solid var(--border);
+  }
+
+  .metricCard:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .attentionPanel,
+  .jobsPanel {
+    grid-column: span 12;
+  }
+
+  .activityPanel,
+  .repositoryPanel {
+    grid-column: span 6;
   }
 
   .searchGroup {
@@ -3924,6 +3983,404 @@ a.metricCard:hover {
 
   .relationRow,
   .traversalOverview > div > a {
+    transition: none;
+  }
+}
+
+/* Renovated workbench foundation: neutral type, ruled surfaces, and restrained MEX orange. */
+.viewportFrame {
+  grid-template-columns: 232px minmax(0, 1fr);
+  background: var(--canvas);
+}
+
+.sidebar {
+  width: 232px;
+  padding: 16px 12px 14px;
+  background: #010409;
+  border-right-color: #21262d;
+}
+
+.brand {
+  position: relative;
+  min-height: 48px;
+  gap: 11px;
+  padding: 0 7px 13px;
+  border: 0;
+}
+
+.brandMark {
+  width: 36px;
+  height: 36px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: var(--primary-border);
+  border-radius: 9px;
+}
+
+.brandMark svg {
+  width: 18px;
+  stroke-width: 1.65;
+}
+
+.brand strong {
+  font-size: 15px;
+  font-weight: 520;
+  letter-spacing: 0.035em;
+}
+
+.brand small {
+  margin-top: 1px;
+  font-size: 11px;
+}
+
+.brandContext {
+  margin-left: auto;
+  padding: 3px 6px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-border);
+  border-radius: 999px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 7.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidebarSeparator {
+  width: calc(100% - 2px);
+  margin: 0 1px;
+  background: #21262d;
+}
+
+.nav {
+  gap: 19px;
+  padding: 17px 0 22px;
+}
+
+.navGroup {
+  gap: 3px;
+}
+
+.navGroup > p {
+  margin: 0 10px 7px;
+  color: #7d8590;
+  font-size: 10px;
+  font-weight: 520;
+  letter-spacing: 0.12em;
+}
+
+.navLink {
+  position: relative;
+  min-height: 38px;
+  grid-template-columns: 19px minmax(0, 1fr) auto;
+  padding: 8px 10px;
+  color: #9198a1;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 440;
+}
+
+.navLink:hover {
+  color: #f0f6fc;
+  background: #151a22;
+  border-color: #30363d;
+}
+
+.navLinkActive {
+  color: #ffffff;
+  background: #1b212a;
+  border-color: #3b434d;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.navLinkActive::before {
+  left: -13px;
+  width: 3px;
+  height: 22px;
+  background: var(--primary);
+}
+
+.navLink svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.65;
+}
+
+.navLink [data-slot="kbd"] {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  color: #7d8590;
+  background: #0d1117;
+  border-color: #30363d;
+  font-size: 10px;
+}
+
+.navUnavailable {
+  width: 5px !important;
+  height: 5px !important;
+  color: #484f58;
+}
+
+.localOnly {
+  min-height: 52px;
+  gap: 10px;
+  padding: 10px 11px;
+  background: #0d1117;
+  border-color: #30363d;
+  border-radius: 9px;
+}
+
+.localOnly > svg {
+  width: 16px;
+  color: var(--primary);
+}
+
+.localOnly strong {
+  color: #d7dde5;
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.localOnly small {
+  margin-top: 1px;
+  font-size: 9.5px;
+}
+
+.contextBar {
+  height: 64px;
+  grid-template-columns: minmax(185px, 1fr) auto auto;
+  padding: 0 30px;
+  background: rgba(1, 4, 9, 0.92);
+  border-bottom-color: #30363d;
+  backdrop-filter: blur(16px) saturate(120%);
+}
+
+.repoIdentity {
+  min-width: 0;
+  gap: 11px;
+}
+
+.repoGlyph {
+  width: 32px;
+  height: 32px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-color: var(--primary-border);
+  border-radius: 8px;
+}
+
+.repoIdentity small,
+.sessionMeta small {
+  color: #7d8590;
+  font-size: 9px;
+  font-weight: 520;
+  letter-spacing: 0.1em;
+}
+
+.repoIdentity strong,
+.sessionMeta strong {
+  margin-top: 1px;
+  color: #f0f6fc;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.repoFacts {
+  min-width: 0;
+  gap: 15px;
+  padding: 0 22px;
+  color: #a8b0bb;
+}
+
+.repoFacts > span {
+  min-width: 0;
+  font-size: 11.5px;
+}
+
+.repoFacts > span > span {
+  overflow: hidden;
+  max-width: min(28vw, 300px);
+  text-overflow: ellipsis;
+}
+
+.sessionMeta {
+  gap: 10px;
+  padding-left: 21px;
+}
+
+.sessionDot {
+  width: 7px;
+  height: 7px;
+}
+
+.main {
+  min-height: calc(100vh - 64px);
+  padding: 34px clamp(28px, 3.25vw, 48px) 64px;
+  background: #0d1117;
+}
+
+.page {
+  width: min(100%, 1320px);
+}
+
+.pageHeader {
+  align-items: flex-end;
+  gap: 36px;
+  margin-bottom: 30px;
+}
+
+.pageHeader[data-compact="true"] {
+  align-items: center;
+  margin-bottom: 0;
+}
+
+.pageHeader[data-compact="true"] h1 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+  line-height: 1.1;
+}
+
+.pageHeader h1,
+.notFound h1,
+.desktopRequired h1 {
+  margin: 7px 0 9px;
+  font-size: clamp(32px, 2.65vw, 40px);
+  font-weight: 460;
+  letter-spacing: -0.045em;
+  line-height: 1.04;
+}
+
+.eyebrow,
+.panelEyebrow {
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 580;
+  letter-spacing: 0.13em;
+}
+
+.pageDescription {
+  max-width: 760px;
+  color: #aab2bd;
+  font-size: 15px;
+  line-height: 1.55;
+  letter-spacing: 0.006em;
+}
+
+.panel {
+  background: rgba(21, 26, 34, 0.94);
+  border-color: #30363d;
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.panelHeader {
+  gap: 24px;
+  padding: 20px 22px 18px;
+}
+
+.panelHeader h2,
+.listToolbar h2,
+.searchGroupHeader h2,
+.detailHeader h2,
+.healthOverview h2 {
+  margin-top: 4px;
+  font-size: 17px;
+  font-weight: 480;
+  letter-spacing: -0.02em;
+}
+
+.panelHeader p:not(.panelEyebrow) {
+  margin-top: 6px;
+  color: #9da6b2;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.inlineLink {
+  min-height: 30px;
+  padding: 0 2px;
+  color: var(--link);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.statePanel {
+  min-height: 132px;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: 16px;
+  padding: 23px;
+  text-align: left;
+  border-style: solid;
+  border-radius: 12px;
+}
+
+.statePanel [data-slot="empty-header"] {
+  max-width: none;
+  align-items: flex-start;
+  gap: 0;
+  text-align: left;
+}
+
+.statePanel h2 {
+  font-size: 16px;
+  font-weight: 480;
+  letter-spacing: -0.015em;
+}
+
+.statePanel [data-slot="empty-description"] {
+  max-width: 720px;
+  margin-top: 5px;
+  color: #aab2bd;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.stateIcon {
+  width: 42px;
+  height: 42px;
+  margin: 0;
+  border-radius: 9px;
+}
+
+.statusPill {
+  min-height: 21px;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  font-weight: 520;
+  letter-spacing: 0.01em;
+}
+
+@media (max-width: 1190px) {
+  .contextBar {
+    padding: 0 20px;
+  }
+
+  .repoFacts {
+    gap: 11px;
+    padding: 0 16px;
+  }
+
+  .sessionMeta {
+    padding-left: 15px;
+  }
+
+  .main {
+    padding: 27px 28px 52px;
+  }
+
+  .pageHeader h1,
+  .notFound h1,
+  .desktopRequired h1 {
+    font-size: 32px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .navLink,
+  .inlineLink svg {
     transition: none;
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -7,7 +7,6 @@ import {
   Braces,
   ChevronRight,
   FileCode2,
-  GitBranch,
   Network,
   RefreshCw,
   Route,
@@ -24,8 +23,29 @@ import type {
   GraphSourceProjection,
   GraphSymbol,
 } from "../api/types";
-import { ErrorState, Panel, StatePanel, StatusPill, sentenceCase } from "../components/ui";
-import styles from "../styles/hub.module.css";
+import { ErrorState, StatePanel, StatusPill, sentenceCase } from "../components/ui";
+import { Badge } from "../components/primitives/badge";
+import { Button, buttonVariants } from "../components/primitives/button";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "../components/primitives/card";
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemMedia,
+  ItemTitle,
+} from "../components/primitives/item";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/primitives/tabs";
+import { cn } from "../lib/utils";
+import styles from "../styles/symbol.module.css";
 
 const workspaceViews: Array<{ value: CodeWorkspaceView; label: string; icon: typeof Braces }> = [
   { value: "overview", label: "Overview", icon: Braces },
@@ -45,10 +65,17 @@ function depthFrom(value: string | null): number {
 
 function SymbolLink({ symbol, compact = false }: { symbol: GraphSymbol; compact?: boolean }) {
   return (
-    <Link className={`${styles.symbolLink} ${compact ? styles.symbolLinkCompact : ""}`} to={symbol.route}>
-      <span><strong>{symbol.name}</strong><small>{symbol.qualifiedName}</small></span>
-      <ChevronRight aria-hidden="true" />
-    </Link>
+    <Item
+      className={cn(styles.symbolLink, compact && styles.symbolLinkCompact)}
+      render={<Link to={symbol.route} />}
+      size="xs"
+    >
+      <ItemContent>
+        <ItemTitle>{symbol.name}</ItemTitle>
+        <ItemDescription>{symbol.qualifiedName}</ItemDescription>
+      </ItemContent>
+      <ItemActions><ChevronRight aria-hidden="true" /></ItemActions>
+    </Item>
   );
 }
 
@@ -78,33 +105,46 @@ function SourceSpecimen({ source }: { source: GraphSourceProjection }) {
 function RelationRow({ relation, symbolId, view }: { relation: GraphRelation; symbolId: string; view: "callers" | "callees" }) {
   const relatedId = view === "callers" ? relation.sourceId : relation.targetId;
   return (
-    <Link className={styles.relationRow} to={`/code/symbols/${encodeURIComponent(relatedId)}?view=${view}`}>
-      <span className={styles.relationGlyph}><Route aria-hidden="true" /></span>
-      <span>
+    <Item
+      className={styles.relationRow}
+      render={<Link to={`/code/symbols/${encodeURIComponent(relatedId)}?view=${view}`} />}
+      size="sm"
+    >
+      <ItemMedia className={styles.relationGlyph} variant="icon"><Route aria-hidden="true" /></ItemMedia>
+      <ItemContent className={styles.relationContent}>
         <small>{sentenceCase(relation.kind)} · {view === "callers" ? "incoming" : "outgoing"}</small>
         <strong className={styles.mono}>{relatedId === symbolId ? "Current symbol" : relatedId}</strong>
         {relation.path ? <span className={styles.mono}>{relation.path}{relation.line ? `:${relation.line}` : ""}</span> : null}
-      </span>
-      <span className={styles.relationEvidence}>
-        {relation.confidence !== undefined ? <small>{Math.round(relation.confidence * 100)}% confidence</small> : null}
-        {relation.provenance ? <small>{relation.provenance}</small> : null}
-      </span>
-      <ChevronRight aria-hidden="true" />
-    </Link>
+      </ItemContent>
+      <ItemActions className={styles.relationEvidence}>
+        {relation.confidence !== undefined ? <Badge variant="outline">{Math.round(relation.confidence * 100)}% confidence</Badge> : null}
+        {relation.provenance ? <Badge variant="secondary">{relation.provenance}</Badge> : null}
+        <ChevronRight aria-hidden="true" />
+      </ItemActions>
+    </Item>
   );
 }
 
 function OverviewTraversal({ symbol }: { symbol: GraphSymbol }) {
   return (
     <div className={styles.traversalOverview}>
-      <span><Network aria-hidden="true" /></span>
-      <h2>Choose a semantic lens</h2>
-      <p>The graph keeps inbound calls, outbound calls, and bounded dependent impact separate. Each view reads one coherent graph revision.</p>
-      <div>
-        <Link to={`${symbol.route}?view=callers`}><ArrowLeft aria-hidden="true" /><span><strong>Callers</strong><small>What reaches this symbol</small></span></Link>
-        <Link to={`${symbol.route}?view=callees`}><ArrowRight aria-hidden="true" /><span><strong>Callees</strong><small>What this symbol reaches</small></span></Link>
-        <Link to={`${symbol.route}?view=impact&depth=2`}><Network aria-hidden="true" /><span><strong>Impact</strong><small>Dependent blast radius</small></span></Link>
-      </div>
+      <ItemGroup aria-label="Symbol graph views" className={styles.lensList} role="navigation">
+        <Item render={<Link to={`${symbol.route}?view=callers`} />} size="sm">
+          <ItemMedia variant="icon"><ArrowLeft aria-hidden="true" /></ItemMedia>
+          <ItemContent><ItemTitle>Callers</ItemTitle><ItemDescription>Inbound references</ItemDescription></ItemContent>
+          <ItemActions><ChevronRight aria-hidden="true" /></ItemActions>
+        </Item>
+        <Item render={<Link to={`${symbol.route}?view=callees`} />} size="sm">
+          <ItemMedia variant="icon"><ArrowRight aria-hidden="true" /></ItemMedia>
+          <ItemContent><ItemTitle>Callees</ItemTitle><ItemDescription>Outbound references</ItemDescription></ItemContent>
+          <ItemActions><ChevronRight aria-hidden="true" /></ItemActions>
+        </Item>
+        <Item render={<Link to={`${symbol.route}?view=impact&depth=2`} />} size="sm">
+          <ItemMedia variant="icon"><Network aria-hidden="true" /></ItemMedia>
+          <ItemContent><ItemTitle>Impact</ItemTitle><ItemDescription>Bounded dependents</ItemDescription></ItemContent>
+          <ItemActions><ChevronRight aria-hidden="true" /></ItemActions>
+        </Item>
+      </ItemGroup>
     </div>
   );
 }
@@ -167,10 +207,10 @@ function TraversalPanel({
         <div className={styles.inlinePaginationProblem} role="alert">
           <AlertTriangle aria-hidden="true" />
           <span><strong>More relationships could not be loaded.</strong>Loaded relationships remain visible.</span>
-          <button className={styles.secondaryButton} onClick={onLoadMore} type="button">Try again</button>
+          <Button onClick={onLoadMore} size="sm" type="button" variant="outline">Try again</Button>
         </div>
       ) : hasMore ? (
-        <button className={styles.loadMore} disabled={loadingMore} onClick={onLoadMore} type="button">{loadingMore ? "Loading…" : `Load more ${traversal.view}`}</button>
+        <Button className={styles.loadMore} disabled={loadingMore} onClick={onLoadMore} type="button" variant="outline">{loadingMore ? "Loading…" : `Load more ${traversal.view}`}</Button>
       ) : relationTruncated ? <p className={styles.truncatedNote}>This traversal reached its safety bound.</p> : null}
     </div>
   );
@@ -179,19 +219,24 @@ function TraversalPanel({
 function SymbolIdentity({ response }: { response: CodeWorkspaceResponse }) {
   const { symbol } = response;
   return (
-    <Panel className={styles.symbolIdentity} aria-labelledby="symbol-identity-heading">
-      <div className={styles.symbolMonogram} aria-hidden="true"><Braces /></div>
-      <p className={styles.panelEyebrow}>{symbol.language} · {symbol.symbolKind}</p>
-      <h2 id="symbol-identity-heading">{symbol.name}</h2>
-      <p className={styles.symbolQualified}>{symbol.qualifiedName}</p>
-      {symbol.signature ? <code className={styles.symbolSignature}>{symbol.signature}</code> : null}
-      <dl className={styles.symbolFacts}>
-        <div><dt>File</dt><dd className={styles.mono}>{symbol.path}</dd></div>
-        <div><dt>Range</dt><dd className={styles.mono}>{symbol.startLine}–{symbol.endLine}</dd></div>
-        <div><dt>Symbol ID</dt><dd className={styles.mono}>{symbol.id}</dd></div>
-        <div><dt>Revision</dt><dd className={styles.mono}>{response.revision.slice(0, 12)}</dd></div>
-      </dl>
-    </Panel>
+    <section className={styles.symbolIdentity} aria-labelledby="symbol-identity-heading">
+      <Card className={styles.workspaceCard} size="sm">
+        <CardHeader>
+          <Badge variant="secondary">{symbol.language} · {symbol.symbolKind}</Badge>
+          <CardTitle><h2 id="symbol-identity-heading">{symbol.name}</h2></CardTitle>
+          <CardDescription><p className={styles.symbolQualified}>{symbol.qualifiedName}</p></CardDescription>
+        </CardHeader>
+        <CardContent>
+          {symbol.signature ? <code className={styles.symbolSignature}>{symbol.signature}</code> : null}
+          <dl className={styles.symbolFacts}>
+            <div><dt>File</dt><dd className={styles.mono}>{symbol.path}</dd></div>
+            <div><dt>Range</dt><dd className={styles.mono}>{symbol.startLine}–{symbol.endLine}</dd></div>
+            <div><dt>Symbol ID</dt><dd className={styles.mono}>{symbol.id}</dd></div>
+            <div><dt>Revision</dt><dd className={styles.mono}>{response.revision.slice(0, 12)}</dd></div>
+          </dl>
+        </CardContent>
+      </Card>
+    </section>
   );
 }
 
@@ -200,7 +245,7 @@ function GraphProblem({ error, retry }: { error: unknown; retry: () => void }) {
   if (problem && ["INDEX_MISSING", "INDEX_STALE", "INDEX_CORRUPT", "MIGRATION_REQUIRED"].includes(problem.code)) {
     return (
       <StatePanel
-        action={<Link className={styles.secondaryButton} to="/health">Open Graph health</Link>}
+        action={<Link className={buttonVariants({ size: "sm", variant: "outline" })} to="/health">Open Graph health</Link>}
         detail="The symbol workbench only reads a trustworthy graph snapshot. Inspect Health, then explicitly refresh or rebuild if the repository needs it."
         state="unavailable"
         title={problem.code === "INDEX_STALE" ? "The graph snapshot is stale" : "A trustworthy graph snapshot is unavailable"}
@@ -217,7 +262,7 @@ export function SymbolPage() {
   const [params, setParams] = useSearchParams();
   const view = viewFrom(params.get("view"));
   const depth = depthFrom(params.get("depth"));
-  const workspaceRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLElement>(null);
   const focusedSymbolId = useRef<string | null>(null);
   const [displayed, setDisplayed] = useState<CodeWorkspaceResponse | null>(null);
   const [sources, setSources] = useState<GraphSourceProjection[]>([]);
@@ -287,10 +332,6 @@ export function SymbolPage() {
     loadSource.reset();
     loadRelations.reset();
     setRevisionConflict(false);
-    if (focusedSymbolId.current !== id) {
-      focusedSymbolId.current = id;
-      workspaceRef.current?.focus({ preventScroll: true });
-    }
   }
 
   useEffect(() => {
@@ -299,23 +340,15 @@ export function SymbolPage() {
 
   const response = displayed?.symbol.id === id ? displayed : null;
 
+  useEffect(() => {
+    const symbolId = response?.symbol.id;
+    if (!symbolId || focusedSymbolId.current === symbolId) return;
+    focusedSymbolId.current = symbolId;
+    workspaceRef.current?.focus({ preventScroll: true });
+  }, [response?.symbol.id]);
+
   function selectView(next: CodeWorkspaceView) {
     setParams(next === "overview" ? {} : next === "impact" ? { view: next, depth: String(depth) } : { view: next });
-  }
-
-  function handleTabKey(event: ReactKeyboardEvent<HTMLDivElement>) {
-    if ((event.target as HTMLElement).getAttribute("role") !== "tab") return;
-    const current = workspaceViews.findIndex((item) => item.value === view);
-    let target = current;
-    if (event.key === "ArrowRight") target = (current + 1) % workspaceViews.length;
-    else if (event.key === "ArrowLeft") target = (current - 1 + workspaceViews.length) % workspaceViews.length;
-    else if (event.key === "Home") target = 0;
-    else if (event.key === "End") target = workspaceViews.length - 1;
-    else return;
-    event.preventDefault();
-    const next = workspaceViews[target].value;
-    selectView(next);
-    requestAnimationFrame(() => document.getElementById(`symbol-tab-${next}`)?.focus({ preventScroll: true }));
   }
 
   async function reloadNewest() {
@@ -325,7 +358,10 @@ export function SymbolPage() {
 
   return (
     <div className={styles.page}>
-      <Link className={styles.symbolBackLink} to="/code"><ArrowLeft aria-hidden="true" /> Back to code search</Link>
+      <Link className={cn(buttonVariants({ size: "sm", variant: "ghost" }), styles.symbolBackLink)} to="/code">
+        <ArrowLeft aria-hidden="true" data-icon="inline-start" />
+        Back to code search
+      </Link>
       {checkingCapability ? (
         <StatePanel state="loading" title="Checking graph availability" detail="The symbol read will start only after the local capability boundary is known." />
       ) : unavailable ? (
@@ -337,61 +373,72 @@ export function SymbolPage() {
       ) : response ? (
         <>
           <header className={styles.symbolHeader} ref={workspaceRef} tabIndex={-1}>
-            <div><p className={styles.eyebrow}>Code symbol</p><h1>{response.symbol.name}</h1><p>{response.symbol.qualifiedName}</p></div>
-            <StatusPill tone="success">Revision {response.revision.slice(0, 8)}</StatusPill>
+            <div><h1>{response.symbol.name}</h1><p>{response.symbol.qualifiedName}</p></div>
+            <StatusPill>Revision {response.revision.slice(0, 8)}</StatusPill>
           </header>
-          <div className={styles.symbolTabs}>
-            <div aria-label="Inspect symbol graph" className={styles.symbolTabList} onKeyDown={handleTabKey} role="tablist">
+          <Tabs className={styles.workspaceTabs} onValueChange={(next) => selectView(viewFrom(next))} value={view}>
+            <div className={styles.symbolTabs}>
+              <TabsList activateOnFocus aria-label="Inspect symbol graph" className={styles.symbolTabList} variant="line">
+                {workspaceViews.map((item) => (
+                  <TabsTrigger id={`symbol-tab-${item.value}`} key={item.value} value={item.value}>
+                    <item.icon aria-hidden="true" data-icon="inline-start" />
+                    {item.label}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+              {view === "impact" ? (
+                <label>Depth<select aria-label="Impact depth" onChange={(event) => setParams({ view: "impact", depth: event.target.value })} value={depth}>{[1, 2, 3, 4].map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+              ) : null}
+            </div>
+            {revisionConflict ? (
+              <div className={styles.graphRevisionConflict} role="alert">
+                <RefreshCw aria-hidden="true" />
+                <span>
+                  <strong>The graph changed while you were reading.</strong>
+                  Loaded source and relationships remain visible, but pages from different revisions will not be combined.
+                  {workspace.isError ? <small>The newest graph could not be reloaded. This revision remains frozen.</small> : null}
+                </span>
+                <Button disabled={workspace.isFetching} onClick={() => void reloadNewest()} size="sm" type="button" variant="outline">
+                  {workspace.isFetching ? "Reloading…" : "Reload newest graph"}
+                </Button>
+              </div>
+            ) : null}
+            <div className={styles.symbolWorkspace}>
+              <SymbolIdentity response={response} />
+              <section className={styles.sourceWorkspace} aria-labelledby="source-heading">
+                <Card className={styles.workspaceCard} size="sm">
+                  <CardHeader>
+                    <CardTitle><h2 id="source-heading">Source specimen</h2></CardTitle>
+                    <CardAction><Badge variant="secondary">{sources.length} chunk{sources.length === 1 ? "" : "s"}</Badge></CardAction>
+                  </CardHeader>
+                  <CardContent className={styles.sourceCardContent}>
+                    {sources.length ? <div className={styles.sourceSpecimens}>{sources.map((source) => <SourceSpecimen key={`${source.contentHash}-${source.startLine}`} source={source} />)}</div> : <StatePanel compact state="empty" title="No source projection available" detail="The symbol exists in the graph, but no bounded source body was returned." />}
+                    {loadSource.isError && !revisionConflict ? (
+                      <div className={styles.inlinePaginationProblem} role="alert"><AlertTriangle aria-hidden="true" /><span><strong>More source could not be loaded.</strong>Loaded source remains unchanged.</span><Button onClick={() => loadSource.mutate()} size="sm" type="button" variant="outline">Try again</Button></div>
+                    ) : sourceCursor && !revisionConflict && !workspace.isPending && !workspace.isError ? <Button className={styles.loadMore} disabled={loadSource.isPending} onClick={() => loadSource.mutate()} type="button" variant="outline">{loadSource.isPending ? "Loading…" : "Load more source"}</Button> : sourceTruncated ? <p className={styles.truncatedNote}>Source reached its bounded response limit.</p> : null}
+                  </CardContent>
+                </Card>
+              </section>
               {workspaceViews.map((item) => (
-                <button
-                  aria-controls="symbol-traversal-panel"
-                  aria-selected={view === item.value}
-                  id={`symbol-tab-${item.value}`}
-                  key={item.value}
-                  onClick={() => selectView(item.value)}
-                  role="tab"
-                  tabIndex={view === item.value ? 0 : -1}
-                  type="button"
-                ><item.icon aria-hidden="true" />{item.label}</button>
+                <TabsContent className={styles.traversalWorkspace} key={item.value} value={item.value}>
+                  {view === item.value ? (
+                    <Card className={styles.workspaceCard} size="sm">
+                      <CardHeader><CardTitle><h2>{view === "impact" ? "Dependent impact" : sentenceCase(view)}</h2></CardTitle></CardHeader>
+                      <CardContent className={styles.traversalCardContent}>
+                        {workspace.isPending || response.view !== view ? (
+                          <StatePanel compact state="loading" title={`Loading ${view}`} detail="Reading this traversal from one coherent graph revision." />
+                        ) : workspace.isError && !revisionConflict ? (
+                          <GraphProblem error={workspace.error} retry={() => void workspace.refetch()} />
+                        ) : (
+                          <TraversalPanel hasMore={relationCursor !== null && !revisionConflict} loadingMore={loadRelations.isPending} onLoadMore={() => loadRelations.mutate()} paginationError={loadRelations.isError && !revisionConflict} relationTruncated={relationTruncated} relations={relations} response={response} />
+                        )}
+                      </CardContent>
+                    </Card>
+                  ) : null}
+                </TabsContent>
               ))}
             </div>
-            {view === "impact" ? (
-              <label>Depth<select aria-label="Impact depth" onChange={(event) => setParams({ view: "impact", depth: event.target.value })} value={depth}>{[1, 2, 3, 4].map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
-            ) : null}
-          </div>
-          {revisionConflict ? (
-            <div className={styles.graphRevisionConflict} role="alert">
-              <RefreshCw aria-hidden="true" />
-              <span>
-                <strong>The graph changed while you were reading.</strong>
-                Loaded source and relationships remain visible, but pages from different revisions will not be combined.
-                {workspace.isError ? <small>The newest graph could not be reloaded. This revision remains frozen.</small> : null}
-              </span>
-              <button className={styles.secondaryButton} disabled={workspace.isFetching} onClick={() => void reloadNewest()} type="button">
-                {workspace.isFetching ? "Reloading…" : "Reload newest graph"}
-              </button>
-            </div>
-          ) : null}
-          <div className={styles.symbolWorkspace}>
-            <SymbolIdentity response={response} />
-            <Panel className={styles.sourceWorkspace} aria-labelledby="source-heading">
-              <div className={styles.workspacePanelHeader}><div><p className={styles.panelEyebrow}>Exact bounded source</p><h2 id="source-heading">Source specimen</h2></div><span>{sources.length} chunk{sources.length === 1 ? "" : "s"}</span></div>
-              {sources.length ? <div className={styles.sourceSpecimens}>{sources.map((source) => <SourceSpecimen key={`${source.contentHash}-${source.startLine}`} source={source} />)}</div> : <StatePanel compact state="empty" title="No source projection available" detail="The symbol exists in the graph, but no bounded source body was returned." />}
-              {loadSource.isError && !revisionConflict ? (
-                <div className={styles.inlinePaginationProblem} role="alert"><AlertTriangle aria-hidden="true" /><span><strong>More source could not be loaded.</strong>Loaded source remains unchanged.</span><button className={styles.secondaryButton} onClick={() => loadSource.mutate()} type="button">Try again</button></div>
-              ) : sourceCursor && !revisionConflict && !workspace.isPending && !workspace.isError ? <button className={styles.loadMore} disabled={loadSource.isPending} onClick={() => loadSource.mutate()} type="button">{loadSource.isPending ? "Loading…" : "Load more source"}</button> : sourceTruncated ? <p className={styles.truncatedNote}>Source reached its bounded response limit.</p> : null}
-            </Panel>
-            <Panel className={styles.traversalWorkspace} aria-labelledby={`symbol-tab-${view}`} id="symbol-traversal-panel" role="tabpanel">
-              <div className={styles.workspacePanelHeader}><div><p className={styles.panelEyebrow}>Semantic graph</p><h2>{view === "impact" ? "Dependent impact" : sentenceCase(view)}</h2></div>{view !== "overview" ? <GitBranch aria-hidden="true" /> : null}</div>
-              {workspace.isPending || response.view !== view ? (
-                <StatePanel compact state="loading" title={`Loading ${view}`} detail="Reading this traversal from one coherent graph revision." />
-              ) : workspace.isError && !revisionConflict ? (
-                <GraphProblem error={workspace.error} retry={() => void workspace.refetch()} />
-              ) : (
-                <TraversalPanel hasMore={relationCursor !== null && !revisionConflict} loadingMore={loadRelations.isPending} onLoadMore={() => loadRelations.mutate()} paginationError={loadRelations.isError && !revisionConflict} relationTruncated={relationTruncated} relations={relations} response={response} />
-              )}
-            </Panel>
-          </div>
+          </Tabs>
         </>
       ) : null}
     </div>

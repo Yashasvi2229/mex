@@ -1,64 +1,129 @@
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ArrowUpRight, FolderGit2, Gauge, Rows3, UserRound } from "lucide-react";
+import {
+  Activity,
+  ArrowRight,
+  ArrowUpRight,
+  CircleDot,
+  FolderGit2,
+  GitBranch,
+  Rows3,
+  Search as SearchIcon,
+  UserRound,
+  type LucideIcon,
+} from "lucide-react";
 import { Link, useOutletContext } from "react-router-dom";
 import { useHubApi } from "../api/context";
 import type { CapabilitiesResponse, HomeResponse, JobSummary, Tone } from "../api/types";
 import {
   ErrorState,
   formatDate,
-  InlineLink,
   PageHeader,
-  Panel,
-  PanelHeader,
   sentenceCase,
   StatePanel,
   StatusPill,
   stateTone,
 } from "../components/ui";
+import { Badge } from "../components/primitives/badge";
+import { buttonVariants } from "../components/primitives/button";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "../components/primitives/card";
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemMedia,
+  ItemTitle,
+} from "../components/primitives/item";
+import {
+  Table,
+  TableBody,
+  TableCaption,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/primitives/table";
 import styles from "../styles/hub.module.css";
+import homeStyles from "../styles/home.module.css";
 
 interface MetricView {
   id: string;
   label: string;
   value: number | string;
   detail: string;
-  tone?: Tone;
   route?: string;
+  icon: LucideIcon;
+}
+
+function HomeHeader() {
+  return (
+    <PageHeader
+      title="Overview"
+      actions={(
+        <Link className={buttonVariants({ size: "sm", variant: "outline" })} to="/search">
+          <SearchIcon data-icon="inline-start" aria-hidden="true" />
+          Search
+        </Link>
+      )}
+    />
+  );
 }
 
 function MetricCard({ metric }: { metric: MetricView }) {
-  const contents = (
-    <>
-      <div className={styles.metricTopline}><span>{metric.label}</span><Gauge aria-hidden="true" /></div>
-      <strong>{metric.value}</strong>
-      <p>{metric.detail}</p>
-    </>
+  const Icon = metric.icon;
+  const card = (
+    <Card className={homeStyles.metricCard} size="sm">
+      <CardHeader className={homeStyles.metricHeader}>
+        <CardTitle className={homeStyles.metricLabel}>{metric.label}</CardTitle>
+        <CardAction className={homeStyles.metricIcon}><Icon aria-hidden="true" /></CardAction>
+      </CardHeader>
+      <CardContent className={homeStyles.metricContent}>
+        <strong className={homeStyles.metricValue}>{metric.value}</strong>
+        <span className={homeStyles.metricDetail}>{metric.detail}</span>
+      </CardContent>
+    </Card>
   );
-  if (metric.route) {
-    return (
-      <Link className={styles.metricCard} data-tone={metric.tone ?? "neutral"} to={metric.route}>
-        {contents}
-      </Link>
-    );
-  }
-  return (
-    <article className={styles.metricCard} data-tone={metric.tone ?? "neutral"}>
-      {contents}
-    </article>
-  );
+
+  return metric.route ? (
+    <Link className={homeStyles.metricLink} to={metric.route}>{card}</Link>
+  ) : card;
 }
 
-function JobMiniRow({ job }: { job: JobSummary }) {
+function JobRow({ job }: { job: JobSummary }) {
+  const label = sentenceCase(job.kind);
   return (
-    <Link className={styles.jobMiniRow} to={`/jobs?job=${encodeURIComponent(job.id)}`}>
-      <span className={styles.jobMiniIcon}><Rows3 aria-hidden="true" /></span>
-      <span className={styles.jobMiniMain}>
-        <strong>{sentenceCase(job.kind)}</strong>
-        <small className={styles.mono}>{job.id}</small>
-      </span>
-      <StatusPill tone={stateTone(job.state)}>{job.cancelRequested ? "Cancelling" : sentenceCase(job.state)}</StatusPill>
-      <time>{formatDate(job.finishedAt ?? job.startedAt ?? job.createdAt)}</time>
-    </Link>
+    <TableRow>
+      <TableCell>
+        <Link className={homeStyles.jobIdentity} to={`/jobs?job=${encodeURIComponent(job.id)}`}>
+          <span>{label}</span>
+          <small>{job.id}</small>
+        </Link>
+      </TableCell>
+      <TableCell>
+        <StatusPill tone={stateTone(job.state)}>
+          {job.cancelRequested ? "Cancelling" : sentenceCase(job.state)}
+        </StatusPill>
+      </TableCell>
+      <TableCell>
+        <time className={homeStyles.jobTime}>{formatDate(job.finishedAt ?? job.startedAt ?? job.createdAt)}</time>
+      </TableCell>
+      <TableCell className={homeStyles.jobActionCell}>
+        <Link
+          aria-label={`Open ${label}`}
+          className={buttonVariants({ size: "icon-xs", variant: "ghost" })}
+          to={`/jobs?job=${encodeURIComponent(job.id)}`}
+        >
+          <ArrowUpRight aria-hidden="true" />
+        </Link>
+      </TableCell>
+    </TableRow>
   );
 }
 
@@ -81,104 +146,179 @@ export function HomePage() {
 
   if (home.isPending) {
     return (
-      <div className={styles.page}>
-        <PageHeader eyebrow="Repository overview" title="Good context starts here." description="A bounded view of the current local project." />
-        <StatePanel state="loading" title="Reading local project state" detail="Checking only the repositories and indexes available to this Hub process." />
+      <div className={`${styles.page} ${homeStyles.page}`}>
+        <HomeHeader />
+        <StatePanel state="loading" title="Reading local project state" detail="Loading repository context and local indexes." />
       </div>
     );
   }
+
   if (home.isError) {
-    return <div className={styles.page}><PageHeader eyebrow="Repository overview" title="Good context starts here." description="A bounded view of the current local project." /><ErrorState error={home.error} retry={() => void home.refetch()} /></div>;
+    return (
+      <div className={`${styles.page} ${homeStyles.page}`}>
+        <HomeHeader />
+        <ErrorState error={home.error} retry={() => void home.refetch()} />
+      </div>
+    );
   }
 
   const data = home.data;
-  const sections = Object.entries(data.sections) as Array<[keyof HomeResponse["sections"], HomeResponse["sections"][keyof HomeResponse["sections"]]]>;
+  const sections = Object.entries(data.sections) as Array<[
+    keyof HomeResponse["sections"],
+    HomeResponse["sections"][keyof HomeResponse["sections"]],
+  ]>;
   const metrics: MetricView[] = [
-    { id: "jobs", label: "Active jobs", value: data.activeJobs, detail: data.activeJobs === 1 ? "One local operation in progress" : `${data.activeJobs} local operations in progress`, tone: data.activeJobs ? "info" : "neutral" },
-    { id: "workstreams", label: "Workstreams", value: data.sections.workstreams.count ?? "—", detail: data.sections.workstreams.reason ?? "Durable project work", tone: data.sections.workstreams.availability === "unavailable" ? "warning" : "neutral" },
-    { id: "activity", label: "Canonical events", value: data.sections.activity.count ?? "—", detail: data.sections.activity.reason ?? "Open immutable repository activity", tone: data.sections.activity.availability === "unavailable" ? "warning" : "neutral", route: "/activity" },
-    { id: "tree", label: "Working tree", value: data.repository.dirty ? "Changed" : "Clean", detail: data.repository.branch ? `Branch ${data.repository.branch}` : "Detached or unknown branch", tone: data.repository.dirty ? "warning" : "success" },
+    {
+      id: "jobs",
+      label: "Active jobs",
+      value: data.activeJobs,
+      detail: data.activeJobs ? "In progress" : "Idle",
+      icon: Rows3,
+    },
+    {
+      id: "workstreams",
+      label: "Workstreams",
+      value: data.sections.workstreams.count ?? "—",
+      detail: data.sections.workstreams.availability === "available" ? "Available" : "Wiki unavailable",
+      icon: FolderGit2,
+    },
+    {
+      id: "activity",
+      label: "Canonical events",
+      value: data.sections.activity.count ?? "—",
+      detail: "Repository activity",
+      route: "/activity",
+      icon: Activity,
+    },
+    {
+      id: "tree",
+      label: "Working tree",
+      value: data.repository.dirty ? "Changed" : "Clean",
+      detail: data.repository.branch ?? "Branch unavailable",
+      icon: GitBranch,
+    },
   ];
   const sourcesUnavailable = capabilities
     && capabilities.graph.read.availability === "unavailable"
     && capabilities.wiki.read.availability === "unavailable";
 
   return (
-    <div className={styles.page}>
-      <PageHeader
-        eyebrow="Repository overview"
-        title="Good context starts here."
-        description="A bounded view of project memory, repository activity, and local operations—without changing the working tree."
-        actions={<InlineLink to="/search">Search this project</InlineLink>}
-      />
+    <div className={`${styles.page} ${homeStyles.page}`}>
+      <HomeHeader />
 
       {sourcesUnavailable ? (
-        <div className={styles.notice} role="status">
-          <AlertCircle aria-hidden="true" />
-          <span><strong>Knowledge and code indexes are unavailable.</strong>Repository context and local job history remain visible; unavailable sources are never replaced with sample data.</span>
-          <Link to="/health">Review health</Link>
-        </div>
+        <StatePanel
+          compact
+          state="unavailable"
+          title="Knowledge and code indexes are unavailable."
+          detail="Repository context and job history remain available."
+          action={(
+            <Link className={buttonVariants({ size: "sm", variant: "outline" })} to="/health">
+              Health
+              <ArrowRight data-icon="inline-end" aria-hidden="true" />
+            </Link>
+          )}
+        />
       ) : null}
 
-      <section className={styles.metricGrid} aria-label="Project summary">
+      <section className={homeStyles.summaryGrid} aria-label="Project summary">
         {metrics.map((metric) => <MetricCard key={metric.id} metric={metric} />)}
       </section>
 
-      <div className={styles.overviewGrid}>
-        <Panel className={styles.attentionPanel}>
-          <PanelHeader eyebrow="Now" title="Needs attention" detail="Explicit warnings and follow-ups from available local sources." />
-          {data.attention.length ? (
-            <div className={styles.attentionList}>
-              {data.attention.map((item) => (
-                <article className={styles.attentionItem} key={item.id}>
-                  <span className={styles.attentionMarker} data-tone={attentionTone(item.tone)} />
-                  <div>
-                    <div className={styles.attentionTitle}><strong>{item.title}</strong><StatusPill tone={attentionTone(item.tone)}>{sentenceCase(item.kind)}</StatusPill></div>
-                    <p>{item.summary}</p>
+      <div className={homeStyles.dashboardGrid}>
+        <Card className={homeStyles.attentionCard} role="region" aria-labelledby="home-attention-heading">
+          <CardHeader className={`${homeStyles.cardHeader} border-b`}>
+            <CardTitle><h2 id="home-attention-heading">Needs attention</h2></CardTitle>
+            <CardAction><Badge variant="outline">{data.attention.length}</Badge></CardAction>
+          </CardHeader>
+          <CardContent className={homeStyles.cardListContent}>
+            {data.attention.length ? (
+              <ItemGroup>
+                {data.attention.map((item) => (
+                  <div role="listitem" key={item.id}>
+                    <Item render={<Link to={item.route} />} size="sm">
+                      <ItemMedia variant="icon"><CircleDot aria-hidden="true" /></ItemMedia>
+                      <ItemContent>
+                        <ItemTitle>
+                          <span>{item.title}</span>
+                          <StatusPill tone={attentionTone(item.tone)}>{sentenceCase(item.kind)}</StatusPill>
+                        </ItemTitle>
+                        <ItemDescription>{item.summary}</ItemDescription>
+                      </ItemContent>
+                      <ItemActions><ArrowUpRight aria-hidden="true" /></ItemActions>
+                    </Item>
                   </div>
-                  <Link aria-label={`Open ${item.title}`} to={item.route}><ArrowUpRight aria-hidden="true" /></Link>
-                </article>
+                ))}
+              </ItemGroup>
+            ) : (
+              <StatePanel compact state="empty" title="Nothing needs attention" detail="No actionable items were returned." />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className={homeStyles.coverageCard} role="region" aria-labelledby="home-coverage-heading">
+          <CardHeader className={`${homeStyles.cardHeader} border-b`}>
+            <CardTitle><h2 id="home-coverage-heading">Project sections</h2></CardTitle>
+            <CardAction>
+              <Badge variant="outline">
+                <UserRound data-icon="inline-start" aria-hidden="true" />
+                {actorName(data.actor)}
+              </Badge>
+            </CardAction>
+          </CardHeader>
+          <CardContent className={homeStyles.cardListContent}>
+            <ItemGroup>
+              {sections.map(([name, section]) => (
+                <Item key={name} role="listitem" size="xs">
+                  <ItemContent>
+                    <ItemTitle>{sentenceCase(name)}</ItemTitle>
+                  </ItemContent>
+                  <ItemActions>
+                    <StatusPill tone={section.availability === "available" ? "neutral" : "warning"}>
+                      {section.count ?? "Unavailable"}
+                    </StatusPill>
+                  </ItemActions>
+                </Item>
               ))}
-            </div>
-          ) : (
-            <StatePanel compact state="empty" title="Nothing needs attention" detail="No warnings or actionable items were returned." />
-          )}
-        </Panel>
+            </ItemGroup>
+          </CardContent>
+        </Card>
 
-        <Panel className={styles.activityPanel}>
-          <PanelHeader eyebrow="Coverage" title="Project sections" detail="Unavailable sections remain explicit." />
-          <div className={styles.sectionSummaryList}>
-            {sections.map(([name, section]) => (
-              <div className={styles.sectionSummary} key={name}>
-                <span><strong>{sentenceCase(name)}</strong><small>{section.reason ?? "Connected local source"}</small></span>
-                <StatusPill tone={section.availability === "available" ? "success" : "warning"}>{section.count ?? "Unavailable"}</StatusPill>
-              </div>
-            ))}
-          </div>
-        </Panel>
-
-        <Panel className={styles.repositoryPanel}>
-          <PanelHeader eyebrow="Local context" title="Repository & actor" />
-          <div className={styles.repositoryCardBody}>
-            <span className={styles.largeGlyph}><FolderGit2 aria-hidden="true" /></span>
-            <div><strong>{data.repository.name}</strong><p>{data.repository.branch ?? "Branch not reported"}</p></div>
-            <span className={styles.largeGlyph}><UserRound aria-hidden="true" /></span>
-            <div><strong>{actorName(data.actor)}</strong><p>{data.actor.kind === "member" ? "Configured team member" : data.actor.kind === "git" ? "Git identity fallback" : "No identity resolved"}</p></div>
-          </div>
-        </Panel>
-
-        <Panel className={styles.jobsPanel}>
-          <PanelHeader eyebrow="Operations" title="Recent jobs" action={<InlineLink to="/jobs">View all jobs</InlineLink>} />
+        <Card className={homeStyles.jobsCard} role="region" aria-labelledby="home-jobs-heading">
+          <CardHeader className={`${homeStyles.cardHeader} border-b`}>
+            <CardTitle><h2 id="home-jobs-heading">Recent jobs</h2></CardTitle>
+            <CardAction>
+              <Link className={buttonVariants({ size: "sm", variant: "ghost" })} to="/jobs">
+                All jobs
+                <ArrowRight data-icon="inline-end" aria-hidden="true" />
+              </Link>
+            </CardAction>
+          </CardHeader>
           {jobs.isPending ? (
-            <StatePanel compact state="loading" title="Reading job history" detail="Loading persisted summaries." />
+            <CardContent><StatePanel compact state="loading" title="Reading job history" detail="Loading persisted summaries." /></CardContent>
           ) : jobs.isError ? (
-            <ErrorState error={jobs.error} retry={() => void jobs.refetch()} />
+            <CardContent><ErrorState error={jobs.error} retry={() => void jobs.refetch()} /></CardContent>
           ) : jobs.data.items.length ? (
-            <div className={styles.jobMiniList}>{jobs.data.items.slice(0, 4).map((job) => <JobMiniRow job={job} key={job.id} />)}</div>
+            <CardContent className={homeStyles.tableContent}>
+              <Table>
+                <TableCaption className="sr-only">Recent persisted jobs</TableCaption>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Operation</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Updated</TableHead>
+                    <TableHead><span className="sr-only">Open job</span></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {jobs.data.items.slice(0, 4).map((job) => <JobRow job={job} key={job.id} />)}
+                </TableBody>
+              </Table>
+            </CardContent>
           ) : (
-            <StatePanel compact state="empty" title="No jobs recorded" detail="User-launched operations will appear here." />
+            <CardContent><StatePanel compact state="empty" title="No jobs recorded" detail="User-launched operations will appear here." /></CardContent>
           )}
-        </Panel>
+        </Card>
       </div>
     </div>
   );

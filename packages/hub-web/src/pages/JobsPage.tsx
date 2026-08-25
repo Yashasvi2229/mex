@@ -21,13 +21,21 @@ import {
   ErrorState,
   formatDate,
   PageHeader,
-  Panel,
   sentenceCase,
   StatePanel,
   StatusPill,
   stateTone,
 } from "../components/ui";
-import styles from "../styles/hub.module.css";
+import { Button } from "../components/primitives/button";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "../components/primitives/card";
+import { Progress as ProgressPrimitive } from "../components/primitives/progress";
+import styles from "../styles/jobs.module.css";
 
 const operations: Array<{ kind: JobKind; label: string; detail: string }> = [
   { kind: "graph_refresh", label: "Refresh graph", detail: "Index the bounded repository delta" },
@@ -113,7 +121,7 @@ function JobStateIcon({ state }: { state: JobState }) {
   return <Clock3 aria-hidden="true" />;
 }
 
-function Progress({ job }: { job: JobSummary }) {
+function JobProgressView({ job }: { job: JobSummary }) {
   const value = percentage(job.progress);
   const phase = graphPhaseIndex(job.phase) >= 0 ? sentenceCase(job.phase) : job.phase;
   return (
@@ -122,7 +130,9 @@ function Progress({ job }: { job: JobSummary }) {
         <span>{phase}</span>
         <span>{value === null ? (job.progress ? `${job.progress.completed} complete · total unknown` : "Total unknown") : `${value}%`}</span>
       </div>
-      {value === null ? null : <progress aria-label={`${value}% complete`} className={styles.progressTrack} max={100} value={value}>{value}%</progress>}
+      {value === null ? null : (
+        <ProgressPrimitive aria-label={`${value}% complete`} className={styles.progressTrack} value={value} />
+      )}
     </div>
   );
 }
@@ -150,22 +160,23 @@ function GraphPhaseRail({ job }: { job: JobSummary }) {
 
 function JobRow({ job, selected, onSelect }: { job: JobSummary; selected: boolean; onSelect: () => void }) {
   return (
-    <button
+    <Button
       aria-pressed={selected}
       className={`${styles.jobRow} ${selected ? styles.jobRowSelected : ""}`}
       data-job-id={job.id}
       onClick={onSelect}
       type="button"
+      variant="ghost"
     >
       <span className={styles.jobStateIcon} data-tone={stateTone(job.state)}><JobStateIcon state={job.state} /></span>
       <span className={styles.jobIdentity}>
         <span><strong>{sentenceCase(job.kind)}</strong><StatusPill tone={stateTone(job.state)}>{job.cancelRequested ? "Cancelling" : sentenceCase(job.state)}</StatusPill></span>
         <small className={styles.mono}>{job.id}</small>
       </span>
-      <Progress job={job} />
+      <JobProgressView job={job} />
       <time>{formatDate(job.finishedAt ?? job.startedAt ?? job.createdAt)}</time>
       <ChevronRight aria-hidden="true" />
-    </button>
+    </Button>
   );
 }
 
@@ -184,7 +195,7 @@ function JobDetail({ jobId, onClose }: { jobId: string; onClose: () => void }) {
   });
 
   useEffect(() => {
-    detailRef.current?.focus({ preventScroll: true });
+    detailRef.current?.focus({ preventScroll: window.innerWidth > 1170 });
   }, [jobId, job.isPending]);
 
   if (job.isPending) return <aside className={styles.jobDetail} ref={detailRef} tabIndex={-1}><StatePanel compact state="loading" title="Loading job" detail="Reading the persisted operation summary." /></aside>;
@@ -194,13 +205,13 @@ function JobDetail({ jobId, onClose }: { jobId: string; onClose: () => void }) {
     <aside className={styles.jobDetail} aria-label="Job detail" ref={detailRef} tabIndex={-1}>
       <div className={styles.detailHeader}>
         <div><p className={styles.panelEyebrow}>Operation detail</p><h2>{sentenceCase(item.kind)}</h2></div>
-        <button aria-label="Close job detail" className={styles.iconButton} onClick={onClose} type="button"><X /></button>
+        <Button aria-label="Close job detail" className={styles.iconButton} onClick={onClose} size="icon-sm" type="button" variant="ghost"><X /></Button>
       </div>
       <div className={styles.detailState}>
         <span className={styles.jobStateIcon} data-tone={stateTone(item.state)}><JobStateIcon state={item.state} /></span>
         <div><StatusPill tone={stateTone(item.state)}>{item.cancelRequested ? "Cancelling" : sentenceCase(item.state)}</StatusPill><small>{graphPhaseIndex(item.phase) >= 0 ? sentenceCase(item.phase) : item.phase}</small></div>
       </div>
-      <Progress job={item} />
+      <JobProgressView job={item} />
       <GraphPhaseRail job={item} />
       <dl className={styles.detailList}>
         <div><dt>Job ID</dt><dd className={styles.mono}>{item.id}</dd></div>
@@ -221,9 +232,9 @@ function JobDetail({ jobId, onClose }: { jobId: string; onClose: () => void }) {
       {item.interruptedReason ? <div className={styles.detailNote}><strong>Interruption reason</strong><p>{sentenceCase(item.interruptedReason)}</p></div> : null}
       {item.cancelRequested && isActive(item) ? <div className={styles.detailNote} role="status"><strong>Cancellation requested</strong><p>The executor is stopping safely. This job remains active until it settles as interrupted.</p></div> : null}
       {isActive(item) ? (
-        <button className={styles.dangerButton} disabled={cancel.isPending || item.cancelRequested} onClick={() => cancel.mutate()} type="button">
-          <CircleStop aria-hidden="true" /> {cancel.isPending || item.cancelRequested ? "Cancelling…" : "Cancel job"}
-        </button>
+        <Button className={styles.dangerButton} disabled={cancel.isPending || item.cancelRequested} onClick={() => cancel.mutate()} type="button" variant="destructive">
+          <CircleStop aria-hidden="true" data-icon="inline-start" /> {cancel.isPending || item.cancelRequested ? "Cancelling…" : "Cancel job"}
+        </Button>
       ) : null}
       {cancel.isError ? <p className={styles.inlineProblem} role="alert">{cancel.error instanceof Error ? cancel.error.message : "Cancellation failed"}</p> : null}
     </aside>
@@ -292,75 +303,97 @@ export function JobsPage() {
 
   return (
     <div className={styles.page}>
-      <PageHeader
-        eyebrow="Local operations"
-        title="Jobs"
-        description="Explicit, persisted work with honest progress. Unknown totals stay unknown, and interrupted work remains visible after restart."
-      />
+      <PageHeader title="Jobs" />
 
-      <section className={styles.operationStrip} aria-label="Start an operation">
-        <div className={styles.operationIntro}><span><DatabaseZap aria-hidden="true" /></span><div><strong>Start local work</strong><p>Only supported executors can run.</p></div></div>
-        {operations.map((operation) => {
-          const capability = operationCapability(capabilities, operation.kind, graphHealth, health.isSuccess);
-          return (
-            <button
-              className={styles.operationButton}
-              disabled={!capability.available || start.isPending}
-              key={operation.kind}
-              onClick={() => operation.kind === "graph_rebuild" ? setConfirmRebuild(true) : start.mutate(operation.kind)}
-              ref={operation.kind === "graph_rebuild" ? rebuildTriggerRef : undefined}
-              title={!capability.available ? (capability.reason ?? `${operation.label} is unavailable in this build`) : operation.detail}
-              type="button"
-            >
-              {start.isPending && start.variables === operation.kind ? <LoaderCircle className={styles.spin} /> : <Play />}
-              <span><strong>{operation.label}</strong><small>{capability.available ? operation.detail : "Capability unavailable"}</small></span>
-            </button>
-          );
-        })}
-      </section>
+      <Card aria-label="Start an operation" className={styles.operationStrip} role="region" size="sm">
+        <CardHeader className={styles.operationHeader}>
+          <CardTitle className={styles.operationTitle}>
+            <DatabaseZap aria-hidden="true" />
+            <h2>Start operation</h2>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className={styles.operationGrid}>
+          {operations.map((operation) => {
+            const capability = operationCapability(capabilities, operation.kind, graphHealth, health.isSuccess);
+            return (
+              <Button
+                className={styles.operationButton}
+                disabled={!capability.available || start.isPending}
+                key={operation.kind}
+                onClick={() => operation.kind === "graph_rebuild" ? setConfirmRebuild(true) : start.mutate(operation.kind)}
+                ref={operation.kind === "graph_rebuild" ? rebuildTriggerRef : undefined}
+                title={!capability.available ? (capability.reason ?? `${operation.label} is unavailable in this build`) : operation.detail}
+                type="button"
+                variant="outline"
+              >
+                {start.isPending && start.variables === operation.kind
+                  ? <LoaderCircle aria-hidden="true" className={styles.spin} data-icon="inline-start" />
+                  : <Play aria-hidden="true" data-icon="inline-start" />}
+                <span>
+                  <strong>{operation.label}</strong>
+                  {!capability.available ? <small>{capability.reason ?? "Capability unavailable"}</small> : null}
+                </span>
+              </Button>
+            );
+          })}
+        </CardContent>
+      </Card>
 
       {contention ? (
         <div className={styles.notice} data-tone="warning" role="alert">
           <RotateCcw aria-hidden="true" />
           <span><strong>An index operation is already running.</strong>The active job must finish or be cancelled before another starts.</span>
-          <button onClick={() => setFilter("active")} type="button">Show active jobs</button>
+          <Button onClick={() => setFilter("active")} size="sm" type="button" variant="outline">Show active jobs</Button>
         </div>
       ) : start.isError ? <ErrorState error={start.error} /> : null}
 
       <div className={`${styles.jobsWorkspace} ${selectedId ? styles.jobsWorkspaceOpen : ""}`}>
-        <Panel className={styles.jobsListPanel}>
-          <div className={styles.listToolbar}>
-            <div><p className={styles.panelEyebrow}>Persisted history</p><h2>Operation log</h2></div>
-            <div className={styles.segmented} aria-label="Filter jobs">
-              {(["all", "active", "history"] as const).map((value) => (
-                <button aria-pressed={filter === value} key={value} onClick={() => setFilter(value)} type="button">{sentenceCase(value)}</button>
-              ))}
-            </div>
-          </div>
-          {jobs.isPending ? (
-            <StatePanel compact state="loading" title="Loading jobs" detail="Reading persisted job summaries." />
-          ) : jobs.isError ? (
-            <ErrorState error={jobs.error} retry={() => void jobs.refetch()} />
-          ) : visibleJobs.length ? (
-            <div className={styles.jobRows}>
-              {visibleJobs.map((job) => (
-                <JobRow
-                  job={job}
-                  key={job.id}
-                  onSelect={() => setParams({ job: job.id })}
-                  selected={selectedId === job.id}
-                />
-              ))}
-              {jobs.hasNextPage ? (
-                <button className={styles.loadMore} disabled={jobs.isFetchingNextPage} onClick={() => void jobs.fetchNextPage()} type="button">
-                  {jobs.isFetchingNextPage ? "Loading…" : "Load older jobs"}
-                </button>
-              ) : null}
-            </div>
-          ) : (
-            <StatePanel compact state="empty" title={allJobs.length ? `No ${filter} jobs` : "No jobs recorded"} detail={allJobs.length ? "Choose another filter to see recorded work." : "Start a supported operation to create the first persisted job."} />
-          )}
-        </Panel>
+        <Card className={styles.jobsListPanel} size="sm">
+          <CardHeader className={styles.listToolbar}>
+            <CardTitle><h2>Operation log</h2></CardTitle>
+            <CardAction>
+              <div aria-label="Filter jobs" className={styles.segmented} role="group">
+                {(["all", "active", "history"] as const).map((value) => (
+                  <Button
+                    aria-pressed={filter === value}
+                    key={value}
+                    onClick={() => setFilter(value)}
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                  >
+                    {sentenceCase(value)}
+                  </Button>
+                ))}
+              </div>
+            </CardAction>
+          </CardHeader>
+          <CardContent className={styles.jobsListContent}>
+            {jobs.isPending ? (
+              <StatePanel compact state="loading" title="Loading jobs" detail="Reading persisted job summaries." />
+            ) : jobs.isError ? (
+              <ErrorState error={jobs.error} retry={() => void jobs.refetch()} />
+            ) : visibleJobs.length ? (
+              <div className={styles.jobRows}>
+                {visibleJobs.map((job) => (
+                  <JobRow
+                    job={job}
+                    key={job.id}
+                    onSelect={() => setParams({ job: job.id })}
+                    selected={selectedId === job.id}
+                  />
+                ))}
+                {jobs.hasNextPage ? (
+                  <Button className={styles.loadMore} disabled={jobs.isFetchingNextPage} onClick={() => void jobs.fetchNextPage()} type="button" variant="outline">
+                    {jobs.isFetchingNextPage ? "Loading…" : "Load older jobs"}
+                  </Button>
+                ) : null}
+              </div>
+            ) : (
+              <StatePanel compact state="empty" title={allJobs.length ? `No ${filter} jobs` : "No jobs recorded"} detail={allJobs.length ? "Choose another filter to see recorded work." : "Start a supported operation to create the first persisted job."} />
+            )}
+          </CardContent>
+        </Card>
         {selectedId ? <JobDetail jobId={selectedId} onClose={() => setParams({})} /> : null}
       </div>
       <RebuildConfirmation

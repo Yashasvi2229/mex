@@ -3,6 +3,10 @@ import { AlertTriangle, ArrowRight, LoaderCircle, PackageOpen, WifiOff } from "l
 import { Link } from "react-router-dom";
 import { HubApiError } from "../api/client";
 import type { JobState, Tone } from "../api/types";
+import { Badge } from "./primitives/badge";
+import { Button, buttonVariants } from "./primitives/button";
+import { Empty, EmptyDescription, EmptyHeader, EmptyMedia } from "./primitives/empty";
+import { cn } from "../lib/utils";
 import styles from "../styles/hub.module.css";
 
 export function PageHeader({
@@ -11,17 +15,18 @@ export function PageHeader({
   description,
   actions,
 }: {
-  eyebrow: string;
+  eyebrow?: string;
   title: string;
-  description: string;
+  description?: string;
   actions?: ReactNode;
 }) {
+  const compact = !eyebrow && !description;
   return (
-    <header className={styles.pageHeader}>
+    <header className={styles.pageHeader} data-compact={compact || undefined}>
       <div>
-        <p className={styles.eyebrow}>{eyebrow}</p>
+        {eyebrow ? <p className={styles.eyebrow}>{eyebrow}</p> : null}
         <h1>{title}</h1>
-        <p className={styles.pageDescription}>{description}</p>
+        {description ? <p className={styles.pageDescription}>{description}</p> : null}
       </div>
       {actions ? <div className={styles.headerActions}>{actions}</div> : null}
     </header>
@@ -84,19 +89,19 @@ export function StatePanel({
         ? WifiOff
         : AlertTriangle;
   return (
-    <div
+    <Empty
       className={`${styles.statePanel} ${compact ? styles.statePanelCompact : ""}`}
       role={state === "error" ? "alert" : "status"}
     >
-      <span className={styles.stateIcon} data-state={state}>
+      <EmptyMedia className={styles.stateIcon} data-state={state} variant="icon">
         <Icon aria-hidden="true" className={state === "loading" ? styles.spin : ""} />
-      </span>
-      <div>
+      </EmptyMedia>
+      <EmptyHeader>
         <h2>{title}</h2>
-        <p>{detail}</p>
-      </div>
+        <EmptyDescription>{detail}</EmptyDescription>
+      </EmptyHeader>
       {action ? <div className={styles.stateAction}>{action}</div> : null}
-    </div>
+    </Empty>
   );
 }
 
@@ -109,9 +114,9 @@ export function ErrorState({ error, retry }: { error: unknown; retry?: () => voi
       detail={problem?.detail ?? "The Hub kept the last trustworthy state. Try the request again."}
       action={
         retry ? (
-          <button className={styles.secondaryButton} type="button" onClick={retry}>
+          <Button className={styles.secondaryButton} variant="outline" size="sm" type="button" onClick={retry}>
             Try again
-          </button>
+          </Button>
         ) : undefined
       }
     />
@@ -122,7 +127,7 @@ export function StatusPill({
   children,
   tone = "neutral",
 }: PropsWithChildren<{ tone?: Tone }>) {
-  return <span className={styles.statusPill} data-tone={tone}>{children}</span>;
+  return <Badge className={styles.statusPill} data-tone={tone} variant="outline">{children}</Badge>;
 }
 
 export function stateTone(state: JobState | string): Tone {
@@ -137,7 +142,7 @@ export function stateTone(state: JobState | string): Tone {
 
 export function InlineLink({ to, children }: PropsWithChildren<{ to: string }>) {
   return (
-    <Link className={styles.inlineLink} to={to}>
+    <Link className={cn(buttonVariants({ variant: "link", size: "sm" }), styles.inlineLink)} to={to}>
       {children}
       <ArrowRight aria-hidden="true" />
     </Link>

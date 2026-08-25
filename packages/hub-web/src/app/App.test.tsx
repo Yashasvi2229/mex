@@ -23,10 +23,10 @@ function renderRoute(route: string, api: HubApi = createFixtureApi()) {
 
 describe("Project Hub routes", () => {
   it.each([
-    ["/", "Good context starts here."],
-    ["/search", "Search the project"],
+    ["/", "Overview"],
+    ["/search", "Search"],
     ["/knowledge", "Knowledge"],
-    ["/code", "Explore the code graph"],
+    ["/code", "Code"],
     ["/workstreams", "Workstreams"],
     ["/specs", "Specs"],
     ["/playbooks", "Playbooks"],
@@ -35,7 +35,7 @@ describe("Project Hub routes", () => {
     ["/activity", "Activity"],
     ["/jobs", "Jobs"],
     ["/health", "Health"],
-    ["/not-a-route", "This path is outside the workbench."],
+    ["/not-a-route", "Page not found"],
   ])("renders %s as an intentional view", async (route, heading) => {
     renderRoute(route);
     expect(await screen.findByRole("heading", { level: 1, name: heading })).toBeVisible();
@@ -44,7 +44,7 @@ describe("Project Hub routes", () => {
   it("exposes keyboard navigation and a skip link", async () => {
     const user = userEvent.setup();
     renderRoute("/");
-    await screen.findByRole("heading", { level: 1, name: "Good context starts here." });
+    await screen.findByRole("heading", { level: 1, name: "Overview" });
     const skip = screen.getByRole("link", { name: "Skip to main content" });
     skip.focus();
     expect(skip).toHaveFocus();
@@ -65,11 +65,11 @@ describe("Project Hub routes", () => {
 
     expect(await screen.findByRole("heading", { name: "Project capabilities could not be loaded" })).toBeVisible();
     expect(screen.queryByText(/sensitive filesystem detail/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Explore the code graph" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Code" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Try again" }));
 
-    expect(await screen.findByRole("heading", { name: "Explore the code graph" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Code" })).toBeVisible();
     expect(capabilities).toHaveBeenCalledTimes(2);
   });
 
@@ -88,6 +88,11 @@ describe("Project Hub routes", () => {
     renderRoute("/");
     const activityMetric = await screen.findByRole("link", { name: /Canonical events/ });
     expect(activityMetric).toHaveAttribute("href", "/activity");
+    expect(screen.getByRole("link", { name: "All jobs" })).toHaveAttribute("href", "/jobs");
+    expect(screen.getByRole("link", { name: "Open Graph refresh" })).toHaveAttribute(
+      "href",
+      "/jobs?job=job_01K36WVM6H7JK8M9NPQRSTVVWX",
+    );
     expect(screen.getByRole("link", { name: "Activity" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Inbox Unavailable" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Relays Unavailable" })).toBeVisible();
