@@ -5,6 +5,8 @@ import {
   BootstrapResponseSchema,
   CodeWorkspaceRequestSchema,
   CodeWorkspaceResponseSchema,
+  CodeKnowledgeRequestSchema,
+  CodeKnowledgeResponseSchema,
   GraphSymbolIdSchema,
   HealthResponseSchema,
   HomeResponseSchema,
@@ -18,9 +20,19 @@ import {
   SearchRequestSchema,
   SearchResponseSchema,
   SessionResponseSchema,
+  WikiBacklinksRequestSchema,
+  WikiBacklinksResponseSchema,
+  WikiEntityDetailResponseSchema,
+  WikiEntityIdSchema,
+  WikiEntityListRequestSchema,
+  WikiEntityListResponseSchema,
+  WikiRelationsRequestSchema,
+  WikiRelationsResponseSchema,
   type HealthResponse,
   type CodeWorkspaceRequest,
   type CodeWorkspaceResponse,
+  type CodeKnowledgeRequest,
+  type CodeKnowledgeResponse,
   type ActivityRequest,
   type ActivityResponse,
   type HomeResponse,
@@ -30,6 +42,13 @@ import {
   type JobPageRequest,
   type SearchRequest,
   type SearchResponse,
+  type WikiBacklinksRequest,
+  type WikiBacklinksResponse,
+  type WikiEntityDetailResponse,
+  type WikiEntityListRequest,
+  type WikiEntityListResponse,
+  type WikiRelationsRequest,
+  type WikiRelationsResponse,
 } from "@mex/hub-contracts";
 import { Hono, type Context } from "hono";
 import { getCookie, generateCookie } from "hono/cookie";
@@ -92,6 +111,24 @@ export interface HubReadServices {
     symbolId: string,
     request: CodeWorkspaceRequest,
   ): Promise<CodeWorkspaceResponse> | CodeWorkspaceResponse;
+  wikiEntities?(
+    request: WikiEntityListRequest,
+  ): Promise<WikiEntityListResponse> | WikiEntityListResponse;
+  wikiEntity?(
+    entityId: string,
+  ): Promise<WikiEntityDetailResponse> | WikiEntityDetailResponse;
+  wikiRelations?(
+    entityId: string,
+    request: WikiRelationsRequest,
+  ): Promise<WikiRelationsResponse> | WikiRelationsResponse;
+  wikiBacklinks?(
+    entityId: string,
+    request: WikiBacklinksRequest,
+  ): Promise<WikiBacklinksResponse> | WikiBacklinksResponse;
+  codeKnowledge?(
+    symbolId: string,
+    request: CodeKnowledgeRequest,
+  ): Promise<CodeKnowledgeResponse> | CodeKnowledgeResponse;
   health(): Promise<HealthResponse> | HealthResponse;
   assertJobStartAllowed?(kind: HubJobKind): Promise<void> | void;
 }
@@ -237,6 +274,71 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
     return resourceResponse(
       CodeWorkspaceResponseSchema,
       await options.services.codeSymbol(symbolId, request),
+    );
+  });
+
+  app.get("/api/v1/code/symbols/:id/knowledge", async (context) => {
+    if (!options.services.codeKnowledge) {
+      throw unavailable("Code-to-Knowledge reads are not connected in this build.");
+    }
+    const symbolId = graphInput(() => parseInput(GraphSymbolIdSchema, context.req.param("id")));
+    const request = graphInput(() => parseInput(
+      CodeKnowledgeRequestSchema,
+      readStrictQuery(context.req.raw, ["cursor", "limit"]),
+    ));
+    return resourceResponse(
+      CodeKnowledgeResponseSchema,
+      await options.services.codeKnowledge(symbolId, request),
+    );
+  });
+
+  app.get("/api/v1/wiki/entities", async (context) => {
+    if (!options.services.wikiEntities) throw unavailable("Wiki reads are not connected in this build.");
+    const request = graphInput(() => parseInput(
+      WikiEntityListRequestSchema,
+      readStrictQuery(context.req.raw, [
+        "kind", "topic", "lifecycle", "grounding", "sourceType", "cursor", "limit",
+      ]),
+    ));
+    return resourceResponse(
+      WikiEntityListResponseSchema,
+      await options.services.wikiEntities(request),
+    );
+  });
+
+  app.get("/api/v1/wiki/entities/:id/relations", async (context) => {
+    if (!options.services.wikiRelations) throw unavailable("Wiki relation reads are not connected in this build.");
+    const entityId = graphInput(() => parseInput(WikiEntityIdSchema, context.req.param("id")));
+    const request = graphInput(() => parseInput(
+      WikiRelationsRequestSchema,
+      readStrictQuery(context.req.raw, ["direction", "type", "cursor", "limit"]),
+    ));
+    return resourceResponse(
+      WikiRelationsResponseSchema,
+      await options.services.wikiRelations(entityId, request),
+    );
+  });
+
+  app.get("/api/v1/wiki/entities/:id/backlinks", async (context) => {
+    if (!options.services.wikiBacklinks) throw unavailable("Wiki backlink reads are not connected in this build.");
+    const entityId = graphInput(() => parseInput(WikiEntityIdSchema, context.req.param("id")));
+    const request = graphInput(() => parseInput(
+      WikiBacklinksRequestSchema,
+      readStrictQuery(context.req.raw, ["type", "cursor", "limit"]),
+    ));
+    return resourceResponse(
+      WikiBacklinksResponseSchema,
+      await options.services.wikiBacklinks(entityId, request),
+    );
+  });
+
+  app.get("/api/v1/wiki/entities/:id", async (context) => {
+    if (!options.services.wikiEntity) throw unavailable("Wiki reads are not connected in this build.");
+    const entityId = graphInput(() => parseInput(WikiEntityIdSchema, context.req.param("id")));
+    graphInput(() => readStrictQuery(context.req.raw, []));
+    return resourceResponse(
+      WikiEntityDetailResponseSchema,
+      await options.services.wikiEntity(entityId),
     );
   });
 

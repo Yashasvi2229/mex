@@ -9,6 +9,8 @@ import {
   type CapabilityStatus,
   type CodeWorkspaceRequest,
   type CodeWorkspaceResponse,
+  type CodeKnowledgeRequest,
+  type CodeKnowledgeResponse,
   type GraphHealthDetails,
   type GraphRelation as HubGraphRelation,
   type GraphSymbol as HubGraphSymbol,
@@ -19,6 +21,17 @@ import {
   type HubJobSnapshot,
   type SearchRequest,
   type SearchResponse,
+  type WikiBacklinksRequest,
+  type WikiBacklinksResponse,
+  type WikiEntityDetailResponse,
+  type WikiEntityListRequest,
+  type WikiEntityListResponse,
+  type WikiEntitySummary as HubWikiEntitySummary,
+  type WikiGrounding as HubWikiGrounding,
+  type WikiHealthDetails,
+  type WikiRelation as HubWikiRelation,
+  type WikiRelationsRequest,
+  type WikiRelationsResponse,
 } from "@mex/hub-contracts";
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
@@ -32,6 +45,17 @@ import type {
 import type { GitPort } from "../team/contracts/git.js";
 import { isRepoRelativePath, type ActorRef, type Diagnostic, type EntityRef } from "../team/contracts/shared.js";
 import type { ActivitySubjectRef } from "../team/contracts/workflow.js";
+import type {
+  WikiEntity,
+  WikiEntitySummary,
+  WikiGroundingResolution,
+  WikiIndexStatus,
+  WikiListRequest,
+  WikiQueryRequest,
+  WikiRelation,
+  WikiRelationHit,
+  WikiSource,
+} from "../team/contracts/wiki.js";
 import type { ResolvedTimelineEntry } from "../team/activity/repository.js";
 import { TeamIdentityActivityFoundation } from "../team/foundation.js";
 import { createRepositoryGitPort } from "../team/git/git-port.js";
@@ -44,6 +68,14 @@ import type {
   GraphSymbolWorkspaceRequest,
   GraphSymbolWorkspaceResult,
 } from "../graph/application-adapter.js";
+import type {
+  RepositoryCodeKnowledgeRequest,
+  RepositoryCodeKnowledgeResult,
+  RepositoryKnowledgeWorkspace,
+  RepositoryKnowledgeWorkspaceRequest,
+  RepositoryWikiListBundle,
+  RepositoryWikiSearchBundle,
+} from "../wiki/application-adapter.js";
 
 interface HubJobReader {
   list(request?: { limit?: number }): {
@@ -58,21 +90,31 @@ export interface HubGraphReadService {
   readSymbolWorkspace(request: GraphSymbolWorkspaceRequest): Promise<GraphSymbolWorkspaceResult>;
 }
 
+/** Narrow private seam implemented by the repository-bound Wiki adapter. */
+export interface HubWikiReadService {
+  inspectIndex(): Promise<WikiIndexStatus>;
+  listBundle(request: WikiListRequest): Promise<RepositoryWikiListBundle>;
+  searchBundle(request: WikiQueryRequest): Promise<RepositoryWikiSearchBundle>;
+  readKnowledgeWorkspace(request: RepositoryKnowledgeWorkspaceRequest): Promise<RepositoryKnowledgeWorkspace>;
+  knowledgeForCode(request: RepositoryCodeKnowledgeRequest): Promise<RepositoryCodeKnowledgeResult>;
+}
+
 export interface LocalHubReadServicesOptions {
   readonly projectRoot: string;
   readonly scaffoldId: string;
   readonly jobs: HubJobReader;
   readonly git?: GitPort;
   readonly graph?: HubGraphReadService;
+  readonly wiki?: HubWikiReadService;
   readonly now?: () => Date;
 }
 
 /**
  * Honest production read model for the local Hub.
  *
- * Git, Activity, durable jobs, and an injected repository Graph adapter are
- * real. Wiki and later workflow aggregates stay explicitly unavailable until
- * their owning lanes are integrated; populated visual data is never built here.
+ * Git, Activity, durable jobs, and injected repository Graph/Wiki adapters are
+ * real. Later workflow aggregates stay explicitly unavailable; populated
+ * visual data is never built here.
  */
 export function createLocalHubReadServices(
   options: LocalHubReadServicesOptions,
@@ -80,6 +122,7 @@ export function createLocalHubReadServices(
   const now = options.now ?? (() => new Date());
   const git = options.git ?? createRepositoryGitPort(options.projectRoot, { now });
   const graph = options.graph;
+  const wiki = options.wiki;
   const team = new TeamIdentityActivityFoundation({
     projectRoot: options.projectRoot,
     scaffoldId: options.scaffoldId,
@@ -101,8 +144,9 @@ export function createLocalHubReadServices(
           rebuild: graph ? available() : unavailable("Graph rebuild requires the Lane A recovery adapter."),
         },
         wiki: {
-          read: unavailable("The WikiPort is not connected in this foundation build."),
-          rebuild: unavailable("Wiki rebuild requires the teammate adapter."),
+          read: wiki ? available() : unavailable("The WikiPort is not connected in this build."),
+          refresh: wiki ? available() : unavailable("Wiki refresh requires the repository adapter."),
+          rebuild: wiki ? available() : unavailable("Wiki rebuild requires the repository adapter."),
         },
       };
     },
@@ -172,16 +216,7 @@ export function createLocalHubReadServices(
     },
 
     async search(request: SearchRequest): Promise<SearchResponse> {
-      if (graph) return graphSearch(graph, request, now);
-      return {
-        query: request.q,
-        observedAt: now().toISOString(),
-        groups: {
-          wiki: unavailableSearch("Wiki search requires the teammate adapter."),
-          symbols: unavailableSearch("Code-symbol search requires the GraphPort adapter."),
-          sources: unavailableSearch("Source-chunk search requires the GraphPort adapter."),
-        },
-      };
+      return unifiedSearch(graph, wiki, request, now);
     },
 
     async health(): Promise<HealthResponse> {
@@ -203,40 +238,46 @@ export function createLocalHubReadServices(
             summary: "Graph health requires the Lane A adapter.",
             diagnostics: [],
           };
-      return {
-        status: "degraded",
-        observedAt: now().toISOString(),
-        components: [
-          {
-            id: "git",
-            label: "Git repository",
-            status: gitStatus,
-            summary: gitSummary,
-            diagnostics: [],
-          },
-          {
-            id: "local_state",
-            label: "Local Hub state",
-            status: "healthy",
-            summary: "Schema v3 job summaries are available locally.",
-            diagnostics: [],
-          },
-          {
-            id: "migration",
-            label: "Local migration",
-            status: "healthy",
-            summary: "Local Hub state passed startup migration and validation.",
-            diagnostics: [],
-          },
-          graphComponent,
-          {
-            id: "wiki",
+      const wikiComponent = wiki
+        ? await projectWikiHealth(wiki, options.jobs)
+        : {
+            id: "wiki" as const,
             label: "Wiki index",
-            status: "unavailable",
-            summary: "Wiki health joins after the teammate adapter is integrated.",
+            status: "unavailable" as const,
+            summary: "Wiki health requires the repository adapter.",
             diagnostics: [],
-          },
-        ],
+          };
+      const components: HealthResponse["components"] = [
+        {
+          id: "git",
+          label: "Git repository",
+          status: gitStatus,
+          summary: gitSummary,
+          diagnostics: [],
+        },
+        {
+          id: "local_state",
+          label: "Local Hub state",
+          status: "healthy",
+          summary: "Schema v3 job summaries are available locally.",
+          diagnostics: [],
+        },
+        {
+          id: "migration",
+          label: "Local migration",
+          status: "healthy",
+          summary: "Local Hub state passed startup migration and validation.",
+          diagnostics: [],
+        },
+        graphComponent,
+        wikiComponent,
+      ];
+      return {
+        status: components.every((component) => component.status === "healthy")
+          ? "healthy"
+          : "degraded",
+        observedAt: now().toISOString(),
+        components,
       };
     },
 
@@ -255,8 +296,100 @@ export function createLocalHubReadServices(
       return readCodeWorkspace(graph, symbolId, request);
     },
 
+    async wikiEntities(request: WikiEntityListRequest): Promise<WikiEntityListResponse> {
+      const connected = requireWiki(wiki);
+      const bundle = await connected.listBundle({
+        limit: request.limit,
+        includeArchived: request.lifecycle === "archived",
+        ...(request.kind === undefined ? {} : { kinds: [request.kind] }),
+        ...(request.topic === undefined ? {} : { topics: [request.topic] }),
+        ...(request.lifecycle === undefined ? {} : { lifecycleStates: [request.lifecycle] }),
+        ...(request.grounding === undefined ? {} : { groundingHealth: [request.grounding] }),
+        ...(request.sourceType === undefined ? {} : { sourceTypes: [request.sourceType] }),
+        ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+      });
+      return {
+        indexedRevision: bundle.indexedRevision,
+        observedAt: bundle.observedAt,
+        items: bundle.results.items.map(projectWikiSummary),
+        nextCursor: bundle.results.nextCursor,
+        truncated: bundle.results.truncated,
+      };
+    },
+
+    async wikiEntity(entityId: string): Promise<WikiEntityDetailResponse> {
+      const workspace = await requireWiki(wiki).readKnowledgeWorkspace({ entityId });
+      return projectWikiDetail(workspace);
+    },
+
+    async wikiRelations(
+      entityId: string,
+      request: WikiRelationsRequest,
+    ): Promise<WikiRelationsResponse> {
+      const workspace = await requireWiki(wiki).readKnowledgeWorkspace({
+        entityId,
+        view: "relations",
+        direction: request.direction,
+        includeArchived: true,
+        limit: request.limit,
+        ...(request.type === undefined ? {} : { relationTypes: [request.type] }),
+        ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+      });
+      if (workspace.selection.kind !== "relations") throw invalidWikiProjection();
+      return {
+        indexedRevision: workspace.indexedRevision,
+        observedAt: workspace.observedAt,
+        items: workspace.selection.results.items.map(projectWikiRelationHit),
+        nextCursor: workspace.selection.results.nextCursor,
+        truncated: workspace.selection.results.truncated,
+      };
+    },
+
+    async wikiBacklinks(
+      entityId: string,
+      request: WikiBacklinksRequest,
+    ): Promise<WikiBacklinksResponse> {
+      const workspace = await requireWiki(wiki).readKnowledgeWorkspace({
+        entityId,
+        view: "backlinks",
+        includeArchived: true,
+        limit: request.limit,
+        ...(request.type === undefined ? {} : { relationTypes: [request.type] }),
+        ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+      });
+      if (workspace.selection.kind !== "backlinks") throw invalidWikiProjection();
+      return {
+        indexedRevision: workspace.indexedRevision,
+        observedAt: workspace.observedAt,
+        items: workspace.selection.results.items.map(projectWikiRelation),
+        nextCursor: workspace.selection.results.nextCursor,
+        truncated: workspace.selection.results.truncated,
+      };
+    },
+
+    async codeKnowledge(
+      symbolId: string,
+      request: CodeKnowledgeRequest,
+    ): Promise<CodeKnowledgeResponse> {
+      const result = await requireWiki(wiki).knowledgeForCode({
+        nodeIds: [symbolId],
+        limit: request.limit,
+        ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+      });
+      return {
+        indexedRevision: result.indexedRevision,
+        observedAt: result.observedAt,
+        items: result.items.map((item) => ({
+          entity: projectWikiSummary(item.entity),
+          matchedNodes: item.matchedNodes.slice(0, 50),
+        })),
+        nextCursor: result.nextCursor,
+        truncated: result.truncated,
+      };
+    },
+
     async assertJobStartAllowed(kind): Promise<void> {
-      if (kind !== "graph_refresh" && kind !== "graph_rebuild") return;
+      if (!["graph_refresh", "graph_rebuild", "wiki_refresh", "wiki_rebuild"].includes(kind)) return;
       // Preserve the job manager's authoritative 409 contention response (and
       // active job ID). A running writer can make graph status deliberately
       // non-actionable, but it must not mask JOB_ALREADY_RUNNING as a 503.
@@ -264,6 +397,26 @@ export function createLocalHubReadServices(
         job.state === "queued" || job.state === "running"
       ));
       if (active) return;
+      if (kind === "wiki_refresh" || kind === "wiki_rebuild") {
+        if (!wiki) {
+          throw new HubHttpError(
+            503,
+            "CAPABILITY_UNAVAILABLE",
+            "Capability unavailable",
+            "Wiki maintenance is not connected in this build.",
+          );
+        }
+        const status = await wiki.inspectIndex();
+        if (!allowedWikiOperations(status).includes(kind)) {
+          throw new HubHttpError(
+            503,
+            "CAPABILITY_UNAVAILABLE",
+            "Capability unavailable",
+            "The requested Wiki operation is not safe for the current index state.",
+          );
+        }
+        return;
+      }
       if (!graph) {
         throw new HubHttpError(
           503,
@@ -286,48 +439,78 @@ export function createLocalHubReadServices(
   };
 }
 
-async function graphSearch(
-  graph: HubGraphReadService,
+async function unifiedSearch(
+  graph: HubGraphReadService | undefined,
+  wiki: HubWikiReadService | undefined,
   request: SearchRequest,
   now: () => Date,
 ): Promise<SearchResponse> {
-  const bundle = await graph.searchBundle({
-    nodes: {
-      query: request.q,
-      limit: request.limit,
-      ...(request.symbolCursor === undefined ? {} : { cursor: request.symbolCursor }),
-    },
-    sources: {
-      query: request.q,
-      limit: request.limit,
-      maxLinesPerMatch: 40,
-      maxBytesPerMatch: 2_048,
-      ...(request.sourceCursor === undefined ? {} : { cursor: request.sourceCursor }),
-    },
-  });
+  const wikiGroupPromise: Promise<SearchResponse["groups"]["wiki"]> = wiki === undefined
+    ? Promise.resolve(unavailableSearch("Wiki search requires the repository adapter."))
+    : wiki.searchBundle({
+        query: request.q,
+        limit: request.limit,
+        ...(request.wikiCursor === undefined ? {} : { cursor: request.wikiCursor }),
+      }).then((bundle): SearchResponse["groups"]["wiki"] => ({
+        status: "available",
+        items: bundle.results.items.map((hit) => projectWikiSearchHit(hit.entity, hit.matchedFields)),
+        nextCursor: bundle.results.nextCursor,
+        truncated: bundle.results.truncated,
+        revision: bundle.indexedRevision,
+      })).catch((error: unknown) => failedSearch(error));
+
+  const graphGroupsPromise: Promise<Pick<SearchResponse["groups"], "symbols" | "sources">> = graph === undefined
+    ? Promise.resolve({
+        symbols: unavailableSearch("Code-symbol search requires the GraphPort adapter."),
+        sources: unavailableSearch("Source-chunk search requires the GraphPort adapter."),
+      })
+    : graph.searchBundle({
+        nodes: {
+          query: request.q,
+          limit: request.limit,
+          ...(request.symbolCursor === undefined ? {} : { cursor: request.symbolCursor }),
+        },
+        sources: {
+          query: request.q,
+          limit: request.limit,
+          maxLinesPerMatch: 40,
+          maxBytesPerMatch: 2_048,
+          ...(request.sourceCursor === undefined ? {} : { cursor: request.sourceCursor }),
+        },
+      }).then((bundle) => ({
+        symbols: bundle.nodes.ok
+          ? {
+              status: "available" as const,
+              items: bundle.nodes.value.items.map(projectSearchSymbol),
+              nextCursor: bundle.nodes.value.nextCursor,
+              truncated: bundle.nodes.value.truncated,
+              revision: bundle.revision,
+            }
+          : failedSearch(bundle.nodes.problem),
+        sources: bundle.sources.ok
+          ? {
+              status: "available" as const,
+              items: bundle.sources.value.items.map((item) => projectSearchSource(item, bundle.revision)),
+              nextCursor: bundle.sources.value.nextCursor,
+              truncated: bundle.sources.value.truncated,
+              revision: bundle.revision,
+            }
+          : failedSearch(bundle.sources.problem),
+      })).catch((error: unknown) => ({
+        // A final graph freshness invalidation makes both graph groups
+        // untrustworthy, but it must not erase an independently fresh Wiki
+        // group assembled by the sibling repository adapter.
+        symbols: failedSearch(error),
+        sources: failedSearch(error),
+      }));
+  const [wikiGroup, graphGroups] = await Promise.all([wikiGroupPromise, graphGroupsPromise]);
   return {
     query: request.q,
     observedAt: now().toISOString(),
     groups: {
-      wiki: unavailableSearch("Wiki search requires the teammate adapter."),
-      symbols: bundle.nodes.ok
-        ? {
-            status: "available",
-            items: bundle.nodes.value.items.map(projectSearchSymbol),
-            nextCursor: bundle.nodes.value.nextCursor,
-            truncated: bundle.nodes.value.truncated,
-            revision: bundle.revision,
-          }
-        : failedSearch(bundle.nodes.problem),
-      sources: bundle.sources.ok
-        ? {
-            status: "available",
-            items: bundle.sources.value.items.map((item) => projectSearchSource(item, bundle.revision)),
-            nextCursor: bundle.sources.value.nextCursor,
-            truncated: bundle.sources.value.truncated,
-            revision: bundle.revision,
-          }
-        : failedSearch(bundle.sources.problem),
+      wiki: wikiGroup,
+      symbols: graphGroups.symbols,
+      sources: graphGroups.sources,
     },
   };
 }
@@ -487,6 +670,296 @@ function projectGraphImpact(impact: GraphImpactResult): CodeWorkspaceResponse["t
   };
 }
 
+function projectWikiSummary(entity: WikiEntitySummary): HubWikiEntitySummary {
+  if (!isCanonicalRepoPath(entity.location.path)) throw invalidWikiProjection();
+  const topics = entity.topics.slice(0, 50);
+  const safeSourceTypes = entity.sourceTypes
+    .map((value) => safeWikiTaxonomy(value, "unknown"))
+    .slice(0, 50);
+  const diagnostics = entity.diagnostics.map(projectWikiDiagnostic);
+  return {
+    id: entity.ref.id,
+    kind: safeWikiTaxonomy(entity.ref.kind, "unknown"),
+    title: boundedWikiText(entity.title, 512, "Untitled Wiki entry"),
+    summary: entity.summary === undefined ? null : boundedWikiText(entity.summary, 2_048, ""),
+    lifecycleState: entity.lifecycleState,
+    groundingHealth: entity.groundingHealth,
+    topics,
+    topicsTruncated: entity.topics.length > topics.length,
+    sourceTypes: safeSourceTypes,
+    sourceTypesTruncated: entity.sourceTypes.length > safeSourceTypes.length,
+    location: {
+      path: entity.location.path,
+      startLine: entity.location.startLine ?? 1,
+      endLine: Math.max(entity.location.startLine ?? 1, entity.location.endLine ?? entity.location.startLine ?? 1),
+    },
+    version: {
+      semanticRevision: entity.version.semanticRevision,
+      contentHash: entity.version.contentHash,
+    },
+    diagnostics: diagnostics.slice(0, 10),
+    diagnosticsTruncated: diagnostics.length > 10,
+    route: wikiEntityRoute(entity.ref.id),
+  };
+}
+
+function projectWikiSearchHit(
+  entity: WikiEntitySummary,
+  matchedFields: readonly ("id" | "title" | "summary" | "body")[],
+): SearchResponse["groups"]["wiki"]["items"][number] {
+  const summary = projectWikiSummary(entity);
+  return {
+    id: summary.id,
+    kind: "wiki",
+    entityKind: summary.kind,
+    title: summary.title,
+    summary: summary.summary,
+    lifecycleState: summary.lifecycleState,
+    groundingHealth: summary.groundingHealth,
+    topics: summary.topics,
+    topicsTruncated: summary.topicsTruncated,
+    sourceTypes: summary.sourceTypes,
+    sourceTypesTruncated: summary.sourceTypesTruncated,
+    path: summary.location.path,
+    matchedFields: [...new Set(matchedFields)].slice(0, 4),
+    route: summary.route,
+  };
+}
+
+function projectWikiDetail(workspace: RepositoryKnowledgeWorkspace): WikiEntityDetailResponse {
+  const entity: WikiEntity<never> = workspace.entity;
+  const bodyBytes = Buffer.byteLength(entity.body, "utf8");
+  const sources = entity.sources.slice(0, 50).map(projectWikiSource);
+  const groundings = entity.groundings.slice(0, 50).map(projectWikiGrounding);
+  return {
+    indexedRevision: workspace.indexedRevision,
+    observedAt: workspace.observedAt,
+    entity: projectWikiSummary(entity),
+    body: {
+      content: truncateUtf8(entity.body, 128 * 1_024),
+      totalBytes: bodyBytes,
+      truncated: bodyBytes > 128 * 1_024,
+    },
+    provenance: entity.provenance === undefined
+      ? null
+      : {
+          kind: entity.provenance.kind,
+          id: safeEvidenceValue(entity.provenance.id, 256),
+          capturedAt: isIsoTimestamp(entity.provenance.capturedAt)
+            ? entity.provenance.capturedAt!
+            : null,
+        },
+    sources: {
+      items: sources,
+      total: entity.sources.length,
+      truncated: entity.sources.length > sources.length,
+    },
+    groundings: {
+      items: groundings,
+      total: entity.groundings.length,
+      truncated: entity.groundings.length > groundings.length,
+    },
+    // The repository adapter rejects entities whose canonical relation arrays
+    // exceed its safety bound, so these are exact for every successful detail.
+    relationCount: entity.relations.length,
+    backlinkCount: entity.backlinks.length,
+  };
+}
+
+function projectWikiSource(source: WikiSource): WikiEntityDetailResponse["sources"]["items"][number] {
+  const ref = source.type === "agent_session" ? null : safeEvidenceValue(source.ref, 2_048);
+  return {
+    type: safeWikiTaxonomy(source.type, "unknown"),
+    ref,
+    note: safeEvidenceValue(source.note, 2_048),
+    repository: safeEvidenceValue(source.repository, 512),
+    commit: safeEvidenceValue(source.commit, 128),
+    capturedAt: isIsoTimestamp(source.capturedAt) ? source.capturedAt! : null,
+  };
+}
+
+function projectWikiGrounding(value: WikiGroundingResolution): HubWikiGrounding {
+  const candidates = value.state === "unresolved"
+    ? (value.candidates ?? []).slice(0, 8).map((candidate) => ({
+        node: boundedWikiText(candidate.node, 512, "unavailable"),
+        fingerprint: candidate.fingerprint === undefined
+          ? null
+          : boundedWikiText(candidate.fingerprint, 256, ""),
+        file: candidate.file !== undefined && isCanonicalRepoPath(candidate.file)
+          ? candidate.file
+          : null,
+        score: typeof candidate.score === "number" && Number.isFinite(candidate.score)
+          ? candidate.score
+          : null,
+      }))
+    : [];
+  if (value.state === "ungrounded") {
+    return {
+      state: "ungrounded",
+      health: "unverified",
+      requestedNode: null,
+      resolvedNode: null,
+      fingerprint: null,
+      file: null,
+      commit: null,
+      verifiedAt: null,
+      reason: safeEvidenceValue(value.reason, 1_024),
+      candidates,
+      candidatesTruncated: false,
+    };
+  }
+  const grounding = value.grounding;
+  return {
+    state: value.state,
+    health: value.health,
+    requestedNode: boundedWikiText(value.requestedNode, 512, "unavailable"),
+    resolvedNode: "resolvedNode" in value && value.resolvedNode !== undefined
+      ? boundedWikiText(value.resolvedNode, 512, "")
+      : null,
+    fingerprint: boundedWikiText(grounding.fingerprint, 256, ""),
+    file: grounding.file !== undefined && isCanonicalRepoPath(grounding.file)
+      ? grounding.file
+      : null,
+    commit: safeEvidenceValue(grounding.commit, 128),
+    verifiedAt: isIsoTimestamp(grounding.verifiedAt) ? grounding.verifiedAt! : null,
+    reason: safeEvidenceValue(value.reason ?? grounding.reason, 1_024),
+    candidates,
+    candidatesTruncated: value.state === "unresolved"
+      && (value.candidates?.length ?? 0) > candidates.length,
+  };
+}
+
+function projectWikiRelationHit(hit: WikiRelationHit): WikiRelationsResponse["items"][number] {
+  return {
+    direction: hit.direction,
+    relation: projectWikiRelation(hit.relation),
+    entity: projectWikiSummary(hit.entity),
+  };
+}
+
+function projectWikiRelation(relation: WikiRelation): HubWikiRelation {
+  return {
+    type: boundedWikiText(relation.type, 128, "related_to"),
+    source: projectWikiRef(relation.source),
+    target: projectWikiRef(relation.target),
+    note: relation.note === undefined ? null : boundedWikiText(relation.note, 2_048, ""),
+  };
+}
+
+function projectWikiRef(ref: EntityRef): HubWikiRelation["source"] {
+  return {
+    id: ref.id,
+    kind: safeWikiTaxonomy(ref.kind, "unknown"),
+    title: ref.title === undefined ? null : boundedWikiText(ref.title, 512, ""),
+  };
+}
+
+async function projectWikiHealth(
+  wiki: HubWikiReadService,
+  jobs: HubJobReader,
+): Promise<HealthResponse["components"][number]> {
+  try {
+    const status = await wiki.inspectIndex();
+    const allowedJobKinds = allowedWikiOperations(status);
+    const recommendedJobKind = recommendedWikiOperation(status, allowedJobKinds);
+    const active = jobs.list({ limit: 100 }).items.find((job) => (
+      (job.kind === "wiki_refresh" || job.kind === "wiki_rebuild")
+      && (job.state === "queued" || job.state === "running")
+    ));
+    const wikiDetails: WikiHealthDetails = {
+      indexStatus: status.state,
+      observedAt: status.observedAt,
+      indexedAt: status.indexedAt,
+      schemaVersion: status.schemaVersion,
+      indexedRevision: status.indexedRevision,
+      allowedJobKinds,
+      recommendedJobKind,
+      activeJobId: active?.id ?? null,
+    };
+    return {
+      id: "wiki",
+      label: "Wiki index",
+      status: status.state === "fresh" ? "healthy" : "degraded",
+      summary: wikiHealthSummary(status),
+      diagnostics: status.diagnostics
+        .slice(0, HUB_LIMITS.maxDiagnosticCount)
+        .map(projectWikiDiagnostic),
+      ...(recommendedJobKind === null ? {} : { repairJobKind: recommendedJobKind }),
+      wiki: wikiDetails,
+    };
+  } catch {
+    return {
+      id: "wiki",
+      label: "Wiki index",
+      status: "unavailable",
+      summary: "Wiki status could not be observed against a stable local snapshot.",
+      diagnostics: [],
+    };
+  }
+}
+
+function allowedWikiOperations(
+  status: WikiIndexStatus,
+): Array<"wiki_refresh" | "wiki_rebuild"> {
+  if (status.diagnostics.some((diagnostic) => (
+    diagnostic.code === "PATH_OUTSIDE_SCAFFOLD"
+    || diagnostic.code === "WRITE_SCOPE_VIOLATION"
+  ))) return [];
+  switch (status.state) {
+    case "stale": return ["wiki_refresh", "wiki_rebuild"];
+    case "missing":
+    case "corrupt":
+    case "rebuild_required": return ["wiki_rebuild"];
+    case "fresh": return ["wiki_refresh", "wiki_rebuild"];
+    case "degraded":
+    case "migration_required": return [];
+  }
+}
+
+function recommendedWikiOperation(
+  status: WikiIndexStatus,
+  allowed: readonly ("wiki_refresh" | "wiki_rebuild")[],
+): "wiki_refresh" | "wiki_rebuild" | null {
+  if (status.state === "stale" && allowed.includes("wiki_refresh")) return "wiki_refresh";
+  if (["missing", "corrupt", "rebuild_required"].includes(status.state)
+    && allowed.includes("wiki_rebuild")) return "wiki_rebuild";
+  return null;
+}
+
+function wikiHealthSummary(status: WikiIndexStatus): string {
+  switch (status.state) {
+    case "fresh": return "The Wiki index matches the current canonical Knowledge corpus.";
+    case "missing": return "No Wiki index has been built for this repository.";
+    case "stale": return "Canonical Knowledge changed and requires an explicit Wiki refresh.";
+    case "degraded": return "Wiki health could not be established safely; retry after the local writer or observation race settles.";
+    case "rebuild_required": return "The Wiki index requires an explicit compatible rebuild.";
+    case "corrupt": return "The Wiki index failed integrity checks and cannot be read safely.";
+    case "migration_required": return "Legacy Knowledge requires an explicit migration before Hub reads can continue.";
+  }
+}
+
+function projectWikiDiagnostic(diagnostic: Diagnostic): HealthResponse["components"][number]["diagnostics"][number] {
+  return {
+    code: /^[A-Z0-9_]{1,128}$/.test(diagnostic.code) ? diagnostic.code : "WIKI_DIAGNOSTIC",
+    severity: diagnostic.severity,
+    message: wikiDiagnosticMessage(diagnostic.code),
+    ...(diagnostic.path !== undefined && isCanonicalRepoPath(diagnostic.path)
+      ? { path: diagnostic.path }
+      : {}),
+  };
+}
+
+function wikiDiagnosticMessage(code: string): string {
+  const messages: Readonly<Record<string, string>> = {
+    WIKI_INDEX_MISSING: "The Wiki index is missing.",
+    WIKI_INDEX_REBUILD_REQUIRED: "The Wiki index requires explicit maintenance.",
+    INDEX_REFRESH_REQUIRED: "Canonical Knowledge changed but its disposable index was not refreshed.",
+    WIKI_PARSE_ERROR: "A canonical Knowledge file could not be read safely.",
+    PATH_OUTSIDE_SCAFFOLD: "A Wiki path was rejected at the repository boundary.",
+  };
+  return messages[code] ?? "The Wiki reported a bounded local health diagnostic.";
+}
+
 async function projectGraphHealth(
   graph: HubGraphReadService,
   jobs: HubJobReader,
@@ -631,8 +1104,9 @@ function graphDiagnosticMessage(code: string): string {
   return messages[code] ?? "The graph reported a bounded local health diagnostic.";
 }
 
-function failedSearch(problem: { code: string }): SearchResponse["groups"]["symbols"] {
-  const code = isSearchFailureCode(problem.code) ? problem.code : "INTERNAL_ERROR";
+function failedSearch(problem: unknown): SearchResponse["groups"]["symbols"] {
+  const rawCode = readProblemCode(problem);
+  const code = isSearchFailureCode(rawCode) ? rawCode : "INTERNAL_ERROR";
   return {
     status: "failed",
     items: [],
@@ -644,18 +1118,113 @@ function failedSearch(problem: { code: string }): SearchResponse["groups"]["symb
   };
 }
 
-function isSearchFailureCode(code: string): code is "VALIDATION_FAILED" | "REVISION_CONFLICT" {
-  return code === "VALIDATION_FAILED" || code === "REVISION_CONFLICT";
+function readProblemCode(problem: unknown): string {
+  if (typeof problem !== "object" || problem === null) return "INTERNAL_ERROR";
+  if ("code" in problem && typeof problem.code === "string") return problem.code;
+  if ("problem" in problem) return readProblemCode(problem.problem);
+  return "INTERNAL_ERROR";
+}
+
+function isSearchFailureCode(code: string): code is SearchResponse["groups"]["symbols"]["code"] & string {
+  return [
+    "NOT_FOUND",
+    "INVALID_REQUEST",
+    "VALIDATION_FAILED",
+    "REVISION_CONFLICT",
+    "INDEX_MISSING",
+    "INDEX_STALE",
+    "INDEX_CORRUPT",
+    "MIGRATION_REQUIRED",
+    "PATH_OUTSIDE_PROJECT",
+    "OPERATION_INTERRUPTED",
+  ].includes(code);
 }
 
 function searchFailureDetail(code: string): string {
-  return code === "REVISION_CONFLICT"
-    ? "The graph changed since this result page was loaded. Reload the newest results."
-    : "This search page cursor is invalid for the current request.";
+  switch (code) {
+    case "REVISION_CONFLICT": return "The local index changed since this result page was loaded. Reload the newest results.";
+    case "INVALID_REQUEST": return "This search page cursor is invalid for the current request.";
+    case "VALIDATION_FAILED": return "This search page cursor is invalid for the current request.";
+    case "INDEX_MISSING": return "The required local index has not been built.";
+    case "INDEX_STALE": return "The required local index is stale and needs explicit maintenance.";
+    case "INDEX_CORRUPT": return "The required local index could not be read safely.";
+    case "MIGRATION_REQUIRED": return "The local Knowledge corpus requires an explicit migration.";
+    case "PATH_OUTSIDE_PROJECT": return "The local search refused an unsafe project path.";
+    case "OPERATION_INTERRUPTED": return "The local index changed while search results were being assembled.";
+    default: return "The local search group could not be read safely.";
+  }
 }
 
 function graphSymbolRoute(symbolId: string): string {
   return `/code/symbols/${encodeURIComponent(symbolId)}`;
+}
+
+function wikiEntityRoute(entityId: string): string {
+  return `/knowledge/${encodeURIComponent(entityId)}`;
+}
+
+function requireWiki(wiki: HubWikiReadService | undefined): HubWikiReadService {
+  if (wiki !== undefined) return wiki;
+  throw new HubHttpError(
+    503,
+    "CAPABILITY_UNAVAILABLE",
+    "Capability unavailable",
+    "Wiki reads are not connected in this build.",
+  );
+}
+
+function invalidWikiProjection(): HubHttpError {
+  return new HubHttpError(
+    500,
+    "INTERNAL_ERROR",
+    "Invalid Wiki projection",
+    "The Wiki adapter returned an invalid bounded Knowledge result.",
+  );
+}
+
+function boundedWikiText(value: string, maximumBytes: number, fallback: string): string {
+  const safe = safeDisplayText(value);
+  const bounded = truncateUtf8(safe, maximumBytes);
+  return bounded.length === 0 ? fallback : bounded;
+}
+
+function safeWikiTaxonomy(value: string, fallback: string): string {
+  const bounded = boundedWikiText(value, 128, fallback);
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(bounded) ? bounded : fallback;
+}
+
+function safeEvidenceValue(value: string | undefined, maximumBytes: number): string | null {
+  if (value === undefined || value.length === 0) return null;
+  const normalized = safeDisplayText(value);
+  if (normalized.length === 0 || containsLocalAbsolutePath(normalized)) return null;
+  if (/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/@:]+:[^\s/@]+@/u.test(normalized)) return null;
+  try {
+    const url = new URL(normalized);
+    if ((url.protocol === "http:" || url.protocol === "https:")
+      && (url.username !== "" || url.password !== "")) return null;
+  } catch {
+    // Ordinary non-URL evidence is allowed after local-path screening.
+  }
+  return truncateUtf8(normalized, maximumBytes);
+}
+
+function containsLocalAbsolutePath(value: string): boolean {
+  if (/\bfile:(?:\/|\\)+/iu.test(value)) return true;
+  if (/(?:^|[^A-Za-z0-9])[A-Za-z]:[\\/]/u.test(value)) return true;
+  if (/(?:^|[^\\])\\\\(?:[^\\]|$)/u.test(value)) return true;
+
+  // Ignore ordinary absolute URL paths, then reject a POSIX absolute path at
+  // the start or after any delimiter. This catches punctuation-delimited
+  // evidence such as `trace(/Users/...)` and `cwd=/var/...` without treating
+  // `https://example.test/path` as a local filesystem disclosure.
+  const withoutUrls = value.replace(/\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s<>{}\[\]"']+/gu, "");
+  return /(?:^|[^A-Za-z0-9_/])\/(?!\/)/u.test(withoutUrls);
+}
+
+function isIsoTimestamp(value: string | undefined): value is string {
+  return value !== undefined
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)
+    && Number.isFinite(Date.parse(value));
 }
 
 function safeDisplayText(value: string): string {

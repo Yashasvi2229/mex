@@ -5,12 +5,17 @@ import {
   BootstrapRequestSchema,
   CodeWorkspaceRequestSchema,
   CodeWorkspaceResponseSchema,
+  CodeKnowledgeResponseSchema,
   HealthResponseSchema,
   HUB_LIMITS,
   HomeResponseSchema,
   HubJobIdSchema,
   SearchRequestSchema,
   SearchResponseSchema,
+  WikiEntityDetailResponseSchema,
+  WikiEntityListRequestSchema,
+  WikiEntityListResponseSchema,
+  WikiRelationsRequestSchema,
 } from "./index.js";
 
 describe("Hub API contracts", () => {
@@ -29,6 +34,106 @@ describe("Hub API contracts", () => {
       q: "memory",
       limit: HUB_LIMITS.defaultPageSize,
     });
+  });
+
+  it("keeps Wiki filters singular, strict, and capped at 50", () => {
+    const entity = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
+    expect(WikiEntityListRequestSchema.parse({ topic: entity })).toEqual({
+      topic: entity,
+      limit: 25,
+    });
+    expect(WikiEntityListRequestSchema.safeParse({ kind: ["architecture"] }).success).toBe(false);
+    expect(WikiEntityListRequestSchema.safeParse({ limit: 51 }).success).toBe(false);
+    expect(WikiEntityListRequestSchema.safeParse({ unknown: true }).success).toBe(false);
+    expect(WikiRelationsRequestSchema.safeParse({ direction: "both", depth: 2 }).success).toBe(false);
+  });
+
+  it("bounds Wiki summaries, body bytes, and Code links without extension fields", () => {
+    const id = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
+    const summary = {
+      id,
+      kind: "architecture",
+      title: "Durable queue",
+      summary: null,
+      lifecycleState: "promoted",
+      groundingHealth: "unverified",
+      topics: [],
+      topicsTruncated: false,
+      sourceTypes: ["manual"],
+      sourceTypesTruncated: false,
+      location: { path: ".mex/context/queue.md", startLine: 1, endLine: 12 },
+      version: { semanticRevision: 1, contentHash: "a".repeat(64) },
+      diagnostics: [],
+      diagnosticsTruncated: false,
+      route: `/knowledge/${id}`,
+    } as const;
+    const page = {
+      indexedRevision: "b".repeat(64),
+      observedAt: "2026-08-26T00:00:00.000Z",
+      items: [summary],
+      nextCursor: null,
+      truncated: false,
+    };
+    expect(WikiEntityListResponseSchema.safeParse(page).success).toBe(true);
+    expect(CodeKnowledgeResponseSchema.safeParse({
+      ...page,
+      items: [{ entity: summary, matchedNodes: ["function:queue"] }],
+    }).success).toBe(true);
+    const detail = {
+      indexedRevision: page.indexedRevision,
+      observedAt: page.observedAt,
+      entity: summary,
+      body: { content: "Queue body\n", totalBytes: 11, truncated: false },
+      provenance: null,
+      sources: { items: [], total: 0, truncated: false },
+      groundings: { items: [], total: 0, truncated: false },
+      relationCount: 0,
+      backlinkCount: 0,
+    };
+    expect(WikiEntityDetailResponseSchema.safeParse(detail).success).toBe(true);
+    expect(WikiEntityDetailResponseSchema.safeParse({
+      ...detail,
+      body: { content: "x".repeat(128 * 1_024 + 1), totalBytes: 128 * 1_024 + 1, truncated: false },
+    }).success).toBe(false);
+    expect(WikiEntityDetailResponseSchema.safeParse({
+      ...detail,
+      extension: { sessionId: "secret" },
+    }).success).toBe(false);
+    expect(SearchResponseSchema.safeParse({
+      query: "queue",
+      observedAt: page.observedAt,
+      groups: {
+        wiki: {
+          status: "available",
+          items: [{
+            id,
+            kind: "wiki",
+            entityKind: "architecture",
+            title: "Durable queue",
+            summary: null,
+            lifecycleState: "promoted",
+            groundingHealth: "unverified",
+            topics: [],
+            // Deliberately omit topicsTruncated/sourceTypesTruncated.
+            sourceTypes: [],
+            path: ".mex/context/queue.md",
+            matchedFields: ["title"],
+            route: `/knowledge/${id}`,
+          }],
+          nextCursor: null,
+          truncated: false,
+          revision: page.indexedRevision,
+        },
+        symbols: {
+          status: "unavailable", items: [], nextCursor: null, truncated: false,
+          revision: null, code: "CAPABILITY_UNAVAILABLE", detail: "Unavailable.",
+        },
+        sources: {
+          status: "unavailable", items: [], nextCursor: null, truncated: false,
+          revision: null, code: "CAPABILITY_UNAVAILABLE", detail: "Unavailable.",
+        },
+      },
+    }).success).toBe(false);
   });
 
   it("bounds strict activity filters and cursors", () => {

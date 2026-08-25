@@ -273,6 +273,8 @@ export interface WikiContractReadSession {
   search(request: ContractSearchRequest): ContractPage<ContractSearchHit>;
   /** Package-private pre-health candidate set for current Graph projection. */
   searchCandidates(request: ContractSearchCandidateRequest): ContractSearchCandidates;
+  /** Exact added, modified, and deleted canonical paths under this read snapshot. */
+  refreshPaths(): readonly string[];
   relations(request: ContractRelationRequest): ContractPage<ContractRelationHit>;
   backlinks(request: Omit<ContractRelationRequest, "direction">): ContractPage<ContractRelation>;
   neighborhood(request: ContractNeighborhoodRequest): ContractNeighborhood;
@@ -324,6 +326,7 @@ interface BoundIndex {
 
 interface CorpusObservation {
   revision: string;
+  files: readonly { path: string; contentHash: string }[];
   diagnostics: WikiDiagnostic[];
   stable: boolean;
 }
@@ -669,6 +672,38 @@ class ContractSession implements WikiContractReadSession {
     const normalized = normalizeSearchRequest({ ...request, limit: MAX_PAGE_LIMIT });
     if (normalized.query.length === 0) return { items: [], truncated: false };
     return this.searchCandidateSet(normalized);
+  }
+
+  refreshPaths(): readonly string[] {
+    this.assertOpen();
+    const current = observeCorpus(this.options.scaffoldRoot, this.options.exclude);
+    if (!current.stable || current.files.length > 10_000) {
+      throw new WikiContractReadError(
+        "INDEX_UNAVAILABLE",
+        "The canonical Wiki corpus is not stable enough for targeted refresh discovery.",
+      );
+    }
+    const indexed = this.db.prepare(
+      `SELECT path, content_hash FROM wiki_files ORDER BY path LIMIT 10001`,
+    ).all() as Array<{ path: string; content_hash: string }>;
+    if (indexed.length > 10_000 || indexed.some((row) => (
+      !isSafeRepoPath(row.path) || !isContentHash(row.content_hash)
+    ))) {
+      throw new WikiContractReadError(
+        "INDEX_UNAVAILABLE",
+        "The indexed Wiki file inventory is not safe for targeted refresh discovery.",
+      );
+    }
+    const indexedByPath = new Map(indexed.map((row) => [row.path, row.content_hash]));
+    const currentByPath = new Map(current.files.map((file) => [file.path, file.contentHash]));
+    return [...new Set([
+      ...current.files
+        .filter((file) => indexedByPath.get(file.path) !== file.contentHash)
+        .map((file) => file.path),
+      ...indexed
+        .filter((file) => !currentByPath.has(file.path))
+        .map((file) => file.path),
+    ])].sort(compareString);
   }
 
   private searchCandidateSet(
@@ -1413,7 +1448,8 @@ function observeCorpus(scaffoldRoot: string, exclude: readonly string[] | undefi
       diagnostics.push(diagnostic("WIKI_PARSE_ERROR", `Could not inspect ${file.path} safely.`, { file: file.path }));
     }
   }
-  return { revision: indexedCorpusRevision(files), diagnostics, stable };
+  files.sort((left, right) => compareString(left.path, right.path));
+  return { revision: indexedCorpusRevision(files), files, diagnostics, stable };
 }
 
 function hasLegacyInventory(scaffoldRoot: string, exclude: readonly string[] | undefined): boolean {

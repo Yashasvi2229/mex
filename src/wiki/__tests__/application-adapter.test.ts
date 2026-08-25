@@ -24,6 +24,7 @@ const ENTITY = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
 const TARGET = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJE";
 const THIRD = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJF";
 const TOPIC = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJG";
+const FOURTH = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJH";
 const roots: string[] = [];
 
 afterEach(() => {
@@ -143,6 +144,37 @@ Payment capture and delivery behavior.
 }
 
 describe("RepositoryWikiPort", () => {
+  it("discovers the exact added, modified, and deleted paths for targeted refresh", async () => {
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const architecture = readFileSync(target.firstPath, "utf8").replace(
+      `relations:\n  - type: depends_on\n    target: ${TARGET}\n`,
+      "",
+    );
+    writeFileSync(target.firstPath, architecture.replace("durable queue", "durable dispatch queue"), "utf8");
+    rmSync(join(target.root, ".mex", "context", "component.md"));
+    writeFileSync(join(target.root, ".mex", "context", "new.md"), `<!-- mex:entity
+id: ${FOURTH}
+type: component
+status: promoted
+revision: 1
+-->
+## New component
+
+New bounded Wiki content.
+`, "utf8");
+
+    await expect(port.discoverRefreshPaths()).resolves.toEqual([
+      ".mex/context/architecture.md",
+      ".mex/context/component.md",
+      ".mex/context/new.md",
+    ]);
+    await port.refreshFiles(await port.discoverRefreshPaths());
+    await expect(port.discoverRefreshPaths()).resolves.toEqual([]);
+    await expect(port.inspectIndex()).resolves.toMatchObject({ state: "fresh" });
+  });
+
   it("keeps missing-index reads explicit and rebuilds only on request", async () => {
     const target = project();
     const port = createRepositoryWikiPort(target.root);

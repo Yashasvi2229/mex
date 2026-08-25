@@ -223,6 +223,102 @@ describe("Project Hub HTTP application", () => {
     }
   });
 
+  it("authenticates and strictly validates every read-only Knowledge route", async () => {
+    const id = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
+    const target = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJE";
+    const services = readServices();
+    const summary = wikiSummary(id);
+    const page = {
+      indexedRevision: "d".repeat(64),
+      observedAt: "2026-08-26T00:00:00.000Z",
+      items: [summary],
+      nextCursor: null,
+      truncated: false,
+    };
+    const wikiEntities = vi.fn(() => page);
+    const wikiEntity = vi.fn(() => ({
+      indexedRevision: page.indexedRevision,
+      observedAt: page.observedAt,
+      entity: summary,
+      body: { content: "Durable body\n", totalBytes: 13, truncated: false },
+      provenance: null,
+      sources: { items: [], total: 0, truncated: false },
+      groundings: { items: [], total: 0, truncated: false },
+      relationCount: 1,
+      backlinkCount: 0,
+    }));
+    const relation = {
+      type: "depends_on",
+      source: { id, kind: "architecture", title: "Durable queue" },
+      target: { id: target, kind: "component", title: "Worker" },
+      note: null,
+    } as const;
+    const wikiRelations = vi.fn(() => ({
+      ...page,
+      items: [{ direction: "outgoing" as const, relation, entity: wikiSummary(target) }],
+    }));
+    const wikiBacklinks = vi.fn(() => ({ ...page, items: [relation] }));
+    const codeKnowledge = vi.fn(() => ({
+      ...page,
+      items: [{ entity: summary, matchedNodes: ["function:router"] }],
+    }));
+    const app = fixtureApp({
+      services: {
+        ...services,
+        wikiEntities,
+        wikiEntity,
+        wikiRelations,
+        wikiBacklinks,
+        codeKnowledge,
+      },
+    });
+
+    expect((await app.request(`${ORIGIN}/api/v1/wiki/entities`, {
+      headers: { host: HOST },
+    })).status).toBe(401);
+    const { cookie } = await bootstrapSession(app);
+    const headers = { host: HOST, cookie };
+    const list = await app.request(
+      `${ORIGIN}/api/v1/wiki/entities?kind=architecture&lifecycle=promoted&limit=5`,
+      { headers },
+    );
+    expect(list.status).toBe(200);
+    expect(wikiEntities).toHaveBeenCalledWith({ kind: "architecture", lifecycle: "promoted", limit: 5 });
+    expect((await list.json() as { items: unknown[] }).items).toHaveLength(1);
+    expect((await app.request(`${ORIGIN}/api/v1/wiki/entities/${id}`, { headers })).status).toBe(200);
+    expect(wikiEntity).toHaveBeenCalledWith(id);
+    expect((await app.request(
+      `${ORIGIN}/api/v1/wiki/entities/${id}/relations?direction=outgoing&type=depends_on`,
+      { headers },
+    )).status).toBe(200);
+    expect(wikiRelations).toHaveBeenCalledWith(id, {
+      direction: "outgoing",
+      type: "depends_on",
+      limit: 25,
+    });
+    expect((await app.request(
+      `${ORIGIN}/api/v1/wiki/entities/${target}/backlinks?limit=5`,
+      { headers },
+    )).status).toBe(200);
+    expect((await app.request(
+      `${ORIGIN}/api/v1/code/symbols/function:router/knowledge?limit=5`,
+      { headers },
+    )).status).toBe(200);
+    expect(codeKnowledge).toHaveBeenCalledWith("function:router", { limit: 5 });
+
+    for (const path of [
+      "/api/v1/wiki/entities?kind=a&kind=b",
+      "/api/v1/wiki/entities?unknown=true",
+      `/api/v1/wiki/entities/${id}?unexpected=true`,
+      "/api/v1/wiki/entities/not-an-id",
+      `/api/v1/wiki/entities/${id}/relations?limit=51`,
+      "/api/v1/code/symbols/function%2Frouter/knowledge",
+    ]) {
+      const invalid = await app.request(`${ORIGIN}${path}`, { headers });
+      expect([400, 404], path).toContain(invalid.status);
+    }
+  });
+
   it("revalidates graph job eligibility before creating a durable job", async () => {
     const services = readServices();
     const assertJobStartAllowed = vi.fn(() => {
@@ -623,7 +719,7 @@ function readServices(): HubReadServices {
     activity: { availability: "available" },
     jobs: { availability: "available" },
     graph: { read: unavailable, refresh: unavailable, rebuild: unavailable },
-    wiki: { read: unavailable, rebuild: unavailable },
+    wiki: { read: unavailable, refresh: unavailable, rebuild: unavailable },
   };
   const home: HomeResponse = {
     observedAt: "2026-08-23T00:00:00.000Z",
@@ -740,6 +836,26 @@ function unavailableSearch() {
     revision: null,
     code: "CAPABILITY_UNAVAILABLE" as const,
     detail: "The adapter is not connected.",
+  };
+}
+
+function wikiSummary(id: string) {
+  return {
+    id,
+    kind: id.endsWith("JD") ? "architecture" : "component",
+    title: id.endsWith("JD") ? "Durable queue" : "Worker",
+    summary: null,
+    lifecycleState: "promoted" as const,
+    groundingHealth: "unverified" as const,
+    topics: [],
+    topicsTruncated: false,
+    sourceTypes: [],
+    sourceTypesTruncated: false,
+    location: { path: ".mex/context/queue.md", startLine: 1, endLine: 10 },
+    version: { semanticRevision: 1, contentHash: "e".repeat(64) },
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    route: `/knowledge/${id}`,
   };
 }
 

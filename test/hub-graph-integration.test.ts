@@ -54,7 +54,11 @@ describe("real Project Hub graph integration", () => {
           refresh: { availability: "available" },
           rebuild: { availability: "available" },
         },
-        wiki: { read: { availability: "unavailable" } },
+        wiki: {
+          read: { availability: "unavailable" },
+          refresh: { availability: "unavailable" },
+          rebuild: { availability: "unavailable" },
+        },
       });
 
       const searchResponse = await harness.get("/api/v1/search?q=service&limit=1");
@@ -102,10 +106,20 @@ describe("real Project Hub graph integration", () => {
 
       writeFileSync(join(harness.root, "src", "service.ts"), changedSource());
       const stale = await harness.get("/api/v1/search?q=service");
-      expect(stale.status).toBe(409);
-      const staleProblem = await stale.json() as Record<string, unknown>;
-      expect(staleProblem).toMatchObject({ code: "INDEX_STALE" });
-      expect(JSON.stringify(staleProblem)).not.toContain(harness.root);
+      expect(stale.status).toBe(200);
+      const staleSearch = SearchResponseSchema.parse(await stale.json());
+      expect(staleSearch.groups.symbols).toMatchObject({
+        status: "failed",
+        code: "INDEX_STALE",
+        items: [],
+      });
+      expect(staleSearch.groups.sources).toMatchObject({
+        status: "failed",
+        code: "INDEX_STALE",
+        items: [],
+      });
+      expect(staleSearch.groups.wiki.status).toBe("unavailable");
+      expect(JSON.stringify(staleSearch)).not.toContain(harness.root);
     } finally {
       await harness.close();
     }

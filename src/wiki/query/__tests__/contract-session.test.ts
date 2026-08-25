@@ -229,6 +229,31 @@ describe("Wiki contract read session", () => {
     }
   });
 
+  it("discovers sorted added, modified, and deleted refresh paths inside the immutable handshake", async () => {
+    const { scaffold: target, indexPath } = setup();
+    target.write("context/added.md", fixture().replaceAll(SOURCE, "mx_01KRZZZZZZZZZZZZZZZZZZZZZY"));
+    target.remove("context/wiki.md");
+    const stale = openWikiContractReadSession({ scaffoldRoot: target.root, indexPath });
+    try {
+      expect(stale.refreshPaths()).toEqual(["context/added.md", "context/wiki.md"]);
+    } finally {
+      stale.close();
+    }
+
+    // Use a second already-fresh fixture for the final-revalidation race. This
+    // keeps the assertion focused on the immutable read boundary instead of a
+    // just-published SQLite file competing for descriptors under parallel CI.
+    const { scaffold: raceTarget, indexPath: raceIndexPath } = setup();
+    await expect(withWikiContractReadSessionAsync(
+      { scaffoldRoot: raceTarget.root, indexPath: raceIndexPath },
+      async (session) => {
+        raceTarget.write("context/wiki.md", `${fixture()}\nChanged mid-discovery.\n`);
+        expect(session.refreshPaths()).toEqual(["context/wiki.md"]);
+        return session.refreshPaths();
+      },
+    )).rejects.toMatchObject({ code: "REVISION_CONFLICT" });
+  });
+
   it("rejects a corpus change during the initial status handshake", () => {
     const { scaffold: target, indexPath } = setup();
     expect(() => openWikiContractReadSession({

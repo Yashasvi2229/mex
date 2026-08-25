@@ -7,7 +7,10 @@ import { TeamIdentityActivityFoundation } from "../../team/foundation.js";
 import {
   createLocalHubReadServices,
   type HubGraphReadService,
+  type HubWikiReadService,
 } from "../services.js";
+import { createRepositoryWikiPort } from "../../wiki/application-adapter.js";
+import type { WikiIndexStatus } from "../../team/contracts/wiki.js";
 
 const EVENT = "event_01ARZ3NDEKTSV4RRFFQ69G5FAB";
 const MEMBER = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -33,7 +36,206 @@ afterEach(() => {
   rmSync(projectRoot, { recursive: true, force: true });
 });
 
+function wikiWithStatus(state: WikiIndexStatus["state"]): HubWikiReadService {
+  const unused = async (): Promise<never> => { throw new Error("unused"); };
+  return {
+    inspectIndex: async () => ({
+      state,
+      observedAt: NOW.toISOString(),
+      schemaVersion: state === "missing" ? null : 3,
+      indexedRevision: ["missing", "rebuild_required", "migration_required"].includes(state)
+        ? null
+        : "f".repeat(64),
+      indexedAt: state === "missing" ? null : NOW.toISOString(),
+      diagnostics: [],
+    }),
+    listBundle: unused,
+    searchBundle: unused,
+    readKnowledgeWorkspace: unused,
+    knowledgeForCode: unused,
+  };
+}
+
 describe("createLocalHubReadServices", () => {
+  it("projects real bounded Wiki browse, detail, relations, search, Code links, and health", async () => {
+    const entity = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
+    const target = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJE";
+    const context = join(projectRoot, ".mex", "context");
+    mkdirSync(context, { recursive: true });
+    writeFileSync(join(context, "queue.md"), `<!-- mex:entity
+id: ${entity}
+type: architecture
+status: promoted
+revision: 1
+relations:
+  - type: depends_on
+    target: ${target}
+sources:
+  - type: agent_session
+    ref: session_01Jo6Wr2CMDPtLn3
+  - type: manual
+    note: Maintainer evidence
+  - type: manual
+    ref: '(\\\\server\\share\\secret)'
+    note: trace(/Users/alice/private-note)
+    repository: 'cwd=C:\\Users\\alice\\private-repository'
+  - type: manual
+    ref: file://localhost/Users/alice/file-authority-ref
+    note: file://server/share/file-authority-note
+provenance:
+  createdBy:
+    kind: agent
+    id: file://localhost/Users/alice/private-provenance
+grounds_to:
+  - node: function:1111111111111111
+    fingerprint: mh:4:11111111
+    reason: file://server/share/private-grounding
+-->
+## Durable queue
+
+One service owns durable queueing.
+`, "utf8");
+    writeFileSync(join(context, "worker.md"), `<!-- mex:entity
+id: ${target}
+type: component
+status: promoted
+revision: 1
+-->
+## Queue worker
+
+The worker drains the durable queue.
+`, "utf8");
+    const wiki = createRepositoryWikiPort(projectRoot, { now: () => NOW.toISOString() });
+    await wiki.rebuildIndex();
+    const services = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      wiki,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+
+    await expect(services.capabilities()).resolves.toMatchObject({
+      wiki: {
+        read: { availability: "available" },
+        refresh: { availability: "available" },
+        rebuild: { availability: "available" },
+      },
+    });
+    const browse = await services.wikiEntities?.({ limit: 25 });
+    expect(browse?.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: entity, kind: "architecture", title: "Durable queue" }),
+    ]));
+    expect(browse?.nextCursor).toBeNull();
+    const detail = await services.wikiEntity?.(entity);
+    expect(detail).toMatchObject({
+      entity: { id: entity, groundingHealth: "unverified" },
+      body: { content: expect.stringContaining("One service owns") },
+      relationCount: 1,
+      backlinkCount: 0,
+      sources: { total: 4 },
+    });
+    expect(detail?.sources.items.find((source) => source.type === "agent_session")?.ref).toBeNull();
+    expect(JSON.stringify(detail)).not.toContain("session_01Jo6Wr2CMDPtLn3");
+    expect(JSON.stringify(detail)).not.toContain("/Users/alice");
+    expect(JSON.stringify(detail)).not.toContain("C:\\\\Users");
+    expect(JSON.stringify(detail)).not.toContain("server\\\\share");
+    expect(JSON.stringify(detail)).not.toContain("file://");
+    await expect(services.wikiRelations?.(entity, { direction: "outgoing", limit: 25 })).resolves.toMatchObject({
+      items: [{ direction: "outgoing", relation: { target: { id: target } } }],
+    });
+    await expect(services.wikiBacklinks?.(target, { limit: 25 })).resolves.toMatchObject({
+      items: [{ source: { id: entity }, target: { id: target } }],
+    });
+    await expect(services.codeKnowledge?.("function:1111111111111111", { limit: 25 })).resolves.toMatchObject({
+      items: [{ entity: { id: entity }, matchedNodes: ["function:1111111111111111"] }],
+    });
+    const search = await services.search({ q: "durable", limit: 25 });
+    expect(search.groups.wiki.status).toBe("available");
+    expect(search.groups.wiki.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: entity,
+        kind: "wiki",
+        matchedFields: expect.arrayContaining(["body"]),
+      }),
+    ]));
+    expect(search.groups.symbols.status).toBe("unavailable");
+    const wikiHealth = (await services.health()).components.find((component) => component.id === "wiki");
+    expect(wikiHealth).toMatchObject({
+      status: "healthy",
+      wiki: {
+        indexStatus: "fresh",
+        allowedJobKinds: ["wiki_refresh", "wiki_rebuild"],
+        recommendedJobKind: null,
+      },
+    });
+  });
+
+  it("revalidates Wiki maintenance eligibility for every index state", async () => {
+    const expected: Record<WikiIndexStatus["state"], readonly string[]> = {
+      missing: ["wiki_rebuild"],
+      fresh: ["wiki_refresh", "wiki_rebuild"],
+      stale: ["wiki_refresh", "wiki_rebuild"],
+      degraded: [],
+      rebuild_required: ["wiki_rebuild"],
+      corrupt: ["wiki_rebuild"],
+      migration_required: [],
+    };
+    for (const [state, allowed] of Object.entries(expected) as Array<[WikiIndexStatus["state"], readonly string[]]>) {
+      const wiki = wikiWithStatus(state);
+      const services = createLocalHubReadServices({
+        projectRoot,
+        scaffoldId: "scaffold-local",
+        git,
+        wiki,
+        jobs: { list: () => ({ items: [] }) },
+        now: () => new Date(NOW),
+      });
+      for (const kind of ["wiki_refresh", "wiki_rebuild"] as const) {
+        const assertion = services.assertJobStartAllowed?.(kind);
+        if (allowed.includes(kind)) await expect(assertion, `${state}:${kind}`).resolves.toBeUndefined();
+        else await expect(assertion, `${state}:${kind}`).rejects.toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
+      }
+      const health = await services.health();
+      expect(health.components.find((component) => component.id === "wiki")?.wiki?.allowedJobKinds)
+        .toEqual(allowed);
+    }
+
+    const unsafeWiki = {
+      ...wikiWithStatus("stale"),
+      inspectIndex: async () => ({
+        ...(await wikiWithStatus("stale").inspectIndex()),
+        diagnostics: [{
+          code: "PATH_OUTSIDE_SCAFFOLD",
+          severity: "warning" as const,
+          message: "/Users/alice/private symlink target",
+        }],
+      }),
+    } satisfies HubWikiReadService;
+    const unsafe = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      wiki: unsafeWiki,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+    await expect(unsafe.assertJobStartAllowed?.("wiki_refresh")).rejects.toMatchObject({
+      code: "CAPABILITY_UNAVAILABLE",
+    });
+    await expect(unsafe.assertJobStartAllowed?.("wiki_rebuild")).rejects.toMatchObject({
+      code: "CAPABILITY_UNAVAILABLE",
+    });
+    const unsafeHealth = await unsafe.health();
+    const unsafeComponent = unsafeHealth.components.find((component) => component.id === "wiki");
+    expect(unsafeComponent).toMatchObject({
+      wiki: { allowedJobKinds: [], recommendedJobKind: null },
+    });
+    expect(unsafeComponent).not.toHaveProperty("repairJobKind");
+    expect(JSON.stringify(unsafeHealth)).not.toContain("/Users/alice");
+  });
+
   it("uses real repository context without inventing unavailable project data", async () => {
     const services = createLocalHubReadServices({
       projectRoot,
@@ -75,6 +277,104 @@ describe("createLocalHubReadServices", () => {
     expect(result.groups.symbols.status).toBe("unavailable");
     expect(result.groups.sources.status).toBe("unavailable");
     expect(result.groups.wiki.items).toEqual([]);
+  });
+
+  it("keeps a Wiki search failure local without erasing trustworthy graph groups", async () => {
+    const wiki = {
+      ...wikiWithStatus("stale"),
+      searchBundle: async () => {
+        throw {
+          problem: {
+            code: "INDEX_STALE",
+            status: 409,
+            detail: "/Users/alice/private Wiki error",
+          },
+        };
+      },
+    } satisfies HubWikiReadService;
+    const graph = {
+      inspectStatus: async () => { throw new Error("unused"); },
+      readSymbolWorkspace: async () => { throw new Error("unused"); },
+      searchBundle: async () => ({
+        revision: "c".repeat(64),
+        status: {} as never,
+        nodes: {
+          ok: true as const,
+          value: { items: [], nextCursor: null, truncated: false },
+        },
+        sources: {
+          ok: true as const,
+          value: { items: [], nextCursor: null, truncated: false },
+        },
+      }),
+    } satisfies HubGraphReadService;
+    const services = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      graph,
+      wiki,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+
+    const result = await services.search({ q: "grounding", limit: 25 });
+    expect(result.groups.wiki).toMatchObject({
+      status: "failed",
+      code: "INDEX_STALE",
+      items: [],
+      revision: null,
+    });
+    expect(result.groups.symbols).toMatchObject({ status: "available", revision: "c".repeat(64) });
+    expect(result.groups.sources).toMatchObject({ status: "available", revision: "c".repeat(64) });
+    expect(JSON.stringify(result)).not.toContain("/Users/alice");
+  });
+
+  it("fails both invalidated graph groups without erasing a trustworthy Wiki group", async () => {
+    const wiki = {
+      ...wikiWithStatus("fresh"),
+      searchBundle: async () => ({
+        indexedRevision: "f".repeat(64),
+        observedAt: NOW.toISOString(),
+        results: { items: [], nextCursor: null, estimatedTokens: 0, truncated: false },
+      }),
+    } satisfies HubWikiReadService;
+    const graph = {
+      inspectStatus: async () => { throw new Error("unused"); },
+      readSymbolWorkspace: async () => { throw new Error("unused"); },
+      searchBundle: async () => {
+        throw {
+          problem: {
+            code: "OPERATION_INTERRUPTED",
+            status: 503,
+            detail: "/Users/alice/private graph race",
+          },
+        };
+      },
+    } satisfies HubGraphReadService;
+    const services = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      graph,
+      wiki,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+
+    const result = await services.search({ q: "grounding", limit: 25 });
+    expect(result.groups.wiki).toMatchObject({ status: "available", revision: "f".repeat(64) });
+    expect(result.groups.symbols).toMatchObject({
+      status: "failed",
+      code: "OPERATION_INTERRUPTED",
+      revision: null,
+    });
+    expect(result.groups.sources).toMatchObject({
+      status: "failed",
+      code: "OPERATION_INTERRUPTED",
+      revision: null,
+    });
+    expect(JSON.stringify(result)).not.toContain("/Users/alice");
   });
 
   it("reports foundation health honestly", async () => {
