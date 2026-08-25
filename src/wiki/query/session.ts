@@ -317,6 +317,31 @@ export class WikiQuerySession {
     }));
   }
 
+  /**
+   * The sources one entity cites, in the order Markdown declares them.
+   *
+   * §8.6's evidence, which §17's evidence panel shows beside the groundings.
+   * Read separately from `EntitySummary` for the same reason the body is: an
+   * entity can cite many sources and a list of forty entities does not want
+   * them all. `shadowed = 0`, like every other query by id.
+   */
+  sourcesFor(
+    id: string,
+    options: BoundsInput = {},
+  ): { type: string; ref: string | null; note: string | null; capturedAt: string | null }[] {
+    const bounds = resolveBounds(options);
+    const rows = this.db
+      .prepare(
+        `SELECT s.type, s.ref, s.note, s.captured_at
+           FROM wiki_sources s
+           JOIN wiki_entities e ON e.entity_key = s.entity_key
+          WHERE e.id = ? AND e.shadowed = 0
+          ORDER BY s.ordinal LIMIT ?`,
+      )
+      .all(id, bounds.edgeLimit) as { type: string; ref: string | null; note: string | null; captured_at: string | null }[];
+    return rows.map((row) => ({ type: row.type, ref: row.ref, note: row.note, capturedAt: row.captured_at }));
+  }
+
   /** Every diagnostic the index holds, bounded and deterministically ordered. */
   diagnostics(options: BoundsInput & { file?: string } = {}): Page<WikiDiagnostic> {
     const bounds = resolveBounds(options);
