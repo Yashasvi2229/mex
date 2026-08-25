@@ -134,6 +134,30 @@ export function validateString(options: { allowEmpty?: boolean } = {}): Validato
   };
 }
 
+/**
+ * A finite number in a closed range.
+ *
+ * Beside {@link validateInteger} rather than folded into it: a confidence is a
+ * real number in [0, 1] and an integer validator that grew a "well, unless"
+ * branch would be a worse home for both. `NaN` and the infinities fail on the
+ * finiteness test rather than sliding through a comparison that is false for
+ * every bound.
+ */
+export function validateNumber(options: { min?: number; max?: number } = {}): Validator<number> {
+  return (value, context) => {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return reject(context, "INVALID_FIELD_TYPE", `Expected a finite number, got ${describe(value)}.`);
+    }
+    if (options.min !== undefined && value < options.min) {
+      return reject(context, "INVALID_FIELD_TYPE", `Expected a number >= ${options.min}, got ${value}.`);
+    }
+    if (options.max !== undefined && value > options.max) {
+      return reject(context, "INVALID_FIELD_TYPE", `Expected a number <= ${options.max}, got ${value}.`);
+    }
+    return succeed(value);
+  };
+}
+
 export function validateInteger(options: { min?: number; max?: number } = {}): Validator<number> {
   return (value, context) => {
     if (typeof value !== "number" || !Number.isInteger(value)) {
