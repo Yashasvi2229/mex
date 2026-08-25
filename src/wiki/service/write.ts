@@ -18,7 +18,9 @@ import { existsSync } from "node:fs";
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 import type { GroundingGraph } from "../grounding/adapter.js";
+import { createHash } from "node:crypto";
 import { rebuildWikiIndex } from "../index/rebuild.js";
+import { refreshWikiIndex } from "../index/refresh.js";
 import { planOperation, type PlanOptions } from "../operations/plan.js";
 import { previewPlan, renderPreview, type WikiPreview } from "../operations/preview.js";
 import { applyGeneratedViews, applyOperation, type ApplyOptions, type GeneratedViewCandidate } from "../operations/apply.js";
@@ -185,6 +187,90 @@ export function wikiRebuildIndex(options: WikiWriteOptions): ServiceResult<Rebui
     },
     diagnostics: result.diagnostics,
   };
+}
+
+export interface RefreshData {
+  indexPath: string;
+  /** Files re-read and re-projected. */
+  reparsed: string[];
+  /** Files whose rows were dropped — gone from disk, or newly excluded. */
+  removed: string[];
+  /** Present and byte-identical to what the index already held. */
+  unchanged: string[];
+}
+
+/**
+ * §7.2's `refreshFiles(paths)` — reparse a changed set, re-resolve everything.
+ *
+ * A service function rather than something the facade reaches into `index/`
+ * for, because the rule that makes §20.7's parity checkable is that nothing
+ * above this layer imports the layers below it.
+ *
+ * The name is honest about the asymmetry P3 built in: **incremental means
+ * incremental *parsing*.** Every derived fact — shadowing, target resolution,
+ * every set-level diagnostic — is recomputed globally from the rows on both
+ * build paths, because "anything that pointed at the changed files" is not
+ * knowable from the changed set alone: a file that *arrives* can resolve a
+ * reference that has been dangling for weeks. Parsing is the expensive part and
+ * parsing is the only thing this skips.
+ *
+ * A missing or unreadable index is a typed diagnostic, never a rebuild.
+ */
+export function wikiRefreshIndex(
+  options: WikiWriteOptions & { changed: readonly string[] },
+): ServiceResult<RefreshData> {
+  const scaffoldRoot = resolve(options.scaffoldRoot);
+  const indexPath = indexPathFor(options);
+  const result = refreshWikiIndex({
+    scaffoldRoot,
+    indexPath,
+    changed: options.changed,
+    ...(options.exclude === undefined ? {} : { exclude: options.exclude }),
+    ...(options.registry === undefined ? {} : { registry: options.registry }),
+  });
+  if (!result.ok) {
+    return {
+      data: { indexPath, reparsed: [], removed: [], unchanged: [] },
+      diagnostics: [result.diagnostic],
+    };
+  }
+  return {
+    data: { indexPath, reparsed: result.reparsed, removed: result.removed, unchanged: result.unchanged },
+    diagnostics: result.diagnostics,
+  };
+}
+
+/**
+ * A digest of what a migration report proposes to do.
+ *
+ * §7.2 splits migration into `planMigration()` and `applyMigration(plan)`, and
+ * a two-phase signature whose second half ignores its argument is decoration.
+ * mex's `migrateScaffold` re-plans rather than replaying a stored plan — which
+ * is right, and is the same reasoning that keeps `applyOperation` from carrying
+ * offsets across the revalidation boundary — so the plan cannot be *executed*.
+ * It can be *checked*, and that is what this is for: the facade re-plans, and
+ * refuses when the tree has moved under the plan the caller is holding.
+ *
+ * Only the decided work is in the digest. Diffs and diagnostics are excluded
+ * deliberately: a diagnostic can change because a file the migration does not
+ * touch became unreadable, and refusing then would be refusing for a reason
+ * that is not about the plan. What is in it is what P6 made deterministic — the
+ * planned entities and where each goes, the counts, and the abstentions — so an
+ * ordinary re-run digests identically and a real change does not.
+ */
+export function migrationPlanDigest(report: MigrationReport): string {
+  const shape = {
+    planned: report.planned.map((entry) => [entry.file, entry.type, entry.title, entry.location, entry.rule]),
+    filesSkipped: report.filesSkipped.map((entry) => [entry.file, entry.reason]),
+    abstentions: report.abstentions.map((entry) => Object.entries(entry).sort()),
+    entitiesByType: Object.entries(report.entitiesByType).sort(),
+    edgesConverted: report.edgesConverted,
+    edgesAmbiguous: report.edgesAmbiguous,
+    groundingsPreserved: report.groundingsPreserved,
+    groundingsMoved: report.groundingsMoved,
+    groundingsAmbiguous: report.groundingsAmbiguous,
+  };
+  return createHash("sha256").update(JSON.stringify(shape), "utf8").digest("hex");
 }
 
 export interface MigrateData {
