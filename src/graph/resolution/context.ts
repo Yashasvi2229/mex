@@ -4,6 +4,13 @@ import type { GraphStore } from "../db/store.js";
 import type { GraphNode } from "../types.js";
 import type { ResolutionContext } from "./types.js";
 
+export interface StagedResolutionSourceAccess {
+  /** Repository-relative paths whose exact bytes exist in immutable staging. */
+  paths: readonly string[];
+  /** Load one staged source on demand without retaining the corpus in memory. */
+  readFile(path: string): string | null;
+}
+
 export function createResolutionContext(store: GraphStore, projectRoot: string): ResolutionContext {
   // A resolution pass reads the node set many times over (framework resolvers
   // call getNodesByName once per unresolved ref). getAllNodes() runs a full
@@ -52,6 +59,7 @@ export function createStagedResolutionContext(
   stagedNodes: readonly GraphNode[],
   projectRoot: string,
   stagedSources: ReadonlyMap<string, string> = new Map(),
+  sourceAccess?: StagedResolutionSourceAccess,
 ): ResolutionContext {
   const nodes = [...stagedNodes];
   const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -69,15 +77,16 @@ export function createStagedResolutionContext(
   const byName = index((node) => node.name);
   const byQualifiedName = index((node) => node.qualifiedName);
   const byKind = index((node) => node.kind);
+  const stagedPaths = new Set([...stagedSources.keys(), ...(sourceAccess?.paths ?? [])]);
   return {
     getNodesInFile: (path) => byFile.get(path) ?? [],
     getNodesByName: (name) => byName.get(name) ?? [],
     getNodesByQualifiedName: (name) => byQualifiedName.get(name) ?? [],
     getNodesByKind: (kind) => byKind.get(kind) ?? [],
     getNodeById: (id) => byId.get(id) ?? null,
-    fileExists: (path) => stagedSources.has(path),
-    readFile: (path) => stagedSources.get(path) ?? null,
+    fileExists: (path) => stagedPaths.has(path),
+    readFile: (path) => stagedSources.get(path) ?? sourceAccess?.readFile(path) ?? null,
     getProjectRoot: () => projectRoot,
-    getAllFiles: () => [...new Set([...stagedSources.keys(), ...nodes.map((node) => node.filePath)])].sort(),
+    getAllFiles: () => [...new Set([...stagedPaths, ...nodes.map((node) => node.filePath)])].sort(),
   };
 }

@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, relative, resolve, sep } from "node:path";
+import { WIKI_CORPUS_LIMITS, WikiCorpusLimitError } from "./corpus-policy.js";
 
 export class WikiSourceReadError extends Error {
   readonly path: string;
@@ -65,6 +66,9 @@ export function readContainedSource(
     fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const opened = fstatSync(fd, { bigint: true });
     if (!opened.isFile()) throw new WikiSourceReadError(label);
+    if (opened.size > BigInt(WIKI_CORPUS_LIMITS.maxFileBytes)) {
+      throw new WikiCorpusLimitError("maxFileBytes");
+    }
     options.afterOpen?.();
 
     const rootNowLexical = lstatSync(root);
@@ -105,6 +109,9 @@ export function readContainedSource(
     } catch {
       throw new WikiSourceReadError(label, exactByteHash);
     }
+    if (Buffer.byteLength(result, "utf8") > WIKI_CORPUS_LIMITS.maxFileBytes) {
+      throw new WikiCorpusLimitError("maxFileBytes");
+    }
     options.afterRead?.();
 
     // Reading is itself a race boundary. Rebind the descriptor, its pathname,
@@ -141,7 +148,7 @@ export function readContainedSource(
     ) throw new WikiSourceReadError(label);
     return result;
   } catch (error) {
-    if (error instanceof WikiSourceReadError) throw error;
+    if (error instanceof WikiSourceReadError || error instanceof WikiCorpusLimitError) throw error;
     throw new WikiSourceReadError(label);
   } finally {
     if (fd !== undefined) closeSync(fd);

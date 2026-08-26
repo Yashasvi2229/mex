@@ -7,6 +7,12 @@ import { extractFrontmatter, findMexAnchors } from "../src/markdown.js";
 
 const roots: string[] = [];
 const embedded = ["CLAUDE.md", ".cursorrules", ".windsurfrules", "copilot-instructions.md"];
+const capabilityGuidance = [
+  "mex capabilities --json",
+  "prefer the structured reads",
+  "Preview mutations first",
+  "wait for explicit human approval before running an apply command",
+];
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -36,6 +42,7 @@ describe("shipped code-graph agent guidance", () => {
     expect(contents[0]).toContain("mex graph query <who-calls|what-calls|where-defined> <symbol>");
     expect(contents[0]).toContain("adjudicate any AMBIGUOUS grounding");
     expect(contents[0]).toContain("refreshed grounding is re-emitted");
+    for (const guidance of capabilityGuidance) expect(contents[0]).toContain(guidance);
   });
 
   it("keeps maintained equivalents aligned and OpenCode delegated to guided AGENTS.md", () => {
@@ -44,6 +51,12 @@ describe("shipped code-graph agent guidance", () => {
     expect(maintained[0]).toContain("mex impact <symbol|file>");
     const agents = readFileSync("templates/AGENTS.md", "utf-8");
     expect(agents).toContain("mex graph query <who-calls|what-calls|where-defined> <symbol>");
+    for (const guidance of capabilityGuidance) expect(agents).toContain(guidance);
+    const agentMemory = readFileSync("templates/agent-memory/AGENTS.md", "utf-8");
+    for (const guidance of capabilityGuidance) expect(agentMemory).toContain(guidance);
+    const maintainedAgents = readFileSync(".mex/AGENTS.md", "utf-8");
+    for (const guidance of capabilityGuidance) expect(maintainedAgents).toContain(guidance);
+    for (const guidance of capabilityGuidance) expect(maintained[0]).toContain(guidance);
     for (const file of ["templates/.tool-configs/opencode.json", ".mex/.tool-configs/opencode.json"]) {
       expect(JSON.parse(readFileSync(file, "utf-8")).instructions).toContain(".mex/AGENTS.md");
     }

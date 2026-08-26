@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { GraphStatus } from "../team/contracts/graph.js";
+import { GRAPH_CORPUS_LIMITS, GraphCorpusLimitError } from "./corpus-policy.js";
 import { openGraphDatabase } from "./db/database.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
 import { createGraphEngineFromOpenDatabase } from "./engine-impl.js";
@@ -503,6 +504,11 @@ function readStableContainedSource(projectRoot: string, filePath: string): Buffe
     if (!opened.isFile() || !sameFileIdentity(before, opened)) {
       throw new Error("Indexed source changed before it could be opened.");
     }
+    if (!Number.isSafeInteger(opened.size)
+      || opened.size < 0
+      || opened.size > GRAPH_CORPUS_LIMITS.maxSourceFileBytes) {
+      throw new GraphCorpusLimitError("maxSourceFileBytes");
+    }
     const bytes = readFileSync(fd);
     const after = fstatSync(fd);
     const resolvedAfter = realpathSync(absolutePath);
@@ -626,6 +632,11 @@ function bindDatabaseFile(dbPath: string, afterClose?: () => void): BoundDatabas
   if (!before.isFile() || before.isSymbolicLink()) {
     throw new Error("Graph database is not a stable regular file.");
   }
+  if (!Number.isSafeInteger(before.size)
+    || before.size < 0
+    || before.size > GRAPH_CORPUS_LIMITS.maxIndexBytes) {
+    throw new GraphCorpusLimitError("maxIndexBytes");
+  }
   const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
   const fd = openSync(dbPath, constants.O_RDONLY | noFollow);
   let open = true;
@@ -653,6 +664,11 @@ function bindDatabaseFile(dbPath: string, afterClose?: () => void): BoundDatabas
       || !sameFileIdentity(before, opened)
       || !sameFileIdentity(opened, pathAfter)) {
       throw new Error("Graph database changed before it could be bound.");
+    }
+    if (!Number.isSafeInteger(opened.size)
+      || opened.size < 0
+      || opened.size > GRAPH_CORPUS_LIMITS.maxIndexBytes) {
+      throw new GraphCorpusLimitError("maxIndexBytes");
     }
     return {
       databasePath: descriptorDatabasePath(fd, dbPath),
@@ -691,8 +707,14 @@ function readSessionSnapshotIdentity(db: SqliteDatabase): {
   snapshot: GraphSnapshot | null;
 } {
   const row = db.prepare(
-    "SELECT value FROM project_metadata WHERE key = ?",
-  ).get(GRAPH_SNAPSHOT_METADATA_KEY) as { value?: unknown } | undefined;
+    `SELECT CASE
+       WHEN typeof(value) = 'text' AND length(CAST(value AS BLOB)) <= ? THEN value
+       ELSE NULL END AS value
+     FROM project_metadata WHERE key = ?`,
+  ).get(
+    GRAPH_CORPUS_LIMITS.maxSnapshotMetadataBytes,
+    GRAPH_SNAPSHOT_METADATA_KEY,
+  ) as { value?: unknown } | undefined;
   const snapshotRaw = typeof row?.value === "string" ? row.value : null;
   return {
     snapshotRaw,

@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "provisional": false,
+  "calibration": {
+    "status": "calibrated-from-pinned-run-33005876613",
+    "runtimeFormula": "ceil(measured p95 * 1.15)",
+    "assetFormula": "ceil(built bytes * 1.05)"
+  },
+  "environment": {
+    "os": "ubuntu-24.04",
+    "platform": "linux",
+    "architecture": "x64",
+    "node": "v22.22.0"
+  },
+  "samples": {
+    "timing": 10,
+    "idleMemory": 5
+  },
+  "assets": {
+    "maxJsChunkBytes": 451385,
+    "initial": {
+      "jsBytes": 451385,
+      "cssBytes": 70902,
+      "fontBytes": 88961
+    },
+    "routes": {
+      "home": { "jsBytes": 15396, "cssBytes": 4412, "fontBytes": 0 },
+      "search": { "jsBytes": 31289, "cssBytes": 6875, "fontBytes": 0 },
+      "knowledge": { "jsBytes": 72748, "cssBytes": 11097, "fontBytes": 0 },
+      "knowledgeDetail": { "jsBytes": 72748, "cssBytes": 11097, "fontBytes": 0 },
+      "code": { "jsBytes": 31289, "cssBytes": 6875, "fontBytes": 0 },
+      "codeSymbol": { "jsBytes": 57825, "cssBytes": 21217, "fontBytes": 0 },
+      "workstreams": { "jsBytes": 7102, "cssBytes": 3510, "fontBytes": 0 },
+      "specs": { "jsBytes": 7102, "cssBytes": 3510, "fontBytes": 0 },
+      "playbooks": { "jsBytes": 7102, "cssBytes": 3510, "fontBytes": 0 },
+      "inbox": { "jsBytes": 7102, "cssBytes": 3510, "fontBytes": 0 },
+      "relays": { "jsBytes": 7102, "cssBytes": 3510, "fontBytes": 0 },
+      "activity": { "jsBytes": 26842, "cssBytes": 18386, "fontBytes": 0 },
+      "jobs": { "jsBytes": 29158, "cssBytes": 14641, "fontBytes": 0 },
+      "health": { "jsBytes": 30307, "cssBytes": 16736, "fontBytes": 0 },
+      "notFound": { "jsBytes": 7102, "cssBytes": 3510, "fontBytes": 0 }
+    }
+  },
+  "runtime": {
+    "coldHubReadyMs": { "small": 941, "medium": 937, "large": 940 },
+    "idleRssBytes": { "small": 205750272, "medium": 205345178, "large": 210295808 },
+    "idleCpuMs": { "small": 0, "medium": 0, "large": 12 },
+    "apiLatencyMs": {
+      "small": { "search": 110, "code": 51, "knowledge": 68, "activity": 9 },
+      "medium": { "search": 176, "code": 79, "knowledge": 105, "activity": 28 },
+      "large": { "search": 342, "code": 142, "knowledge": 215, "activity": 58 }
+    },
+    "maintenanceMs": {
+      "small": { "graph_refresh": 984, "graph_rebuild": 496, "wiki_refresh": 186, "wiki_rebuild": 181 },
+      "medium": { "graph_refresh": 1237, "graph_rebuild": 743, "wiki_refresh": 262, "wiki_rebuild": 301 },
+      "large": { "graph_refresh": 1812, "graph_rebuild": 1229, "wiki_refresh": 418, "wiki_rebuild": 617 }
+    },
+    "maintenancePeakRssBytes": {
+      "small": { "graph_refresh": 470639616, "graph_rebuild": 518977741, "wiki_refresh": 512307815, "wiki_rebuild": 512604570 },
+      "medium": { "graph_refresh": 546006016, "graph_rebuild": 645174068, "wiki_refresh": 630675456, "wiki_rebuild": 630986343 },
+      "large": { "graph_refresh": 604061696, "graph_rebuild": 767922381, "wiki_refresh": 758793626, "wiki_rebuild": 759226983 }
+    },
+    "browserHeapBytes": {
+      "small": {
+        "home": 4595594, "search": 5426602, "knowledge": 4769934, "knowledgeDetail": 4855696,
+        "code": 5388496, "codeSymbol": 4845185, "workstreams": 4198499, "specs": 4198503,
+        "playbooks": 4203807, "inbox": 4198623, "relays": 4198669, "activity": 4562055,
+        "jobs": 4567014, "health": 4510981, "notFound": 4185582
+      },
+      "medium": {
+        "home": 4596840, "search": 5762301, "knowledge": 5013554, "knowledgeDetail": 4856552,
+        "code": 5720349, "codeSymbol": 4849523, "workstreams": 4198213, "specs": 4202004,
+        "playbooks": 4199281, "inbox": 4203135, "relays": 4203204, "activity": 4806655,
+        "jobs": 4564691, "health": 4511036, "notFound": 4185554
+      },
+      "large": {
+        "home": 4597084, "search": 6027330, "knowledge": 5135808, "knowledgeDetail": 4858258,
+        "code": 5989987, "codeSymbol": 4847729, "workstreams": 4198402, "specs": 4198296,
+        "playbooks": 4203858, "inbox": 4203287, "relays": 4203264, "activity": 4955792,
+        "jobs": 4563113, "health": 4509017, "notFound": 4181773
+      }
+    },
+    "databaseToInputRatio": {
+      "small": { "graph": 188, "wiki": 82 },
+      "medium": { "graph": 126, "wiki": 23 },
+      "large": { "graph": 109, "wiki": 12 }
+    }
+  }
+}

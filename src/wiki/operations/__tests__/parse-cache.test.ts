@@ -19,7 +19,13 @@ import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { applyOperation } from "../apply.js";
-import { createParseCache, locateEntity, readParsed } from "../locate.js";
+import {
+  WIKI_PARSE_CACHE_LIMITS,
+  createParseCache,
+  locateEntity,
+  parseCached,
+  readParsed,
+} from "../locate.js";
 import { createEntityTypeRegistry } from "../../model/entity.js";
 import { makeScaffold, envelope, ARCH, GATEWAY, JWT, type Scaffold } from "./helpers.js";
 
@@ -106,6 +112,25 @@ describe("the run-scoped parse cache", () => {
     );
     expect(extended?.parsed).not.toBe(plain?.parsed);
     expect(cache.misses).toBe(2);
+  });
+
+  it("evicts old source and AST projections at a hard combined entry bound", () => {
+    const s = fresh();
+    const cache = createParseCache();
+    const absolute = join(s.root, "bounded.md");
+    for (let index = 0; index < WIKI_PARSE_CACHE_LIMITS.maxEntries + 4; index += 1) {
+      parseCached(
+        { scaffoldRoot: s.root, parseCache: cache },
+        "bounded.md",
+        absolute,
+        `# Revision ${index}\n`,
+      );
+    }
+
+    expect(cache.order).toHaveLength(WIKI_PARSE_CACHE_LIMITS.maxEntries);
+    expect(cache.sourceBytes).toBeLessThanOrEqual(WIKI_PARSE_CACHE_LIMITS.maxSourceBytes);
+    expect([...cache.entries.values()].reduce((total, values) => total + values.size, 0))
+      .toBe(WIKI_PARSE_CACHE_LIMITS.maxEntries);
   });
 
   it("gives locate the same answer with a cache as without", () => {

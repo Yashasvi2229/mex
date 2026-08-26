@@ -1,14 +1,61 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = resolve(packageRoot, "../../dist/hub");
 const manifestPath = join(outputRoot, ".vite", "manifest.json");
-const manifest = readFileSync(manifestPath, "utf8");
+const manifestText = readFileSync(manifestPath, "utf8");
+const manifest = JSON.parse(manifestText);
+const maxJavaScriptChunkBytes = 500_000;
 
-if (/fixture-api|src\/dev\//i.test(manifest)) {
+if (/fixture-api|src\/dev\//i.test(manifestText)) {
   throw new Error("The production Hub manifest contains a development fixture module.");
+}
+
+const lazyWorkbenchSources = [
+  "src/pages/HomePage.tsx",
+  "src/pages/SearchPage.tsx",
+  "src/pages/KnowledgePage.tsx",
+  "src/pages/SymbolPage.tsx",
+  "src/pages/CapabilityPage.tsx",
+  "src/pages/ActivityPage.tsx",
+  "src/pages/JobsPage.tsx",
+  "src/pages/HealthPage.tsx",
+];
+const entryKey = Object.keys(manifest).find((key) => manifest[key].isEntry);
+if (!entryKey) throw new Error("The production Hub manifest has no application entry.");
+const initialChunks = staticImportClosure(entryKey);
+const initialDynamicImports = new Set(
+  [...initialChunks].flatMap((key) => manifest[key]?.dynamicImports ?? []),
+);
+const workbenchEntries = lazyWorkbenchSources.map((source) => {
+  const key = Object.keys(manifest).find((candidate) => candidate === source || manifest[candidate].src === source);
+  if (!key) throw new Error(`The production Hub manifest has no route chunk for ${source}.`);
+  if (!manifest[key].isDynamicEntry || !initialDynamicImports.has(key)) {
+    throw new Error(`The production Hub route ${source} is not loaded through a lazy workbench boundary.`);
+  }
+  if (initialChunks.has(key)) {
+    throw new Error(`The production Hub entry eagerly loads workbench route ${source}.`);
+  }
+  return { key, source, file: manifest[key].file };
+});
+const homeEntry = workbenchEntries.find((entry) => entry.source === "src/pages/HomePage.tsx");
+if (!homeEntry || workbenchEntries.some((entry) => entry !== homeEntry && entry.file === homeEntry.file)) {
+  throw new Error("The production Hub Home workbench is not isolated in its own lazy chunk.");
+}
+const homeChunks = staticImportClosure(homeEntry.key);
+for (const entry of workbenchEntries) {
+  if (entry !== homeEntry && homeChunks.has(entry.key)) {
+    throw new Error(`The production Hub Home workbench eagerly imports ${entry.source}.`);
+  }
+}
+for (const key of homeChunks) {
+  const record = manifest[key] ?? {};
+  const identity = [key, record.src, record.name, record.file].filter(Boolean).join("\n");
+  if (/(?:^|\/)setup(?:\/|\.|$)/iu.test(identity)) {
+    throw new Error(`The production Hub Home workbench eagerly imports setup code through ${key}.`);
+  }
 }
 
 const forbiddenFixtureData = [
@@ -23,6 +70,16 @@ const forbiddenFixtureData = [
 
 for (const file of filesUnder(outputRoot)) {
   const bytes = readFileSync(file);
+  if (file.endsWith(".js") && statSync(file).size > maxJavaScriptChunkBytes) {
+    throw new Error(
+      `The production Hub JavaScript chunk ${file} exceeds ${maxJavaScriptChunkBytes} bytes.`,
+    );
+  }
+  for (const sentinel of ["react.development.js", "Download the React DevTools"]) {
+    if (file.endsWith(".js") && bytes.includes(Buffer.from(sentinel))) {
+      throw new Error(`The production Hub asset ${file} contains the React development runtime.`);
+    }
+  }
   for (const sentinel of forbiddenFixtureData) {
     if (bytes.includes(Buffer.from(sentinel))) {
       throw new Error(`The production Hub asset ${file} contains development fixture data.`);
@@ -36,4 +93,16 @@ function* filesUnder(directory) {
     if (entry.isDirectory()) yield* filesUnder(path);
     else if (entry.isFile()) yield path;
   }
+}
+
+function staticImportClosure(entryKey) {
+  const seen = new Set();
+  const pending = [entryKey];
+  while (pending.length) {
+    const key = pending.pop();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    pending.push(...(manifest[key]?.imports ?? []));
+  }
+  return seen;
 }

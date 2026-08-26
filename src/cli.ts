@@ -77,7 +77,13 @@ export function isTelemetryExemptCommand(
 ): boolean {
   return parentName === "telemetry"
     || parentName === "config"
-    || commandName === "hub";
+    || commandName === "hub"
+    || commandName === "capabilities";
+}
+
+/** Commands whose machine/read-only contract must precede any global notice. */
+export function isFirstRunNoticeExemptCommand(commandName?: string): boolean {
+  return commandName === "hub" || commandName === "capabilities";
 }
 
 async function runTuiCommand(): Promise<void> {
@@ -156,6 +162,20 @@ program
       console.error((err as Error).message);
       process.exitCode = 1;
     }
+  });
+
+program
+  .command("capabilities")
+  .description("Inspect installed and currently available machine capabilities")
+  .option("--json", "Emit the versioned machine-readable capability manifest")
+  .action(async (options: { json?: boolean }) => {
+    if (options.json !== true) {
+      console.error("mex capabilities requires --json.");
+      process.exitCode = 2;
+      return;
+    }
+    const { runCapabilities } = await import("./capabilities.js");
+    await runCapabilities();
   });
 
 // ── Setup (npx entry point) ──
@@ -379,7 +399,9 @@ const wikiCommand = program
  * project, not of the invocation.
  */
 function wikiIo(): import("./wiki/cli/commands.js").CommandIo {
-  const config = loadConfig();
+  // Advertised Wiki reads and previews are non-persisting. In particular,
+  // resolving their configuration must never backfill a missing scaffold_id.
+  const config = findConfig();
   return {
     write: (line: string) => console.log(line),
     setExitCode: (code: number) => {
@@ -879,6 +901,7 @@ program
     console.log(chalk.bold("\nCLI Commands") + chalk.dim("  (run from project root)\n"));
     console.log("  mex setup              First-time setup — create .mex/ scaffold");
     console.log("  mex setup --dry-run    Preview setup without making changes");
+    console.log("  mex capabilities --json  Discover structured agent capabilities");
     console.log("  mex check              Drift score — are scaffold files still accurate?");
     console.log("  mex check --quiet      One-liner drift score");
     console.log("  mex check --json       Full drift report as JSON");
@@ -933,7 +956,7 @@ if (process.argv[1]) {
   }
 }
 if (isMainModule) {
-  if (process.argv[2] !== "hub") showFirstRunNotice();
+  if (!isFirstRunNoticeExemptCommand(process.argv[2])) showFirstRunNotice();
   program.parseAsync().catch((err: Error) => {
     console.error(err.message);
     process.exit(1);
@@ -942,7 +965,7 @@ if (isMainModule) {
 
 function buildCompletion(shell: string): string {
   const commands = [
-    "setup", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
+    "setup", "capabilities", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
     "heartbeat", "doctor", "watch", "tui", "commands", "completion",
     "telemetry", "config", "feedback", "hub",
   ];

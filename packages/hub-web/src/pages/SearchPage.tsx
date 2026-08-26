@@ -52,6 +52,10 @@ import {
   ItemMedia,
   ItemTitle,
 } from "../components/primitives/item";
+import {
+  appendBoundedUnique,
+  MAX_ACCUMULATED_WORKBENCH_ITEMS,
+} from "../lib/bounds";
 import styles from "../styles/search.module.css";
 
 type GroupKind = keyof SearchResponse["groups"];
@@ -171,9 +175,14 @@ function ResultGroup({
         setRevisionConflict(true);
         return;
       }
+      const accumulated = appendBoundedUnique(group.items, next.items, (item) => item.id);
+      const boundReached = accumulated.omitted
+        || (accumulated.items.length >= MAX_ACCUMULATED_WORKBENCH_ITEMS && next.nextCursor !== null);
       setGroup({
         ...next,
-        items: [...group.items, ...next.items.filter((item) => !group.items.some((loaded) => loaded.id === item.id))],
+        items: accumulated.items,
+        nextCursor: boundReached ? null : next.nextCursor,
+        truncated: next.truncated || boundReached,
       });
     },
     onError: (error) => {

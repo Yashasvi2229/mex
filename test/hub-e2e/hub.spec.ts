@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -554,8 +554,19 @@ test.describe("built production Hub", () => {
     if (projectRoot) rmSync(projectRoot, { recursive: true, force: true });
   });
 
-  test("bootstraps once, cleans the fragment, and never exposes fixture content", async ({ page }) => {
+  test("bootstraps once, stays exact-origin and idle, and never exposes fixture content", async ({ page }) => {
     const errors = watchBrowserErrors(page);
+    const productionOrigin = new URL(bootstrapUrl).origin;
+    const crossOriginRequests: string[] = [];
+    const idleApiRequests: string[] = [];
+    let observeIdleApi = false;
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (url.origin !== productionOrigin) crossOriginRequests.push(request.url());
+      if (observeIdleApi && url.origin === productionOrigin && url.pathname.startsWith("/api/")) {
+        idleApiRequests.push(`${request.method()} ${url.pathname}${url.search}`);
+      }
+    });
     const response = await page.goto(bootstrapUrl);
     await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     await expect.poll(() => page.url()).not.toContain("#token=");
@@ -590,6 +601,16 @@ test.describe("built production Hub", () => {
     await expect(page.getByText("production metadata sentinel", { exact: true })).toHaveCount(0);
     await expect(page.getByText("/private/production/path", { exact: true })).toHaveCount(0);
     await expect(page.getByText(".mex/traces/production-private.md", { exact: true })).toHaveCount(0);
+    await page.waitForLoadState("networkidle");
+    if (!projectRoot) throw new Error("The production Hub fixture root is unavailable.");
+    const beforeIdle = snapshotReleaseProtectedState(projectRoot);
+    expect(beforeIdle.indexFiles).toEqual([]);
+    observeIdleApi = true;
+    await page.waitForTimeout(5_500);
+    observeIdleApi = false;
+    expect(idleApiRequests).toEqual([]);
+    expect(snapshotReleaseProtectedState(projectRoot)).toEqual(beforeIdle);
+    expect(crossOriginRequests).toEqual([]);
     expect(response?.headers()["content-security-policy"]).toContain("default-src 'self'");
     await expectAccessible(page);
     expect(errors).toEqual([
@@ -597,6 +618,35 @@ test.describe("built production Hub", () => {
     ]);
   });
 });
+
+function snapshotReleaseProtectedState(projectRoot: string): {
+  canonical: Record<string, string>;
+  gitStatus: string;
+  indexFiles: string[];
+} {
+  const canonicalPaths = [
+    ".mex/ROUTER.md",
+    ".mex/config.json",
+    ".mex/events/activity/2026-08/event_01K3Q080000000000000000004.md",
+    ".mex/events/decisions.jsonl",
+  ];
+  const gitStatus = spawnSync(
+    "git",
+    ["status", "--porcelain=v1", "--untracked-files=all"],
+    { cwd: projectRoot, encoding: "utf8" },
+  );
+  if (gitStatus.status !== 0) throw new Error(gitStatus.stderr);
+  return {
+    canonical: Object.fromEntries(canonicalPaths.map((path) => [
+      path,
+      readFileSync(join(projectRoot, path), "utf8"),
+    ])),
+    gitStatus: gitStatus.stdout,
+    indexFiles: readdirSync(join(projectRoot, ".mex"))
+      .filter((name) => name.startsWith("graph.db") || name.startsWith("wiki.db"))
+      .sort(),
+  };
+}
 
 function writeProductionActivity(projectRoot: string): void {
   const eventId = "event_01K3Q080000000000000000004";

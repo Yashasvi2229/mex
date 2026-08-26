@@ -1,11 +1,11 @@
-import { useEffect, useRef } from "react";
+import { Suspense, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Circle, FolderGit2, GitBranch, GitCommitHorizontal, Menu, ShieldCheck, X } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import type { CapabilitiesResponse, HomeResponse, SessionResponse } from "../api/types";
 import { useHubApi } from "../api/context";
 import { navigation } from "./navigation";
-import { formatTime, StatusPill } from "../components/ui";
+import { formatTime, StatePanel, StatusPill } from "../components/ui";
 import { Badge } from "../components/primitives/badge";
 import { Kbd } from "../components/primitives/kbd";
 import { Separator } from "../components/primitives/separator";
@@ -121,13 +121,15 @@ export function HubLayout({
 
   return (
     <div className={styles.viewportFrame}>
-      <JobLifecycleObserver />
+      <JobLifecycleObserver channelScope={session.expiresAt} />
       <a className={styles.skipLink} href="#main-content">Skip to main content</a>
       <Sidebar capabilities={capabilities} />
       <div className={styles.workspace}>
         <RepositoryBar repository={home.data?.repository} session={session} />
         <main id="main-content" className={styles.main} ref={mainRef} tabIndex={-1}>
-          <Outlet context={{ capabilities }} />
+          <Suspense fallback={<StatePanel state="loading" title="Opening workbench" detail="Loading this local Hub view." />}>
+            <Outlet context={{ capabilities }} />
+          </Suspense>
         </main>
       </div>
     </div>

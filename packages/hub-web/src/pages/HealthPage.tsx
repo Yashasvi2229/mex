@@ -27,7 +27,6 @@ import { ErrorState, formatDate, PageHeader, StatePanel, StatusPill, stateTone, 
 import { cn } from "../lib/utils";
 import { invalidateIndexOperationState } from "../app/JobLifecycleObserver";
 import healthStyles from "../styles/health.module.css";
-import styles from "../styles/hub.module.css";
 
 type HealthComponent = HealthResponse["components"][number];
 
@@ -395,7 +394,7 @@ export function HealthPage() {
   const hasActiveIndexJob = health.data?.components.some((component) => Boolean(component.graph?.activeJobId || component.wiki?.activeJobId)) ?? false;
 
   return (
-    <div className={`${styles.page} ${healthStyles.page}`}>
+    <div className={healthStyles.page}>
       <PageIntro action={health.data ? <StatusPill tone={stateTone(health.data.status)}>{sentenceCase(health.data.status)}</StatusPill> : undefined} />
       {start.isError ? <ErrorState error={start.error} /> : null}
       {health.isPending ? (

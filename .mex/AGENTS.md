@@ -27,6 +27,8 @@ last_updated: "2026-07-12"
 - Typecheck: `npm run typecheck`
 - Build: `npm run build`
 
+Before using MEX commands, run `mex capabilities --json` and prefer the structured reads it reports. Preview mutations first, then wait for explicit human approval before running an apply command.
+
 ## Scaffold Growth
 After every task: if no pattern exists for the task type you just completed, create one. If a pattern or context file is now out of date, update it. The scaffold grows from real work, not just setup. See the GROW step in `ROUTER.md` for details.
 

@@ -25,6 +25,11 @@ import { parseWikiMarkdown } from "../markdown/codec.js";
 import type { ParsedFile } from "../markdown/contract.js";
 import { discoverMarkdownFiles } from "./discover.js";
 import {
+  WIKI_CORPUS_LIMITS,
+  WikiCorpusLimitError,
+  addWikiCorpusBytes,
+} from "./corpus-policy.js";
+import {
   createPendingIndex,
   discardPendingIndex,
   discardSealedPendingIndex,
@@ -52,6 +57,7 @@ import {
   type WikiMaintenanceContext,
   WikiPreparedMaintenanceNotPreflightedError,
   WikiPreparedMaintenanceSettledError,
+  WikiMaintenanceInterruptedError,
 } from "./maintenance.js";
 import { resolveIndexState, writeFileDiagnostics, writeParsedFile, type GroundingResolver } from "./write.js";
 import { readContainedSource } from "./source-read.js";
@@ -144,8 +150,12 @@ export function parseAll(
   readFile?: (absolutePath: string) => string,
   maintenance?: WikiMaintenanceContext,
 ): { parsed: ParsedFile[]; unreadable: UnreadableFile[] } {
+  if (files.length > WIKI_CORPUS_LIMITS.maxMarkdownFiles) {
+    throw new WikiCorpusLimitError("maxMarkdownFiles");
+  }
   const parsed: ParsedFile[] = [];
   const unreadable: UnreadableFile[] = [];
+  let corpusBytes = 0;
 
   maintenanceBoundary(maintenance, "parse", { completed: 0, total: files.length });
   for (let index = 0; index < files.length; index += 1) {
@@ -155,9 +165,13 @@ export function parseAll(
     try {
       text = readContainedSource(scaffoldRoot, file.absolutePath, readFile === undefined ? {} : { readFile });
     } catch (error) {
-      unreadable.push({ path: file.path, diagnostic: unreadableFileDiagnostic(file.path, error) });
+      if (error instanceof WikiCorpusLimitError) throw error;
+      if (unreadable.length < WIKI_CORPUS_LIMITS.maxDiagnostics) {
+        unreadable.push({ path: file.path, diagnostic: unreadableFileDiagnostic(file.path, error) });
+      }
       continue;
     }
+    corpusBytes = addWikiCorpusBytes(corpusBytes, Buffer.byteLength(text, "utf8"));
     parsed.push(parseWikiMarkdown(registry === undefined ? { path: file.path, text } : { path: file.path, text, registry }));
   }
   maintenanceBoundary(maintenance, "parse", { completed: files.length, total: files.length });
@@ -181,26 +195,41 @@ export interface PreparedWikiRebuild {
   discard(): void;
 }
 
-function parseObservedCorpus(
+function writeObservedCorpus(
   observation: WikiCorpusObservation,
   registry: EntityTypeRegistry | undefined,
   maintenance: WikiMaintenanceContext | undefined,
-): { parsed: ParsedFile[]; unreadable: UnreadableFile[] } {
-  const parsed: ParsedFile[] = [];
+  writeParsed: (file: ParsedFile) => void,
+  writeUnreadable: (file: UnreadableFile) => void,
+): { fileCount: number; entityCount: number; unreadable: UnreadableFile[]; omittedUnreadable: number } {
+  let fileCount = 0;
+  let entityCount = 0;
   const unreadable: UnreadableFile[] = [];
+  let omittedUnreadable = 0;
   maintenanceBoundary(maintenance, "parse", { completed: 0, total: observation.files.length });
   for (let index = 0; index < observation.files.length; index += 1) {
     const file = observation.files[index]!;
     maintenanceBoundary(maintenance, "parse", { completed: index, total: observation.files.length });
+    let parsed: ParsedFile;
     try {
       const text = observation.readFile(file.absolutePath);
-      parsed.push(parseWikiMarkdown(registry === undefined ? { path: file.path, text } : { path: file.path, text, registry }));
+      parsed = parseWikiMarkdown(registry === undefined
+        ? { path: file.path, text }
+        : { path: file.path, text, registry });
     } catch (error) {
-      unreadable.push({ path: file.path, diagnostic: unreadableFileDiagnostic(file.path, error) });
+      if (error instanceof WikiCorpusLimitError || error instanceof WikiMaintenanceInterruptedError) throw error;
+      const entry = { path: file.path, diagnostic: unreadableFileDiagnostic(file.path, error) };
+      writeUnreadable(entry);
+      if (unreadable.length < WIKI_CORPUS_LIMITS.maxDiagnostics) unreadable.push(entry);
+      else omittedUnreadable += 1;
+      continue;
     }
+    writeParsed(parsed);
+    fileCount += 1;
+    entityCount += parsed.entities.length;
   }
   maintenanceBoundary(maintenance, "parse", { completed: observation.files.length, total: observation.files.length });
-  return { parsed, unreadable };
+  return { fileCount, entityCount, unreadable, omittedUnreadable };
 }
 
 function rebuildInterruptedResult(indexPath: string, sweptTempFiles: string[], error: IndexInUseError): RebuildResult {
@@ -242,10 +271,15 @@ export function prepareWikiRebuild(options: RebuildOptions): PreparedWikiRebuild
     const pending = createPendingIndex(indexPath, lease.binding);
     handle = pending.handle;
     tempPath = pending.tempPath;
-    const { parsed, unreadable } = parseObservedCorpus(observation, options.registry, options.maintenance);
+    let result!: ReturnType<typeof writeObservedCorpus>;
     handle.db.transaction(() => {
-      for (const file of parsed) writeParsedFile(handle!.db, file, { now: now() });
-      for (const file of unreadable) writeFileDiagnostics(handle!.db, file.path, [file.diagnostic]);
+      result = writeObservedCorpus(
+        observation,
+        options.registry,
+        options.maintenance,
+        (file) => writeParsedFile(handle!.db, file, { now: now() }),
+        (file) => writeFileDiagnostics(handle!.db, file.path, [file.diagnostic]),
+      );
       maintenanceBoundary(options.maintenance, "resolve");
       resolveIndexState(handle!.db, {
         scaffoldRoot,
@@ -258,11 +292,24 @@ export function prepareWikiRebuild(options: RebuildOptions): PreparedWikiRebuild
     });
     const sealed = sealPendingIndex(handle, tempPath, lease.binding);
     handle = undefined;
+    const diagnostics = [...observation.diagnostics, ...result.unreadable.map((file) => file.diagnostic)]
+      .slice(0, WIKI_CORPUS_LIMITS.maxDiagnostics);
+    const diagnosticCount = observation.diagnostics.length + result.unreadable.length + result.omittedUnreadable;
+    if (diagnosticCount > diagnostics.length) {
+      diagnostics[diagnostics.length - 1] = diagnostic(
+        "WIKI_PARSE_ERROR",
+        `${diagnosticCount - diagnostics.length + 1} additional Wiki rebuild diagnostic(s) were omitted.`,
+        {
+          severity: "info",
+          remediation: "Resolve the visible diagnostics, then rebuild again for any remaining issues.",
+        },
+      );
+    }
     const summary: RebuildResult = {
       indexPath,
-      fileCount: parsed.length,
-      entityCount: parsed.reduce((total, file) => total + file.entities.length, 0),
-      diagnostics: [...observation.diagnostics, ...unreadable.map((file) => file.diagnostic)],
+      fileCount: result.fileCount,
+      entityCount: result.entityCount,
+      diagnostics,
       sweptTempFiles,
     };
     return preparedRebuildHandle({

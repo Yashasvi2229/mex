@@ -97,7 +97,8 @@
 .browseSummary:focus-visible,
 .detailHeader:focus-visible {
   border-left-color: var(--ring);
-  outline: none;
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .browseSummary > span:first-child {

@@ -754,6 +754,7 @@ describe("no unscoped scaffold writes", () => {
     // Every other rule in this file is scoped to `src/wiki/`, so before this
     // one nothing in `src/` was watching at all.
     const KNOWN: Readonly<Record<string, string>> = {
+      "src/graph/engine-impl.ts": "writes only a private, bounded temporary source spool that is removed before graph publication",
       "src/graph/maintenance.ts": "publishes and recovers the disposable graph index under its maintenance lease",
       "src/graph/runtime.ts": "edits existing .mex Markdown; bypasses the pipeline (recorded D9 exception)",
       "src/config.ts": "writes config.json",

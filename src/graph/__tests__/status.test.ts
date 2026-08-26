@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,6 +12,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
@@ -22,6 +24,7 @@ import { graphRemediationCommand } from "../../reporter.js";
 import { DB_SCHEMA_VERSION } from "../db/database.js";
 import { openSqlite } from "../db/sqlite.js";
 import { BANDS } from "../config.js";
+import { GRAPH_CORPUS_LIMITS } from "../corpus-policy.js";
 import { createGraphEngine } from "../engine-impl.js";
 import { FingerprintStore } from "../fingerprint-store.js";
 import type { Fingerprint } from "../reconcile.js";
@@ -149,6 +152,67 @@ describe("inspectGraphStatus", () => {
       changes: { total: 1, added: ["src/service.ts"], modified: [], deleted: [] },
     });
     expect(treeState(root)).toEqual(before);
+  });
+
+  it("preserves a path-free corpus-limit diagnostic when changed-path output is disabled", async () => {
+    const root = temporaryRoot("mex-graph-status-corpus-limit-");
+    source(
+      root,
+      "src/oversized.py",
+      "x".repeat(GRAPH_CORPUS_LIMITS.maxSourceFileBytes + 1),
+    );
+
+    const status = await inspect(root, 0);
+
+    expect(status.diagnostics).toContainEqual({
+      code: "GRAPH_SOURCE_CORPUS_LIMIT_EXCEEDED",
+      severity: "warning",
+      message: "The supported source corpus exceeds MEX's bounded inspection policy.",
+    });
+  });
+
+  it("classifies a bounded manifest refusal separately from generic inspection failure", async () => {
+    const root = temporaryRoot("mex-graph-status-manifest-limit-");
+    source(root, "package.json", "x".repeat(GRAPH_CORPUS_LIMITS.maxConfigFileBytes + 1));
+
+    const status = await inspect(root, 0);
+
+    expect(status.diagnostics).toContainEqual({
+      code: "GRAPH_MANIFEST_CORPUS_LIMIT_EXCEEDED",
+      severity: "warning",
+      message: "The graph configuration corpus exceeds MEX's bounded inspection policy.",
+    });
+  });
+
+  it("refuses an oversized disposable index before SQLite materialization", async () => {
+    const root = temporaryRoot("mex-graph-status-index-limit-");
+    source(root, "src/service.ts", "export const service = true;\n");
+    const dbPath = await build(root);
+    truncateSync(dbPath, GRAPH_CORPUS_LIMITS.maxIndexBytes + 1);
+
+    const status = await inspect(root, 0);
+
+    expect(status.status).toBe("degraded");
+    expect(status.diagnostics).toContainEqual({
+      code: "GRAPH_INDEX_CORPUS_LIMIT_EXCEEDED",
+      severity: "warning",
+      message: "The disposable graph index exceeds MEX's bounded inspection policy.",
+    });
+  });
+
+  it("disables repository-configured Git filesystem monitors during inspection", async () => {
+    const root = temporaryRoot("mex-graph-status-fsmonitor-");
+    const monitor = join(root, "fsmonitor.sh");
+    const sentinel = join(root, "fsmonitor-invoked");
+    source(root, "src/service.ts", "export const service = true;\n");
+    writeFileSync(monitor, `#!/bin/sh\nprintf invoked > ${JSON.stringify(sentinel)}\n`);
+    chmodSync(monitor, 0o700);
+    git(root, "init", "-q", "-b", "main");
+    git(root, "config", "core.fsmonitor", monitor);
+
+    await inspect(root, 0);
+
+    expect(existsSync(sentinel)).toBe(false);
   });
 
   it("suppresses executable graph remediation when Git provenance is unavailable", async () => {

@@ -9,6 +9,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,6 +41,7 @@ import {
 import { prepareWikiRebuild, rebuildWikiIndex } from "../rebuild.js";
 import { prepareWikiRefresh, refreshWikiIndex, WikiRefreshPathError } from "../refresh.js";
 import { readContainedSource, WikiSourceReadError } from "../source-read.js";
+import { WIKI_CORPUS_LIMITS, WikiCorpusLimitError, addWikiCorpusBytes } from "../corpus-policy.js";
 
 const roots: string[] = [];
 
@@ -125,6 +127,14 @@ describe("Wiki maintenance lease and boundaries", () => {
     expect(() => readContainedSource(target.root, target.path)).toThrow(WikiSourceReadError);
   });
 
+  it("rejects oversized source and aggregate corpus bytes before decoding", () => {
+    const target = scaffold();
+    truncateSync(target.path, WIKI_CORPUS_LIMITS.maxFileBytes + 1);
+    expect(() => readContainedSource(target.root, target.path)).toThrow(WikiCorpusLimitError);
+    expect(() => addWikiCorpusBytes(WIKI_CORPUS_LIMITS.maxCorpusBytes, 1))
+      .toThrow(WikiCorpusLimitError);
+  });
+
   it("preserves a valid UTF-8 BOM as an exact source character", () => {
     const target = scaffold();
     writeFileSync(target.path, "\uFEFF# BOM\n", "utf8");
@@ -151,6 +161,22 @@ describe("Wiki maintenance lease and boundaries", () => {
     prepared.discard();
     expect(existsSync(`${target.indexPath}.lock`)).toBe(false);
     expect(() => prepared.discard()).toThrow(WikiPreparedMaintenanceSettledError);
+  });
+
+  it("streams candidate source bodies and interrupts if a file changes between observation and parse", () => {
+    const target = scaffold();
+    let reads = 0;
+    const original = readFileSync(target.path, "utf8");
+    expect(() => rebuildWikiIndex({
+      scaffoldRoot: target.root,
+      indexPath: target.indexPath,
+      readFile: () => {
+        reads += 1;
+        return reads === 1 ? original : `${original}\nchanged during candidate build\n`;
+      },
+    })).toThrow(WikiMaintenanceInterruptedError);
+    expect(reads).toBe(2);
+    expect(existsSync(target.indexPath)).toBe(false);
   });
 
   it("fast-rebinds the corpus after preflight and refuses a pre-commit edit", () => {

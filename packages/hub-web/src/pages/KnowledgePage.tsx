@@ -57,6 +57,10 @@ import {
   ItemTitle,
 } from "../components/primitives/item";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/primitives/tabs";
+import {
+  appendBoundedUnique,
+  MAX_ACCUMULATED_WORKBENCH_ITEMS,
+} from "../lib/bounds";
 import { cn } from "../lib/utils";
 import styles from "../styles/knowledge.module.css";
 
@@ -230,9 +234,14 @@ function KnowledgeBrowse() {
         setRevisionConflict(true);
         return;
       }
+      const accumulated = appendBoundedUnique(collection.items, next.items, (item) => item.id);
+      const boundReached = accumulated.omitted
+        || (accumulated.items.length >= MAX_ACCUMULATED_WORKBENCH_ITEMS && next.nextCursor !== null);
       setCollection({
         ...next,
-        items: [...collection.items, ...next.items.filter((item) => !collection.items.some((loaded) => loaded.id === item.id))],
+        items: accumulated.items,
+        nextCursor: boundReached ? null : next.nextCursor,
+        truncated: next.truncated || boundReached,
       });
     },
     onError: (error, startedRequestKey) => {
@@ -579,9 +588,16 @@ function KnowledgeDetail() {
     onSuccess: (next, started) => {
       if (started.entityId !== id || response?.entity.id !== started.entityId) return;
       if (response.indexedRevision !== started.indexedRevision || next.indexedRevision !== response.indexedRevision) { setRevisionConflict(true); return; }
-      setRelations((current) => [...current, ...next.items.filter((item) => !current.some((loaded) => loaded.entity.id === item.entity.id && loaded.relation.type === item.relation.type && loaded.direction === item.direction))]);
-      setRelationCursor(next.nextCursor);
-      setRelationTruncated(next.truncated);
+      const accumulated = appendBoundedUnique(
+        relations,
+        next.items,
+        (item) => `${item.entity.id}\0${item.relation.type}\0${item.direction}`,
+      );
+      const boundReached = accumulated.omitted
+        || (accumulated.items.length >= MAX_ACCUMULATED_WORKBENCH_ITEMS && next.nextCursor !== null);
+      setRelations(accumulated.items);
+      setRelationCursor(boundReached ? null : next.nextCursor);
+      setRelationTruncated(next.truncated || boundReached);
       setRelationRecovered(true);
     },
     onError: (error, started) => {
@@ -596,9 +612,16 @@ function KnowledgeDetail() {
     onSuccess: (next, started) => {
       if (started.entityId !== id || response?.entity.id !== started.entityId) return;
       if (response.indexedRevision !== started.indexedRevision || next.indexedRevision !== response.indexedRevision) { setRevisionConflict(true); return; }
-      setBacklinks((current) => [...current, ...next.items.filter((item) => !current.some((loaded) => loaded.source.id === item.source.id && loaded.target.id === item.target.id && loaded.type === item.type))]);
-      setBacklinkCursor(next.nextCursor);
-      setBacklinkTruncated(next.truncated);
+      const accumulated = appendBoundedUnique(
+        backlinks,
+        next.items,
+        (item) => `${item.source.id}\0${item.target.id}\0${item.type}`,
+      );
+      const boundReached = accumulated.omitted
+        || (accumulated.items.length >= MAX_ACCUMULATED_WORKBENCH_ITEMS && next.nextCursor !== null);
+      setBacklinks(accumulated.items);
+      setBacklinkCursor(boundReached ? null : next.nextCursor);
+      setBacklinkTruncated(next.truncated || boundReached);
       setBacklinkRecovered(true);
     },
     onError: (error, started) => {

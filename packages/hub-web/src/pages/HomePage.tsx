@@ -50,7 +50,6 @@ import {
   TableHeader,
   TableRow,
 } from "../components/primitives/table";
-import styles from "../styles/hub.module.css";
 import homeStyles from "../styles/home.module.css";
 
 interface MetricView {
@@ -146,7 +145,7 @@ export function HomePage() {
 
   if (home.isPending) {
     return (
-      <div className={`${styles.page} ${homeStyles.page}`}>
+      <div className={homeStyles.page}>
         <HomeHeader />
         <StatePanel state="loading" title="Reading local project state" detail="Loading repository context and local indexes." />
       </div>
@@ -155,7 +154,7 @@ export function HomePage() {
 
   if (home.isError) {
     return (
-      <div className={`${styles.page} ${homeStyles.page}`}>
+      <div className={homeStyles.page}>
         <HomeHeader />
         <ErrorState error={home.error} retry={() => void home.refetch()} />
       </div>
@@ -203,7 +202,7 @@ export function HomePage() {
     && capabilities.wiki.read.availability === "unavailable";
 
   return (
-    <div className={`${styles.page} ${homeStyles.page}`}>
+    <div className={homeStyles.page}>
       <HomeHeader />
 
       {sourcesUnavailable ? (

@@ -7,7 +7,7 @@ import { Badge } from "./primitives/badge";
 import { Button, buttonVariants } from "./primitives/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia } from "./primitives/empty";
 import { cn } from "../lib/utils";
-import styles from "../styles/hub.module.css";
+import styles from "../styles/ui.module.css";
 
 export function PageHeader({
   eyebrow,
@@ -114,7 +114,7 @@ export function ErrorState({ error, retry }: { error: unknown; retry?: () => voi
       detail={problem?.detail ?? "The Hub kept the last trustworthy state. Try the request again."}
       action={
         retry ? (
-          <Button className={styles.secondaryButton} variant="outline" size="sm" type="button" onClick={retry}>
+          <Button variant="outline" size="sm" type="button" onClick={retry}>
             Try again
           </Button>
         ) : undefined

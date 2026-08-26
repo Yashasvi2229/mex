@@ -35,6 +35,8 @@ last_updated: [YYYY-MM-DD]
      - Build: `npm run build` -->
 
 ## Code Graph
+Before using MEX commands, run `mex capabilities --json` and prefer the structured reads it reports. Preview mutations first, then wait for explicit human approval before running an apply command.
+
 The repo is indexed into `.mex/graph.db`. Use it to avoid re-reading code you already have — it is one tool alongside Grep/Glob, not a replacement for them.
 - If you know the symbol name, go straight to it: `mex graph query <who-calls|what-calls|where-defined> <symbol>` and `mex graph get <id>` are exact and cheap. This is the strongest part of the graph. Give it exact names — an approximate name can return a confident wrong match.
 - Exploring an unfamiliar task? `mex graph scope "<task>"` returns bounded, source-backed JSONL context plus trustworthy execution flows. Scope matches on words, not meaning, so treat it as starting evidence rather than a complete answer.
