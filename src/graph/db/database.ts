@@ -29,6 +29,11 @@ export interface OpenGraphDatabaseOptions {
   allowRebuild?: boolean;
   /** Reader-only commands must not mutate pragmas, schema, or version metadata. */
   readOnly?: boolean;
+  /**
+   * Ignore SQLite WAL state and prohibit sidecar creation. Callers must first
+   * establish that no non-empty WAL contains authoritative graph data.
+   */
+  immutable?: boolean;
 }
 
 function configureConnection(db: SqliteDatabase): void {
@@ -53,6 +58,9 @@ export function openGraphDatabase(
   dbPath: string,
   options: OpenGraphDatabaseOptions = {},
 ): SqliteDatabase {
+  if (options.immutable && !options.readOnly) {
+    throw new TypeError("Immutable graph access requires readOnly: true.");
+  }
   const dir = dirname(dbPath);
   if (!existsSync(dir)) {
     if (options.readOnly) throw new GraphRebuildRequiredError("The graph index does not exist. Run `mex graph` first.");
@@ -60,7 +68,9 @@ export function openGraphDatabase(
   }
 
   if (options.readOnly) {
-    return openReadOnlyGraphDatabase(dbPath);
+    return options.immutable
+      ? openImmutableGraphDatabase(dbPath)
+      : openReadOnlyGraphDatabase(dbPath);
   }
   const db = openSqlite(dbPath);
   configureConnection(db);
@@ -94,19 +104,29 @@ export function openGraphDatabase(
   return db;
 }
 
-function openReadOnlyGraphDatabase(dbPath: string): SqliteDatabase {
-  const validate = (db: SqliteDatabase): SqliteDatabase => {
-    configureReadOnlyConnection(db);
-    if (!tableExists(db, "schema_versions") || readSchemaVersion(db) !== DB_SCHEMA_VERSION) {
-      throw new GraphRebuildRequiredError();
-    }
-    if (graphRequiresRebuild(db)) throw new GraphRebuildRequiredError();
-    return db;
-  };
+function validateReadOnlyGraphDatabase(db: SqliteDatabase): SqliteDatabase {
+  configureReadOnlyConnection(db);
+  if (!tableExists(db, "schema_versions") || readSchemaVersion(db) !== DB_SCHEMA_VERSION) {
+    throw new GraphRebuildRequiredError();
+  }
+  if (graphRequiresRebuild(db)) throw new GraphRebuildRequiredError();
+  return db;
+}
 
+function openImmutableGraphDatabase(dbPath: string): SqliteDatabase {
+  const db = openSqlite(dbPath, { readOnly: true, immutable: true });
+  try {
+    return validateReadOnlyGraphDatabase(db);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
+function openReadOnlyGraphDatabase(dbPath: string): SqliteDatabase {
   let db = openSqlite(dbPath, { readOnly: true });
   try {
-    return validate(db);
+    return validateReadOnlyGraphDatabase(db);
   } catch (error) {
     db.close();
     const message = error instanceof Error ? error.message : String(error);
@@ -122,7 +142,7 @@ function openReadOnlyGraphDatabase(dbPath: string): SqliteDatabase {
     // first read. Immutable mode is safe only when no WAL payload exists.
     db = openSqlite(dbPath, { readOnly: true, immutable: true });
     try {
-      return validate(db);
+      return validateReadOnlyGraphDatabase(db);
     } catch (immutableError) {
       db.close();
       throw immutableError;

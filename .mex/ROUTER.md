@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-08-22
+last_updated: 2026-08-23
 ---
 
 # Session Bootstrap
@@ -31,11 +31,19 @@ Then read this file fully before doing anything else in this session.
   codes are available under `src/team/contracts` as a provisional boundary.
 - A behavioral WikiPort mock, realistic fixture, reusable conformance suite,
   and graph protocol goldens cover the consumer-side Checkpoint 0 work.
+- Versioned graph snapshot provenance and read-only freshness inspection gate
+  grounding in check, doctor, and dashboard flows without implicit graph sync.
+- Explicit graph status, refresh, and isolated rebuild/recovery commands preserve
+  the last trustworthy index behind one cross-process maintenance lease.
+- Targeted graph get/query/impact consumers use one provenance-bound immutable
+  snapshot and discard output if graph or exact source identity changes.
+- Graph evaluator determinism includes semantic snapshot provenance while
+  excluding only operational timestamps and Git coordinates.
 
 **Not Built:**
 - The real Wiki adapter and type-parity registration against the teammate engine.
-- Project Hub, workflow persistence, graph freshness/recovery, and later delivery
-  checkpoints from the human-team program.
+- Project Hub, workflow persistence, and later delivery checkpoints from the
+  human-team program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
