@@ -8,6 +8,7 @@ import { ActivityPage } from "../pages/ActivityPage";
 import { HealthPage } from "../pages/HealthPage";
 import { HomePage } from "../pages/HomePage";
 import { JobsPage } from "../pages/JobsPage";
+import { KnowledgeDetailPage, KnowledgePage } from "../pages/KnowledgePage";
 import { CodePage, SearchPage } from "../pages/SearchPage";
 import { SymbolPage } from "../pages/SymbolPage";
 import styles from "../styles/hub.module.css";
@@ -78,7 +79,8 @@ export function AppRoutes() {
       <Route element={<SessionBoundary />}>
         <Route index element={<HomePage />} />
         <Route path="search" element={<SearchPage />} />
-        <Route path="knowledge" element={<CapabilityPage page="knowledge" />} />
+        <Route path="knowledge" element={<KnowledgePage />} />
+        <Route path="knowledge/:id" element={<KnowledgeDetailPage />} />
         <Route path="code" element={<CodePage />} />
         <Route path="code/symbols/:id" element={<SymbolPage />} />
         <Route path="workstreams" element={<CapabilityPage page="workstreams" />} />

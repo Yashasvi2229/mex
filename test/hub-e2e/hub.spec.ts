@@ -41,12 +41,12 @@ test.describe("populated development fixture", () => {
     await expect(page).toHaveScreenshot("hub-home.png", { fullPage: true });
   });
 
-  test("keeps real Graph search groups separate while Wiki is unavailable", async ({ page }) => {
+  test("keeps real Wiki, symbol, and source search groups separate", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     await page.goto("/search?fixture=populated&q=hub");
     await expect(page.getByRole("heading", { name: "Search" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Knowledge", exact: true })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Knowledge unavailable" })).toBeVisible();
+    await expect(page.getByRole("link", { name: /Project Hub read boundaries/ })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Code symbols" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Source matches" })).toBeVisible();
     await expect(page.getByRole("link", { name: /createHubServer/ }).first()).toBeVisible();
@@ -56,6 +56,119 @@ test.describe("populated development fixture", () => {
     expect(errors).toEqual([]);
     await expect(page).toHaveScreenshot("hub-search.png", { fullPage: true });
   });
+
+  test("browses, filters, paginates, and restores URL-backed Knowledge state", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/knowledge?fixture=populated");
+
+    await expect(page.getByRole("heading", { name: "Knowledge", exact: true })).toBeVisible();
+    await expect(page.getByText("Browse durable project memory", { exact: false })).toBeVisible();
+    const summary = page.getByText("All Knowledge records", { exact: true }).locator("..");
+    await expect(summary).toBeFocused();
+    await expect(page.getByText("2 loaded", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Load more Knowledge" }).click();
+    await expect(page.getByText("3 loaded", { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: /Review immutable activity/ })).toBeVisible();
+
+    await page.getByLabel("Kind").fill("decision");
+    await page.getByRole("button", { name: "Apply" }).click();
+    await expect(page).toHaveURL(/kind=decision/);
+    const filteredSummary = page.getByText("Filtered Knowledge records", { exact: true }).locator("..");
+    await expect(filteredSummary).toBeVisible();
+    await expect(filteredSummary).toBeFocused();
+    await expect(page.getByRole("link", { name: /One snapshot per graph request/ })).toBeVisible();
+    await expect(page.getByRole("link", { name: /Project Hub read boundaries/ })).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Clear search and filters" }).click();
+    await expect(page).not.toHaveURL(/kind=/);
+    await expect(page.getByText("All Knowledge records", { exact: true }).locator("..")).toBeFocused();
+    const searchbox = page.getByRole("searchbox", { name: "Search titles, summaries, and bodies" });
+    await expect(searchbox).toHaveValue("");
+    await searchbox.fill("snapshot");
+    const apply = page.getByRole("button", { name: "Apply" });
+    await expect(apply).toBeEnabled();
+    await apply.click();
+    await expect(page).toHaveURL(/q=snapshot/);
+    await expect(page.getByText("Knowledge results for “snapshot”", { exact: true }).locator("..")).toBeFocused();
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("renders the read-only Knowledge record with keyboard links and exact grounding", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    const external: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).hostname !== "127.0.0.1") external.push(request.url());
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/knowledge/mx_01K36WVM6H7JK8M9NPQRSTVVWX?fixture=populated");
+
+    await expect(page.getByRole("heading", { level: 1, name: "Project Hub read boundaries" })).toBeVisible();
+    await expect(page.getByText("architecture · Knowledge record", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Record body" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Code grounding" })).toBeVisible();
+    await expect(page.getByRole("link", { name: /sym\.createHubServer/ })).toHaveAttribute(
+      "href",
+      "/code/symbols/sym.createHubServer",
+    );
+    await expect(page.getByRole("heading", { name: "Evidence" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Provenance" })).toBeVisible();
+    await expect(page.getByRole("article", { name: "Knowledge body as plain text" })).toBeVisible();
+    await expect(page.getByRole("tabpanel", { name: "Relations" }).getByText("One snapshot per graph request", { exact: true })).toBeVisible();
+
+    await expectAccessible(page);
+    expect(external).toEqual([]);
+    expect(errors).toEqual([]);
+    await expect(page).toHaveScreenshot("hub-knowledge.png", { fullPage: true });
+
+    const relations = page.getByRole("tab", { name: "Relations" });
+    await relations.focus();
+    await page.keyboard.press("ArrowRight");
+    const backlinks = page.getByRole("tab", { name: "Backlinks" });
+    await expect(backlinks).toBeFocused();
+    await expect(backlinks).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tabpanel", { name: "Backlinks" }).getByText("Review immutable activity", { exact: true })).toBeVisible();
+  });
+
+  for (const width of [1440, 1024] as const) {
+    test(`keeps the Knowledge workspace accessible and correctly arranged at ${width}px`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/knowledge/mx_01K36WVM6H7JK8M9NPQRSTVVWX?fixture=populated");
+      await expect(page.getByRole("heading", { level: 1, name: "Project Hub read boundaries" })).toBeVisible();
+
+      const identity = await page.getByRole("heading", { name: "Record identity" }).boundingBox();
+      const body = await page.getByRole("heading", { name: "Record body" }).boundingBox();
+      const evidence = await page.getByRole("heading", { name: "Code grounding" }).boundingBox();
+      expect(identity).not.toBeNull();
+      expect(body).not.toBeNull();
+      expect(evidence).not.toBeNull();
+      if (width === 1440) {
+        expect(identity!.x).toBeLessThan(body!.x);
+        expect(body!.x).toBeLessThan(evidence!.x);
+      } else {
+        expect(identity!.y).toBeLessThan(body!.y);
+        expect(body!.y).toBeLessThan(evidence!.y);
+      }
+      const transitionDuration = await page.getByRole("link", { name: /sym\.createHubServer/ })
+        .evaluate((element) => getComputedStyle(element).transitionDuration);
+      expect(Number.parseFloat(transitionDuration)).toBeLessThanOrEqual(0.00001);
+      const geometry = await page.evaluate(() => ({
+        viewportWidth: window.innerWidth,
+        documentClientWidth: document.documentElement.clientWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+      }));
+      expect(geometry).toEqual({
+        viewportWidth: width,
+        documentClientWidth: width,
+        documentScrollWidth: width,
+        bodyScrollWidth: width,
+      });
+      await expectAccessible(page);
+    });
+  }
 
   test("renders the deterministic Code landing and exact symbol workspace", async ({ page }) => {
     const errors = watchBrowserErrors(page);
@@ -86,6 +199,8 @@ test.describe("populated development fixture", () => {
       "}",
     ]);
     await expect(page.getByText("sha256:888888888888", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Related Knowledge" })).toBeVisible();
+    await expect(page.getByRole("link", { name: /Project Hub read boundaries/ })).toBeVisible();
     await expectAccessible(page);
     expect(external).toEqual([]);
     expect(errors).toEqual([]);
@@ -195,7 +310,9 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("button", { name: /Refresh graph/ })).toBeDisabled();
     await expect(page.getByRole("button", { name: /Rebuild graph/ })).toBeDisabled();
     await expect(page.getByText("The previous trustworthy index was preserved.")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /Wiki rebuild/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Wiki refresh" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Wiki rebuild" })).toBeDisabled();
+    await expect(page.getByLabel("Services").getByText("New operations wait for the active job.", { exact: true })).toBeVisible();
     await expectAccessible(page);
     expect(errors).toEqual([]);
     await expect(page).toHaveScreenshot("hub-health.png", { fullPage: true });
@@ -318,7 +435,11 @@ test.describe("populated development fixture", () => {
     for (const [link, heading] of routes) {
       await page.getByRole("link", { name: new RegExp(`^${link}(?: Unavailable)?$`) }).click();
       await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
-      await expect(page.locator("#main-content")).toBeFocused();
+      if (link === "Knowledge") {
+        await expect(page.getByText("All Knowledge records", { exact: true }).locator("..")).toBeFocused();
+      } else {
+        await expect(page.locator("#main-content")).toBeFocused();
+      }
     }
     await page.goto("/outside-the-workbench?fixture=populated");
     await expect(page.getByText("404", { exact: true })).toBeVisible();
@@ -385,6 +506,10 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     await page.goto("/activity?fixture=populated");
     await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
+    await page.goto("/knowledge?fixture=populated");
+    await expect(page.getByRole("heading", { name: "Knowledge", exact: true })).toBeVisible();
+    await page.getByRole("link", { name: /Project Hub read boundaries/ }).click();
+    await expect(page.getByRole("heading", { level: 1, name: "Project Hub read boundaries" })).toBeVisible();
     await page.goto("/code?fixture=populated&q=hub");
     await expect(page.getByRole("heading", { name: "Code symbols" })).toBeVisible();
     await page.getByRole("link", { name: /createHubServer/ }).first().click();
@@ -434,13 +559,22 @@ test.describe("built production Hub", () => {
     const response = await page.goto(bootstrapUrl);
     await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     await expect.poll(() => page.url()).not.toContain("#token=");
-    await expect(page.getByRole("link", { name: "Knowledge Unavailable" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Knowledge", exact: true })).toBeVisible();
     await expect(page.getByRole("link", { name: "Code", exact: true })).toBeVisible();
     await expect(page.getByText("Three knowledge pages lost grounding")).toHaveCount(0);
 
     await page.goto(`${new URL(bootstrapUrl).origin}/?fixture=populated`);
     await expect(page.getByText("Three knowledge pages lost grounding")).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "Knowledge Unavailable" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Knowledge", exact: true })).toBeVisible();
+
+    const [knowledgeUnavailable] = await Promise.all([
+      page.waitForResponse((candidate) => new URL(candidate.url()).pathname === "/api/v1/wiki/entities"),
+      page.goto(`${new URL(bootstrapUrl).origin}/knowledge?fixture=populated`),
+    ]);
+    expect(knowledgeUnavailable.status()).toBe(503);
+    await expect(page.getByRole("heading", { name: "Knowledge", exact: true })).toBeVisible();
+    await expect(page.getByText("Project Hub read boundaries", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Knowledge migration is required" })).toBeVisible();
 
     await page.goto(`${new URL(bootstrapUrl).origin}/code?fixture=populated`);
     await expect(page.getByRole("heading", { name: "Code" })).toBeVisible();
@@ -458,7 +592,9 @@ test.describe("built production Hub", () => {
     await expect(page.getByText(".mex/traces/production-private.md", { exact: true })).toHaveCount(0);
     expect(response?.headers()["content-security-policy"]).toContain("default-src 'self'");
     await expectAccessible(page);
-    expect(errors).toEqual([]);
+    expect(errors).toEqual([
+      "Failed to load resource: the server responded with a status of 503 (Service Unavailable)",
+    ]);
   });
 });
 

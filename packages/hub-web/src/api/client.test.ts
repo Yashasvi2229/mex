@@ -88,6 +88,40 @@ describe("HttpHubApi shared-contract boundary", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
+  it("uses strict Wiki routes, singular filters, and safe entity IDs", async () => {
+    const fixture = createFixtureApi();
+    const entityId = "mx_01K36WVM6H7JK8M9NPQRSTVVWX";
+    const responses = await Promise.all([
+      fixture.listWikiEntities({ kind: "architecture", lifecycle: "promoted", grounding: "fresh", sourceType: "file", limit: 25 }),
+      fixture.getWikiEntity(entityId),
+      fixture.getWikiRelations(entityId, { direction: "both", type: "depends_on", limit: 25 }),
+      fixture.getWikiBacklinks(entityId, { type: "related_to", limit: 25 }),
+      fixture.getCodeKnowledge("sym.createHubServer", { limit: 25 }),
+    ]);
+    const fetchMock = vi.fn();
+    for (const response of responses) fetchMock.mockResolvedValueOnce(json(response));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpHubApi();
+
+    await api.listWikiEntities({ kind: "architecture", lifecycle: "promoted", grounding: "fresh", sourceType: "file", limit: 25 });
+    await api.getWikiEntity(entityId);
+    await api.getWikiRelations(entityId, { direction: "both", type: "depends_on", limit: 25 });
+    await api.getWikiBacklinks(entityId, { type: "related_to", limit: 25 });
+    await api.getCodeKnowledge("sym.createHubServer", { limit: 25 });
+
+    const urls = fetchMock.mock.calls.map(([rawUrl]) => new URL(rawUrl as string, "http://127.0.0.1"));
+    expect(urls[0].pathname).toBe("/api/v1/wiki/entities");
+    expect(Object.fromEntries(urls[0].searchParams)).toEqual({ limit: "25", kind: "architecture", lifecycle: "promoted", grounding: "fresh", sourceType: "file" });
+    expect(urls[1].pathname).toBe(`/api/v1/wiki/entities/${entityId}`);
+    expect(urls[2].pathname).toBe(`/api/v1/wiki/entities/${entityId}/relations`);
+    expect(Object.fromEntries(urls[2].searchParams)).toEqual({ direction: "both", limit: "25", type: "depends_on" });
+    expect(urls[3].pathname).toBe(`/api/v1/wiki/entities/${entityId}/backlinks`);
+    expect(urls[4].pathname).toBe("/api/v1/code/symbols/sym.createHubServer/knowledge");
+
+    await expect(api.getWikiEntity("../../private/wiki")).rejects.toBeInstanceOf(HubApiError);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
   it("sends bounded Activity filters and parses the shared response contract", async () => {
     const fetchMock = vi.fn().mockResolvedValue(json(activity));
     vi.stubGlobal("fetch", fetchMock);

@@ -152,6 +152,7 @@ export const HubCapabilitiesSchema = z.object({
   }).strict(),
   wiki: z.object({
     read: CapabilityStatusSchema,
+    refresh: CapabilityStatusSchema,
     rebuild: CapabilityStatusSchema,
   }).strict(),
 }).strict();
@@ -252,13 +253,88 @@ export const GraphSymbolSchema = z.object({
   route: z.string().startsWith("/code/symbols/").max(2_048),
 }).strict();
 
+export const WikiEntityIdSchema = z.string()
+  .regex(/^mx_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Wiki entity ID.");
+
+export const WikiLifecycleStateSchema = z.enum([
+  "in_flight",
+  "promoted",
+  "deprecated",
+  "archived",
+]);
+
+export const WikiGroundingHealthSchema = z.enum([
+  "fresh",
+  "changed",
+  "missing",
+  "ambiguous",
+  "unverified",
+]);
+
+const wikiDisplayText = (maximum: number, minimum = 1) => utf8Text(maximum, minimum)
+  .refine(
+    (value) => value.normalize("NFC") === value
+      && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(value),
+    "Wiki display text contains unsafe characters.",
+  );
+const wikiKind = wikiDisplayText(128)
+  .refine((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value), "Invalid Wiki entity kind.");
+const wikiSourceType = wikiDisplayText(128)
+  .refine((value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value), "Invalid Wiki source type.");
+
+export const WikiEntityRefSchema = z.object({
+  id: WikiEntityIdSchema,
+  kind: wikiKind,
+  title: wikiDisplayText(512).nullable(),
+}).strict();
+
+export const WikiEntitySummarySchema = z.object({
+  id: WikiEntityIdSchema,
+  kind: wikiKind,
+  title: wikiDisplayText(512),
+  summary: wikiDisplayText(2_048, 0).nullable(),
+  lifecycleState: WikiLifecycleStateSchema,
+  groundingHealth: WikiGroundingHealthSchema,
+  topics: z.array(WikiEntityIdSchema).max(50),
+  topicsTruncated: z.boolean(),
+  sourceTypes: z.array(wikiSourceType).max(50),
+  sourceTypesTruncated: z.boolean(),
+  location: z.object({
+    path: repositoryDisplayPath,
+    startLine: z.number().int().positive(),
+    endLine: z.number().int().positive(),
+  }).strict(),
+  version: z.object({
+    semanticRevision: z.number().int().nonnegative(),
+    contentHash: revision,
+  }).strict(),
+  diagnostics: z.array(HubDiagnosticSchema).max(10),
+  diagnosticsTruncated: z.boolean(),
+  route: z.string().startsWith("/knowledge/").max(2_048),
+}).strict().superRefine((value, context) => {
+  if (value.location.endLine < value.location.startLine) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["location"], message: "A Wiki source range cannot end before it starts." });
+  }
+  if (value.route !== `/knowledge/${encodeURIComponent(value.id)}`) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["route"], message: "A Knowledge route must identify its entity." });
+  }
+});
+
 export const WikiSearchResultSchema = z.object({
-  id: identifier,
+  id: WikiEntityIdSchema,
   kind: z.literal("wiki"),
-  title: z.string().min(1).max(512),
-  description: z.string().max(2_048).optional(),
-  path: repositoryDisplayPath.optional(),
-  route: z.string().startsWith("/").max(2_048).optional(),
+  entityKind: wikiKind,
+  title: wikiDisplayText(512),
+  summary: wikiDisplayText(2_048, 0).nullable(),
+  lifecycleState: WikiLifecycleStateSchema,
+  groundingHealth: WikiGroundingHealthSchema,
+  topics: z.array(WikiEntityIdSchema).max(50),
+  topicsTruncated: z.boolean(),
+  sourceTypes: z.array(wikiSourceType).max(50),
+  sourceTypesTruncated: z.boolean(),
+  path: repositoryDisplayPath,
+  matchedFields: z.array(z.enum(["id", "title", "summary", "body"])).max(4),
+  route: z.string().startsWith("/knowledge/").max(2_048),
 }).strict();
 
 export const SymbolSearchResultSchema = GraphSymbolSchema.extend({
@@ -476,6 +552,180 @@ export const CodeWorkspaceResponseSchema = z.object({
   }
 });
 
+export const WikiEntityListRequestSchema = z.object({
+  kind: wikiKind.optional(),
+  topic: WikiEntityIdSchema.optional(),
+  lifecycle: WikiLifecycleStateSchema.optional(),
+  grounding: WikiGroundingHealthSchema.optional(),
+  sourceType: wikiSourceType.optional(),
+  cursor: cursor.optional(),
+  limit: z.coerce.number().int().min(1).max(HUB_LIMITS.maxSearchGroupSize)
+    .default(HUB_LIMITS.defaultPageSize),
+}).strict();
+
+export const WikiEntityListResponseSchema = z.object({
+  indexedRevision: revision,
+  observedAt: isoTimestamp,
+  items: z.array(WikiEntitySummarySchema).max(HUB_LIMITS.maxSearchGroupSize),
+  nextCursor: cursor.nullable(),
+  truncated: z.boolean(),
+}).strict().superRefine((value, context) => {
+  if (value.nextCursor !== null && !value.truncated) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["truncated"], message: "A paginated Wiki response must report truncation." });
+  }
+});
+
+export const WikiProvenanceSchema = z.object({
+  kind: z.enum(["human", "agent", "system", "migration", "unknown"]),
+  id: wikiDisplayText(256).nullable(),
+  capturedAt: isoTimestamp.nullable(),
+}).strict();
+
+export const WikiSourceSchema = z.object({
+  type: wikiSourceType,
+  ref: wikiDisplayText(2_048, 0).nullable(),
+  note: wikiDisplayText(2_048, 0).nullable(),
+  repository: wikiDisplayText(512, 0).nullable(),
+  commit: wikiDisplayText(128, 0).nullable(),
+  capturedAt: isoTimestamp.nullable(),
+}).strict();
+
+export const WikiGroundingCandidateSchema = z.object({
+  node: wikiDisplayText(512),
+  fingerprint: wikiDisplayText(256, 0).nullable(),
+  file: repositoryDisplayPath.nullable(),
+  score: z.number().finite().nullable(),
+}).strict();
+
+export const WikiGroundingSchema = z.object({
+  state: z.enum(["fresh", "stale", "missing", "unresolved", "ungrounded"]),
+  health: WikiGroundingHealthSchema,
+  requestedNode: wikiDisplayText(512, 0).nullable(),
+  resolvedNode: wikiDisplayText(512, 0).nullable(),
+  fingerprint: wikiDisplayText(256, 0).nullable(),
+  file: repositoryDisplayPath.nullable(),
+  commit: wikiDisplayText(128, 0).nullable(),
+  verifiedAt: isoTimestamp.nullable(),
+  reason: wikiDisplayText(1_024, 0).nullable(),
+  candidates: z.array(WikiGroundingCandidateSchema).max(8),
+  candidatesTruncated: z.boolean(),
+}).strict().superRefine((value, context) => {
+  const validHealth = value.state === "fresh" ? value.health === "fresh"
+    : value.state === "stale" ? value.health === "changed"
+      : value.state === "missing" ? value.health === "missing"
+        : value.state === "unresolved" ? ["ambiguous", "unverified"].includes(value.health)
+          : value.health === "unverified";
+  if (!validHealth) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["health"], message: "Wiki grounding state and health contradict one another." });
+  }
+  if (value.state === "ungrounded") {
+    if (value.requestedNode !== null || value.fingerprint !== null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["requestedNode"], message: "Ungrounded Wiki entries cannot identify a requested code node." });
+    }
+  } else if (value.requestedNode === null || value.fingerprint === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["requestedNode"], message: "A grounded Wiki entry requires its canonical node and fingerprint." });
+  }
+  if (value.state === "fresh" && value.resolvedNode === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["resolvedNode"], message: "A fresh Wiki grounding requires its resolved code node." });
+  }
+});
+
+export const WikiEntityDetailResponseSchema = z.object({
+  indexedRevision: revision,
+  observedAt: isoTimestamp,
+  entity: WikiEntitySummarySchema,
+  body: z.object({
+    content: utf8Text(128 * 1_024, 0),
+    totalBytes: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+  }).strict(),
+  provenance: WikiProvenanceSchema.nullable(),
+  sources: z.object({
+    items: z.array(WikiSourceSchema).max(50),
+    total: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+  }).strict(),
+  groundings: z.object({
+    items: z.array(WikiGroundingSchema).max(50),
+    total: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+  }).strict(),
+  relationCount: z.number().int().nonnegative(),
+  backlinkCount: z.number().int().nonnegative(),
+}).strict().superRefine((value, context) => {
+  if (value.sources.total < value.sources.items.length || value.groundings.total < value.groundings.items.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Wiki detail totals cannot be smaller than their bounded previews." });
+  }
+  if (value.sources.truncated !== (value.sources.total > value.sources.items.length)
+    || value.groundings.truncated !== (value.groundings.total > value.groundings.items.length)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Wiki detail preview truncation must match its exact totals." });
+  }
+  if (value.body.truncated !== (value.body.totalBytes > new TextEncoder().encode(value.body.content).byteLength)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["body", "truncated"], message: "Wiki body truncation must match its exact byte count." });
+  }
+});
+
+export const WikiRelationSchema = z.object({
+  type: wikiDisplayText(128),
+  source: WikiEntityRefSchema,
+  target: WikiEntityRefSchema,
+  note: wikiDisplayText(2_048, 0).nullable(),
+}).strict();
+
+export const WikiRelationHitSchema = z.object({
+  direction: z.enum(["outgoing", "incoming"]),
+  relation: WikiRelationSchema,
+  entity: WikiEntitySummarySchema,
+}).strict();
+
+export const WikiRelationsRequestSchema = z.object({
+  direction: z.enum(["outgoing", "incoming", "both"]).default("both"),
+  type: wikiDisplayText(128).optional(),
+  cursor: cursor.optional(),
+  limit: z.coerce.number().int().min(1).max(HUB_LIMITS.maxSearchGroupSize)
+    .default(HUB_LIMITS.defaultPageSize),
+}).strict();
+
+export const WikiBacklinksRequestSchema = z.object({
+  type: wikiDisplayText(128).optional(),
+  cursor: cursor.optional(),
+  limit: z.coerce.number().int().min(1).max(HUB_LIMITS.maxSearchGroupSize)
+    .default(HUB_LIMITS.defaultPageSize),
+}).strict();
+
+const wikiPageEnvelope = {
+  indexedRevision: revision,
+  observedAt: isoTimestamp,
+  nextCursor: cursor.nullable(),
+  truncated: z.boolean(),
+} as const;
+
+export const WikiRelationsResponseSchema = z.object({
+  ...wikiPageEnvelope,
+  items: z.array(WikiRelationHitSchema).max(HUB_LIMITS.maxSearchGroupSize),
+}).strict();
+
+export const WikiBacklinksResponseSchema = z.object({
+  ...wikiPageEnvelope,
+  items: z.array(WikiRelationSchema).max(HUB_LIMITS.maxSearchGroupSize),
+}).strict();
+
+export const CodeKnowledgeRequestSchema = z.object({
+  cursor: cursor.optional(),
+  limit: z.coerce.number().int().min(1).max(HUB_LIMITS.maxSearchGroupSize)
+    .default(HUB_LIMITS.defaultPageSize),
+}).strict();
+
+export const CodeKnowledgeHitSchema = z.object({
+  entity: WikiEntitySummarySchema,
+  matchedNodes: z.array(GraphSymbolIdSchema).min(1).max(50),
+}).strict();
+
+export const CodeKnowledgeResponseSchema = z.object({
+  ...wikiPageEnvelope,
+  items: z.array(CodeKnowledgeHitSchema).max(HUB_LIMITS.maxSearchGroupSize),
+}).strict();
+
 export const ActivitySourceSchema = z.enum(["activity", "legacy"]);
 
 export const ActivityRequestSchema = z.object({
@@ -678,6 +928,38 @@ export const GraphHealthDetailsSchema = z.object({
   }
 });
 
+export const WikiIndexStatusSchema = z.enum([
+  "missing",
+  "fresh",
+  "stale",
+  "degraded",
+  "rebuild_required",
+  "corrupt",
+  "migration_required",
+]);
+
+export const WikiHealthDetailsSchema = z.object({
+  indexStatus: WikiIndexStatusSchema,
+  observedAt: isoTimestamp,
+  indexedAt: isoTimestamp.nullable(),
+  schemaVersion: z.number().int().nonnegative().nullable(),
+  indexedRevision: revision.nullable(),
+  allowedJobKinds: z.array(z.enum(["wiki_refresh", "wiki_rebuild"])).max(2),
+  recommendedJobKind: z.enum(["wiki_refresh", "wiki_rebuild"]).nullable(),
+  activeJobId: hubJobId.nullable(),
+}).strict().superRefine((value, context) => {
+  if (
+    value.recommendedJobKind !== null
+    && !value.allowedJobKinds.includes(value.recommendedJobKind)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["recommendedJobKind"],
+      message: "A recommended Wiki operation must also be allowed.",
+    });
+  }
+});
+
 export const HealthComponentSchema = z.object({
   id: z.enum(["git", "graph", "wiki", "migration", "local_state"]),
   label: z.string().min(1).max(128),
@@ -686,6 +968,7 @@ export const HealthComponentSchema = z.object({
   diagnostics: z.array(HubDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
   repairJobKind: z.enum(HUB_JOB_KINDS).optional(),
   graph: GraphHealthDetailsSchema.optional(),
+  wiki: WikiHealthDetailsSchema.optional(),
 }).strict().superRefine((value, context) => {
   if (value.id !== "graph" && value.graph !== undefined) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["graph"], message: "Only the graph health component can carry graph details." });
@@ -697,6 +980,17 @@ export const HealthComponentSchema = z.object({
     && value.repairJobKind !== value.graph.recommendedJobKind
   ) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["repairJobKind"], message: "The graph repair action must match its recommended operation." });
+  }
+  if (value.id !== "wiki" && value.wiki !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["wiki"], message: "Only the Wiki health component can carry Wiki details." });
+  }
+  if (
+    value.id === "wiki"
+    && value.wiki !== undefined
+    && value.repairJobKind !== undefined
+    && value.repairJobKind !== value.wiki.recommendedJobKind
+  ) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["repairJobKind"], message: "The Wiki repair action must match its recommended operation." });
   }
 });
 
@@ -776,6 +1070,11 @@ export type HubActor = z.infer<typeof HubActorSchema>;
 export type HomeResponse = z.infer<typeof HomeResponseSchema>;
 export type GraphSymbolId = z.infer<typeof GraphSymbolIdSchema>;
 export type GraphSymbol = z.infer<typeof GraphSymbolSchema>;
+export type WikiEntityId = z.infer<typeof WikiEntityIdSchema>;
+export type WikiLifecycleState = z.infer<typeof WikiLifecycleStateSchema>;
+export type WikiGroundingHealth = z.infer<typeof WikiGroundingHealthSchema>;
+export type WikiEntityRef = z.infer<typeof WikiEntityRefSchema>;
+export type WikiEntitySummary = z.infer<typeof WikiEntitySummarySchema>;
 export type WikiSearchResult = z.infer<typeof WikiSearchResultSchema>;
 export type SymbolSearchResult = z.infer<typeof SymbolSearchResultSchema>;
 export type SourceSearchResult = z.infer<typeof SourceSearchResultSchema>;
@@ -789,6 +1088,22 @@ export type GraphSourcePage = z.infer<typeof GraphSourcePageSchema>;
 export type GraphRelation = z.infer<typeof GraphRelationSchema>;
 export type CodeWorkspaceTraversal = z.infer<typeof CodeWorkspaceTraversalSchema>;
 export type CodeWorkspaceResponse = z.infer<typeof CodeWorkspaceResponseSchema>;
+export type WikiEntityListRequest = z.infer<typeof WikiEntityListRequestSchema>;
+export type WikiEntityListResponse = z.infer<typeof WikiEntityListResponseSchema>;
+export type WikiProvenance = z.infer<typeof WikiProvenanceSchema>;
+export type WikiSource = z.infer<typeof WikiSourceSchema>;
+export type WikiGroundingCandidate = z.infer<typeof WikiGroundingCandidateSchema>;
+export type WikiGrounding = z.infer<typeof WikiGroundingSchema>;
+export type WikiEntityDetailResponse = z.infer<typeof WikiEntityDetailResponseSchema>;
+export type WikiRelation = z.infer<typeof WikiRelationSchema>;
+export type WikiRelationHit = z.infer<typeof WikiRelationHitSchema>;
+export type WikiRelationsRequest = z.infer<typeof WikiRelationsRequestSchema>;
+export type WikiBacklinksRequest = z.infer<typeof WikiBacklinksRequestSchema>;
+export type WikiRelationsResponse = z.infer<typeof WikiRelationsResponseSchema>;
+export type WikiBacklinksResponse = z.infer<typeof WikiBacklinksResponseSchema>;
+export type CodeKnowledgeRequest = z.infer<typeof CodeKnowledgeRequestSchema>;
+export type CodeKnowledgeHit = z.infer<typeof CodeKnowledgeHitSchema>;
+export type CodeKnowledgeResponse = z.infer<typeof CodeKnowledgeResponseSchema>;
 export type ActivitySource = z.infer<typeof ActivitySourceSchema>;
 export type ActivityRequest = z.infer<typeof ActivityRequestSchema>;
 export type ActivityActor = z.infer<typeof ActivityActorSchema>;
@@ -802,6 +1117,8 @@ export type ActivityItem = z.infer<typeof ActivityItemSchema>;
 export type ActivityResponse = z.infer<typeof ActivityResponseSchema>;
 export type GraphIndexStatus = z.infer<typeof GraphIndexStatusSchema>;
 export type GraphHealthDetails = z.infer<typeof GraphHealthDetailsSchema>;
+export type WikiIndexStatus = z.infer<typeof WikiIndexStatusSchema>;
+export type WikiHealthDetails = z.infer<typeof WikiHealthDetailsSchema>;
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 export type HubJobKind = z.infer<typeof HubJobKindSchema>;
 export type HubJobState = z.infer<typeof HubJobStateSchema>;

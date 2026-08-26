@@ -1,7 +1,7 @@
 # Repository WikiPort integration
 
-Status: internal engine and adapter boundary. The Project Hub integration is a
-separate stacked change.
+Status: internal engine and adapter boundary complete. The read-only Project Hub
+consumer is recorded in [`hub-wiki-readonly.md`](hub-wiki-readonly.md).
 
 ## Dependency direction
 
@@ -116,7 +116,6 @@ filtering, path/symlink races, atomic operation batches, selective migrations,
 rollback/recovery, cancellation, lock contention, Graph snapshot revocation,
 and read non-mutation.
 
-The adapter and its engine-only helpers remain private. Read-only Hub Search,
-Knowledge pages, Health, and Wiki maintenance jobs are built on top in the next
-stacked branch; Wiki editing, migration UI, synthesis, and review workbenches
-remain deferred.
+The adapter and its engine-only helpers remain private. The Hub consumes only
+the bounded batching methods and frozen port surface described above. Wiki
+editing, migration UI, synthesis, and review workbenches remain deferred.

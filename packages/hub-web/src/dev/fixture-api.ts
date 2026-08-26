@@ -4,6 +4,8 @@ import type {
   ActivityRequest,
   ActivityResponse,
   CapabilitiesResponse,
+  CodeKnowledgeRequest,
+  CodeKnowledgeResponse,
   CodeWorkspaceRequest,
   CodeWorkspaceResponse,
   GraphSourceProjection,
@@ -16,6 +18,14 @@ import type {
   SearchResponse,
   SessionResponse,
   StartJobRequest,
+  WikiBacklinksRequest,
+  WikiBacklinksResponse,
+  WikiEntityDetailResponse,
+  WikiEntityListRequest,
+  WikiEntityListResponse,
+  WikiEntitySummary,
+  WikiRelationsRequest,
+  WikiRelationsResponse,
 } from "../api/types";
 
 const now = new Date("2026-08-23T08:45:00.000Z");
@@ -237,8 +247,9 @@ const capabilities: CapabilitiesResponse = {
   jobs: available,
   graph: { read: available, refresh: available, rebuild: available },
   wiki: {
-    read: unavailable("The real Wiki reader is not connected in this integration slice."),
-    rebuild: unavailable("The real Wiki rebuild executor is not registered."),
+    read: available,
+    refresh: available,
+    rebuild: available,
   },
 };
 
@@ -325,12 +336,143 @@ const health: HealthResponse = {
         activeJobId: jobs[0].id,
       },
     },
-    { id: "wiki", label: "Project Wiki", status: "unavailable", summary: "The real Wiki reader and executor are not connected in this integration slice.", diagnostics: [] },
+    {
+      id: "wiki",
+      label: "Project Wiki",
+      status: "healthy",
+      summary: "The exact-byte Wiki index is fresh and available for read-only Knowledge views.",
+      diagnostics: [],
+      wiki: {
+        indexStatus: "fresh",
+        observedAt: timestamp(0),
+        indexedAt: timestamp(61),
+        schemaVersion: 3,
+        indexedRevision: revision("6"),
+        allowedJobKinds: ["wiki_refresh", "wiki_rebuild"],
+        recommendedJobKind: null,
+        activeJobId: null,
+      },
+    },
     { id: "local_state", label: "Local Hub state", status: "healthy", summary: "Schema v3 jobs, graph phases, and team state are readable.", diagnostics: [] },
   ],
 };
 
 const graphRevision = revision("7");
+const wikiRevision = revision("6");
+const wikiIds = {
+  hub: "mx_01K36WVM6H7JK8M9NPQRSTVVWX",
+  graph: "mx_01K36R3X4A5BC6DE7FGHJKMNPQ",
+  activity: "mx_01K35Z2A3B4C5D6E7FGHJKMNPQ",
+} as const;
+
+const wikiEntities: WikiEntitySummary[] = [
+  {
+    id: wikiIds.hub,
+    kind: "architecture",
+    title: "Project Hub read boundaries",
+    summary: "The Hub reads canonical project state through revision-bound internal ports and never mutates during ordinary browsing.",
+    lifecycleState: "promoted",
+    groundingHealth: "fresh",
+    topics: [wikiIds.graph],
+    topicsTruncated: false,
+    sourceTypes: ["file", "symbol"],
+    sourceTypesTruncated: false,
+    location: { path: ".mex/wiki/architecture/project-hub.md", startLine: 1, endLine: 48 },
+    version: { semanticRevision: 4, contentHash: revision("1") },
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    route: `/knowledge/${wikiIds.hub}`,
+  },
+  {
+    id: wikiIds.graph,
+    kind: "decision",
+    title: "One snapshot per graph request",
+    summary: "Search and symbol reads revalidate the database, repository snapshot, and exact source bytes before returning data.",
+    lifecycleState: "promoted",
+    groundingHealth: "changed",
+    topics: [],
+    topicsTruncated: false,
+    sourceTypes: ["file", "commit"],
+    sourceTypesTruncated: false,
+    location: { path: ".mex/wiki/decisions/graph-snapshot.md", startLine: 1, endLine: 35 },
+    version: { semanticRevision: 2, contentHash: revision("2") },
+    diagnostics: [{ code: "WIKI_GROUNDING_CHANGED", severity: "warning", message: "The grounded symbol changed after this entry was indexed." }],
+    diagnosticsTruncated: false,
+    route: `/knowledge/${wikiIds.graph}`,
+  },
+  {
+    id: wikiIds.activity,
+    kind: "runbook",
+    title: "Review immutable activity",
+    summary: "Use the Activity workbench to inspect canonical and legacy history without advancing cursors or creating events.",
+    lifecycleState: "in_flight",
+    groundingHealth: "unverified",
+    topics: [wikiIds.hub],
+    topicsTruncated: false,
+    sourceTypes: ["manual"],
+    sourceTypesTruncated: false,
+    location: { path: ".mex/wiki/runbooks/activity-review.md", startLine: 1, endLine: 24 },
+    version: { semanticRevision: 1, contentHash: revision("3") },
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    route: `/knowledge/${wikiIds.activity}`,
+  },
+];
+
+function wikiDetail(id: string): WikiEntityDetailResponse {
+  const entity = wikiEntities.find((item) => item.id === id) ?? wikiEntities[0];
+  const grounded = entity.id === wikiIds.hub;
+  const body = entity.id === wikiIds.hub
+    ? "# Project Hub read boundaries\n\nThe Hub is a local, read-only projection of canonical project state.\n\nEvery indexed response belongs to one stable revision. Pagination never combines revisions, and maintenance runs only after an explicit user action."
+    : `# ${entity.title}\n\n${entity.summary ?? "No additional narrative is recorded."}`;
+  return {
+    indexedRevision: wikiRevision,
+    observedAt: timestamp(0),
+    entity,
+    body: {
+      content: body,
+      totalBytes: new TextEncoder().encode(body).byteLength,
+      truncated: false,
+    },
+    provenance: { kind: "human", id: "daksh", capturedAt: timestamp(2_880) },
+    sources: {
+      items: [{ type: "file", ref: entity.location.path, note: "Canonical Wiki source", repository: "mex", commit: "4f52336", capturedAt: timestamp(61) }],
+      total: 1,
+      truncated: false,
+    },
+    groundings: {
+      items: grounded ? [{ state: "fresh", health: "fresh", requestedNode: "sym.createHubServer", resolvedNode: "sym.createHubServer", fingerprint: revision("4"), file: "src/hub/server.ts", commit: "4f52336", verifiedAt: timestamp(61), reason: null, candidates: [], candidatesTruncated: false }] : [{ state: "ungrounded", health: "unverified", requestedNode: null, resolvedNode: null, fingerprint: null, file: null, commit: null, verifiedAt: null, reason: "No explicit code grounding is recorded.", candidates: [], candidatesTruncated: false }],
+      total: 1,
+      truncated: false,
+    },
+    relationCount: entity.id === wikiIds.hub ? 1 : 0,
+    backlinkCount: entity.id === wikiIds.hub ? 1 : 0,
+  };
+}
+
+function wikiRelations(id: string): WikiRelationsResponse {
+  const target = wikiEntities.find((item) => item.id !== id) ?? wikiEntities[1];
+  const root = wikiEntities.find((item) => item.id === id) ?? wikiEntities[0];
+  return {
+    indexedRevision: wikiRevision,
+    observedAt: timestamp(0),
+    items: id === wikiIds.hub ? [{ direction: "outgoing", relation: { type: "depends_on", source: { id: root.id, kind: root.kind, title: root.title }, target: { id: target.id, kind: target.kind, title: target.title }, note: "Graph reads provide explicit code context." }, entity: target }] : [],
+    nextCursor: null,
+    truncated: false,
+  };
+}
+
+function wikiBacklinks(id: string): WikiBacklinksResponse {
+  const source = wikiEntities[2];
+  const target = wikiEntities.find((item) => item.id === id) ?? wikiEntities[0];
+  return {
+    indexedRevision: wikiRevision,
+    observedAt: timestamp(0),
+    items: id === wikiIds.hub ? [{ type: "related_to", source: { id: source.id, kind: source.kind, title: source.title }, target: { id: target.id, kind: target.kind, title: target.title }, note: "The activity runbook is reviewed from the Hub." }] : [],
+    nextCursor: null,
+    truncated: false,
+  };
+}
 
 const graphSymbols: GraphSymbol[] = [
   {
@@ -383,12 +525,26 @@ const searchResponse = (request: SearchRequest): SearchResponse => ({
   observedAt: timestamp(0),
   groups: {
     wiki: {
-      status: "unavailable",
-      items: [],
+      status: "available",
+      items: wikiEntities.filter((entity) => `${entity.title} ${entity.summary ?? ""}`.toLowerCase().includes(request.q.toLowerCase()) || request.q.toLowerCase().includes("hub")).map((entity) => ({
+        id: entity.id,
+        kind: "wiki" as const,
+        entityKind: entity.kind,
+        title: entity.title,
+        summary: entity.summary,
+        lifecycleState: entity.lifecycleState,
+        groundingHealth: entity.groundingHealth,
+        topics: entity.topics,
+        topicsTruncated: entity.topicsTruncated,
+        sourceTypes: entity.sourceTypes,
+        sourceTypesTruncated: entity.sourceTypesTruncated,
+        path: entity.location.path,
+        matchedFields: ["title" as const, "summary" as const],
+        route: entity.route,
+      })),
       nextCursor: null,
       truncated: false,
-      revision: null,
-      detail: "The Wiki reader is not connected in this integration slice.",
+      revision: wikiRevision,
     },
     symbols: {
       status: "available",
@@ -496,6 +652,38 @@ class FixtureHubApi implements HubApi {
   }
   search(request: SearchRequest) { return Promise.resolve(searchResponse(request)); }
   getCodeSymbol(id: string, request: CodeWorkspaceRequest) { return Promise.resolve(codeWorkspace(id, request)); }
+  listWikiEntities(request: WikiEntityListRequest): Promise<WikiEntityListResponse> {
+    const filtered = wikiEntities.filter((entity) => (
+      (!request.kind || entity.kind === request.kind)
+      && (!request.topic || entity.topics.includes(request.topic))
+      && (!request.lifecycle || entity.lifecycleState === request.lifecycle)
+      && (!request.grounding || entity.groundingHealth === request.grounding)
+      && (!request.sourceType || entity.sourceTypes.includes(request.sourceType))
+    ));
+    const offset = request.cursor === "fixture_wiki_2" ? 2 : 0;
+    const pageSize = Math.min(request.limit, 2);
+    const items = filtered.slice(offset, offset + pageSize);
+    const hasMore = offset + items.length < filtered.length;
+    return Promise.resolve({
+      indexedRevision: wikiRevision,
+      observedAt: timestamp(0),
+      items,
+      nextCursor: hasMore ? "fixture_wiki_2" : null,
+      truncated: hasMore,
+    });
+  }
+  getWikiEntity(id: string) { return Promise.resolve(wikiDetail(id)); }
+  getWikiRelations(id: string, _request: WikiRelationsRequest) { return Promise.resolve(wikiRelations(id)); }
+  getWikiBacklinks(id: string, _request: WikiBacklinksRequest) { return Promise.resolve(wikiBacklinks(id)); }
+  getCodeKnowledge(id: string, _request: CodeKnowledgeRequest): Promise<CodeKnowledgeResponse> {
+    return Promise.resolve({
+      indexedRevision: wikiRevision,
+      observedAt: timestamp(0),
+      items: id === "sym.createHubServer" ? [{ entity: wikiEntities[0], matchedNodes: [id] }] : [],
+      nextCursor: null,
+      truncated: false,
+    });
+  }
   getHealth() { return Promise.resolve(health); }
   getJobs(): Promise<JobsResponse> { return Promise.resolve({ items: [...this.#jobs], nextCursor: null }); }
   getJob(id: string) { return Promise.resolve(this.#jobs.find((job) => job.id === id) ?? this.#jobs[0]); }

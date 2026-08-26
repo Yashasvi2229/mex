@@ -667,6 +667,57 @@
   line-height: 1.45;
 }
 
+.wikiReadout {
+  display: grid;
+  gap: 0;
+  margin-top: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.wikiReadout .indexBanner {
+  padding: 8px 9px;
+}
+
+.wikiReadout .indexBanner strong {
+  font-size: 11px;
+}
+
+.wikiFacts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.wikiFacts > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 8px 9px;
+  border-top: 1px solid var(--border);
+}
+
+.wikiFacts > div:nth-child(odd) {
+  border-right: 1px solid var(--border);
+}
+
+.wikiFacts dt,
+.wikiFacts dd {
+  margin: 0;
+  font-size: 8.5px;
+}
+
+.wikiFacts dt {
+  color: var(--muted-foreground);
+  text-transform: uppercase;
+}
+
+.wikiFacts dd {
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
 .serviceMain .actionControls {
   align-items: flex-start;
   margin-top: 7px;

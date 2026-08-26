@@ -157,6 +157,12 @@ export interface RepositoryWikiSearchBundle {
   readonly results: WikiPage<WikiSearchHit>;
 }
 
+export interface RepositoryWikiListBundle {
+  readonly indexedRevision: Revision;
+  readonly observedAt: string;
+  readonly results: WikiPage<WikiEntitySummary>;
+}
+
 export type RepositoryKnowledgeSelection =
   | { readonly kind: "overview" }
   | { readonly kind: "relations"; readonly results: WikiPage<WikiRelationHit> }
@@ -360,6 +366,23 @@ export class RepositoryWikiPort implements WikiPort<
       observedAt: stableObservationTime(session),
       results: this.#currentSearchPage(session, graph, request),
     }));
+  }
+
+  /** Package-private Wiki browse bundle produced under one immutable session. */
+  async listBundle(request: WikiListRequest = {}): Promise<RepositoryWikiListBundle> {
+    return this.#readCurrent((session, graph) => ({
+      indexedRevision: session.indexedRevision,
+      observedAt: stableObservationTime(session),
+      results: this.#currentListPage(session, graph, request),
+    }));
+  }
+
+  /**
+   * Package-private exact refresh discovery. Added, modified, and deleted
+   * canonical paths are compared inside one immutable Wiki read handshake.
+   */
+  async discoverRefreshPaths(): Promise<readonly RepoRelativePath[]> {
+    return this.#read((session) => session.refreshPaths().map(toProjectPath));
   }
 
   /** Package-private entity workspace; entity and selected panel never mix snapshots. */

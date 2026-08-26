@@ -112,21 +112,23 @@ function SourceResult({ item }: { item: Extract<SearchResult, { kind: "source_ch
 }
 
 function WikiResult({ item }: { item: Extract<SearchResult, { kind: "wiki" }> }) {
-  const body = (
-    <>
+  return (
+    <Item className={styles.searchResult} render={<Link to={item.route} />}>
       <ItemMedia className={styles.resultIcon} variant="icon"><FileSearch aria-hidden="true" /></ItemMedia>
       <ItemContent className={styles.resultBody}>
-        <small>Knowledge</small>
+        <small>{item.entityKind} · {item.lifecycleState.replaceAll("_", " ")}</small>
         <ItemTitle>{item.title}</ItemTitle>
-        {item.description ? <ItemDescription>{item.description}</ItemDescription> : null}
-        {item.path ? <span className={styles.resultMetadata}><span>{item.path}</span></span> : null}
+        {item.summary ? <ItemDescription>{item.summary}</ItemDescription> : null}
+        <span className={styles.resultMetadata}>
+          <span>{item.path}</span>
+          <Badge className={styles.termChip} variant="outline">{item.groundingHealth}</Badge>
+          {item.matchedFields.map((field) => <Badge className={styles.termChip} key={field} variant="secondary">{field}</Badge>)}
+          {item.topics.slice(0, 2).map((topic) => <span key={topic}>topic {topic}</span>)}
+        </span>
       </ItemContent>
-      {item.route ? <ItemActions className={styles.resultAction}><ArrowUpRight aria-hidden="true" /></ItemActions> : null}
-    </>
+      <ItemActions className={styles.resultAction}><ArrowUpRight aria-hidden="true" /></ItemActions>
+    </Item>
   );
-  return item.route
-    ? <Item className={styles.searchResult} render={<Link to={item.route} />}>{body}</Item>
-    : <Item className={styles.searchResult} render={<article />}>{body}</Item>;
 }
 
 function Result({ item }: { item: SearchResult }) {
@@ -207,7 +209,7 @@ function ResultGroup({
         {group.status === "failed" ? (
           <div className={styles.groupProblem} role="status"><AlertTriangle aria-hidden="true" /><p><strong>This source failed independently.</strong>{group.detail}</p></div>
         ) : group.status === "unavailable" ? (
-          <StatePanel compact state="unavailable" title={`${view.label} unavailable`} detail={view.kind === "wiki" ? "Wiki is not connected." : group.detail ?? "This source is unavailable."} />
+          <StatePanel compact state="unavailable" title={`${view.label} unavailable`} detail={group.detail ?? "This source is unavailable."} />
         ) : group.items.length ? (
           <div className={styles.searchResults}>{group.items.map((item) => <Result item={item} key={item.id} />)}</div>
         ) : (
@@ -218,7 +220,7 @@ function ResultGroup({
       {revisionConflict ? (
         <CardFooter className={styles.groupPaginationProblem} role="alert">
           <RefreshCw aria-hidden="true" />
-          <span><strong>This source changed while you were paging.</strong>Reload the newest graph snapshot before loading more results.</span>
+          <span><strong>This source changed while you were paging.</strong>Reload the newest trusted snapshot before loading more results.</span>
           <Button onClick={onReload} size="sm" type="button" variant="outline">Reload results</Button>
         </CardFooter>
       ) : pagination.isError || pageFailed ? (

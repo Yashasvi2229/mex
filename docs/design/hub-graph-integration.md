@@ -1,6 +1,7 @@
 # Project Hub graph integration
 
-Status: the Graph half of Checkpoint 2 is working; Wiki integration remains blocked
+Status: the Graph half of Checkpoint 2 is working; the later Wiki consumer is
+recorded in [`hub-wiki-readonly.md`](hub-wiki-readonly.md)
 
 This slice connects Lane A's freshness and recovery foundation to the local
 Project Hub. It provides real Code search, symbol inspection, traversal, graph
@@ -10,8 +11,8 @@ Catch Up, or make ordinary reads maintain the graph.
 
 This page records the completed Graph slice. The earlier
 [`project-hub-foundation.md`](project-hub-foundation.md) remains the Lane B
-foundation record; its Graph-pending boundary is superseded here. The Wiki-
-pending boundary remains current.
+foundation record; its Graph-pending boundary is superseded here. The separate
+Wiki integration record supersedes this slice's original Wiki-pending boundary.
 
 ## Ownership and flow
 
@@ -187,7 +188,7 @@ only by the explicitly bounded Search/Code read models. It is never persisted
 in job state or included in Health diagnostics.
 
 The packaged production UI contains no graph fixtures and makes no outbound
-requests. Wiki remains visibly unavailable. Successful graph jobs invalidate
+requests. Successful graph jobs invalidate
 the browser's Search, Code, Health, Jobs, and capability queries so subsequent
 reads prove freshness again.
 

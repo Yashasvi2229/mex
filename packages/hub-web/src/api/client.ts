@@ -1,6 +1,7 @@
 import {
   ActivityResponseSchema,
   BootstrapResponseSchema,
+  CodeKnowledgeResponseSchema,
   CodeWorkspaceResponseSchema,
   GraphSymbolIdSchema,
   HealthResponseSchema,
@@ -11,6 +12,11 @@ import {
   JobPageResponseSchema,
   SearchResponseSchema,
   SessionResponseSchema,
+  WikiBacklinksResponseSchema,
+  WikiEntityDetailResponseSchema,
+  WikiEntityIdSchema,
+  WikiEntityListResponseSchema,
+  WikiRelationsResponseSchema,
 } from "@mex/hub-contracts";
 import { createFixtureApi } from "virtual:mex-hub-fixture-api";
 import type {
@@ -18,6 +24,8 @@ import type {
   ActivityResponse,
   BootstrapResponse,
   CapabilitiesResponse,
+  CodeKnowledgeRequest,
+  CodeKnowledgeResponse,
   CodeWorkspaceRequest,
   CodeWorkspaceResponse,
   HealthResponse,
@@ -29,6 +37,13 @@ import type {
   SearchResponse,
   SessionResponse,
   StartJobRequest,
+  WikiBacklinksRequest,
+  WikiBacklinksResponse,
+  WikiEntityDetailResponse,
+  WikiEntityListRequest,
+  WikiEntityListResponse,
+  WikiRelationsRequest,
+  WikiRelationsResponse,
 } from "./types";
 
 const API_ROOT = "/api/v1";
@@ -59,6 +74,11 @@ export interface HubApi {
   getActivity(request: ActivityRequest): Promise<ActivityResponse>;
   search(request: SearchRequest): Promise<SearchResponse>;
   getCodeSymbol(id: string, request: CodeWorkspaceRequest): Promise<CodeWorkspaceResponse>;
+  listWikiEntities(request: WikiEntityListRequest): Promise<WikiEntityListResponse>;
+  getWikiEntity(id: string): Promise<WikiEntityDetailResponse>;
+  getWikiRelations(id: string, request: WikiRelationsRequest): Promise<WikiRelationsResponse>;
+  getWikiBacklinks(id: string, request: WikiBacklinksRequest): Promise<WikiBacklinksResponse>;
+  getCodeKnowledge(id: string, request: CodeKnowledgeRequest): Promise<CodeKnowledgeResponse>;
   getHealth(): Promise<HealthResponse>;
   getJobs(cursor?: string): Promise<JobsResponse>;
   getJob(id: string): Promise<JobSummary>;
@@ -113,6 +133,14 @@ function assertSafeSymbolId(value: string): string {
   const parsed = GraphSymbolIdSchema.safeParse(value);
   if (!parsed.success) {
     throw new HubApiError(fallbackProblem(400, "The graph symbol identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+function assertSafeWikiEntityId(value: string): string {
+  const parsed = WikiEntityIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The Wiki entity identifier is invalid."));
   }
   return parsed.data;
 }
@@ -204,6 +232,53 @@ export class HttpHubApi implements HubApi {
     return await this.#request(
       `/code/symbols/${encodeURIComponent(assertSafeSymbolId(id))}?${params}`,
       CodeWorkspaceResponseSchema,
+    );
+  }
+
+  listWikiEntities(request: WikiEntityListRequest): Promise<WikiEntityListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.kind) params.set("kind", request.kind);
+    if (request.topic) params.set("topic", request.topic);
+    if (request.lifecycle) params.set("lifecycle", request.lifecycle);
+    if (request.grounding) params.set("grounding", request.grounding);
+    if (request.sourceType) params.set("sourceType", request.sourceType);
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/wiki/entities?${params}`, WikiEntityListResponseSchema);
+  }
+
+  async getWikiEntity(id: string): Promise<WikiEntityDetailResponse> {
+    return await this.#request(
+      `/wiki/entities/${encodeURIComponent(assertSafeWikiEntityId(id))}`,
+      WikiEntityDetailResponseSchema,
+    );
+  }
+
+  getWikiRelations(id: string, request: WikiRelationsRequest): Promise<WikiRelationsResponse> {
+    const params = new URLSearchParams({ direction: request.direction, limit: String(request.limit) });
+    if (request.type) params.set("type", request.type);
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(
+      `/wiki/entities/${encodeURIComponent(assertSafeWikiEntityId(id))}/relations?${params}`,
+      WikiRelationsResponseSchema,
+    );
+  }
+
+  getWikiBacklinks(id: string, request: WikiBacklinksRequest): Promise<WikiBacklinksResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.type) params.set("type", request.type);
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(
+      `/wiki/entities/${encodeURIComponent(assertSafeWikiEntityId(id))}/backlinks?${params}`,
+      WikiBacklinksResponseSchema,
+    );
+  }
+
+  getCodeKnowledge(id: string, request: CodeKnowledgeRequest): Promise<CodeKnowledgeResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(
+      `/code/symbols/${encodeURIComponent(assertSafeSymbolId(id))}/knowledge?${params}`,
+      CodeKnowledgeResponseSchema,
     );
   }
 

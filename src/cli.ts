@@ -8,6 +8,8 @@ import { VERSION } from "./version.js";
 import { captureCommand, flush, isEnabled, getPayloadPreview, showFirstRunNotice } from "./telemetry/index.js";
 import { readMachineId, setGlobalConfigKey } from "./global-config.js";
 import { runFeedback, maybeShowInvite, dismissInvite, enableInvite } from "./feedback/index.js";
+import type { MexConfig } from "./types.js";
+import type { RunHubCommandOptions } from "./hub/command.js";
 
 /**
  * Load config for a CLI command and backfill scaffold identity on the way.
@@ -49,6 +51,22 @@ export function parsePortArg(raw: string): number {
     throw new InvalidArgumentError(`Expected a TCP port from 1 to 65535, got "${raw}".`);
   }
   return port;
+}
+
+/** Pure Hub bootstrap projection so CLI and production wiring share Wiki scope. */
+export function createHubRunOptions(
+  config: Pick<MexConfig, "projectRoot" | "wiki">,
+  scaffoldId: string,
+  options: { port?: number; open: boolean },
+): RunHubCommandOptions {
+  return {
+    projectRoot: config.projectRoot,
+    scaffoldId,
+    port: options.port,
+    openBrowser: options.open,
+    ...(config.wiki?.exclude === undefined ? {} : { wikiExclude: config.wiki.exclude }),
+    ...(config.wiki?.readOnly === undefined ? {} : { wikiReadOnly: config.wiki.readOnly }),
+  };
 }
 
 export const program = new Command();
@@ -133,12 +151,7 @@ program
       const config = loadConfig();
       const identity = getScaffoldIdentity(config);
       const { runHubCommand } = await import("./hub/command.js");
-      await runHubCommand({
-        projectRoot: config.projectRoot,
-        scaffoldId: identity.scaffold_id,
-        port: opts.port,
-        openBrowser: opts.open,
-      });
+      await runHubCommand(createHubRunOptions(config, identity.scaffold_id, opts));
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

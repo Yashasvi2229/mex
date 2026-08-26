@@ -73,14 +73,14 @@ describe("Project Hub routes", () => {
     expect(capabilities).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps unavailable Wiki visible beside real graph groups", async () => {
+  it("renders real Wiki results beside independent graph groups", async () => {
     const user = userEvent.setup();
     renderRoute("/search");
     const input = await screen.findByRole("searchbox", { name: "Search project memory and code" });
-    await user.type(input, "bootstrap session");
+    await user.type(input, "hub");
     await user.click(screen.getByRole("button", { name: "Search" }));
     expect(await screen.findByText("createHubServer")).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Knowledge unavailable" })).toBeVisible();
+    expect(screen.getByText("Project Hub read boundaries")).toBeVisible();
     expect(screen.getByText("Source matches", { selector: "h2" })).toBeVisible();
   });
 
@@ -96,6 +96,7 @@ describe("Project Hub routes", () => {
     expect(screen.getByRole("link", { name: "Activity" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Inbox Unavailable" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Relays Unavailable" })).toBeVisible();
+    expect(screen.queryByText("Wiki unavailable")).not.toBeInTheDocument();
   });
 
   it("keeps the Search input synchronized with browser history", async () => {

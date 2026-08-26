@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
+  BookOpenText,
   Braces,
   ChevronRight,
   FileCode2,
@@ -16,6 +17,7 @@ import { HubApiError } from "../api/client";
 import { useHubApi } from "../api/context";
 import type {
   CapabilitiesResponse,
+  CodeKnowledgeHit,
   CodeWorkspaceRequest,
   CodeWorkspaceResponse,
   CodeWorkspaceView,
@@ -31,6 +33,7 @@ import {
   CardAction,
   CardContent,
   CardDescription,
+  CardFooter,
   CardHeader,
   CardTitle,
 } from "../components/primitives/card";
@@ -46,6 +49,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/primitives/tabs";
 import { cn } from "../lib/utils";
 import styles from "../styles/symbol.module.css";
+import knowledgeStyles from "../styles/knowledge.module.css";
 
 const workspaceViews: Array<{ value: CodeWorkspaceView; label: string; icon: typeof Braces }> = [
   { value: "overview", label: "Overview", icon: Braces },
@@ -216,7 +220,91 @@ function TraversalPanel({
   );
 }
 
-function SymbolIdentity({ response }: { response: CodeWorkspaceResponse }) {
+function RelatedKnowledge({ symbolId, available, reason }: { symbolId: string; available: boolean; reason: string | undefined }) {
+  const api = useHubApi();
+  const [items, setItems] = useState<CodeKnowledgeHit[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [revision, setRevision] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
+  const [revisionConflict, setRevisionConflict] = useState(false);
+  const knowledge = useQuery({
+    queryKey: ["code-knowledge", symbolId],
+    queryFn: () => api.getCodeKnowledge(symbolId, { limit: 25 }),
+    enabled: available,
+    retry: false,
+  });
+  const pagination = useMutation({
+    mutationFn: (started: { symbolId: string; indexedRevision: string; cursor: string | null }) => api.getCodeKnowledge(
+      started.symbolId,
+      { limit: 25, ...(started.cursor ? { cursor: started.cursor } : {}) },
+    ),
+    onSuccess: (next, started) => {
+      if (started.symbolId !== symbolId || revision === null || started.indexedRevision !== revision) return;
+      if (next.indexedRevision !== revision) {
+        setRevisionConflict(true);
+        return;
+      }
+      setItems((current) => [...current, ...next.items.filter((item) => !current.some((loaded) => loaded.entity.id === item.entity.id))]);
+      setCursor(next.nextCursor);
+      setTruncated(next.truncated);
+    },
+    onError: (error, started) => {
+      if (started.symbolId === symbolId && started.indexedRevision === revision && error instanceof HubApiError && error.problem.code === "REVISION_CONFLICT") setRevisionConflict(true);
+    },
+  });
+
+  useEffect(() => {
+    setItems([]);
+    setCursor(null);
+    setRevision(null);
+    setTruncated(false);
+    setRevisionConflict(false);
+    pagination.reset();
+  }, [symbolId]);
+
+  useEffect(() => {
+    if (!knowledge.data) return;
+    setItems(knowledge.data.items);
+    setCursor(knowledge.data.nextCursor);
+    setRevision(knowledge.data.indexedRevision);
+    setTruncated(knowledge.data.truncated);
+    setRevisionConflict(false);
+  }, [knowledge.data]);
+
+  async function reloadLatest() {
+    const result = await knowledge.refetch();
+    if (!result.isSuccess) return;
+    setItems(result.data.items);
+    setCursor(result.data.nextCursor);
+    setRevision(result.data.indexedRevision);
+    setTruncated(result.data.truncated);
+    setRevisionConflict(false);
+    pagination.reset();
+  }
+
+  return (
+    <Card className={cn(styles.workspaceCard, knowledgeStyles.relatedRail)} size="sm">
+      <CardHeader><CardTitle><h2>Related Knowledge</h2></CardTitle>{revision ? <CardAction><Badge variant="outline">{items.length}</Badge></CardAction> : null}</CardHeader>
+      <CardContent className={knowledgeStyles.edgeCardContent}>
+        {!available ? <StatePanel compact state="unavailable" title="Related Knowledge unavailable" detail={reason ?? "The Wiki reader is not connected."} />
+          : knowledge.isPending && !revision ? <StatePanel compact state="loading" title="Finding explicit Knowledge links" detail="Reading canonical code groundings only." />
+            : knowledge.isError && !revision ? <StatePanel compact state="unavailable" title="Related Knowledge unavailable" detail="A trustworthy Wiki revision could not be read. The symbol workspace remains available." />
+              : items.length ? <div className={knowledgeStyles.relatedRailList}>{items.map((item) => (
+                <Link className={knowledgeStyles.relatedKnowledgeLink} key={item.entity.id} to={item.entity.route}>
+                  <span><strong>{item.entity.title}</strong><small>{item.entity.kind} · {item.matchedNodes.join(", ")}</small></span>
+                  <ChevronRight aria-hidden="true" />
+                </Link>
+              ))}</div> : <StatePanel compact state="empty" title="No Related Knowledge" detail="No explicit Wiki grounding points to this symbol." />}
+      </CardContent>
+      {revisionConflict ? <CardFooter className={knowledgeStyles.paginationProblem} role="alert"><RefreshCw aria-hidden="true" /><span><strong>Knowledge changed while paging.</strong>Reload before combining revisions.</span><Button onClick={() => void reloadLatest()} size="sm" type="button" variant="outline">Reload latest</Button></CardFooter>
+        : pagination.isError ? <CardFooter className={knowledgeStyles.paginationProblem} role="alert"><AlertTriangle aria-hidden="true" /><span><strong>More Knowledge could not be loaded.</strong>Loaded links remain visible.</span><Button onClick={() => { if (revision) pagination.mutate({ symbolId, indexedRevision: revision, cursor }); }} size="sm" type="button" variant="outline">Try again</Button></CardFooter>
+          : cursor ? <CardFooter className={knowledgeStyles.loadFooter}><Button disabled={pagination.isPending} onClick={() => { if (revision) pagination.mutate({ symbolId, indexedRevision: revision, cursor }); }} size="sm" type="button" variant="outline">{pagination.isPending ? "Loading…" : "Load more"}</Button></CardFooter>
+            : truncated ? <CardFooter className={knowledgeStyles.boundedFooter}>Related Knowledge reached its safety bound.</CardFooter> : null}
+    </Card>
+  );
+}
+
+function SymbolIdentity({ response, wiki }: { response: CodeWorkspaceResponse; wiki: CapabilitiesResponse["wiki"] }) {
   const { symbol } = response;
   return (
     <section className={styles.symbolIdentity} aria-labelledby="symbol-identity-heading">
@@ -236,6 +324,7 @@ function SymbolIdentity({ response }: { response: CodeWorkspaceResponse }) {
           </dl>
         </CardContent>
       </Card>
+      <RelatedKnowledge key={symbol.id} available={wiki.read.availability === "available"} reason={wiki.read.reason} symbolId={symbol.id} />
     </section>
   );
 }
@@ -404,7 +493,7 @@ export function SymbolPage() {
               </div>
             ) : null}
             <div className={styles.symbolWorkspace}>
-              <SymbolIdentity response={response} />
+              <SymbolIdentity response={response} wiki={capabilities.wiki} />
               <section className={styles.sourceWorkspace} aria-labelledby="source-heading">
                 <Card className={styles.workspaceCard} size="sm">
                   <CardHeader>
