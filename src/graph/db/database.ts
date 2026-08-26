@@ -17,10 +17,12 @@ import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { schemaPath } from "../assets.js";
 import { GraphRebuildRequiredError } from "../errors.js";
+import { bandHashInts, encodeMinhash } from "../fingerprint.js";
+import type { Fingerprint } from "../reconcile.js";
 import { openSqlite, type SqliteDatabase } from "./sqlite.js";
 
 /** The schema version this build writes/expects (matches schema.sql's seed). */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 /** @deprecated Prefer the explicit DB_SCHEMA_VERSION name. */
 export const CURRENT_SCHEMA_VERSION = DB_SCHEMA_VERSION;
 
@@ -77,8 +79,9 @@ export function openGraphDatabase(
         `This mex build supports graph schema ${DB_SCHEMA_VERSION}, but the index uses ${current}.`,
       );
     }
-    if (current < DB_SCHEMA_VERSION) migrateV1ToV2(db, schema);
-    else db.exec(schema);
+    if (current < 2) migrateV1ToV2(db, schema);
+    if (current < 3) migrateV2ToV3(db);
+    db.exec(schema);
   }
 
   // Belt-and-suspenders: guarantee the version row exists even if the SQL seed
@@ -229,6 +232,73 @@ function migrateV1ToV2(db: SqliteDatabase, schema: string): void {
   // Creates all new tables and indexes after the old tables have the v2 columns.
   db.exec(schema);
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_unresolved_ref_key ON unresolved_refs(ref_key)");
-  writeSchemaVersion(db, DB_SCHEMA_VERSION);
+  writeSchemaVersion(db, 2);
   markGraphRebuildRequired(db, "schema-v1");
+}
+
+/**
+ * Schema v2 → v3: LOSSLESS storage re-encode of the fingerprint subsystem
+ * (issue #140 storage follow-up). The minhash JSON text becomes a 256-byte
+ * BLOB, LSH rows key on an INTEGER ref instead of repeating the TEXT node id,
+ * and band hashes truncate to int64 (a truncation collision merely adds an
+ * LSH candidate, which full minhash scoring rejects). Decoded fingerprints —
+ * and therefore every reconciler outcome — are identical, so the graph is NOT
+ * marked rebuild-required: existing groundings keep working immediately.
+ */
+function migrateV2ToV3(db: SqliteDatabase): void {
+  if (!tableExists(db, "node_fingerprints") || columns(db, "node_fingerprints").has("ref")) {
+    writeSchemaVersion(db, 3);
+    return;
+  }
+  db.transaction(() => {
+    db.exec(`CREATE TABLE node_fingerprints_v3 (
+      ref          INTEGER PRIMARY KEY,
+      node_id      TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
+      minhash      BLOB NOT NULL,
+      neighbors    TEXT NOT NULL,
+      token_count  INTEGER NOT NULL
+    )`);
+    const rows = db.prepare(
+      "SELECT node_id, minhash, neighbors, token_count FROM node_fingerprints ORDER BY node_id",
+    ).all() as Array<{ node_id: string; minhash: string; neighbors: string; token_count: number }>;
+    const insertFingerprint = db.prepare(
+      "INSERT INTO node_fingerprints_v3 (node_id, minhash, neighbors, token_count) VALUES (?, ?, ?, ?)",
+    );
+    const migrated: Array<{ node_id: string; fingerprint: Fingerprint }> = [];
+    for (const row of rows) {
+      // A row this build cannot decode was never usable by the reconciler;
+      // dropping it changes nothing observable.
+      try {
+        const fingerprint: Fingerprint = {
+          minhash: JSON.parse(row.minhash) as number[],
+          neighbors: JSON.parse(row.neighbors) as string[],
+          tokenCount: row.token_count,
+        };
+        insertFingerprint.run(row.node_id, encodeMinhash(fingerprint.minhash), row.neighbors, row.token_count);
+        migrated.push({ node_id: row.node_id, fingerprint });
+      } catch { /* skip undecodable legacy row */ }
+    }
+    db.exec("DROP TABLE lsh_buckets");
+    db.exec("DROP TABLE node_fingerprints");
+    db.exec("ALTER TABLE node_fingerprints_v3 RENAME TO node_fingerprints");
+    db.exec(`CREATE TABLE lsh_buckets (
+      band      INTEGER NOT NULL,
+      band_hash INTEGER NOT NULL,
+      ref       INTEGER NOT NULL REFERENCES node_fingerprints(ref) ON DELETE CASCADE,
+      PRIMARY KEY (band, band_hash, ref)
+    ) WITHOUT ROWID`);
+    const refByNode = new Map(
+      (db.prepare("SELECT ref, node_id FROM node_fingerprints").all() as Array<{ ref: number | bigint; node_id: string }>)
+        .map((row) => [row.node_id, typeof row.ref === "bigint" ? row.ref : BigInt(row.ref)]),
+    );
+    const insertBucket = db.prepare("INSERT INTO lsh_buckets (band, band_hash, ref) VALUES (?, ?, ?)");
+    for (const { node_id, fingerprint } of migrated) {
+      const ref = refByNode.get(node_id);
+      if (ref === undefined) continue;
+      try {
+        bandHashInts(fingerprint).forEach((bandHash, band) => insertBucket.run(band, bandHash, ref));
+      } catch { /* invalid legacy sketch: no LSH rows, same as being unmatchable before */ }
+    }
+  });
+  writeSchemaVersion(db, 3);
 }

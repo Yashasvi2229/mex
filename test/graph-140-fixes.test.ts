@@ -159,3 +159,66 @@ describe("mex graph repair (#140 observation 3)", () => {
     }
   });
 });
+
+describe("schema v3 fingerprint re-encode (#140 storage follow-up)", () => {
+  it("migrates a v2-encoded store losslessly without marking rebuild-required", async () => {
+    const { root, dbPath } = fixture("mex-140-v3-migrate-");
+    const engine = createGraphEngine({ rootDir: root });
+    await engine.build();
+    engine.close();
+
+    const { FingerprintStore } = await import("../src/graph/fingerprint-store.js");
+    const { bandHashes, decodeMinhash } = await import("../src/graph/fingerprint.js");
+    const { openGraphDatabase, readSchemaVersion, graphRequiresRebuild, DB_SCHEMA_VERSION } =
+      await import("../src/graph/db/database.js");
+
+    // Snapshot the real fingerprints, then hand-downgrade the store to the
+    // exact v2 encoding: JSON minhash text, TEXT node ids in lsh_buckets,
+    // 64-char hex band hashes, idx_lsh, and a version-2 row.
+    const db = openSqlite(dbPath);
+    const rows = db.prepare("SELECT node_id, minhash, neighbors, token_count FROM node_fingerprints").all() as
+      Array<{ node_id: string; minhash: Uint8Array; neighbors: string; token_count: number }>;
+    expect(rows.length).toBeGreaterThan(0);
+    const reference = new Map(rows.map((row) => [row.node_id, {
+      minhash: decodeMinhash(row.minhash),
+      neighbors: JSON.parse(row.neighbors) as string[],
+      tokenCount: row.token_count,
+    }]));
+    db.exec(`CREATE TABLE nf_old (
+      node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+      minhash TEXT NOT NULL, neighbors TEXT NOT NULL, token_count INTEGER NOT NULL)`);
+    const insertOld = db.prepare("INSERT INTO nf_old VALUES (?, ?, ?, ?)");
+    for (const row of rows) {
+      insertOld.run(row.node_id, JSON.stringify(decodeMinhash(row.minhash)), row.neighbors, row.token_count);
+    }
+    db.exec("DROP TABLE lsh_buckets");
+    db.exec("DROP TABLE node_fingerprints");
+    db.exec("ALTER TABLE nf_old RENAME TO node_fingerprints");
+    db.exec(`CREATE TABLE lsh_buckets (
+      band INTEGER NOT NULL, band_hash TEXT NOT NULL,
+      node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE)`);
+    db.exec("CREATE INDEX idx_lsh ON lsh_buckets(band, band_hash)");
+    const insertBucket = db.prepare("INSERT INTO lsh_buckets VALUES (?, ?, ?)");
+    for (const [nodeId, fingerprint] of reference) {
+      bandHashes(fingerprint).forEach((hash, band) => insertBucket.run(band, hash, nodeId));
+    }
+    db.exec("DELETE FROM schema_versions");
+    db.prepare("INSERT INTO schema_versions (version, applied_at, description) VALUES (2, 0, 'v2 fixture')").run();
+    db.close();
+
+    // A writer open migrates in place; the graph must stay ready (lossless).
+    const migrated = openGraphDatabase(dbPath);
+    try {
+      expect(readSchemaVersion(migrated)).toBe(DB_SCHEMA_VERSION);
+      expect(graphRequiresRebuild(migrated)).toBe(false);
+      const store = new FingerprintStore(migrated);
+      for (const [nodeId, fingerprint] of reference) {
+        expect(store.get(nodeId)).toEqual(fingerprint);
+        const hits = store.lookup(fingerprint).map((entry) => entry.nodeId);
+        expect(hits).toContain(nodeId);
+      }
+    } finally {
+      migrated.close();
+    }
+  }, 30_000);
+});
