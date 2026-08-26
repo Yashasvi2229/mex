@@ -229,8 +229,8 @@ export class ActivityRepository {
             preview.sourcePath,
           );
         }
-        consumed = true;
         const stored = this.#publishExact(issued.preview, issued.bytes);
+        consumed = true;
         this.issuedPreviews.delete(expectedPreviewRevision);
         return stored;
       },

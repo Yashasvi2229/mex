@@ -110,6 +110,22 @@ describe("ActivityRepository", () => {
     expect(() => publication.publish()).toThrowError(MexPortError);
   });
 
+  it("does not consume a prepared publication when a conflicting path is removed for retry", async () => {
+    const root = temporaryRoot();
+    const repository = fixedRepository(root, fakeGit(), firstId);
+    const preview = await repository.previewCreate({
+      actor: { kind: "unknown" }, action: "workstream.created", subjects: [],
+    });
+    const publication = await repository.prepareApplyCreate(preview, preview.previewRevision);
+    const path = join(root, ...preview.sourcePath.split("/"));
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, "conflicting bytes\n", "utf8");
+
+    expect(() => publication.publish()).toThrowError(MexPortError);
+    unlinkSync(path);
+    expect(publication.publish().revision).toBe(preview.revision);
+  });
+
   it("recovers only an exact journaled Activity event and replays it idempotently", async () => {
     const root = temporaryRoot();
     const repository = fixedRepository(root, fakeGit(), firstId);
