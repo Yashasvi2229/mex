@@ -57,6 +57,9 @@ describe("code-graph grounding integration", () => {
       "subtotal > 1000 ? 0 : 75",
       "Math.max(0, 75 - subtotal * 0.05)",
     ));
+    // check reads the last published graph (read-only, #140); refresh it the
+    // way `mex graph` would before expecting drift against the new body.
+    await loadGroundingRuntime(config).then((refresh) => refresh?.close());
     let report = await runDriftCheck(config);
     expect(report.issues.filter((issue) => issue.code === "GROUNDING_DRIFT")).toHaveLength(1);
 
