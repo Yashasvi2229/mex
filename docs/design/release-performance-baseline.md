@@ -1,8 +1,8 @@
 # Release performance baseline
 
-Status: Checkpoint A benchmark contract. The built-asset budgets are frozen;
-the runtime budgets are intentionally marked provisional until the first
-retained run on the pinned release runner is used for characterization.
+Status: Checkpoint A benchmark contract. Built-asset and runtime budgets are
+frozen. Runtime budgets were characterized by pinned CI run
+[`33005876613`](https://github.com/mex-memory/mex/actions/runs/33005876613).
 
 ## Runner contract
 
@@ -61,11 +61,11 @@ compatibility matrix, outside performance enforcement.
 The dedicated `release-performance` CI job installs Chromium on the pinned
 runner, enforces the budgets, and retains the report. Runtime candidates in
 that report are `ceil(p95 * 1.15)` independently for each fixture profile,
-route, read, and maintenance operation. To finish characterization, take the
-first healthy pinned report, copy its runtime candidates into `budgets.json`,
-change the calibration status and `provisional` marker, then rerun the same
-pinned job with enforcement. Do not derive runtime limits from an unpinned
-local run or collapse fixture profiles into one worst-case envelope.
+route, read, and maintenance operation. The committed values are copied exactly
+from the first healthy retained pinned report; its enforcing rerun must pass
+before Checkpoint A is considered green. Future recalibration uses the same
+retained-report workflow. Do not derive runtime limits from an unpinned local
+run or collapse fixture profiles into one worst-case envelope.
 
 The report is capped at 2 MiB. Response bodies, child-process diagnostics,
 recorded request paths, asset lists, and violation lists also have explicit
