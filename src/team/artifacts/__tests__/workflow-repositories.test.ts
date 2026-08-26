@@ -151,6 +151,102 @@ describe("canonical workflow repositories", () => {
     });
   });
 
+  it("rejects creates that would exceed directory or record capacity and rechecks after preview", async () => {
+    await withWorkflowRepositoryLimits({
+      maxDirectoryEntries: 10,
+      maxRecords: 1,
+      maxCorpusBytes: 1_000_000,
+    }, async () => {
+      const root = temporaryRoot();
+      const repository = new WorkstreamRepository(root);
+      const pending = await repository.previewCreate(workstreamInput(WORKSTREAM, "Pending"));
+      const occupied = await repository.previewCreate(workstreamInput(WORKSTREAM_2, "Occupied"));
+      await repository.apply(occupied, occupied.previewRevision);
+
+      await expect(repository.previewCreate(workstreamInput(id("ws", 8), "Too many"))).rejects.toMatchObject({
+        problem: { code: "VALIDATION_FAILED" },
+      });
+      await expect(repository.apply(pending, pending.previewRevision)).rejects.toMatchObject({
+        problem: { code: "VALIDATION_FAILED" },
+      });
+      expect(await repository.get(WORKSTREAM)).toBeNull();
+    });
+
+    await withWorkflowRepositoryLimits({
+      maxDirectoryEntries: 1,
+      maxRecords: 10,
+      maxCorpusBytes: 1_000_000,
+    }, async () => {
+      const root = temporaryRoot();
+      const repository = new WorkstreamRepository(root);
+      const pending = await repository.previewCreate(workstreamInput(WORKSTREAM, "No directory slot"));
+      const directory = join(root, ".mex", "workstreams");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "README"), "reserved", "utf8");
+
+      await expect(
+        repository.previewCreate(workstreamInput(WORKSTREAM_2, "No directory slot")),
+      ).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
+      await expect(repository.apply(pending, pending.previewRevision)).rejects.toMatchObject({
+        problem: { code: "VALIDATION_FAILED" },
+      });
+    });
+
+    await withWorkflowRepositoryLimits({
+      maxDirectoryEntries: 10,
+      maxRecords: 10,
+      maxCorpusBytes: 1_000_000,
+    }, async (limits) => {
+      const root = temporaryRoot();
+      const repository = new WorkstreamRepository(root);
+      const pending = await repository.previewCreate(workstreamInput(WORKSTREAM, "Corpus pending"));
+      limits.maxCorpusBytes = Buffer.byteLength(pending.document, "utf8");
+      const directory = join(root, ".mex", "workstreams");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "occupied.md"), "x", "utf8");
+
+      await expect(repository.previewCreate(workstreamInput(WORKSTREAM_2, "Corpus pending"))).rejects.toMatchObject({
+        problem: { code: "VALIDATION_FAILED" },
+      });
+      await expect(repository.apply(pending, pending.previewRevision)).rejects.toMatchObject({
+        problem: { code: "VALIDATION_FAILED" },
+      });
+    });
+  });
+
+  it("uses replacement bytes for projected workflow corpus capacity", async () => {
+    await withWorkflowRepositoryLimits({
+      maxDirectoryEntries: 10,
+      maxRecords: 10,
+      maxCorpusBytes: 1_000_000,
+    }, async (limits) => {
+      const root = temporaryRoot();
+      const repository = new WorkstreamRepository(root);
+      const createdPlan = await repository.previewCreate(
+        workstreamInput(WORKSTREAM, "A deliberately long canonical workstream title"),
+      );
+      const created = (await repository.apply(createdPlan, createdPlan.previewRevision)).artifact;
+      const shrinkInput = {
+        ...withoutId(workstreamInput(WORKSTREAM, "Short")),
+        state: "active" as const,
+        updatedAt: LATER,
+      };
+      const shrink = await repository.previewUpdate(WORKSTREAM, shrinkInput, created.revision);
+      limits.maxCorpusBytes = Buffer.byteLength(shrink.document, "utf8");
+
+      const boundedShrink = await repository.previewUpdate(WORKSTREAM, shrinkInput, created.revision);
+      const updated = (await repository.apply(boundedShrink, boundedShrink.previewRevision)).artifact;
+      expect(updated.title).toBe("Short");
+
+      await expect(repository.previewUpdate(WORKSTREAM, {
+        ...withoutId(workstreamInput(WORKSTREAM, "A title that grows beyond the newly bounded corpus")),
+        state: "active",
+        createdAt: updated.createdAt,
+        updatedAt: "2026-08-27T12:00:00.000Z",
+      }, updated.revision)).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
+    });
+  });
+
   it("binds a symlinked project root before preview so apply cannot follow a target swap", async () => {
     const container = temporaryRoot();
     const original = join(container, "original");
@@ -201,4 +297,26 @@ function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "mex-workflow-repository-"));
   roots.push(root);
   return root;
+}
+
+interface MutableWorkflowRepositoryLimits {
+  maxDirectoryEntries: number;
+  maxRecords: number;
+  maxCorpusBytes: number;
+  maxCursorBytes: number;
+  maxDiagnostics: number;
+}
+
+async function withWorkflowRepositoryLimits(
+  overrides: Partial<MutableWorkflowRepositoryLimits>,
+  operation: (limits: MutableWorkflowRepositoryLimits) => Promise<void>,
+): Promise<void> {
+  const limits = WORKFLOW_REPOSITORY_LIMITS as unknown as MutableWorkflowRepositoryLimits;
+  const original = { ...limits };
+  Object.assign(limits, overrides);
+  try {
+    await operation(limits);
+  } finally {
+    Object.assign(limits, original);
+  }
 }

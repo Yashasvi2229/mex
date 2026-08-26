@@ -216,6 +216,7 @@ class CanonicalWorkflowRepository<TArtifact, TStored, TCreate extends { id?: str
     }
     const document = this.#codec.serialize(this.#codec.createInput(input, id));
     const artifact = this.#codec.parse(document, path);
+    this.#assertWriteCapacity("create", path, document);
     const change: FileChange = {
       kind: "create", path, beforeRevision: null, afterRevision: this.#codec.revisionOf(artifact),
       diff: canonicalFileDiff(path, null, document),
@@ -246,6 +247,7 @@ class CanonicalWorkflowRepository<TArtifact, TStored, TCreate extends { id?: str
     if (JSON.stringify(semanticArtifact(current)) === JSON.stringify(semanticArtifact(candidate))) {
       throw artifactError("VALIDATION_FAILED", "Workflow artifact is unchanged", `Artifact ${id} update produces no canonical change.`, this.#codec.sourcePathOf(current));
     }
+    this.#assertWriteCapacity("update", this.#codec.sourcePathOf(current), document);
     const change: FileChange = {
       kind: "update", path: this.#codec.sourcePathOf(current), beforeRevision: expectedRevision,
       afterRevision: this.#codec.revisionOf(candidate), diff: canonicalFileDiff(this.#codec.sourcePathOf(current), beforeDocument, document),
@@ -263,6 +265,7 @@ class CanonicalWorkflowRepository<TArtifact, TStored, TCreate extends { id?: str
       const id = this.#codec.idOf(verified);
       if (plan.kind === "create") {
         if (await this.get(id) !== null) throw artifactError("REVISION_CONFLICT", "Workflow artifact preview is stale", `Artifact ${id} was created after preview.`, this.#codec.sourcePathOf(verified));
+        this.#assertWriteCapacity("create", this.#codec.sourcePathOf(verified), plan.document);
         atomicCreateArtifact(this.#projectRoot, this.#codec.sourcePathOf(verified), plan.document);
       } else {
         const current = await this.get(id);
@@ -270,6 +273,7 @@ class CanonicalWorkflowRepository<TArtifact, TStored, TCreate extends { id?: str
           throw artifactError("REVISION_CONFLICT", "Workflow artifact preview is stale", `Artifact ${id} changed after preview.`, this.#codec.sourcePathOf(verified));
         }
         this.#codec.assertTransition(current, verified);
+        this.#assertWriteCapacity("update", this.#codec.sourcePathOf(verified), plan.document);
         atomicReplaceArtifact(this.#projectRoot, this.#codec.sourcePathOf(verified), plan.beforeRevision, plan.document);
       }
       return { previewRevision: plan.previewRevision, artifact: candidate, change: plan.change };
@@ -322,6 +326,138 @@ class CanonicalWorkflowRepository<TArtifact, TStored, TCreate extends { id?: str
       handle.closeSync();
     }
     return paths.sort(compare);
+  }
+
+  #assertWriteCapacity(
+    kind: "create" | "update",
+    targetPath: RepoRelativePath,
+    document: string,
+  ): void {
+    const directory = assertContainedArtifactDirectory(this.#projectRoot, this.#codec.directory);
+    const candidateBytes = Buffer.byteLength(document, "utf8");
+    if (directory === null) {
+      if (kind === "update") {
+        throw artifactError(
+          "REVISION_CONFLICT",
+          "Workflow artifact preview is stale",
+          `Artifact ${targetPath} disappeared while collection capacity was checked.`,
+          targetPath,
+        );
+      }
+      if (candidateBytes > WORKFLOW_REPOSITORY_LIMITS.maxCorpusBytes) {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Workflow artifact corpus is too large",
+          `Workflow artifact corpus would exceed ${WORKFLOW_REPOSITORY_LIMITS.maxCorpusBytes} bytes.`,
+          targetPath,
+        );
+      }
+      return;
+    }
+
+    const handle = opendirSync(directory);
+    let directoryEntries = 0;
+    let records = 0;
+    let projectedCorpusBytes = candidateBytes;
+    let foundTarget = false;
+    try {
+      for (;;) {
+        const entry = handle.readSync();
+        if (entry === null) break;
+        // The collection lock is transient and cannot remain after this operation.
+        if (entry.name === this.#codec.lockName) continue;
+        directoryEntries += 1;
+        if (directoryEntries > WORKFLOW_REPOSITORY_LIMITS.maxDirectoryEntries) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Workflow artifact directory is too large",
+            `Directory exceeds ${WORKFLOW_REPOSITORY_LIMITS.maxDirectoryEntries} entries.`,
+            this.#codec.directory,
+          );
+        }
+        if (!entry.name.endsWith(".md")) continue;
+        if (!entry.isFile()) {
+          throw artifactError(
+            "PATH_OUTSIDE_PROJECT",
+            "Unsafe workflow artifact",
+            `Entry ${entry.name} must be a regular file.`,
+            this.#codec.directory,
+          );
+        }
+        records += 1;
+        if (records > WORKFLOW_REPOSITORY_LIMITS.maxRecords) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Workflow artifact collection is too large",
+            `Collection exceeds ${WORKFLOW_REPOSITORY_LIMITS.maxRecords} records.`,
+            this.#codec.directory,
+          );
+        }
+        const path = `${this.#codec.directory}/${entry.name}` as RepoRelativePath;
+        if (path === targetPath) {
+          foundTarget = true;
+          if (kind === "create") {
+            throw artifactError(
+              "REVISION_CONFLICT",
+              "Workflow artifact preview is stale",
+              `Artifact ${targetPath} already exists.`,
+              targetPath,
+            );
+          }
+          continue;
+        }
+        projectedCorpusBytes += readContainedArtifact(
+          this.#projectRoot,
+          path,
+          WORKFLOW_ARTIFACT_MAX_BYTES,
+        ).bytes.byteLength;
+        if (projectedCorpusBytes > WORKFLOW_REPOSITORY_LIMITS.maxCorpusBytes) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Workflow artifact corpus is too large",
+            `Workflow artifact corpus would exceed ${WORKFLOW_REPOSITORY_LIMITS.maxCorpusBytes} bytes.`,
+            targetPath,
+          );
+        }
+      }
+    } finally {
+      handle.closeSync();
+    }
+
+    const projectedEntries = directoryEntries + (kind === "create" ? 1 : 0);
+    const projectedRecords = records + (kind === "create" ? 1 : 0);
+    if (projectedEntries > WORKFLOW_REPOSITORY_LIMITS.maxDirectoryEntries) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Workflow artifact directory is full",
+        `Creating ${targetPath} would exceed ${WORKFLOW_REPOSITORY_LIMITS.maxDirectoryEntries} directory entries.`,
+        targetPath,
+      );
+    }
+    if (projectedRecords > WORKFLOW_REPOSITORY_LIMITS.maxRecords) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Workflow artifact collection is full",
+        `Creating ${targetPath} would exceed ${WORKFLOW_REPOSITORY_LIMITS.maxRecords} records.`,
+        targetPath,
+      );
+    }
+    if (kind === "update" && !foundTarget) {
+      throw artifactError(
+        "REVISION_CONFLICT",
+        "Workflow artifact preview is stale",
+        `Artifact ${targetPath} disappeared while collection capacity was checked.`,
+        targetPath,
+      );
+    }
+    if (projectedCorpusBytes > WORKFLOW_REPOSITORY_LIMITS.maxCorpusBytes) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Workflow artifact corpus is too large",
+        `Workflow artifact corpus would exceed ${WORKFLOW_REPOSITORY_LIMITS.maxCorpusBytes} bytes.`,
+        targetPath,
+      );
+    }
   }
 }
 
