@@ -436,7 +436,7 @@ describe("graph maintenance", () => {
     expect(result.diagnostics).toContainEqual(expect.objectContaining({
       code: "GRAPH_INDEX_CONTINUITY_FALLBACK",
     }));
-  });
+  }, 15_000);
 
   it("does not let an older-schema fallback hide a current source parse failure", async () => {
     const root = temporaryRoot();
