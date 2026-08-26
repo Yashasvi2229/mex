@@ -34,6 +34,7 @@ interface CapabilityPageDefinition {
   icon: LucideIcon;
   connectedCopy: string;
   unavailableCopy: string;
+  structuralUnavailable?: boolean;
 }
 
 export const capabilityPages: Record<string, CapabilityPageDefinition> = {
@@ -51,16 +52,19 @@ export const capabilityPages: Record<string, CapabilityPageDefinition> = {
     title: "Workstreams", capability: "wiki", icon: Workflow,
     connectedCopy: "Workstreams are unavailable.",
     unavailableCopy: "Workstreams are unavailable.",
+    structuralUnavailable: true,
   },
   specs: {
     title: "Specs", capability: "wiki", icon: FileCheck2,
     connectedCopy: "Specs are unavailable.",
     unavailableCopy: "Specs are unavailable.",
+    structuralUnavailable: true,
   },
   playbooks: {
     title: "Playbooks", capability: "wiki", icon: ListChecks,
     connectedCopy: "Playbooks are unavailable.",
     unavailableCopy: "Playbooks are unavailable.",
+    structuralUnavailable: true,
   },
   inbox: {
     title: "Inbox", capability: "team", icon: Inbox,
@@ -88,7 +92,9 @@ export function CapabilityPage({ page }: { page: keyof typeof capabilityPages })
   const { capabilities } = useOutletContext<{ capabilities?: CapabilitiesResponse }>();
   const capability = capabilityStatus(capabilities, definition.capability);
   const checking = capabilities === undefined;
-  const dependencyAvailable = !checking && capability?.availability === "available";
+  const dependencyAvailable = !definition.structuralUnavailable
+    && !checking
+    && capability?.availability === "available";
   const state = checking ? "checking" : dependencyAvailable ? "connected" : "unavailable";
   const stateLabel = checking ? "Checking" : dependencyAvailable ? "Dependency connected" : "Unavailable";
   const boundaryTitle = checking
@@ -100,7 +106,9 @@ export function CapabilityPage({ page }: { page: keyof typeof capabilityPages })
     ? "Checking the local capability manifest."
     : dependencyAvailable
       ? "This surface is not mounted."
-      : definition.capability === "wiki"
+      : definition.structuralUnavailable
+        ? "This read-only checkpoint does not mount this product surface."
+        : definition.capability === "wiki"
         ? "Wiki is not connected."
         : definition.capability === "team"
           ? "Team features are not connected."

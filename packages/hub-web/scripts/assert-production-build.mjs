@@ -17,6 +17,8 @@ const forbiddenFixtureData = [
   "scf_mex",
   "event_01K36WVM6H7JK8M9NPQRSTVVWX",
   "Keep activity immutable and preserve legacy history",
+  "Project Hub read boundaries",
+  "mx_01K36WVM6H7JK8M9NPQRSTVVWX",
 ];
 
 for (const file of filesUnder(outputRoot)) {

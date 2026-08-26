@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import { HubApiError, type HubApi } from "../api/client";
 import { HubApiProvider } from "../api/context";
@@ -19,6 +19,11 @@ function apiWith(overrides: Partial<HubApi>): HubApi {
     getActivity: (request) => fixture.getActivity(request),
     search: (request) => fixture.search(request),
     getCodeSymbol: (id, request) => fixture.getCodeSymbol(id, request),
+    listWikiEntities: (request) => fixture.listWikiEntities(request),
+    getWikiEntity: (id) => fixture.getWikiEntity(id),
+    getWikiRelations: (id, request) => fixture.getWikiRelations(id, request),
+    getWikiBacklinks: (id, request) => fixture.getWikiBacklinks(id, request),
+    getCodeKnowledge: (id, request) => fixture.getCodeKnowledge(id, request),
     getHealth: () => fixture.getHealth(),
     getJobs: (cursor) => fixture.getJobs(cursor),
     getJob: (id) => fixture.getJob(id),
@@ -199,6 +204,57 @@ describe("symbol observatory", () => {
     expect(screen.getByRole("region", { name: /src\/hub\/server.ts, lines 74 through 84/ })).toHaveTextContent("export async function createHubServer(options: HubServerOptions)");
     expect(screen.getByText("sha256:888888888888")).toBeVisible();
     expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeVisible();
+  });
+
+  it("ignores Related Knowledge pagination from a previously displayed symbol", async () => {
+    const user = userEvent.setup();
+    const fixture = createFixtureApi();
+    const oldSymbol = "sym.createHubServer";
+    const newSymbol = "sym.GraphPort.searchNodes";
+    const first = await fixture.getCodeKnowledge(oldSymbol, { limit: 25 });
+    const staleEntity = (await fixture.listWikiEntities({ limit: 25, cursor: "fixture_wiki_2" })).items[0];
+    if (!staleEntity) throw new Error("Expected a second Wiki fixture page.");
+    type KnowledgePage = Awaited<ReturnType<HubApi["getCodeKnowledge"]>>;
+    let resolveOlder!: (page: KnowledgePage) => void;
+    const olderPage = new Promise<KnowledgePage>((resolve) => { resolveOlder = resolve; });
+    const getCodeKnowledge = vi.fn((symbolId: string, request: Parameters<HubApi["getCodeKnowledge"]>[1]) => {
+      if (symbolId === oldSymbol && request.cursor) return olderPage;
+      if (symbolId === oldSymbol) return Promise.resolve({ ...first, nextCursor: "old_symbol_cursor", truncated: true });
+      return Promise.resolve({ ...first, items: [], nextCursor: null, truncated: false });
+    });
+    function SwitchSymbol() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate(`/code/symbols/${newSymbol}`)} type="button">Switch test symbol</button>;
+    }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <HubApiProvider api={apiWith({ getCodeKnowledge })}>
+          <MemoryRouter initialEntries={[`/code/symbols/${oldSymbol}`]}>
+            <SwitchSymbol />
+            <AppRoutes />
+          </MemoryRouter>
+        </HubApiProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByRole("heading", { level: 1, name: "createHubServer" })).toBeVisible();
+    await user.click(await screen.findByRole("button", { name: /^Load more$/ }));
+    await user.click(screen.getByRole("button", { name: "Switch test symbol" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "searchNodes" })).toBeVisible();
+    expect(await screen.findByText("No Related Knowledge")).toBeVisible();
+
+    await act(async () => {
+      resolveOlder({
+        ...first,
+        items: [{ entity: staleEntity, matchedNodes: [oldSymbol] }],
+        nextCursor: null,
+        truncated: false,
+      });
+      await olderPage;
+    });
+    expect(screen.queryByText("Review immutable activity")).not.toBeInTheDocument();
+    expect(screen.getByText("No Related Knowledge")).toBeVisible();
   });
 
   it("does not invent a numbered source line for the terminal LF sentinel", async () => {
@@ -405,7 +461,7 @@ describe("Graph health and operations", () => {
     expect(startJob).not.toHaveBeenCalled();
   });
 
-  it("invalidates Graph read caches only after a successful graph job snapshot", async () => {
+  it("invalidates Graph read caches from the app lifetime after a successful job snapshot", async () => {
     const fixture = createFixtureApi();
     const page = await fixture.getJobs();
     const running = page.items.find((job) => job.kind === "graph_refresh");
@@ -415,9 +471,12 @@ describe("Graph health and operations", () => {
       publish = onSnapshot;
       return { close() {} };
     });
-    const rendered = renderRoute("/jobs", apiWith({ subscribeToJob }));
+    const rendered = renderRoute("/", apiWith({
+      getJobs: () => Promise.resolve({ items: [running], nextCursor: null }),
+      subscribeToJob,
+    }));
     const invalidate = vi.spyOn(rendered.queryClient, "invalidateQueries");
-    await screen.findByRole("heading", { name: "Operation log" });
+    await screen.findByRole("heading", { name: "Overview" });
     await waitFor(() => expect(subscribeToJob).toHaveBeenCalled());
 
     publish?.({ ...running, state: "running", phase: "validate" });
@@ -429,5 +488,26 @@ describe("Graph health and operations", () => {
     publish?.({ ...running, state: "succeeded", phase: "publish", finishedAt: "2026-08-23T09:00:00.000Z" });
     await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["search"] }));
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["code-symbol"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["capabilities"] });
+  });
+
+  it("reconciles a job that finished before the lifetime observer subscribed", async () => {
+    const fixture = createFixtureApi();
+    const page = await fixture.getJobs();
+    const succeeded = page.items.find((job) => job.kind === "wiki_refresh" && job.state === "succeeded");
+    if (!succeeded) throw new Error("Expected a succeeded Wiki fixture.");
+    const getJobs = vi.fn()
+      .mockResolvedValueOnce({ items: [], nextCursor: null })
+      .mockResolvedValue({ items: [succeeded], nextCursor: null });
+    const subscribeToJob = vi.fn();
+    const rendered = renderRoute("/search", apiWith({ getJobs, subscribeToJob }));
+    const invalidate = vi.spyOn(rendered.queryClient, "invalidateQueries");
+
+    await waitFor(() => expect(getJobs).toHaveBeenCalledTimes(1));
+    await rendered.queryClient.invalidateQueries({ queryKey: ["job-lifecycle"] });
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["wiki-entities"] }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["code-knowledge"] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["capabilities"] });
+    expect(subscribeToJob).not.toHaveBeenCalled();
   });
 });

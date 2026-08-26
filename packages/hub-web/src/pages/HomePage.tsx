@@ -179,7 +179,7 @@ export function HomePage() {
       id: "workstreams",
       label: "Workstreams",
       value: data.sections.workstreams.count ?? "—",
-      detail: data.sections.workstreams.availability === "available" ? "Available" : "Wiki unavailable",
+      detail: data.sections.workstreams.availability === "available" ? "Available" : "Not connected",
       icon: FolderGit2,
     },
     {

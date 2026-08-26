@@ -134,7 +134,7 @@ export function stateTone(state: JobState | string): Tone {
   if (["succeeded", "healthy", "fresh", "ready", "available"].includes(state)) return "success";
   if (["failed", "corrupt"].includes(state)) return "danger";
   if (["running"].includes(state)) return "info";
-  if (["queued", "degraded", "stale", "missing", "rebuild_required", "interrupted"].includes(state)) {
+  if (["queued", "degraded", "stale", "missing", "rebuild_required", "migration_required", "interrupted"].includes(state)) {
     return "warning";
   }
   return "neutral";

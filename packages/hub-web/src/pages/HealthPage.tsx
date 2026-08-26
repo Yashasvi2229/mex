@@ -3,7 +3,7 @@ import { useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { CheckCircle2, CircleDashed, Database, FileWarning, GitCompare, RefreshCw } from "lucide-react";
 import { Link, useNavigate, useOutletContext } from "react-router-dom";
 import { useHubApi } from "../api/context";
-import type { CapabilitiesResponse, GraphHealthDetails, HealthResponse, JobKind } from "../api/types";
+import type { CapabilitiesResponse, GraphHealthDetails, HealthResponse, JobKind, WikiHealthDetails } from "../api/types";
 import { RebuildConfirmation } from "../components/RebuildConfirmation";
 import { Button, buttonVariants } from "../components/primitives/button";
 import {
@@ -25,6 +25,7 @@ import {
 } from "../components/primitives/item";
 import { ErrorState, formatDate, PageHeader, StatePanel, StatusPill, stateTone, sentenceCase } from "../components/ui";
 import { cn } from "../lib/utils";
+import { invalidateIndexOperationState } from "../app/JobLifecycleObserver";
 import healthStyles from "../styles/health.module.css";
 import styles from "../styles/hub.module.css";
 
@@ -34,6 +35,7 @@ function operationAvailable(capabilities: CapabilitiesResponse | undefined, kind
   if (!capabilities) return false;
   if (kind === "graph_refresh") return capabilities.graph.refresh.availability === "available";
   if (kind === "graph_rebuild") return capabilities.graph.rebuild.availability === "available";
+  if (kind === "wiki_refresh") return capabilities.wiki.refresh.availability === "available";
   if (kind === "wiki_rebuild") return capabilities.wiki.rebuild.availability === "available";
   return false;
 }
@@ -65,42 +67,48 @@ function ActionControls({
   onAction,
   actionPending,
   actionAvailable,
+  indexJobActive,
 }: {
   component: HealthComponent;
   onAction: (kind: JobKind) => void;
-  actionPending: boolean;
+  actionPending: (kind: JobKind) => boolean;
   actionAvailable: (kind: JobKind) => boolean;
+  indexJobActive: boolean;
 }) {
   const actions: JobKind[] = component.graph?.allowedJobKinds
+    ?? component.wiki?.allowedJobKinds
     ?? (component.repairJobKind ? [component.repairJobKind] : []);
+  const activeJobId = component.graph?.activeJobId ?? component.wiki?.activeJobId;
+  const recommendedJobKind = component.graph?.recommendedJobKind ?? component.wiki?.recommendedJobKind;
 
-  if (!component.graph?.activeJobId && !actions.length) return null;
+  if (!activeJobId && !actions.length) return null;
 
   return (
     <div className={healthStyles.actionControls}>
-      {component.graph?.activeJobId ? (
-        <Link className={cn(buttonVariants({ size: "sm", variant: "outline" }), healthStyles.activeJobLink)} to={`/jobs?job=${component.graph.activeJobId}`}>
+      {activeJobId ? (
+        <Link className={cn(buttonVariants({ size: "sm", variant: "outline" }), healthStyles.activeJobLink)} to={`/jobs?job=${activeJobId}`}>
           View active job
         </Link>
       ) : null}
       {actions.length ? (
         <div className={healthStyles.actionButtons}>
           {actions.map((kind) => {
-            const recommended = component.graph?.recommendedJobKind === kind;
+            const recommended = recommendedJobKind === kind;
             const available = actionAvailable(kind);
+            const pending = actionPending(kind);
             return (
               <Button
                 className={healthStyles.operationButton}
-                disabled={!available || actionPending}
+                disabled={!available || pending}
                 key={kind}
                 onClick={() => onAction(kind)}
                 size="sm"
-                title={!available ? "This graph operation is unavailable in the current build" : undefined}
+                title={!available ? indexJobActive ? "Another index operation is active" : "This index operation is unavailable in the current build" : undefined}
                 type="button"
                 variant={recommended && available ? "default" : "outline"}
               >
-                <RefreshCw aria-hidden="true" className={actionPending ? healthStyles.spin : ""} data-icon="inline-start" />
-                {actionPending ? "Starting…" : kind === "graph_refresh" ? "Refresh graph" : kind === "graph_rebuild" ? "Rebuild graph" : sentenceCase(kind)}
+                <RefreshCw aria-hidden="true" className={pending ? healthStyles.spin : ""} data-icon="inline-start" />
+                {pending ? "Starting…" : kind === "graph_refresh" ? "Refresh graph" : kind === "graph_rebuild" ? "Rebuild graph" : sentenceCase(kind)}
                 {recommended && available ? <small>Recommended</small> : null}
               </Button>
             );
@@ -109,9 +117,26 @@ function ActionControls({
       ) : null}
       {actions.some((kind) => !actionAvailable(kind)) ? (
         <small className={healthStyles.actionReason}>
-          {component.graph?.activeJobId ? "New operations wait for the active job." : "Operation unavailable in this build."}
+          {indexJobActive ? "New operations wait for the active job." : "Operation unavailable in this build."}
         </small>
       ) : null}
+    </div>
+  );
+}
+
+function WikiHealthReadout({ wiki }: { wiki: WikiHealthDetails }) {
+  return (
+    <div className={healthStyles.wikiReadout}>
+      <div className={healthStyles.indexBanner}>
+        <span><small>Wiki index status</small><strong>{sentenceCase(wiki.indexStatus)}</strong></span>
+        <StatusPill tone={stateTone(wiki.indexStatus)}>{wiki.recommendedJobKind ? `${sentenceCase(wiki.recommendedJobKind)} recommended` : "No repair recommended"}</StatusPill>
+      </div>
+      <dl className={healthStyles.wikiFacts}>
+        <div><dt>Indexed</dt><dd>{formatDate(wiki.indexedAt)}</dd></div>
+        <div><dt>Schema</dt><dd className={healthStyles.mono}>{wiki.schemaVersion ?? "Not recorded"}</dd></div>
+        <div><dt>Revision</dt><dd className={healthStyles.mono}>{wiki.indexedRevision?.slice(0, 12) ?? "Not indexed"}</dd></div>
+        <div><dt>Observed</dt><dd>{formatDate(wiki.observedAt)}</dd></div>
+      </dl>
     </div>
   );
 }
@@ -230,12 +255,14 @@ function GraphDossier({
   onAction,
   actionPending,
   actionAvailable,
+  indexJobActive,
   wide,
 }: {
   component: HealthComponent;
   onAction: (kind: JobKind) => void;
-  actionPending: boolean;
+  actionPending: (kind: JobKind) => boolean;
   actionAvailable: (kind: JobKind) => boolean;
+  indexJobActive: boolean;
   wide: boolean;
 }) {
   return (
@@ -260,6 +287,7 @@ function GraphDossier({
             actionAvailable={actionAvailable}
             actionPending={actionPending}
             component={component}
+            indexJobActive={indexJobActive}
             onAction={onAction}
           />
         </CardAction>
@@ -274,11 +302,13 @@ function ServiceRow({
   onAction,
   actionPending,
   actionAvailable,
+  indexJobActive,
 }: {
   component: HealthComponent;
   onAction: (kind: JobKind) => void;
-  actionPending: boolean;
+  actionPending: (kind: JobKind) => boolean;
   actionAvailable: (kind: JobKind) => boolean;
+  indexJobActive: boolean;
 }) {
   return (
     <Item className={healthStyles.serviceRow} role="listitem" size="sm">
@@ -290,10 +320,12 @@ function ServiceRow({
         </ItemHeader>
         <ItemDescription>{component.summary}</ItemDescription>
         <Diagnostics diagnostics={component.diagnostics} />
+        {component.wiki ? <WikiHealthReadout wiki={component.wiki} /> : null}
         <ActionControls
           actionAvailable={actionAvailable}
           actionPending={actionPending}
           component={component}
+          indexJobActive={indexJobActive}
           onAction={onAction}
         />
       </ItemContent>
@@ -317,47 +349,50 @@ export function HealthPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { capabilities } = useOutletContext<{ capabilities?: CapabilitiesResponse }>();
-  const [confirmRebuild, setConfirmRebuild] = useState(false);
+  const [confirmRebuild, setConfirmRebuild] = useState<"graph_rebuild" | "wiki_rebuild" | null>(null);
   const rebuildReturnFocus = useRef<HTMLElement | null>(null);
   const health = useQuery({ queryKey: ["health"], queryFn: () => api.getHealth(), retry: false });
   const start = useMutation({
     mutationFn: (kind: JobKind) => api.startJob({ kind }),
     onSuccess: (job) => {
-      setConfirmRebuild(false);
+      setConfirmRebuild(null);
       navigate(`/jobs?job=${encodeURIComponent(job.id)}`);
-      void Promise.all([queryClient.invalidateQueries({ queryKey: ["health"] }), queryClient.invalidateQueries({ queryKey: ["jobs"] })]);
+      void Promise.all([
+        invalidateIndexOperationState(queryClient),
+        queryClient.invalidateQueries({ queryKey: ["job-lifecycle"] }),
+      ]);
     },
     onError: () => {
-      setConfirmRebuild(false);
+      setConfirmRebuild(null);
       rebuildReturnFocus.current?.focus({ preventScroll: true });
     },
   });
 
   function requestAction(kind: JobKind) {
-    if (kind === "graph_rebuild") {
+    if (kind === "graph_rebuild" || kind === "wiki_rebuild") {
       rebuildReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      setConfirmRebuild(true);
+      setConfirmRebuild(kind);
       return;
     }
     start.mutate(kind);
   }
 
   function isActionAvailable(component: HealthComponent, kind: JobKind): boolean {
+    if (hasActiveIndexJob || start.isPending) return false;
     return operationAvailable(capabilities, kind) && (
-      !component.graph
-      || (component.graph.activeJobId === null && component.graph.allowedJobKinds.some((allowed) => allowed === kind))
+      (!component.graph && !component.wiki)
+      || (component.graph !== undefined && component.graph.activeJobId === null && component.graph.allowedJobKinds.some((allowed) => allowed === kind))
+      || (component.wiki !== undefined && component.wiki.activeJobId === null && component.wiki.allowedJobKinds.some((allowed) => allowed === kind))
     );
   }
 
-  function isActionPending(component: HealthComponent): boolean {
-    return start.isPending && start.variables !== undefined && (
-      component.graph?.allowedJobKinds.some((kind) => kind === start.variables)
-      || start.variables === component.repairJobKind
-    );
+  function isActionPending(kind: JobKind): boolean {
+    return start.isPending && start.variables === kind;
   }
 
   const graphComponent = health.data?.components.find((component) => component.id === "graph");
   const serviceComponents = health.data?.components.filter((component) => component.id !== "graph") ?? [];
+  const hasActiveIndexJob = health.data?.components.some((component) => Boolean(component.graph?.activeJobId || component.wiki?.activeJobId)) ?? false;
 
   return (
     <div className={`${styles.page} ${healthStyles.page}`}>
@@ -389,8 +424,9 @@ export function HealthPage() {
             {graphComponent ? (
               <GraphDossier
                 actionAvailable={(kind) => isActionAvailable(graphComponent, kind)}
-                actionPending={isActionPending(graphComponent)}
+                actionPending={isActionPending}
                 component={graphComponent}
+                indexJobActive={hasActiveIndexJob || start.isPending}
                 onAction={requestAction}
                 wide={!serviceComponents.length}
               />
@@ -408,8 +444,9 @@ export function HealthPage() {
                       {serviceComponents.map((component) => (
                         <ServiceRow
                           actionAvailable={(kind) => isActionAvailable(component, kind)}
-                          actionPending={isActionPending(component)}
+                          actionPending={isActionPending}
                           component={component}
+                indexJobActive={hasActiveIndexJob || start.isPending}
                           key={component.id}
                           onAction={requestAction}
                         />
@@ -424,12 +461,13 @@ export function HealthPage() {
       )}
       <RebuildConfirmation
         onCancel={() => {
-          setConfirmRebuild(false);
+          setConfirmRebuild(null);
           rebuildReturnFocus.current?.focus({ preventScroll: true });
         }}
-        onConfirm={() => start.mutate("graph_rebuild")}
-        open={confirmRebuild}
-        pending={start.isPending && start.variables === "graph_rebuild"}
+        onConfirm={() => { if (confirmRebuild) start.mutate(confirmRebuild); }}
+        open={confirmRebuild !== null}
+        pending={start.isPending && start.variables === confirmRebuild}
+        target={confirmRebuild === "wiki_rebuild" ? "wiki" : "graph"}
       />
     </div>
   );

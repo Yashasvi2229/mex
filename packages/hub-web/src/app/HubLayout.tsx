@@ -11,6 +11,7 @@ import { Kbd } from "../components/primitives/kbd";
 import { Separator } from "../components/primitives/separator";
 import styles from "../styles/shell.module.css";
 import mexMascot from "../../../../mascot/mex-mascot.svg";
+import { JobLifecycleObserver } from "./JobLifecycleObserver";
 
 function capabilityAvailable(
   capabilities: CapabilitiesResponse | undefined,
@@ -43,7 +44,9 @@ function Sidebar({ capabilities }: { capabilities?: CapabilitiesResponse }) {
           <div className={styles.navGroup} key={group.label}>
             <p>{group.label}</p>
             {group.items.map((item) => {
-              const available = capabilityAvailable(capabilities, item.capability);
+              const available = item.structuralUnavailable
+                ? false
+                : capabilityAvailable(capabilities, item.capability);
               return (
                 <NavLink
                   end={item.path === "/"}
@@ -118,6 +121,7 @@ export function HubLayout({
 
   return (
     <div className={styles.viewportFrame}>
+      <JobLifecycleObserver />
       <a className={styles.skipLink} href="#main-content">Skip to main content</a>
       <Sidebar capabilities={capabilities} />
       <div className={styles.workspace}>

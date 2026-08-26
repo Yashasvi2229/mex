@@ -125,6 +125,12 @@
   min-width: 0;
 }
 
+.symbolIdentity {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .workspaceCard {
   width: 100%;
   min-width: 0;

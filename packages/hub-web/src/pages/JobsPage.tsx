@@ -15,7 +15,7 @@ import {
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import { HubApiError } from "../api/client";
 import { useHubApi } from "../api/context";
-import type { CapabilitiesResponse, GraphHealthDetails, JobKind, JobProgress, JobState, JobSummary } from "../api/types";
+import type { CapabilitiesResponse, GraphHealthDetails, JobKind, JobProgress, JobState, JobSummary, WikiHealthDetails } from "../api/types";
 import { RebuildConfirmation } from "../components/RebuildConfirmation";
 import {
   ErrorState,
@@ -35,6 +35,12 @@ import {
   CardTitle,
 } from "../components/primitives/card";
 import { Progress as ProgressPrimitive } from "../components/primitives/progress";
+import {
+  invalidateIndexOperationState,
+  isActiveJob,
+  isGraphJob,
+  isWikiJob,
+} from "../app/JobLifecycleObserver";
 import styles from "../styles/jobs.module.css";
 
 const operations: Array<{ kind: JobKind; label: string; detail: string }> = [
@@ -48,10 +54,6 @@ const graphPhases = ["discover", "stage", "parse", "resolve", "validate", "publi
 
 type JobFilter = "all" | "active" | "history";
 
-function isActive(job: JobSummary): boolean {
-  return job.state === "queued" || job.state === "running";
-}
-
 function percentage(progress: JobProgress | null): number | null {
   if (!progress?.total) return null;
   return Math.max(0, Math.min(100, Math.round((progress.completed / progress.total) * 100)));
@@ -61,30 +63,11 @@ function graphPhaseIndex(phase: string): number {
   return graphPhases.indexOf(phase.trim().toLowerCase() as typeof graphPhases[number]);
 }
 
-function isGraphJob(kind: JobKind): kind is "graph_refresh" | "graph_rebuild" {
-  return kind === "graph_refresh" || kind === "graph_rebuild";
-}
-
-async function invalidateGraphReads(queryClient: ReturnType<typeof useQueryClient>): Promise<void> {
-  await Promise.all([
-    queryClient.invalidateQueries({ queryKey: ["search"] }),
-    queryClient.invalidateQueries({ queryKey: ["code-symbol"] }),
-    queryClient.invalidateQueries({ queryKey: ["health"] }),
-    queryClient.invalidateQueries({ queryKey: ["jobs"] }),
-  ]);
-}
-
-async function invalidateGraphOperationState(queryClient: ReturnType<typeof useQueryClient>): Promise<void> {
-  await Promise.all([
-    queryClient.invalidateQueries({ queryKey: ["health"] }),
-    queryClient.invalidateQueries({ queryKey: ["jobs"] }),
-  ]);
-}
-
 function operationCapability(
   capabilities: CapabilitiesResponse | undefined,
   kind: JobKind,
   graphHealth: GraphHealthDetails | undefined,
+  wikiHealth: WikiHealthDetails | undefined,
   healthSettled: boolean,
 ): { available: boolean; reason?: string } {
   if (!capabilities || capabilities.jobs.availability === "unavailable") {
@@ -96,18 +79,26 @@ function operationCapability(
       ? capabilities.graph.rebuild
       : kind === "wiki_rebuild"
         ? capabilities.wiki.rebuild
-        : null;
-  if (!capability) return { available: false, reason: "This build does not advertise a Wiki refresh executor." };
+        : capabilities.wiki.refresh;
   if (capability.availability !== "available") return { available: false, reason: capability.reason };
+  const activeIndexJobId = graphHealth?.activeJobId ?? wikiHealth?.activeJobId;
+  if (activeIndexJobId) {
+    return { available: false, reason: `Index job ${activeIndexJobId} is already active.` };
+  }
   if (isGraphJob(kind)) {
     if (!healthSettled || !graphHealth) {
       return { available: false, reason: "Graph health must be readable before starting an index operation." };
     }
-    if (graphHealth.activeJobId) {
-      return { available: false, reason: `Graph job ${graphHealth.activeJobId} is already active.` };
-    }
     if (!graphHealth.allowedJobKinds.includes(kind)) {
       return { available: false, reason: "The current graph state does not allow this operation." };
+    }
+  }
+  if (isWikiJob(kind)) {
+    if (!healthSettled || !wikiHealth) {
+      return { available: false, reason: "Wiki health must be readable before starting an index operation." };
+    }
+    if (!wikiHealth.allowedJobKinds.includes(kind)) {
+      return { available: false, reason: "The current Wiki state does not allow this operation." };
     }
   }
   return { available: true };
@@ -138,11 +129,11 @@ function JobProgressView({ job }: { job: JobSummary }) {
 }
 
 function GraphPhaseRail({ job }: { job: JobSummary }) {
-  if (!isGraphJob(job.kind)) return null;
+  if (!isGraphJob(job.kind) && !isWikiJob(job.kind)) return null;
   const activeIndex = graphPhaseIndex(job.phase);
   const complete = job.state === "succeeded";
   return (
-    <div className={styles.graphPhaseRail} aria-label="Graph operation phases">
+    <div className={styles.graphPhaseRail} aria-label={isGraphJob(job.kind) ? "Graph operation phases" : "Wiki operation phases"}>
       {graphPhases.map((phase, index) => {
         const phaseComplete = complete || (activeIndex >= 0 && index < activeIndex);
         const current = job.state === "running" && activeIndex === index;
@@ -189,7 +180,10 @@ function JobDetail({ jobId, onClose }: { jobId: string; onClose: () => void }) {
     mutationFn: () => api.cancelJob(jobId),
     onSuccess: async (next) => {
       queryClient.setQueryData(["job", jobId], next);
-      if (isGraphJob(next.kind)) await invalidateGraphOperationState(queryClient);
+      if (isGraphJob(next.kind) || isWikiJob(next.kind)) await Promise.all([
+        invalidateIndexOperationState(queryClient),
+        queryClient.invalidateQueries({ queryKey: ["job-lifecycle"] }),
+      ]);
       else await queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
@@ -230,8 +224,8 @@ function JobDetail({ jobId, onClose }: { jobId: string; onClose: () => void }) {
         </div>
       ) : null}
       {item.interruptedReason ? <div className={styles.detailNote}><strong>Interruption reason</strong><p>{sentenceCase(item.interruptedReason)}</p></div> : null}
-      {item.cancelRequested && isActive(item) ? <div className={styles.detailNote} role="status"><strong>Cancellation requested</strong><p>The executor is stopping safely. This job remains active until it settles as interrupted.</p></div> : null}
-      {isActive(item) ? (
+      {item.cancelRequested && isActiveJob(item) ? <div className={styles.detailNote} role="status"><strong>Cancellation requested</strong><p>The executor is stopping safely. This job remains active until it settles as interrupted.</p></div> : null}
+      {isActiveJob(item) ? (
         <Button className={styles.dangerButton} disabled={cancel.isPending || item.cancelRequested} onClick={() => cancel.mutate()} type="button" variant="destructive">
           <CircleStop aria-hidden="true" data-icon="inline-start" /> {cancel.isPending || item.cancelRequested ? "Cancelling…" : "Cancel job"}
         </Button>
@@ -248,9 +242,9 @@ export function JobsPage() {
   const [params, setParams] = useSearchParams();
   const selectedId = params.get("job");
   const previousSelectedId = useRef<string | null>(selectedId);
-  const rebuildTriggerRef = useRef<HTMLButtonElement>(null);
+  const rebuildTriggerRef = useRef<HTMLElement | null>(null);
   const [filter, setFilter] = useState<JobFilter>("all");
-  const [confirmRebuild, setConfirmRebuild] = useState(false);
+  const [confirmRebuild, setConfirmRebuild] = useState<"graph_rebuild" | "wiki_rebuild" | null>(null);
   const health = useQuery({ queryKey: ["health"], queryFn: () => api.getHealth(), retry: false });
   const jobs = useInfiniteQuery({
     queryKey: ["jobs"],
@@ -262,32 +256,24 @@ export function JobsPage() {
   const start = useMutation({
     mutationFn: (kind: JobKind) => api.startJob({ kind }),
     onSuccess: async (job) => {
-      if (isGraphJob(job.kind)) await invalidateGraphOperationState(queryClient);
+      if (isGraphJob(job.kind) || isWikiJob(job.kind)) await Promise.all([
+        invalidateIndexOperationState(queryClient),
+        queryClient.invalidateQueries({ queryKey: ["job-lifecycle"] }),
+      ]);
       else await queryClient.invalidateQueries({ queryKey: ["jobs"] });
-      setConfirmRebuild(false);
+      setConfirmRebuild(null);
       setParams({ job: job.id });
     },
     onError: () => {
-      setConfirmRebuild(false);
+      setConfirmRebuild(null);
       rebuildTriggerRef.current?.focus({ preventScroll: true });
     },
   });
 
   const allJobs = useMemo(() => jobs.data?.pages.flatMap((page) => page.items) ?? [], [jobs.data]);
-  const visibleJobs = allJobs.filter((job) => filter === "all" || (filter === "active" ? isActive(job) : !isActive(job)));
-  const activeIds = allJobs.filter(isActive).map((job) => job.id).sort().join(",");
+  const visibleJobs = allJobs.filter((job) => filter === "all" || (filter === "active" ? isActiveJob(job) : !isActiveJob(job)));
   const graphHealth = health.data?.components.find((component) => component.id === "graph")?.graph;
-
-  useEffect(() => {
-    if (!activeIds) return;
-    const subscriptions = activeIds.split(",").map((id) => api.subscribeToJob(id, (snapshot) => {
-      queryClient.setQueryData(["job", id], snapshot);
-      if (isGraphJob(snapshot.kind) && snapshot.state === "succeeded") void invalidateGraphReads(queryClient);
-      else if (isGraphJob(snapshot.kind) && (snapshot.state === "failed" || snapshot.state === "interrupted")) void invalidateGraphOperationState(queryClient);
-      else void queryClient.invalidateQueries({ queryKey: ["jobs"] });
-    }));
-    return () => subscriptions.forEach((subscription) => subscription.close());
-  }, [activeIds, api, queryClient]);
+  const wikiHealth = health.data?.components.find((component) => component.id === "wiki")?.wiki;
 
   useEffect(() => {
     const previous = previousSelectedId.current;
@@ -314,14 +300,18 @@ export function JobsPage() {
         </CardHeader>
         <CardContent className={styles.operationGrid}>
           {operations.map((operation) => {
-            const capability = operationCapability(capabilities, operation.kind, graphHealth, health.isSuccess);
+            const capability = operationCapability(capabilities, operation.kind, graphHealth, wikiHealth, health.isSuccess);
             return (
               <Button
                 className={styles.operationButton}
                 disabled={!capability.available || start.isPending}
                 key={operation.kind}
-                onClick={() => operation.kind === "graph_rebuild" ? setConfirmRebuild(true) : start.mutate(operation.kind)}
-                ref={operation.kind === "graph_rebuild" ? rebuildTriggerRef : undefined}
+                onClick={(event) => {
+                  if (operation.kind === "graph_rebuild" || operation.kind === "wiki_rebuild") {
+                    rebuildTriggerRef.current = event.currentTarget;
+                    setConfirmRebuild(operation.kind);
+                  } else start.mutate(operation.kind);
+                }}
                 title={!capability.available ? (capability.reason ?? `${operation.label} is unavailable in this build`) : operation.detail}
                 type="button"
                 variant="outline"
@@ -398,12 +388,13 @@ export function JobsPage() {
       </div>
       <RebuildConfirmation
         onCancel={() => {
-          setConfirmRebuild(false);
+          setConfirmRebuild(null);
           rebuildTriggerRef.current?.focus({ preventScroll: true });
         }}
-        onConfirm={() => start.mutate("graph_rebuild")}
-        open={confirmRebuild}
-        pending={start.isPending && start.variables === "graph_rebuild"}
+        onConfirm={() => { if (confirmRebuild) start.mutate(confirmRebuild); }}
+        open={confirmRebuild !== null}
+        pending={start.isPending && start.variables === confirmRebuild}
+        target={confirmRebuild === "wiki_rebuild" ? "wiki" : "graph"}
       />
     </div>
   );

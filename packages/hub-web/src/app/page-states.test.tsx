@@ -10,6 +10,7 @@ import type {
   CapabilitiesResponse,
   HealthResponse,
   HomeResponse,
+  JobSummary,
   JobsResponse,
   SearchResponse,
 } from "../api/types";
@@ -26,6 +27,11 @@ function apiWith(overrides: Partial<HubApi>): HubApi {
     getActivity: (request) => fixture.getActivity(request),
     search: (request) => fixture.search(request),
     getCodeSymbol: (id, request) => fixture.getCodeSymbol(id, request),
+    listWikiEntities: (request) => fixture.listWikiEntities(request),
+    getWikiEntity: (id) => fixture.getWikiEntity(id),
+    getWikiRelations: (id, request) => fixture.getWikiRelations(id, request),
+    getWikiBacklinks: (id, request) => fixture.getWikiBacklinks(id, request),
+    getCodeKnowledge: (id, request) => fixture.getCodeKnowledge(id, request),
     getHealth: () => fixture.getHealth(),
     getJobs: (cursor) => fixture.getJobs(cursor),
     getJob: (id) => fixture.getJob(id),
@@ -409,6 +415,67 @@ describe("Health states", () => {
 
     expect(await screen.findByText("The graph index cannot be inspected.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Refresh graph" })).toBeDisabled();
+  });
+
+  it("explains global index-job arbitration on Wiki controls", async () => {
+    const fixture = createFixtureApi();
+    renderRoute("/health", apiWith({ getHealth: () => fixture.getHealth() }));
+
+    const wikiHeading = await screen.findByRole("heading", { name: "Project Wiki" });
+    const wikiRow = wikiHeading.closest<HTMLElement>("[role='listitem']");
+    expect(wikiRow).not.toBeNull();
+    expect(within(wikiRow!).getByText("New operations wait for the active job.")).toBeVisible();
+    expect(within(wikiRow!).getByRole("button", { name: "Wiki refresh" })).toBeDisabled();
+    expect(within(wikiRow!).getByRole("button", { name: "Wiki rebuild" })).toBeDisabled();
+  });
+
+  it("starts Wiki refresh directly but confirms Wiki rebuild", async () => {
+    const user = userEvent.setup();
+    const fixture = createFixtureApi();
+    const health = await fixture.getHealth();
+    const withoutActiveJob: HealthResponse = {
+      ...health,
+      components: health.components.map((component) => component.graph
+        ? { ...component, graph: { ...component.graph, activeJobId: null } }
+        : component),
+    };
+    const startJob = vi.fn((request: Parameters<HubApi["startJob"]>[0]) => fixture.startJob(request));
+    const view = renderRoute("/health", apiWith({ getHealth: () => Promise.resolve(withoutActiveJob), startJob }));
+
+    await user.click(await screen.findByRole("button", { name: "Wiki refresh" }));
+    await waitFor(() => expect(startJob).toHaveBeenCalledWith({ kind: "wiki_refresh" }));
+
+    view.unmount();
+    startJob.mockClear();
+    renderRoute("/health", apiWith({ getHealth: () => Promise.resolve(withoutActiveJob), startJob }));
+    await user.click(await screen.findByRole("button", { name: "Wiki rebuild" }));
+    expect(startJob).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("dialog", { name: "Rebuild the Wiki index?" });
+    await user.click(within(dialog).getByRole("button", { name: "Start wiki rebuild" }));
+    await waitFor(() => expect(startJob).toHaveBeenCalledWith({ kind: "wiki_rebuild" }));
+  });
+
+  it("disables every index action while a Health start request is pending", async () => {
+    const user = userEvent.setup();
+    const fixture = createFixtureApi();
+    const health = await fixture.getHealth();
+    const withoutActiveJob: HealthResponse = {
+      ...health,
+      components: health.components.map((component) => component.graph
+        ? { ...component, graph: { ...component.graph, activeJobId: null } }
+        : component.wiki
+          ? { ...component, wiki: { ...component.wiki, activeJobId: null } }
+          : component),
+    };
+    const startJob = vi.fn(() => pending<JobSummary>());
+    renderRoute("/health", apiWith({ getHealth: () => Promise.resolve(withoutActiveJob), startJob }));
+
+    await user.click(await screen.findByRole("button", { name: "Wiki refresh" }));
+    expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Refresh graph" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Rebuild graph" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Wiki rebuild" })).toBeDisabled();
+    expect(startJob).toHaveBeenCalledTimes(1);
   });
 });
 

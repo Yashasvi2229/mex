@@ -10,11 +10,13 @@ export function RebuildConfirmation({
   pending,
   onCancel,
   onConfirm,
+  target = "graph",
 }: {
   open: boolean;
   pending: boolean;
   onCancel: () => void;
   onConfirm: () => void;
+  target?: "graph" | "wiki";
 }) {
   const confirmRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
@@ -64,8 +66,8 @@ export function RebuildConfirmation({
   return (
     <div className={styles.backdrop} role="presentation">
       <section
-        aria-describedby="graph-rebuild-description"
-        aria-labelledby="graph-rebuild-title"
+        aria-describedby={`${target}-rebuild-description`}
+        aria-labelledby={`${target}-rebuild-title`}
         aria-modal="true"
         className={styles.dialog}
         data-pending={pending ? "true" : "false"}
@@ -77,7 +79,7 @@ export function RebuildConfirmation({
           <CardHeader className={styles.header}>
             <span className={styles.commandIcon} aria-hidden="true"><DatabaseZap /></span>
             <CardTitle className={styles.heading}>
-              <h2 id="graph-rebuild-title">Rebuild the code graph?</h2>
+              <h2 id={`${target}-rebuild-title`}>Rebuild the {target === "graph" ? "code graph" : "Wiki index"}?</h2>
             </CardTitle>
             <CardAction className={styles.headerAction}>
               <Button
@@ -96,15 +98,15 @@ export function RebuildConfirmation({
 
           <CardContent className={styles.content}>
             <div className={styles.commandLine} aria-hidden="true">
-              <code>graph_rebuild</code>
+              <code>{target}_rebuild</code>
               <Badge className={styles.commandPolicy} variant="outline">confirmation required</Badge>
             </div>
 
             <div className={styles.body}>
               <div className={styles.warning}>
                 <AlertTriangle aria-hidden="true" />
-                <p id="graph-rebuild-description">
-                  This replaces the derived graph from repository sources. It never stages or commits files, but it can take longer than an incremental refresh.
+                <p id={`${target}-rebuild-description`}>
+                  This replaces the derived {target === "graph" ? "graph" : "Wiki index"} from repository sources. It never stages or commits files, but it can take longer than an incremental refresh.
                 </p>
               </div>
 
@@ -123,14 +125,14 @@ export function RebuildConfirmation({
 
           <CardFooter className={styles.actions}>
             <span className={styles.pendingNote} aria-live="polite">
-              {pending ? "Preparing the persisted graph job…" : "Nothing starts until you confirm."}
+              {pending ? `Preparing the persisted ${target} job…` : "Nothing starts until you confirm."}
             </span>
             <Button className={styles.cancelButton} disabled={pending} onClick={onCancel} type="button" variant="outline">
-              Keep current graph
+              Keep current {target === "graph" ? "graph" : "Wiki index"}
             </Button>
             <Button className={styles.confirmButton} disabled={pending} onClick={onConfirm} ref={confirmRef} type="button">
               {pending ? <LoaderCircle aria-hidden="true" className={styles.spinner} data-icon="inline-start" /> : null}
-              {pending ? "Starting rebuild…" : "Start graph rebuild"}
+              {pending ? "Starting rebuild…" : `Start ${target} rebuild`}
             </Button>
           </CardFooter>
         </Card>
