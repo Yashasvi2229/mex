@@ -2,12 +2,38 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - integration/human-team-memory-v1
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  checkpoint-policy:
+    if: github.event_name == 'pull_request' && github.base_ref == 'integration/human-team-memory-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+      - name: Enforce integration checkpoint boundary
+        env:
+          MEX_POLICY_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/check-integration-pr-policy.mjs
+
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       matrix:
         node-version: [22, 24]
@@ -48,6 +74,7 @@ jobs:
   hub-browser:
     # Visual baselines are exact for this runner image; do not float with ubuntu-latest.
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
