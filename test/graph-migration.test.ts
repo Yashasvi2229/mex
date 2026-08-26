@@ -116,12 +116,14 @@ describe("pre-0.7 graph grounding migration", () => {
     const source = join(root, "src", "checkout.ts");
     writeFileSync(source, readFileSync(source, "utf-8")
       .replace("subtotal >= 100 ? 0 : 12", "subtotal >= 125 ? 0 : 15"));
+    // check reads the last published graph (read-only, #140); refresh first.
+    await loadGroundingRuntime(config).then((refresh) => refresh?.close());
     const drift = await runDriftCheck(config);
     expect(drift.issues).toContainEqual(expect.objectContaining({
       code: "GROUNDING_DRIFT",
       file: ".mex/patterns/checkout.md",
     }));
-  });
+  }, 30_000);
 
   it("requires a built graph", async () => {
     const { config } = fixture();

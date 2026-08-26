@@ -23,7 +23,20 @@ export interface GroundingRuntime {
   fingerprints: FingerprintStore;
   /** Pre-sync fingerprints for inline ids that may disappear during a rename. */
   anchorFingerprints: ReadonlyMap<string, Fingerprint>;
+  /** Source files that changed since the graph was last built (read-only loads). */
+  staleSourceFiles?: number;
   close(): void;
+}
+
+export interface LoadGroundingRuntimeOptions {
+  /**
+   * Open the last published graph without synchronizing it. `mex check` MUST
+   * use this: synchronizing re-stages the whole corpus in-process (TypeScript
+   * programs included), which turned a drift check into a full rebuild's worth
+   * of wall clock and RSS (issue #140 observation 2). Read-only consumers see
+   * `staleSourceFiles` instead and report staleness rather than paying it.
+   */
+  readOnly?: boolean;
 }
 
 export interface GroundingBaselineCaptureResult {
@@ -37,19 +50,25 @@ export interface GroundingBaselineCaptureOptions {
   warn?: (message: string) => void;
 }
 
-export async function loadGroundingRuntime(config: MexConfig): Promise<GroundingRuntime | null> {
+export async function loadGroundingRuntime(
+  config: MexConfig,
+  options: LoadGroundingRuntimeOptions = {},
+): Promise<GroundingRuntime | null> {
   const dbPath = resolve(config.projectRoot, ".mex", "graph.db");
   if (!existsSync(dbPath)) return null;
-  const graph = createGraphEngine({ rootDir: config.projectRoot, dbPath });
+  const readOnly = options.readOnly ?? false;
+  const graph = createGraphEngine({ rootDir: config.projectRoot, dbPath, readOnly });
   let db: SqliteDatabase | null = null;
   try {
-    db = openGraphDatabase(dbPath);
+    db = openGraphDatabase(dbPath, { readOnly });
     const fingerprints = new FingerprintStore(db);
     const anchorFingerprints = snapshotAnchorFingerprints(config, fingerprints);
     const changed = findChangedSourceFiles(config.projectRoot, db);
-    // sync also checks the persisted compiler/config/grammar manifest, so it
-    // must run even when source mtimes are unchanged.
-    await graph.sync(changed);
+    if (!readOnly) {
+      // sync also checks the persisted compiler/config/grammar manifest, so it
+      // must run even when source mtimes are unchanged.
+      await graph.sync(changed);
+    }
     const reconciler = new MinHashReconciler(fingerprints);
     const checkerReconciler: Reconciler & GroundingReconcilerCapabilities = {
       reconcile: (nodeId, baseline) => reconciler.reconcile(nodeId, baseline),
@@ -62,6 +81,7 @@ export async function loadGroundingRuntime(config: MexConfig): Promise<Grounding
       checker: createGroundingChecker(graph, checkerReconciler),
       fingerprints,
       anchorFingerprints,
+      staleSourceFiles: readOnly ? changed.length : 0,
       close: () => { graph.close(); db?.close(); db = null; },
     };
   } catch (error) {

@@ -30,7 +30,7 @@ mex 为代码建立地图，把代理学到的知识整理成结构化 Markdown�
 
 每次编程会话都从相关的架构上下文开始，而不是重新扫描整个仓库。
 
-> **v0.7.2 新功能：** 一次调用即可获得带源码的图谱检索、由编译器解析的 TypeScript 执行流、确定性证据以及严格的输出预算。
+> **v0.7.3 新功能：** 图谱构建每次只保留一个编译器程序、存储体积缩小 36-40%、`mex check` 不再重建图谱，并且 `mex graph repair` 无需重建即可修复被中断的存储。
 
 💬 **加入 mex Discord 社区** — 讨论想法、获取帮助、分享反馈并参与项目贡献。
 
@@ -252,6 +252,7 @@ npm install -g mex-agent
 | `mex graph get <node-id...>` | 展开检索结果中的精确符号 |
 | `mex graph query <relation> <symbol>` | 查询结构化代码关系 |
 | `mex graph ground` | 将已有的 0.7 之前 Wiki 连接到图谱 |
+| `mex graph repair` | 无需重建即可恢复被中断的图谱存储 |
 | `mex impact <symbol\|file>` | 查找受代码变更影响的代码和 Wiki 内容 |
 | `mex log <message>` | 记录决策、笔记、风险或待办 |
 | `mex timeline` | 查看最近的项目事件 |
@@ -299,7 +300,7 @@ MCP 包尚未发布。本地开发时请运行：
 npm run build --workspace mex-mcp
 ```
 
-v0.7.2 的主要发布内容仍然是 `mex-agent` CLI。
+v0.7.3 的主要发布内容仍然是 `mex-agent` CLI。
 
 ## 代理记忆模式
 

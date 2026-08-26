@@ -111,6 +111,45 @@ export function bandHashes(fingerprint: Fingerprint): string[] {
   });
 }
 
+/**
+ * Schema-v3 LSH band hashes: the first 8 bytes of the same per-band sha256
+ * that {@link bandHashes} hex-encodes, as a signed 64-bit integer for compact
+ * INTEGER storage. Derivation input is identical, so two fingerprints share an
+ * int64 band hash exactly when they share the hex band hash (modulo a ~2^-64
+ * truncation collision, which merely adds one LSH candidate that full minhash
+ * scoring then rejects — it can never remove or reorder a true candidate).
+ */
+export function bandHashInts(fingerprint: Fingerprint): bigint[] {
+  assertFingerprint(fingerprint);
+  if (BANDS * ROWS !== K) {
+    throw new Error(`Invalid LSH configuration: ${BANDS} * ${ROWS} !== ${K}`);
+  }
+  return Array.from({ length: BANDS }, (_, band) => {
+    const start = band * ROWS;
+    return createHash("sha256")
+      .update(JSON.stringify(fingerprint.minhash.slice(start, start + ROWS)))
+      .digest()
+      .readBigInt64BE(0);
+  });
+}
+
+/** Encode a K=64 uint32 minhash as a 256-byte big-endian BLOB (schema v3). */
+export function encodeMinhash(minhash: readonly number[]): Buffer {
+  const buffer = Buffer.allocUnsafe(minhash.length * 4);
+  minhash.forEach((value, index) => buffer.writeUInt32BE(value, index * 4));
+  return buffer;
+}
+
+/** Decode a schema-v3 minhash BLOB back to the uint32 array it encodes. */
+export function decodeMinhash(blob: Uint8Array): number[] {
+  const buffer = Buffer.isBuffer(blob) ? blob : Buffer.from(blob.buffer, blob.byteOffset, blob.byteLength);
+  const values: number[] = [];
+  for (let offset = 0; offset + 4 <= buffer.length; offset += 4) {
+    values.push(buffer.readUInt32BE(offset));
+  }
+  return values;
+}
+
 function assertFingerprint(value: unknown): asserts value is Fingerprint {
   if (!value || typeof value !== "object") throw new Error("Invalid fingerprint");
   const candidate = value as Partial<Fingerprint>;

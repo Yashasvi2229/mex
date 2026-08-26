@@ -151,6 +151,17 @@ export function parse(source: string, language: Language): TSTree | null {
   return tree as unknown as TSTree;
 }
 
+/**
+ * Free a parsed tree's WASM-heap memory. web-tree-sitter trees are allocated in
+ * the Emscripten heap and are NOT reclaimed by JS GC (no FinalizationRegistry in
+ * 0.25) — every undeleted tree leaks for the life of the process, and the WASM
+ * heap never shrinks. This is the single boundary that widens the frozen TSTree
+ * back to the concrete web-tree-sitter Tree, mirroring the narrowing in `parse`.
+ */
+export function freeTree(tree: TSTree): void {
+  (tree as unknown as { delete(): void }).delete();
+}
+
 /** Free all cached parsers + reset the runtime flag (tests / teardown). */
 export function disposeParsers(): void {
   for (const parser of parserCache.values()) parser.delete();

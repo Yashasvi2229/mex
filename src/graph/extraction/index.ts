@@ -9,7 +9,7 @@
 
 import type { Language } from "../types.js";
 import type { ExtractedEdge, ExtractedNode, TSNode } from "./types.js";
-import { detectLanguage, parse } from "./grammars.js";
+import { detectLanguage, freeTree, parse } from "./grammars.js";
 import { getExtractor } from "./languages/index.js";
 
 export {
@@ -77,6 +77,21 @@ export function extractFile(
   if (!extractor) return null;
   const tree = parse(source, language);
   if (!tree) return null;
+  try {
+    return extractFromTree(tree, extractor, filePath, source, language);
+  } finally {
+    // Extractors return plain copied nodes/edges; nothing retains the tree.
+    freeTree(tree);
+  }
+}
+
+function extractFromTree(
+  tree: NonNullable<ReturnType<typeof parse>>,
+  extractor: NonNullable<ReturnType<typeof getExtractor>>,
+  filePath: string,
+  source: string,
+  language: Language,
+): FileExtraction {
   const health = treeHealth(tree.rootNode, source);
   if (health.status === "failed") return { language, nodes: [], edges: [], health };
   const extracted = extractor.extract(tree, filePath, source);
@@ -143,14 +158,18 @@ export function normalizedAstTokens(
   const tree = parse(source, detectLanguage(filePath));
   if (!tree) return new Map();
   const leaves: Array<{ line: number; endLine: number; type: string }> = [];
-  const visit = (node: TSNode): void => {
-    if (node.childCount === 0) {
-      leaves.push({ line: node.startPosition.row + 1, endLine: node.endPosition.row + 1, type: node.type });
-      return;
-    }
-    for (const child of node.children) visit(child);
-  };
-  visit(tree.rootNode);
+  try {
+    const visit = (node: TSNode): void => {
+      if (node.childCount === 0) {
+        leaves.push({ line: node.startPosition.row + 1, endLine: node.endPosition.row + 1, type: node.type });
+        return;
+      }
+      for (const child of node.children) visit(child);
+    };
+    visit(tree.rootNode);
+  } finally {
+    freeTree(tree);
+  }
   return new Map(ranges.map((range) => [
     range.id,
     leaves

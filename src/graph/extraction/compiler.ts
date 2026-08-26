@@ -21,7 +21,7 @@ import {
 } from "node:path";
 import ts from "typescript";
 
-export const TYPESCRIPT_COMPILER_EXTRACTOR_VERSION = "typescript-5.9-v1";
+export const TYPESCRIPT_COMPILER_EXTRACTOR_VERSION = "typescript-5.9-v2";
 export const TYPESCRIPT_COMPILER_VERSION = ts.version;
 
 export type CompilerSourceLanguage =
@@ -184,6 +184,16 @@ export interface CompilerExtractionResult {
 export interface CompilerExtractionOptions {
   /** Additional options used only by the inferred program. */
   inferredCompilerOptions?: ts.CompilerOptions;
+  /**
+   * Run the full per-file semantic type-check and record its diagnostics.
+   * Off by default: `parse_status` derives from syntactic diagnostics alone,
+   * and reference/signature extraction uses the checker lazily, so the full
+   * semantic pass only adds diagnostics detail — at a wall-clock/RSS cost that
+   * scales with the resolvable dependency surface (issue #140 observation 1/2).
+   */
+  semanticDiagnostics?: boolean;
+  /** Test seam: replaces `ts.createProgram` to exercise program-crash isolation. */
+  programFactory?: (options: ts.CreateProgramOptions) => ts.Program;
 }
 
 interface ParsedProject {
@@ -246,6 +256,86 @@ interface FileContext {
 interface PendingReference extends Omit<CompilerReference, "id"> {
   position: number;
   identityHint: string;
+}
+
+// ── Sequential capture (issue #140: one program alive at a time) ─────────────
+//
+// Cross-project reference linkage flows through declaration-location STRINGS
+// (`declarationLocation`: absolute path + start offset + syntax kind), which
+// are identical across programs for the same file bytes. That is what already
+// made multi-program resolution work when every program was held concurrently —
+// and it is exactly what lets each project's program be RELEASED after a
+// capture pass: everything AST- or checker-derived (positions, texts, symbol
+// declaration locations, polymorphism, invocation proofs) is computed while
+// the program is alive, and only the string-keyed lookups into the corpus-wide
+// location→id map are deferred to a final, compiler-free finishing pass. Peak
+// memory becomes the largest single project instead of the sum of all of them.
+
+interface DeferredImportBinding {
+  binding: Omit<CompilerImportBinding, "targetId">;
+  /** Declaration locations of the imported symbol (alias-resolved). */
+  targetLocations: readonly string[];
+}
+
+type CapturedReference =
+  | { form: "final"; position: number; identityHint: string; reference: Omit<CompilerReference, "id"> }
+  | {
+      form: "import"; position: number; line: number; column: number; sourceId: string;
+      bindingId: string; moduleSpecifier: string; resolvedFilePath?: string;
+    }
+  | {
+      form: "call"; position: number; line: number; column: number; sourceId: string;
+      isNew: boolean; targetName: string; receiver?: string; polymorphic: boolean;
+      candidateLocations: readonly string[]; expressionText: string; signatureText?: string;
+    }
+  | {
+      form: "heritage"; position: number; line: number; column: number; sourceId: string;
+      isImplements: boolean; targetName: string; targetLocations: readonly string[];
+    }
+  | {
+      form: "identifier"; position: number; line: number; column: number; sourceId: string;
+      text: string; receiver?: string; targetLocations: readonly string[];
+    }
+  | {
+      form: "callback"; position: number; line: number; column: number;
+      calleeLocations: readonly string[]; callbackDraftId?: string;
+      callbackLocations: readonly string[]; parameterName: string; argumentIndex: number;
+      wiringSite: string; argumentText: string;
+    };
+
+/** Everything retained for a file once its project's program is released. */
+interface CapturedFile {
+  filePath: string;
+  language: CompilerSourceLanguage;
+  projectId: string;
+  health: CompilerSourceHealth;
+  nodes: CompilerExtractedNode[];
+  fileDraftId?: string;
+  bindings: DeferredImportBinding[];
+  captured: CapturedReference[];
+}
+
+/** Capture-time half of the old `idsForSymbol`: symbol → declaration locations. */
+function declarationLocationsForSymbol(
+  symbol: ts.Symbol | undefined,
+  checker: ts.TypeChecker,
+): string[] {
+  if (!symbol) return [];
+  const resolved = canonicalSymbol(symbol, checker);
+  return [...new Set((resolved.declarations ?? []).map(declarationLocation))];
+}
+
+/** Finish-time half: locations → the same sorted unique ids `idsForSymbol` produced. */
+function idsForLocations(
+  locations: readonly string[],
+  locationIds: ReadonlyMap<string, string>,
+): string[] {
+  const ids = new Set<string>();
+  for (const location of locations) {
+    const id = locationIds.get(location);
+    if (id) ids.add(id);
+  }
+  return [...ids].sort();
 }
 
 const SOURCE_EXTENSIONS = new Set([
@@ -311,28 +401,127 @@ export function buildTypeScriptExtraction(
   const root = resolve(rootDir);
   const candidates = collectCandidates(root, candidateFiles);
   const parsedProjects = parseProjects(root, new Set(candidates));
-  const runtimeProjects: RuntimeProject[] = parsedProjects.map((project) => {
-    const program = ts.createProgram({
-      rootNames: project.parsed.fileNames,
-      options: project.parsed.options,
-      projectReferences: project.parsed.projectReferences,
-    });
-    return { ...project, program, checker: program.getTypeChecker() };
+  const createProgram = options.programFactory ?? ts.createProgram;
+  const semanticDiagnostics = options.semanticDiagnostics ?? false;
+
+  // Ownership priority: most specific config directory first, then path order —
+  // the identical comparator the previous probe-every-program-then-sort
+  // implementation applied per file. Processing projects in this global order
+  // lets each candidate be claimed greedily by the FIRST containing project
+  // (the same winner), without holding every program alive to compare.
+  const processingOrder = [...parsedProjects].sort((left, right) => {
+    const specificity = dirname(right.configPath).length - dirname(left.configPath).length;
+    return specificity || left.configPath.localeCompare(right.configPath);
   });
 
-  const ownership = new Map<string, RuntimeProject>();
-  for (const file of candidates) {
-    const owners = runtimeProjects
-      .filter((project) => project.program.getSourceFile(file) !== undefined)
-      .sort((left, right) => {
-        const specificity = dirname(right.configPath).length - dirname(left.configPath).length;
-        return specificity || left.configPath.localeCompare(right.configPath);
+  const claimed = new Set<string>();
+  const poisonedFiles = new Set<string>();
+  const crashedProjects = new Set<ParsedProject>();
+  const locationIds = new Map<string, string>();
+  const nodeById = new Map<string, CompilerExtractedNode>();
+  const capturedByFile = new Map<string, CapturedFile>();
+
+  // Stage one project's owned files while its program is alive; retain only
+  // plain data. Nothing stored here references the program, checker, or AST.
+  const processProject = (project: ParsedProject, program: ts.Program, owned: readonly string[]): void => {
+    const runtime: RuntimeProject = { ...project, program, checker: program.getTypeChecker() };
+    const contexts: FileContext[] = [];
+    for (const absoluteFile of owned) {
+      const sourceFile = program.getSourceFile(absoluteFile);
+      if (!sourceFile) continue;
+      const filePath = relativePath(root, absoluteFile);
+      const { health, ranges } = sourceHealth(program, sourceFile, semanticDiagnostics);
+      const context: FileContext = {
+        filePath,
+        sourceFile,
+        project: runtime,
+        language: languageForFile(filePath),
+        health,
+        errorRanges: ranges,
+        excludedDeclarationRanges: [],
+        drafts: [],
+        declarationDrafts: new Map(),
+        symbolDrafts: new Map(),
+        nodes: [],
+      };
+      if (health.status !== "failed") {
+        collectDrafts(context);
+        if (health.status === "partial" && context.drafts.length <= 1) {
+          health.status = "failed";
+          context.drafts = [];
+          context.fileDraft = undefined;
+          context.declarationDrafts.clear();
+          context.symbolDrafts.clear();
+        }
+      }
+      contexts.push(context);
+    }
+
+    assignCanonicalIdentities(contexts);
+    for (const context of contexts) {
+      for (const draft of context.drafts) {
+        if (!draft.id) continue;
+        for (const declaration of draft.declarations) {
+          locationIds.set(declarationLocation(declaration), draft.id);
+        }
+      }
+      context.nodes = materializeNodes(context);
+      for (const node of context.nodes) nodeById.set(node.id, node);
+    }
+    for (const context of contexts) {
+      const bindings = captureImportBindings(root, context);
+      capturedByFile.set(normalizedAbsolute(context.sourceFile.fileName), {
+        filePath: context.filePath,
+        language: context.language,
+        projectId: runtime.id,
+        health: context.health,
+        nodes: context.nodes,
+        fileDraftId: context.fileDraft?.id,
+        bindings,
+        captured: captureReferences(context, bindings),
       });
-    if (owners[0]) ownership.set(file, owners[0]);
+    }
+  };
+
+  for (const project of processingOrder) {
+    // Program creation parses every root file; a single malformed source (e.g.
+    // a hostile test fixture) can hit a TS-internal assertion. Isolate the
+    // failure to this project so its files fall back to tree-sitter extraction
+    // instead of aborting the whole corpus (issue #140 follow-up finding).
+    let program: ts.Program;
+    try {
+      program = createProgram({
+        rootNames: project.parsed.fileNames,
+        // Never type-check library .d.ts or emit: extraction only needs the
+        // checker's lazy symbol/type queries, not a full compile.
+        options: { ...project.parsed.options, skipLibCheck: true, noEmit: true },
+        projectReferences: project.parsed.projectReferences,
+      });
+    } catch {
+      crashedProjects.add(project);
+      // Poison only files no healthier, more specific project has already
+      // extracted — a crash cannot retroactively un-stage a good extraction.
+      for (const file of project.parsed.fileNames) {
+        const absolute = normalizedAbsolute(file);
+        if (!claimed.has(absolute)) poisonedFiles.add(absolute);
+      }
+      continue;
+    }
+    const owned = candidates.filter((file) => {
+      if (claimed.has(file) || poisonedFiles.has(file)) return false;
+      try { return program.getSourceFile(file) !== undefined; }
+      catch { return false; }
+    });
+    for (const file of owned) claimed.add(file);
+    processProject(project, program, owned);
+    // program goes out of scope here — the peak-memory point of the old
+    // implementation (every program + checker alive simultaneously) is gone.
   }
 
-  const uncovered = candidates.filter((file) => !ownership.has(file));
-  let inferred: RuntimeProject | undefined;
+  // Files from a crashed project stay out of the inferred program too — the
+  // poison root file would crash it as well. They fall back to tree-sitter.
+  const uncovered = candidates.filter((file) => !claimed.has(file) && !poisonedFiles.has(file));
+  let inferredProject: ParsedProject | undefined;
   if (uncovered.length > 0) {
     const inferredOptions: ts.CompilerOptions = {
       allowJs: true,
@@ -345,86 +534,56 @@ export function buildTypeScriptExtraction(
       target: ts.ScriptTarget.ES2022,
       ...options.inferredCompilerOptions,
     };
-    const program = ts.createProgram({ rootNames: uncovered, options: inferredOptions });
-    inferred = {
-      id: "inferred",
-      configPath: "",
-      parsed: {
-        options: inferredOptions,
-        fileNames: uncovered,
-        errors: [],
-      },
-      diagnostics: [],
-      program,
-      checker: program.getTypeChecker(),
-    };
-    runtimeProjects.push(inferred);
-    for (const file of uncovered) ownership.set(file, inferred);
+    try {
+      const program = createProgram({ rootNames: uncovered, options: inferredOptions });
+      inferredProject = {
+        id: "inferred",
+        configPath: "",
+        parsed: {
+          options: inferredOptions,
+          fileNames: uncovered,
+          errors: [],
+        },
+        diagnostics: [],
+      };
+      processProject(inferredProject, program, uncovered);
+    } catch {
+      // Poison among the uncovered roots: leave them all to tree-sitter.
+    }
   }
 
-  const contexts: FileContext[] = [];
+  // ── Finishing pass: compiler-free. Resolve deferred declaration locations
+  // against the now-complete corpus-wide location→id map, replaying exactly
+  // the id/status/candidate logic the old concurrent implementation applied.
+  const fileDraftIdByPath = new Map<string, string>();
+  for (const captured of capturedByFile.values()) {
+    if (captured.fileDraftId) fileDraftIdByPath.set(captured.filePath, captured.fileDraftId);
+  }
+
+  const files: CompilerFileExtraction[] = [];
   for (const absoluteFile of candidates) {
-    const project = ownership.get(absoluteFile);
-    const sourceFile = project?.program.getSourceFile(absoluteFile);
-    if (!project || !sourceFile) continue;
-    const filePath = relativePath(root, absoluteFile);
-    const { health, ranges } = sourceHealth(project.program, sourceFile);
-    const context: FileContext = {
-      filePath,
-      sourceFile,
-      project,
-      language: languageForFile(filePath),
-      health,
-      errorRanges: ranges,
-      excludedDeclarationRanges: [],
-      drafts: [],
-      declarationDrafts: new Map(),
-      symbolDrafts: new Map(),
-      nodes: [],
-    };
-    if (health.status !== "failed") {
-      collectDrafts(context);
-      if (health.status === "partial" && context.drafts.length <= 1) {
-        health.status = "failed";
-        context.drafts = [];
-        context.fileDraft = undefined;
-        context.declarationDrafts.clear();
-        context.symbolDrafts.clear();
-      }
-    }
-    contexts.push(context);
-  }
-
-  assignCanonicalIdentities(contexts);
-
-  const locationIds = new Map<string, string>();
-  const nodeById = new Map<string, CompilerExtractedNode>();
-  for (const context of contexts) {
-    for (const draft of context.drafts) {
-      if (!draft.id) continue;
-      for (const declaration of draft.declarations) {
-        locationIds.set(declarationLocation(declaration), draft.id);
-      }
-    }
-    context.nodes = materializeNodes(context);
-    for (const node of context.nodes) nodeById.set(node.id, node);
-  }
-
-  const files = contexts.map((context) => {
-    const importBindings = extractImportBindings(root, context, locationIds);
-    const references = extractReferences(context, contexts, locationIds, nodeById, importBindings);
-    return {
-      filePath: context.filePath,
-      language: context.language,
-      projectId: context.project.id,
-      health: context.health,
-      nodes: context.nodes,
+    const captured = capturedByFile.get(absoluteFile);
+    if (!captured) continue;
+    const importBindings: CompilerImportBinding[] = captured.bindings.map(({ binding, targetLocations }) => ({
+      ...binding,
+      targetId: idsForLocations(targetLocations, locationIds)[0],
+    }));
+    files.push({
+      filePath: captured.filePath,
+      language: captured.language,
+      projectId: captured.projectId,
+      health: captured.health,
+      nodes: captured.nodes,
       importBindings,
-      references,
-    } satisfies CompilerFileExtraction;
-  });
+      references: finishReferences(captured, importBindings, locationIds, nodeById, fileDraftIdByPath),
+    } satisfies CompilerFileExtraction);
+  }
 
-  const projectSummaries: DiscoveredTypeScriptProject[] = runtimeProjects.map((project) => ({
+  const summaryProjects: ParsedProject[] = [
+    ...parsedProjects.filter((project) => !crashedProjects.has(project)),
+    ...(inferredProject ? [inferredProject] : []),
+  ];
+  const projectSummaries: DiscoveredTypeScriptProject[] = summaryProjects.map((project) => ({
     id: project.id,
     configPath: project.configPath ? relativePath(root, project.configPath) : null,
     projectReferences: (project.parsed.projectReferences ?? [])
@@ -831,12 +990,16 @@ function materializeNodes(context: FileContext): CompilerExtractedNode[] {
     });
 }
 
-function extractImportBindings(
+/**
+ * Capture-time import extraction: identical to the old `extractImportBindings`
+ * except the imported symbol resolves to declaration LOCATIONS, not ids — the
+ * finishing pass maps them once every project has contributed to the map.
+ */
+function captureImportBindings(
   root: string,
   context: FileContext,
-  locationIds: ReadonlyMap<string, string>,
-): CompilerImportBinding[] {
-  const bindings: CompilerImportBinding[] = [];
+): DeferredImportBinding[] {
+  const bindings: DeferredImportBinding[] = [];
   const checker = context.project.checker;
   const options = context.project.program.getCompilerOptions();
   for (const statement of context.sourceFile.statements) {
@@ -853,24 +1016,25 @@ function extractImportBindings(
       flags: { isDefault?: boolean; isNamespace?: boolean; isTypeOnly?: boolean } = {},
     ): void => {
       const symbol = checker.getSymbolAtLocation(local);
-      const targetId = symbol ? idForSymbol(symbol, checker, locationIds) : undefined;
       const position = context.sourceFile.getLineAndCharacterOfPosition(local.getStart(context.sourceFile));
       const identity = [context.filePath, local.text, moduleSpecifier, importedName].join("\u0000");
       bindings.push({
-        id: `import:${sha256(identity).slice(0, 32)}`,
-        filePath: context.filePath,
-        localName: local.text,
-        importedName,
-        moduleSpecifier,
-        resolvedFilePath,
-        targetId,
-        isTypeOnly: Boolean(statement.importClause?.isTypeOnly || flags.isTypeOnly),
-        isNamespace: Boolean(flags.isNamespace),
-        isDefault: Boolean(flags.isDefault),
-        line: position.line,
-        column: position.character,
-        confidence: 1,
-        resolutionMethod: "typescript-import",
+        binding: {
+          id: `import:${sha256(identity).slice(0, 32)}`,
+          filePath: context.filePath,
+          localName: local.text,
+          importedName,
+          moduleSpecifier,
+          resolvedFilePath,
+          isTypeOnly: Boolean(statement.importClause?.isTypeOnly || flags.isTypeOnly),
+          isNamespace: Boolean(flags.isNamespace),
+          isDefault: Boolean(flags.isDefault),
+          line: position.line,
+          column: position.character,
+          confidence: 1,
+          resolutionMethod: "typescript-import",
+        },
+        targetLocations: declarationLocationsForSymbol(symbol, checker),
       });
     };
     const clause = statement.importClause;
@@ -884,85 +1048,240 @@ function extractImportBindings(
       }
     }
   }
-  return bindings.sort((left, right) => left.line - right.line || left.column - right.column || left.id.localeCompare(right.id));
+  return bindings.sort((left, right) => left.binding.line - right.binding.line
+    || left.binding.column - right.binding.column
+    || left.binding.id.localeCompare(right.binding.id));
 }
 
-function extractReferences(
+function captureReferences(
   context: FileContext,
-  contexts: readonly FileContext[],
-  locationIds: ReadonlyMap<string, string>,
-  nodeById: ReadonlyMap<string, CompilerExtractedNode>,
-  importBindings: readonly CompilerImportBinding[],
-): CompilerReference[] {
+  importBindings: readonly DeferredImportBinding[],
+): CapturedReference[] {
   if (!context.fileDraft?.id) return [];
-  const pending: PendingReference[] = [];
-  const checker = context.project.checker;
-
-  const push = (reference: Omit<PendingReference, "position" | "identityHint">, position: number, identityHint: string): void => {
-    pending.push({ ...reference, position, identityHint });
-  };
+  const fileDraftId = context.fileDraft.id;
+  const captured: CapturedReference[] = [];
 
   // Structural containment is compiler-proven and never inferred by name.
   for (const draft of context.drafts) {
     if (!draft.id || !draft.container?.id) continue;
     const position = declarationStart(draft);
-    push({
-      sourceId: draft.container.id,
-      targetId: draft.id,
-      kind: "contains",
-      targetName: draft.name,
-      targetQualifiedName: draft.qualifiedName,
-      candidates: [draft.id],
-      status: "resolved",
-      confidence: 1,
-      resolutionMethod: "lexical-containment",
-      provenance: "typescript-compiler",
-      filePath: context.filePath,
-      line: lineColumn(context.sourceFile, position).line,
-      column: lineColumn(context.sourceFile, position).column,
-      evidence: { declarationRole: draft.declarationRole },
-    }, position, `contains:${draft.identityKey}`);
+    const point = lineColumn(context.sourceFile, position);
+    captured.push({
+      form: "final",
+      position,
+      identityHint: `contains:${draft.identityKey}`,
+      reference: {
+        sourceId: draft.container.id,
+        targetId: draft.id,
+        kind: "contains",
+        targetName: draft.name,
+        targetQualifiedName: draft.qualifiedName,
+        candidates: [draft.id],
+        status: "resolved",
+        confidence: 1,
+        resolutionMethod: "lexical-containment",
+        provenance: "typescript-compiler",
+        filePath: context.filePath,
+        line: point.line,
+        column: point.column,
+        evidence: { declarationRole: draft.declarationRole },
+      },
+    });
   }
 
-  for (const binding of importBindings) {
-    const resolvedFilePath = binding.resolvedFilePath;
-    const targetFileId = resolvedFilePath
-      ? contexts.find((entry) => entry.filePath === normalizeRelative(resolvedFilePath))?.fileDraft?.id
-      : undefined;
-    const targetId = targetFileId ?? binding.targetId;
-    push({
-      sourceId: context.fileDraft.id,
-      targetId,
-      kind: "imports",
-      targetName: binding.moduleSpecifier,
-      targetQualifiedName: targetId ? nodeById.get(targetId)?.qualifiedName : undefined,
-      candidates: targetId ? [targetId] : [],
-      status: targetId ? "resolved" : "unresolved",
-      confidence: targetId ? 1 : 0,
-      resolutionMethod: "typescript-import",
-      provenance: "typescript-compiler",
-      filePath: context.filePath,
+  for (const { binding } of importBindings) {
+    captured.push({
+      form: "import",
+      position: context.sourceFile.getPositionOfLineAndCharacter(binding.line, binding.column),
       line: binding.line,
       column: binding.column,
-      evidence: { importBindingId: binding.id, resolvedFilePath: binding.resolvedFilePath },
-    }, context.sourceFile.getPositionOfLineAndCharacter(binding.line, binding.column), `import:${binding.id}`);
+      sourceId: fileDraftId,
+      bindingId: binding.id,
+      moduleSpecifier: binding.moduleSpecifier,
+      resolvedFilePath: binding.resolvedFilePath,
+    });
   }
 
   const visit = (node: ts.Node): void => {
     const trusted = referenceSyntaxIsTrusted(node, context);
     if (trusted && (ts.isCallExpression(node) || ts.isNewExpression(node))) {
-      emitCallReference(node, context, locationIds, nodeById, push);
+      captureCallReference(node, context, captured);
       if (ts.isCallExpression(node)) {
-        emitCallbackReferences(node, context, locationIds, nodeById, push);
+        captureCallbackReferences(node, context, captured);
       }
     } else if (trusted && ts.isHeritageClause(node)) {
-      emitHeritageReferences(node, context, locationIds, nodeById, push);
+      captureHeritageReferences(node, context, captured);
     } else if (trusted && ts.isIdentifier(node) && shouldEmitIdentifierReference(node)) {
-      emitIdentifierReference(node, context, locationIds, nodeById, push);
+      captureIdentifierReference(node, context, captured);
     }
     ts.forEachChild(node, visit);
   };
   ts.forEachChild(context.sourceFile, visit);
+  return captured;
+}
+
+/**
+ * Finishing pass for one file: compiler-free. Resolves the deferred
+ * declaration locations against the corpus-wide location→id map and replays
+ * exactly the id/status/candidate/skip logic the concurrent implementation
+ * applied at emission time, then the original sort → ordinal → hash tail.
+ */
+function finishReferences(
+  file: CapturedFile,
+  importBindings: readonly CompilerImportBinding[],
+  locationIds: ReadonlyMap<string, string>,
+  nodeById: ReadonlyMap<string, CompilerExtractedNode>,
+  fileDraftIdByPath: ReadonlyMap<string, string>,
+): CompilerReference[] {
+  const bindingById = new Map(importBindings.map((binding) => [binding.id, binding]));
+  const pending: PendingReference[] = [];
+  for (const record of file.captured) {
+    switch (record.form) {
+      case "final": {
+        pending.push({ ...record.reference, position: record.position, identityHint: record.identityHint });
+        break;
+      }
+      case "import": {
+        const binding = bindingById.get(record.bindingId);
+        if (!binding) break;
+        const targetFileId = binding.resolvedFilePath
+          ? fileDraftIdByPath.get(normalizeRelative(binding.resolvedFilePath))
+          : undefined;
+        const targetId = targetFileId ?? binding.targetId;
+        pending.push({
+          sourceId: record.sourceId,
+          targetId,
+          kind: "imports",
+          targetName: record.moduleSpecifier,
+          targetQualifiedName: targetId ? nodeById.get(targetId)?.qualifiedName : undefined,
+          candidates: targetId ? [targetId] : [],
+          status: targetId ? "resolved" : "unresolved",
+          confidence: targetId ? 1 : 0,
+          resolutionMethod: "typescript-import",
+          provenance: "typescript-compiler",
+          filePath: file.filePath,
+          line: record.line,
+          column: record.column,
+          evidence: { importBindingId: binding.id, resolvedFilePath: binding.resolvedFilePath },
+          position: record.position,
+          identityHint: `import:${binding.id}`,
+        });
+        break;
+      }
+      case "call": {
+        const candidates = idsForLocations(record.candidateLocations, locationIds);
+        const uniqueCandidate = !record.polymorphic && candidates.length === 1 ? candidates[0] : undefined;
+        const ambiguous = !uniqueCandidate && (candidates.length > 0 || record.polymorphic);
+        pending.push({
+          sourceId: record.sourceId,
+          targetId: uniqueCandidate,
+          kind: record.isNew ? "instantiates" : "calls",
+          targetName: record.targetName,
+          targetQualifiedName: uniqueCandidate ? nodeById.get(uniqueCandidate)?.qualifiedName : undefined,
+          receiver: record.receiver,
+          qualifier: record.receiver,
+          candidates,
+          status: uniqueCandidate ? "resolved" : ambiguous ? "ambiguous" : "unresolved",
+          confidence: uniqueCandidate ? 1 : ambiguous ? 0.75 : 0,
+          resolutionMethod: "typescript-signature",
+          provenance: "typescript-compiler",
+          filePath: file.filePath,
+          line: record.line,
+          column: record.column,
+          evidence: {
+            expression: record.expressionText,
+            signature: record.signatureText,
+            polymorphic: record.polymorphic,
+          },
+          position: record.position,
+          identityHint: `${record.targetName}:${record.receiver ?? ""}`,
+        });
+        break;
+      }
+      case "heritage": {
+        const targetId = idsForLocations(record.targetLocations, locationIds)[0];
+        pending.push({
+          sourceId: record.sourceId,
+          targetId,
+          kind: record.isImplements ? "implements" : "extends",
+          targetName: record.targetName,
+          targetQualifiedName: targetId ? nodeById.get(targetId)?.qualifiedName : undefined,
+          candidates: targetId ? [targetId] : [],
+          status: targetId ? "resolved" : "unresolved",
+          confidence: targetId ? 1 : 0,
+          resolutionMethod: "typescript-heritage",
+          provenance: "typescript-compiler",
+          filePath: file.filePath,
+          line: record.line,
+          column: record.column,
+          evidence: { heritage: record.isImplements ? "implements" : "extends" },
+          position: record.position,
+          identityHint: record.targetName,
+        });
+        break;
+      }
+      case "identifier": {
+        const targetIds = idsForLocations(record.targetLocations, locationIds);
+        const targetId = targetIds.length === 1 ? targetIds[0] : undefined;
+        if (targetId === record.sourceId || targetIds.length === 0) break;
+        pending.push({
+          sourceId: record.sourceId,
+          targetId,
+          kind: "references",
+          targetName: record.text,
+          targetQualifiedName: targetId ? nodeById.get(targetId)?.qualifiedName : undefined,
+          receiver: record.receiver,
+          qualifier: record.receiver,
+          candidates: targetIds,
+          status: targetId ? "resolved" : "ambiguous",
+          confidence: targetId ? 1 : 0.75,
+          resolutionMethod: "typescript-symbol",
+          provenance: "typescript-compiler",
+          filePath: file.filePath,
+          line: record.line,
+          column: record.column,
+          evidence: { expression: record.text },
+          position: record.position,
+          identityHint: `${record.text}:${record.receiver ?? ""}`,
+        });
+        break;
+      }
+      case "callback": {
+        const calleeId = idsForLocations(record.calleeLocations, locationIds)[0];
+        if (!calleeId) break;
+        let callbackId = record.callbackDraftId;
+        if (!callbackId) {
+          const callbackIds = idsForLocations(record.callbackLocations, locationIds);
+          callbackId = callbackIds.length === 1 ? callbackIds[0] : undefined;
+        }
+        if (!callbackId) break;
+        pending.push({
+          sourceId: calleeId,
+          targetId: callbackId,
+          kind: "calls",
+          targetName: nodeById.get(callbackId)?.name ?? record.argumentText,
+          targetQualifiedName: nodeById.get(callbackId)?.qualifiedName,
+          candidates: [callbackId],
+          status: "resolved",
+          confidence: 0.85,
+          resolutionMethod: "typescript-callback-parameter",
+          provenance: "callback-synthesis",
+          filePath: file.filePath,
+          line: record.line,
+          column: record.column,
+          evidence: {
+            parameterName: record.parameterName,
+            argumentIndex: record.argumentIndex,
+            wiringSite: record.wiringSite,
+            callee: nodeById.get(calleeId)?.qualifiedName,
+          },
+          position: record.position,
+          identityHint: `callback:${calleeId}:${record.parameterName}:${record.argumentIndex}:${callbackId}`,
+        });
+        break;
+      }
+    }
+  }
 
   pending.sort((left, right) => left.position - right.position || left.kind.localeCompare(right.kind) || left.identityHint.localeCompare(right.identityHint));
   const occurrence = new Map<string, number>();
@@ -977,12 +1296,10 @@ function extractReferences(
   });
 }
 
-function emitCallReference(
+function captureCallReference(
   node: ts.CallExpression | ts.NewExpression,
   context: FileContext,
-  locationIds: ReadonlyMap<string, string>,
-  nodeById: ReadonlyMap<string, CompilerExtractedNode>,
-  push: (reference: Omit<PendingReference, "position" | "identityHint">, position: number, identityHint: string) => void,
+  captured: CapturedReference[],
 ): void {
   const checker = context.project.checker;
   const expression = node.expression;
@@ -993,18 +1310,18 @@ function emitCallReference(
     ? symbolForDeclaration(resolvedSignature.declaration, checker)
     : undefined;
   const expressionSymbol = checker.getSymbolAtLocation(ts.isPropertyAccessExpression(expression) ? expression.name : expression);
-  const signatureTargets = idsForSymbol(signatureSymbol, checker, locationIds);
-  const expressionTargets = idsForSymbol(expressionSymbol, checker, locationIds);
   const callSignatures = checker.getTypeAtLocation(expression).getCallSignatures();
-  const candidates = [...new Set(callSignatures
+  const candidateLocations = [...new Set(callSignatures
     .map((signature) => signature.declaration ? symbolForDeclaration(signature.declaration, checker) : undefined)
-    .flatMap((symbol) => idsForSymbol(symbol, checker, locationIds))
-    .concat(signatureTargets, expressionTargets))].sort();
+    .flatMap((symbol) => declarationLocationsForSymbol(symbol, checker))
+    .concat(
+      declarationLocationsForSymbol(signatureSymbol, checker),
+      declarationLocationsForSymbol(expressionSymbol, checker),
+    ))];
   const polymorphic = ts.isPropertyAccessExpression(expression)
     && expression.expression.kind !== ts.SyntaxKind.ThisKeyword
     && expression.expression.kind !== ts.SyntaxKind.SuperKeyword
     && isPolymorphicReceiver(checker.getTypeAtLocation(expression.expression));
-  const uniqueCandidate = !polymorphic && candidates.length === 1 ? candidates[0] : undefined;
   const receiver = ts.isPropertyAccessExpression(expression) ? expression.expression.getText(context.sourceFile) : undefined;
   const targetName = ts.isPropertyAccessExpression(expression)
     ? expression.name.text
@@ -1015,119 +1332,88 @@ function emitCallReference(
     ? expression.name.getStart(context.sourceFile)
     : expression.getStart(context.sourceFile);
   const point = lineColumn(context.sourceFile, position);
-  const ambiguous = !uniqueCandidate && (candidates.length > 0 || polymorphic);
-  push({
-    sourceId,
-    targetId: uniqueCandidate,
-    kind: ts.isNewExpression(node) ? "instantiates" : "calls",
-    targetName,
-    targetQualifiedName: uniqueCandidate ? nodeById.get(uniqueCandidate)?.qualifiedName : undefined,
-    receiver,
-    qualifier: receiver,
-    candidates,
-    status: uniqueCandidate ? "resolved" : ambiguous ? "ambiguous" : "unresolved",
-    confidence: uniqueCandidate ? 1 : ambiguous ? 0.75 : 0,
-    resolutionMethod: "typescript-signature",
-    provenance: "typescript-compiler",
-    filePath: context.filePath,
+  captured.push({
+    form: "call",
+    position,
     line: point.line,
     column: point.column,
-    evidence: {
-      expression: expression.getText(context.sourceFile),
-      signature: resolvedSignature ? normalizeSignature(checker.signatureToString(resolvedSignature, node)) : undefined,
-      polymorphic,
-    },
-  }, position, `${targetName}:${receiver ?? ""}`);
+    sourceId,
+    isNew: ts.isNewExpression(node),
+    targetName,
+    receiver,
+    polymorphic,
+    candidateLocations,
+    expressionText: expression.getText(context.sourceFile),
+    signatureText: resolvedSignature ? normalizeSignature(checker.signatureToString(resolvedSignature, node)) : undefined,
+  });
 }
 
-function emitHeritageReferences(
+function captureHeritageReferences(
   clause: ts.HeritageClause,
   context: FileContext,
-  locationIds: ReadonlyMap<string, string>,
-  nodeById: ReadonlyMap<string, CompilerExtractedNode>,
-  push: (reference: Omit<PendingReference, "position" | "identityHint">, position: number, identityHint: string) => void,
+  captured: CapturedReference[],
 ): void {
   const sourceId = enclosingSourceId(clause.parent, context);
   if (!sourceId) return;
   const checker = context.project.checker;
   for (const type of clause.types) {
     const symbol = checker.getSymbolAtLocation(type.expression);
-    const targetId = idForSymbol(symbol, checker, locationIds);
     const targetName = type.expression.getText(context.sourceFile);
     const position = type.getStart(context.sourceFile);
     const point = lineColumn(context.sourceFile, position);
-    push({
-      sourceId,
-      targetId,
-      kind: clause.token === ts.SyntaxKind.ImplementsKeyword ? "implements" : "extends",
-      targetName,
-      targetQualifiedName: targetId ? nodeById.get(targetId)?.qualifiedName : undefined,
-      candidates: targetId ? [targetId] : [],
-      status: targetId ? "resolved" : "unresolved",
-      confidence: targetId ? 1 : 0,
-      resolutionMethod: "typescript-heritage",
-      provenance: "typescript-compiler",
-      filePath: context.filePath,
+    captured.push({
+      form: "heritage",
+      position,
       line: point.line,
       column: point.column,
-      evidence: { heritage: clause.token === ts.SyntaxKind.ImplementsKeyword ? "implements" : "extends" },
-    }, position, targetName);
+      sourceId,
+      isImplements: clause.token === ts.SyntaxKind.ImplementsKeyword,
+      targetName,
+      targetLocations: declarationLocationsForSymbol(symbol, checker),
+    });
   }
 }
 
-function emitIdentifierReference(
+function captureIdentifierReference(
   identifier: ts.Identifier,
   context: FileContext,
-  locationIds: ReadonlyMap<string, string>,
-  nodeById: ReadonlyMap<string, CompilerExtractedNode>,
-  push: (reference: Omit<PendingReference, "position" | "identityHint">, position: number, identityHint: string) => void,
+  captured: CapturedReference[],
 ): void {
   const checker = context.project.checker;
   const symbol = checker.getSymbolAtLocation(identifier);
-  const targetIds = idsForSymbol(symbol, checker, locationIds);
-  const targetId = targetIds.length === 1 ? targetIds[0] : undefined;
+  const targetLocations = declarationLocationsForSymbol(symbol, checker);
   const sourceId = enclosingSourceId(identifier, context);
-  if (!sourceId || targetId === sourceId || targetIds.length === 0) return;
+  if (!sourceId || targetLocations.length === 0) return;
   const position = identifier.getStart(context.sourceFile);
   const point = lineColumn(context.sourceFile, position);
   const parent = identifier.parent;
   const receiver = ts.isPropertyAccessExpression(parent) && parent.name === identifier
     ? parent.expression.getText(context.sourceFile)
     : undefined;
-  push({
-    sourceId,
-    targetId,
-    kind: "references",
-    targetName: identifier.text,
-    targetQualifiedName: targetId ? nodeById.get(targetId)?.qualifiedName : undefined,
-    receiver,
-    qualifier: receiver,
-    candidates: targetIds,
-    status: targetId ? "resolved" : "ambiguous",
-    confidence: targetId ? 1 : 0.75,
-    resolutionMethod: "typescript-symbol",
-    provenance: "typescript-compiler",
-    filePath: context.filePath,
+  captured.push({
+    form: "identifier",
+    position,
     line: point.line,
     column: point.column,
-    evidence: { expression: identifier.text },
-  }, position, `${identifier.text}:${receiver ?? ""}`);
+    sourceId,
+    text: identifier.text,
+    receiver,
+    targetLocations,
+  });
 }
 
-function emitCallbackReferences(
+function captureCallbackReferences(
   call: ts.CallExpression,
   context: FileContext,
-  locationIds: ReadonlyMap<string, string>,
-  nodeById: ReadonlyMap<string, CompilerExtractedNode>,
-  push: (reference: Omit<PendingReference, "position" | "identityHint">, position: number, identityHint: string) => void,
+  captured: CapturedReference[],
 ): void {
   const checker = context.project.checker;
   const signature = checker.getResolvedSignature(call);
   const declaration = signature?.getDeclaration();
   if (!declaration || !ts.isFunctionLike(declaration)) return;
   const calleeSymbol = symbolForDeclaration(declaration, checker);
-  const calleeId = idForSymbol(calleeSymbol, checker, locationIds);
-  if (!calleeId) return;
+  const calleeLocations = declarationLocationsForSymbol(calleeSymbol, checker);
+  if (calleeLocations.length === 0) return;
   const parameters = declaration.parameters;
   call.arguments.forEach((argument, index) => {
     const mapping = callbackParameterForArgument(parameters, index);
@@ -1138,38 +1424,30 @@ function emitCallbackReferences(
       mapping.restArgumentIndex,
     )) return;
     const { parameter } = mapping;
-    let callbackId: string | undefined;
+    let callbackDraftId: string | undefined;
+    let callbackLocations: string[] = [];
     if (ts.isArrowFunction(argument) || ts.isFunctionExpression(argument)) {
-      callbackId = context.declarationDrafts.get(argument)?.id;
+      callbackDraftId = context.declarationDrafts.get(argument)?.id;
+      if (!callbackDraftId) return;
     } else {
-      const callbackIds = idsForSymbol(checker.getSymbolAtLocation(argument), checker, locationIds);
-      callbackId = callbackIds.length === 1 ? callbackIds[0] : undefined;
+      callbackLocations = declarationLocationsForSymbol(checker.getSymbolAtLocation(argument), checker);
+      if (callbackLocations.length === 0) return;
     }
-    if (!callbackId) return;
     const position = argument.getStart(context.sourceFile);
     const point = lineColumn(context.sourceFile, position);
-    const parameterName = parameter.name.getText(declaration.getSourceFile());
-    push({
-      sourceId: calleeId,
-      targetId: callbackId,
-      kind: "calls",
-      targetName: nodeById.get(callbackId)?.name ?? argument.getText(context.sourceFile),
-      targetQualifiedName: nodeById.get(callbackId)?.qualifiedName,
-      candidates: [callbackId],
-      status: "resolved",
-      confidence: 0.85,
-      resolutionMethod: "typescript-callback-parameter",
-      provenance: "callback-synthesis",
-      filePath: context.filePath,
+    captured.push({
+      form: "callback",
+      position,
       line: point.line,
       column: point.column,
-      evidence: {
-        parameterName,
-        argumentIndex: index,
-        wiringSite: call.getText(context.sourceFile),
-        callee: nodeById.get(calleeId)?.qualifiedName,
-      },
-    }, position, `callback:${calleeId}:${parameterName}:${index}:${callbackId}`);
+      calleeLocations,
+      callbackDraftId,
+      callbackLocations,
+      parameterName: parameter.name.getText(declaration.getSourceFile()),
+      argumentIndex: index,
+      wiringSite: call.getText(context.sourceFile),
+      argumentText: argument.getText(context.sourceFile),
+    });
   });
 }
 
@@ -1239,9 +1517,15 @@ function parameterIsInvoked(
   return invoked;
 }
 
-function sourceHealth(program: ts.Program, sourceFile: ts.SourceFile): { health: CompilerSourceHealth; ranges: ErrorRange[] } {
+function sourceHealth(
+  program: ts.Program,
+  sourceFile: ts.SourceFile,
+  semanticDiagnostics: boolean,
+): { health: CompilerSourceHealth; ranges: ErrorRange[] } {
   const syntactic = program.getSyntacticDiagnostics(sourceFile);
-  const semantic = program.getSemanticDiagnostics(sourceFile);
+  // The full semantic pass type-checks the whole file (and everything it can
+  // resolve). `status` never depends on it, so it is opt-in (issue #140).
+  const semantic = semanticDiagnostics ? program.getSemanticDiagnostics(sourceFile) : [];
   const ranges = diagnosticRanges(sourceFile.text, syntactic);
   const coveredBytes = ranges.reduce((total, range) => total + Buffer.byteLength(sourceFile.text.slice(range.start, range.end), "utf8"), 0);
   const totalBytes = Math.max(1, Buffer.byteLength(sourceFile.text, "utf8"));
@@ -1334,29 +1618,6 @@ function closestDraft(node: ts.Node | undefined, context: FileContext): DraftNod
 
 function enclosingSourceId(node: ts.Node, context: FileContext): string | undefined {
   return closestDraft(node, context)?.id ?? context.fileDraft?.id;
-}
-
-function idForSymbol(
-  symbol: ts.Symbol | undefined,
-  checker: ts.TypeChecker,
-  locations: ReadonlyMap<string, string>,
-): string | undefined {
-  return idsForSymbol(symbol, checker, locations)[0];
-}
-
-function idsForSymbol(
-  symbol: ts.Symbol | undefined,
-  checker: ts.TypeChecker,
-  locations: ReadonlyMap<string, string>,
-): string[] {
-  if (!symbol) return [];
-  const resolved = canonicalSymbol(symbol, checker);
-  const ids = new Set<string>();
-  for (const declaration of resolved.declarations ?? []) {
-    const id = locations.get(declarationLocation(declaration));
-    if (id) ids.add(id);
-  }
-  return [...ids].sort();
 }
 
 function isPolymorphicReceiver(type: ts.Type): boolean {

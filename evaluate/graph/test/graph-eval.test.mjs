@@ -126,7 +126,7 @@ test("v2 integrity hashing includes semantic metadata but ignores timestamps", (
   db.close();
 
   const first = inspectGraphDatabase(path, { nodesCreated: 1 });
-  assert.equal(first.schemaVersion, 2);
+  assert.equal(first.schemaVersion, 3);
   assert.deepEqual(first.parseStatusCounts, { partial: 1 });
   assert.equal(first.totalDiagnostics, 2);
   assert.equal(first.resolvedReferences, 1);

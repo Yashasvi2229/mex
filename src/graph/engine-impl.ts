@@ -27,6 +27,7 @@ import {
   TYPESCRIPT_COMPILER_EXTRACTOR_VERSION,
   TYPESCRIPT_COMPILER_VERSION,
   type CompilerExtractedNode,
+  type CompilerExtractionOptions,
   type CompilerExtractionResult,
   type CompilerFileExtraction,
 } from "./extraction/index.js";
@@ -63,6 +64,8 @@ export interface GraphEngineOptions {
   readOnly?: boolean;
   /** Injectable source-file access for embedders and deterministic fault tests. */
   sourceFileAccess?: Partial<GraphSourceFileAccess>;
+  /** Compiler extraction knobs (semantic diagnostics, program-crash fault tests). */
+  compilerExtraction?: CompilerExtractionOptions;
 }
 
 export interface GraphSourceFileAccess {
@@ -129,6 +132,7 @@ class GraphEngineImpl implements GraphEngine {
   private readonly dbPath: string;
   private readonly readOnly: boolean;
   private readonly sourceFileAccess: GraphSourceFileAccess;
+  private readonly compilerExtraction?: CompilerExtractionOptions;
   private db: SqliteDatabase | null = null;
   private store: GraphStore | null = null;
 
@@ -137,6 +141,7 @@ class GraphEngineImpl implements GraphEngine {
     this.dbPath = options.dbPath ?? resolve(this.rootDir, ".mex", "graph.db");
     this.readOnly = options.readOnly ?? false;
     this.sourceFileAccess = { ...NODE_SOURCE_FILE_ACCESS, ...options.sourceFileAccess };
+    this.compilerExtraction = options.compilerExtraction;
   }
 
   private getStore(allowRebuild = false): GraphStore {
@@ -151,7 +156,7 @@ class GraphEngineImpl implements GraphEngine {
     if (this.readOnly) throw new Error("A read-only graph engine cannot build an index.");
     const started = Date.now();
     const root = rootDir ? resolve(rootDir) : this.rootDir;
-    const staged = await stageCorpus(root, undefined, this.sourceFileAccess);
+    const staged = await stageCorpus(root, undefined, this.sourceFileAccess, this.compilerExtraction);
     const result = this.publish(staged);
     return { ...result, durationMs: Date.now() - started };
   }
@@ -172,7 +177,7 @@ class GraphEngineImpl implements GraphEngine {
 
     // Re-stage the whole semantic corpus. This makes an arbitrary sync sequence
     // converge to the same graph as a clean build and re-resolves cross-file refs.
-    const staged = await stageCorpus(this.rootDir, manifest, this.sourceFileAccess);
+    const staged = await stageCorpus(this.rootDir, manifest, this.sourceFileAccess, this.compilerExtraction);
     const stagedByPath = new Map(staged.files.map((file) => [file.record.path, file]));
     const unstagedExisting = changedSources.filter((file) => (
       !deletedChangedSources.has(file) && !stagedByPath.has(file)
@@ -286,15 +291,21 @@ async function stageCorpus(
   root: string,
   manifest = graphManifest(root),
   sourceFileAccess: GraphSourceFileAccess = NODE_SOURCE_FILE_ACCESS,
+  compilerExtraction?: CompilerExtractionOptions,
 ): Promise<StagedCorpus> {
   const discovered = discoverSourceFiles(root, sourceFileAccess);
   const compilerPaths = discovered.filter((file) => COMPILER_LANGUAGES.has(detectLanguage(file.relPath)))
     .map((file) => file.relPath);
-  const compiler = buildTypeScriptExtraction(root, compilerPaths);
+  const compiler = buildTypeScriptExtraction(root, compilerPaths, compilerExtraction);
   const compilerByPath = new Map(compiler.files.map((file) => [file.filePath, file]));
   const treeLanguages = [...new Set(discovered.map((file) => detectLanguage(file.relPath))
     .filter((language) => !COMPILER_LANGUAGES.has(language)))];
-  await loadGrammars(treeLanguages);
+  // Compiler-language files the compiler could not stage (e.g. a project whose
+  // program creation crashed) fall back to tree-sitter — load their grammars too.
+  const fallbackLanguages = [...new Set(discovered
+    .filter((file) => COMPILER_LANGUAGES.has(detectLanguage(file.relPath)) && !compilerByPath.has(file.relPath))
+    .map((file) => detectLanguage(file.relPath)))];
+  await loadGrammars([...treeLanguages, ...fallbackLanguages]);
 
   const files = discovered.map((file) => {
     const compilerFile = compilerByPath.get(file.relPath);
