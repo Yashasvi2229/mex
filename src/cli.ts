@@ -531,6 +531,7 @@ program
     console.log("  mex graph get <id...>                Expand source for node ids as JSONL");
     console.log("  mex graph ground                     Ground an existing pre-0.7 scaffold");
     console.log("  mex graph query <relation> <target>  Structural lookup as JSONL");
+    console.log("  mex graph repair                     Checkpoint a stranded WAL, verify integrity");
     console.log("  mex impact <symbol|file>              Blast radius as JSONL");
     console.log("  mex log <message>      Append a note/decision/risk/todo to the event log");
     console.log("  mex timeline           Show recent event log entries");

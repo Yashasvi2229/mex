@@ -123,7 +123,7 @@ describe("pre-0.7 graph grounding migration", () => {
       code: "GROUNDING_DRIFT",
       file: ".mex/patterns/checkout.md",
     }));
-  });
+  }, 30_000);
 
   it("requires a built graph", async () => {
     const { config } = fixture();

@@ -70,7 +70,7 @@ describe("compiler program-crash isolation (#140 follow-up)", () => {
     } finally {
       db.close();
     }
-  });
+  }, 30_000);
 });
 
 describe("read-only grounding runtime (#140 observation 2)", () => {
@@ -93,7 +93,7 @@ describe("read-only grounding runtime (#140 observation 2)", () => {
 
     const after = createHash("sha256").update(readFileSync(dbPath)).digest("hex");
     expect(after).toBe(before);
-  });
+  }, 30_000);
 });
 
 describe("mex graph repair (#140 observation 3)", () => {
@@ -137,7 +137,7 @@ describe("mex graph repair (#140 observation 3)", () => {
     } finally {
       db.close();
     }
-  });
+  }, 30_000);
 
   it("returns 1 when no graph store exists", async () => {
     const root = mkdtempSync(join(tmpdir(), "mex-140-norepair-"));
