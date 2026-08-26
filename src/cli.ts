@@ -331,8 +331,272 @@ graphCommand
   .option("--max-output-tokens <n>", "hard output token ceiling")
   .option("--max-source-lines <n>", "per-node source line cap (with --detail source)")
   .option("--fingerprint", "attach serialized node fingerprints (grounding workflow)")
-  .action((task: string[], options) => {
-    return import("./graph/cli-agent.js").then(({ runGraphScope }) => runGraphScope(task.join(" "), process.cwd(), {}, options));
+  .option("--wiki", "also return knowledge entities grounded to the nodes in scope")
+  .action(async (task: string[], options) => {
+    const { runGraphScope } = await import("./graph/cli-agent.js");
+    // Composed here, not imported by the graph. With the flag off there is no
+    // provider at all, so the graph's output path is the same code it was
+    // before this option existed — which is what makes "byte-identical when
+    // off" a structural property rather than a promise.
+    const deps = options.wiki === true
+      ? await import("./wiki/cli/for-code.js").then(({ knowledgeRecordsFor }) => ({
+          knowledgeFor: (nodeIds: readonly string[]): Array<Record<string, unknown>> =>
+            knowledgeRecordsFor(nodeIds).map((record) => ({ ...record })),
+        }))
+      : {};
+    return runGraphScope(task.join(" "), process.cwd(), deps, options);
+  });
+
+// ── Wiki ──
+//
+// P9 owns the full wiki command surface and the JSON envelope. This one command
+// exists now because the reverse join is the phase's product claim and a
+// library function does not demonstrate it. It is a thin shell over
+// `wiki/query/for-code.ts`.
+const wikiCommand = program
+  .command("wiki")
+  .description("Knowledge-graph commands over the .mex wiki");
+
+/**
+ * The scaffold-shaped options every wiki command needs.
+ *
+ * One resolution, so ten commands cannot disagree about where the scaffold is
+ * or which paths are reserved. `wiki.exclude` and `wiki.readOnly` come from
+ * config (D10) rather than from flags: a reserved path is a property of the
+ * project, not of the invocation.
+ */
+function wikiIo(): import("./wiki/cli/commands.js").CommandIo {
+  const config = loadConfig();
+  return {
+    write: (line: string) => console.log(line),
+    setExitCode: (code: number) => {
+      process.exitCode = code;
+    },
+    scaffoldRoot: config.scaffoldRoot,
+    projectRoot: config.projectRoot,
+    ...(config.wiki?.exclude === undefined ? {} : { exclude: config.wiki.exclude }),
+    ...(config.wiki?.readOnly === undefined ? {} : { readOnly: config.wiki.readOnly }),
+  };
+}
+
+/** The §15.1 filters, added to whichever commands they apply to. */
+function withReadFilters(command: Command): Command {
+  return command
+    .option("--type <type>", "only entities of this type")
+    .option("--topic <id-or-alias>", "only entities in this topic")
+    .option("--status <status>", "only entities in this lifecycle state")
+    .option("--health <health>", "only entities whose worst grounding health is this")
+    .option("--limit <n>", "maximum records to return; clamped, never unbounded")
+    .option("--include-archived", "include archived entities, which are excluded by default")
+    .option("--json", "emit one enveloped JSON object instead of JSONL records");
+}
+
+withReadFilters(wikiCommand.command("list").description("Entities in this scaffold, bounded")).action(
+  async (options) => {
+    const { runList } = await import("./wiki/cli/commands.js");
+    runList(wikiIo(), options);
+  },
+);
+
+wikiCommand
+  .command("show <id>")
+  .description("One entity, with its body")
+  .option("--no-body", "omit the entity body")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (id: string, options) => {
+    const { runShow } = await import("./wiki/cli/commands.js");
+    runShow(wikiIo(), id, options);
+  });
+
+withReadFilters(wikiCommand.command("query <text...>").description("Full-text search, title before body")).action(
+  async (text: string[], options) => {
+    const { runQuery } = await import("./wiki/cli/commands.js");
+    runQuery(wikiIo(), text.join(" "), options);
+  },
+);
+
+withReadFilters(wikiCommand.command("related <id>").description("The bounded neighbourhood around an entity"))
+  .option("--depth <n>", "traversal depth; clamped")
+  .option("--max-tokens <n>", "token budget for the neighbourhood")
+  .action(async (id: string, options) => {
+    const { runRelated } = await import("./wiki/cli/commands.js");
+    runRelated(wikiIo(), id, options);
+  });
+
+withReadFilters(wikiCommand.command("backlinks <id>").description("Entities that point at this one")).action(
+  async (id: string, options) => {
+    const { runBacklinks } = await import("./wiki/cli/commands.js");
+    runBacklinks(wikiIo(), id, options);
+  },
+);
+
+wikiCommand
+  .command("validate")
+  .description("Check the whole scaffold; works with no index and no code graph")
+  .option("--limit <n>", "maximum diagnostics to report")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runValidate } = await import("./wiki/cli/commands.js");
+    runValidate(wikiIo(), options);
+  });
+
+withReadFilters(wikiCommand.command("graph").description("A bounded slice of the relation graph")).action(
+  async (options) => {
+    const { runGraph } = await import("./wiki/cli/commands.js");
+    runGraph(wikiIo(), options);
+  },
+);
+
+wikiCommand
+  .command("rebuild-index")
+  .description("Rebuild the disposable index; the only command that creates it")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runRebuildIndex } = await import("./wiki/cli/commands.js");
+    runRebuildIndex(wikiIo(), options);
+  });
+
+wikiCommand
+  .command("regenerate-views")
+  .description("Rewrite generated sections that have drifted; --dry-run reports only")
+  .option("--dry-run", "report what has drifted and write nothing")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runRegenerateViews } = await import("./wiki/cli/commands.js");
+    runRegenerateViews(wikiIo(), options);
+  });
+
+wikiCommand
+  .command("migrate")
+  .description("Convert a pre-wiki scaffold; --dry-run writes nothing and mints no id")
+  .option("--dry-run", "report what would happen and write nothing")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runMigrate } = await import("./wiki/cli/commands.js");
+    runMigrate(wikiIo(), options);
+  });
+
+wikiCommand
+  .command("apply <operation-file>")
+  .description("Plan an operation from a JSON file; writes only with --apply")
+  .option("--apply", "write the change, rather than only planning it")
+  .option("--dry-run", "plan only, even if --apply was given")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (file: string, options) => {
+    const { runApply } = await import("./wiki/cli/commands.js");
+    runApply(wikiIo(), file, options);
+  });
+
+/**
+ * The synthesis wiring: the code graph, and an agent launcher.
+ *
+ * Composed here rather than imported anywhere under `src/wiki/`, for the same
+ * reason `knowledgeFor` is (handoff §39.7): a `src/graph/` to `src/wiki/`
+ * import would be a genuine cycle, and injection makes "synthesis does nothing
+ * without a graph" a structural property rather than a promise. Everything
+ * below is lazily imported so a `mex check` pays none of it.
+ */
+async function synthesisIo(): Promise<import("./wiki/cli/commands.js").CommandIo> {
+  const base = wikiIo();
+  const config = loadConfig();
+  const { resolve } = await import("node:path");
+  const { existsSync } = await import("node:fs");
+  const dbPath = resolve(config.projectRoot, ".mex", "graph.db");
+  if (!existsSync(dbPath)) return base;
+
+  const [
+    { createGroundingGraph, createSynthesisGraph },
+    { openGraphDatabase },
+    { createGraphEngine },
+    { MinHashReconciler },
+    { FingerprintStore },
+    { AI_TOOLS },
+    { isCliAvailable },
+    { runToolInteractive },
+  ] = await Promise.all([
+    import("./wiki/grounding/adapter.js"),
+    import("./graph/db/database.js"),
+    import("./graph/engine-impl.js"),
+    import("./graph/reconcile-engine.js"),
+    import("./graph/fingerprint-store.js"),
+    import("./types.js"),
+    import("./cli-tools.js"),
+    import("./sync/index.js"),
+  ]);
+
+  const db = openGraphDatabase(dbPath);
+  const engine = createGraphEngine({ rootDir: config.projectRoot, dbPath });
+  return {
+    ...base,
+    repoRoot: config.projectRoot,
+    codeGraph: createSynthesisGraph(engine, db),
+    graph: createGroundingGraph(engine, new MinHashReconciler(new FingerprintStore(db)), db),
+    ...(config.wiki?.synthesis === undefined ? {} : { synthesisScope: config.wiki.synthesis }),
+    launchAgent: (playbook: string) => {
+      // mex's own launcher, not a second one: six tools, cross-platform
+      // detection, and the Windows shim handling that issue #85 paid for.
+      // The configured tools first, then whatever else is installed. No
+      // interactive question: an agent-facing command that stopped to ask which
+      // CLI to use would hang the run it was supposed to start.
+      const candidates = [...config.aiTools, ...(Object.keys(AI_TOOLS) as import("./types.js").AiTool[])];
+      for (const tool of candidates) {
+        const meta = AI_TOOLS[tool];
+        if (meta.cli === null || !isCliAvailable(meta.cli)) continue;
+        return runToolInteractive(tool, playbook, config.projectRoot);
+      }
+      return false;
+    },
+  };
+}
+
+wikiCommand
+  .command("build")
+  .description("Discover clusters and hand an agent the synthesis playbook")
+  .option("--cluster <name>", "restrict the run to one cluster")
+  .option("--print", "print the playbook rather than launching an agent")
+  .option("--json", "emit one enveloped JSON object; never launches an agent")
+  .action(async (options) => {
+    const { runBuild } = await import("./wiki/cli/commands.js");
+    runBuild(await synthesisIo(), { ...options, print: options.print === true || options.json === true });
+  });
+
+wikiCommand
+  .command("prepare")
+  .description("The deterministic scope and prompt for one synthesis stage")
+  .option("--stage <stage>", "architecture_component | pattern | convention | global | relationships")
+  .option("--cluster <name>", "which cluster, for the per-cluster stages")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (options) => {
+    const { runPrepare } = await import("./wiki/cli/commands.js");
+    runPrepare(await synthesisIo(), options);
+  });
+
+wikiCommand
+  .command("propose <response-file>")
+  .description("Validate an agent's synthesis response into operation plans; writes only with --apply")
+  .option("--apply", "write the changes, rather than only planning them")
+  .option("--dry-run", "plan only, even if --apply was given")
+  .option("--stage <stage>", "the stage this response answers, when the file does not say")
+  .option("--cluster <name>", "the cluster this response is for, when the file does not say")
+  .option("--json", "emit one enveloped JSON object")
+  .action(async (file: string, options) => {
+    const { runPropose } = await import("./wiki/cli/commands.js");
+    runPropose(await synthesisIo(), file, options);
+  });
+
+wikiCommand
+  .command("for-code <nodeId...>")
+  .description("Knowledge entities grounded to the given code-graph node ids")
+  .option("--json", "Emit one enveloped JSON object instead of JSONL records")
+  .option("--limit <n>", "maximum entities to return")
+  .option("--include-archived", "include archived entities, which are excluded by default")
+  .action(async (nodeIds: string[], options) => {
+    const { runWikiForCode } = await import("./wiki/cli/for-code.js");
+    runWikiForCode(nodeIds, process.cwd(), {
+      json: options.json === true,
+      limit: options.limit === undefined ? undefined : Number(options.limit),
+      includeArchived: options.includeArchived === true,
+    });
   });
 
 graphCommand
@@ -665,7 +929,7 @@ if (isMainModule) {
 
 function buildCompletion(shell: string): string {
   const commands = [
-    "setup", "check", "init", "graph", "impact", "sync", "pattern", "log", "timeline",
+    "setup", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
     "heartbeat", "doctor", "watch", "tui", "commands", "completion",
     "telemetry", "config", "feedback", "hub",
   ];

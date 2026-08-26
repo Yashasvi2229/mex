@@ -40,6 +40,22 @@ interface AgentGraphSession {
 export interface AgentCommandDeps {
   open?: (rootDir: string) => AgentGraphSession;
   write?: (line: string) => void;
+  /**
+   * Attach knowledge-graph entities grounded to the nodes Scope returned.
+   *
+   * **Injected, not imported.** The wiki reads the graph, and if the graph also
+   * imported the wiki the two would be mutually dependent — `wiki/query/budget`
+   * already imports `graph/agent-protocol`, so the cycle would be real rather
+   * than notional. Declaring the shape here and composing at the CLI entry
+   * point keeps `src/graph/` unaware that a wiki exists, which is also what
+   * makes the flag-off path provably unchanged: with no provider there is no
+   * code to skip.
+   *
+   * Returns records already shaped for the JSONL stream. They are charged to
+   * the same ledger as everything else, so this cannot smuggle output past the
+   * caller's token ceiling.
+   */
+  knowledgeFor?: (nodeIds: readonly string[]) => Rec[];
 }
 
 type RawOptions = Partial<Record<keyof AgentOptions, unknown>>;
@@ -659,11 +675,24 @@ export function runGraphScope(
     const suggestions = status === "partial" && facts.length > 0
       ? [`mex graph get ${facts[0]!.node.id} --detail source`] : [];
 
+    // Grounded knowledge, when a provider was supplied and only then. Charged
+    // to the same ledger, and appended after the graph's own records so the
+    // prefix of the stream is byte-for-byte what it was without the flag.
+    const knowledgeRecords: Rec[] = [];
+    for (const record of deps.knowledgeFor?.([...finalSourcedIds, ...facts.map((fact) => fact.node.id)]) ?? []) {
+      if (!ledger.tryAdd(record)) {
+        truncated = true;
+        break;
+      }
+      knowledgeRecords.push(record);
+    }
+
     emitAll(write, meta, [
       ...healthRecords,
       ...sourceRecords,
       ...flowRecords,
       ...facts.map((fact) => fact.record),
+      ...knowledgeRecords,
     ]);
     write(JSON.stringify(summaryRecord(ctx, {
       matchedNodes: selection.matchedCount,
@@ -2041,6 +2070,15 @@ function transitiveCallers(graph: GraphEngine, root: GraphNode, maxDepth: number
   return results;
 }
 
+/**
+ * Which scaffold files ground to any of these nodes.
+ *
+ * In schema v3 `scaffold_file` is generated from the subject columns and is
+ * NULL for entity-kind rows. The predicate therefore keeps the legacy graph
+ * protocol strictly scaffold-shaped while Wiki entity baselines share the one
+ * underlying store. Older schemas are rejected by the immutable reader and
+ * require an explicit rebuild before this query can run.
+ */
 function groundedFiles(db: SqliteDatabase, nodeIds: string[]): Array<{ scaffold_file: string; node_id: string }> {
   if (nodeIds.length === 0) return [];
   const placeholders = nodeIds.map(() => "?").join(",");
@@ -2049,8 +2087,9 @@ function groundedFiles(db: SqliteDatabase, nodeIds: string[]): Array<{ scaffold_
             COALESCE(aliases.canonical_node_id, grounded.node_id) AS node_id
      FROM _mex_grounded_source grounded
      LEFT JOIN node_aliases aliases ON aliases.alias_id = grounded.node_id
-     WHERE grounded.node_id IN (${placeholders})
-        OR aliases.canonical_node_id IN (${placeholders})
+     WHERE grounded.scaffold_file IS NOT NULL
+       AND (grounded.node_id IN (${placeholders})
+        OR aliases.canonical_node_id IN (${placeholders}))
      ORDER BY grounded.scaffold_file, node_id`,
   ).all(...nodeIds, ...nodeIds) as Array<{ scaffold_file: string; node_id: string }>;
 }

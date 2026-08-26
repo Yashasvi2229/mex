@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { graphRemediationCommand } from "../../reporter.js";
+import { DB_SCHEMA_VERSION } from "../db/database.js";
 import { openSqlite } from "../db/sqlite.js";
 import { BANDS } from "../config.js";
 import { createGraphEngine } from "../engine-impl.js";
@@ -184,7 +185,7 @@ describe("inspectGraphStatus", () => {
     const status = await inspect(root);
 
     expect(status.status).toBe("fresh");
-    expect(status.schemaVersion).toBe(2);
+    expect(status.schemaVersion).toBe(DB_SCHEMA_VERSION);
     expect(status.parseHealth).toMatchObject({ total: 1, ok: 1, partial: 0, failed: 0 });
     expect(status.changes).toMatchObject({
       total: 0,
@@ -294,7 +295,7 @@ describe("inspectGraphStatus", () => {
     }));
   });
 
-  it.each([1, 3])("classifies schema %s as rebuild_required", async (schemaVersion) => {
+  it.each([1, 2, DB_SCHEMA_VERSION + 1])("classifies schema %s as rebuild_required", async (schemaVersion) => {
     const root = temporaryRoot();
     source(root, "src/a.ts", "export const a = 1;\n");
     const dbPath = await build(root);

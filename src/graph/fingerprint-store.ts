@@ -1,4 +1,4 @@
-import type { GroundedSource } from "./grounding.js";
+import type { GroundedSource, GroundingBaseline, GroundingSubject } from "./grounding.js";
 import { bandHashes } from "./fingerprint.js";
 import type { Fingerprint } from "./reconcile.js";
 import type { SQLInputValue } from "node:sqlite";
@@ -116,46 +116,105 @@ export class FingerprintStore {
       .filter((entry): entry is { nodeId: string; fingerprint: Fingerprint } => entry.fingerprint !== null);
   }
 
-  getGroundedSource(scaffoldFile: string, nodeId: string): GroundedSource | null {
+  /**
+   * The baseline for one (subject, node) pair, following a node alias when the
+   * id it was grounded under has since been reconciled to a canonical one.
+   *
+   * Subject-generalized (schema v3). `getGroundedSource` is the scaffold-kind
+   * projection of it, so there is one accessor and not two: a second one would
+   * be a second place for the alias fallback to be forgotten.
+   */
+  getBaseline(subject: GroundingSubject, nodeId: string): GroundingBaseline | null {
     const row = this.db.prepare(
-      `SELECT scaffold_file, node_id, source, body_hash, fingerprint
-       FROM _mex_grounded_source WHERE scaffold_file = ? AND node_id = ?
+      `SELECT subject_kind, subject_id, node_id, source, body_hash, fingerprint
+       FROM _mex_grounded_source
+       WHERE subject_kind = ? AND subject_id = ? AND node_id = ?
        UNION ALL
-       SELECT grounded.scaffold_file, grounded.node_id, grounded.source, grounded.body_hash, grounded.fingerprint
+       SELECT grounded.subject_kind, grounded.subject_id, grounded.node_id,
+              grounded.source, grounded.body_hash, grounded.fingerprint
        FROM node_aliases aliases
        JOIN _mex_grounded_source grounded ON grounded.node_id = aliases.alias_id
-       WHERE grounded.scaffold_file = ? AND aliases.canonical_node_id = ?
+       WHERE grounded.subject_kind = ? AND grounded.subject_id = ? AND aliases.canonical_node_id = ?
        LIMIT 1`,
-    ).get(scaffoldFile, nodeId, scaffoldFile, nodeId) as {
-      scaffold_file: string;
-      node_id: string;
-      source: string;
-      body_hash: string;
-      fingerprint: string;
-    } | undefined;
-    return row ? {
-      scaffoldFile: row.scaffold_file,
-      nodeId: row.node_id,
-      source: row.source,
-      bodyHash: row.body_hash,
-      fingerprint: row.fingerprint,
+    ).get(subject.kind, subject.id, nodeId, subject.kind, subject.id, nodeId) as BaselineRow | undefined;
+    return row ? decodeBaseline(row) : null;
+  }
+
+  /** Every baseline recorded for one subject, in node order. */
+  listBaselines(subject: GroundingSubject): GroundingBaseline[] {
+    const rows = this.db.prepare(
+      `SELECT subject_kind, subject_id, node_id, source, body_hash, fingerprint
+       FROM _mex_grounded_source WHERE subject_kind = ? AND subject_id = ?
+       ORDER BY node_id`,
+    ).all(subject.kind, subject.id) as BaselineRow[];
+    return rows.map(decodeBaseline);
+  }
+
+  saveBaseline(baseline: GroundingBaseline): void {
+    this.db.prepare(
+      `INSERT INTO _mex_grounded_source
+       (subject_kind, subject_id, node_id, source, body_hash, fingerprint) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(subject_kind, subject_id, node_id) DO UPDATE SET source=excluded.source,
+         body_hash=excluded.body_hash, fingerprint=excluded.fingerprint`,
+    ).run(
+      baseline.subject.kind,
+      baseline.subject.id,
+      baseline.nodeId,
+      baseline.source,
+      baseline.bodyHash,
+      baseline.fingerprint,
+    );
+  }
+
+  deleteBaseline(subject: GroundingSubject, nodeId: string): void {
+    this.db.prepare(
+      "DELETE FROM _mex_grounded_source WHERE subject_kind = ? AND subject_id = ? AND node_id = ?",
+    ).run(subject.kind, subject.id, nodeId);
+  }
+
+  getGroundedSource(scaffoldFile: string, nodeId: string): GroundedSource | null {
+    const baseline = this.getBaseline({ kind: "scaffold", id: scaffoldFile }, nodeId);
+    return baseline ? {
+      scaffoldFile: baseline.subject.id,
+      nodeId: baseline.nodeId,
+      source: baseline.source,
+      bodyHash: baseline.bodyHash,
+      fingerprint: baseline.fingerprint,
     } : null;
   }
 
   saveGroundedSource(source: GroundedSource): void {
-    this.db.prepare(
-      `INSERT INTO _mex_grounded_source
-       (scaffold_file, node_id, source, body_hash, fingerprint) VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(scaffold_file, node_id) DO UPDATE SET source=excluded.source,
-         body_hash=excluded.body_hash, fingerprint=excluded.fingerprint`,
-    ).run(source.scaffoldFile, source.nodeId, source.source, source.bodyHash, source.fingerprint);
+    this.saveBaseline({
+      subject: { kind: "scaffold", id: source.scaffoldFile },
+      nodeId: source.nodeId,
+      source: source.source,
+      bodyHash: source.bodyHash,
+      fingerprint: source.fingerprint,
+    });
   }
 
   deleteGroundedSource(scaffoldFile: string, nodeId: string): void {
-    this.db.prepare(
-      "DELETE FROM _mex_grounded_source WHERE scaffold_file = ? AND node_id = ?",
-    ).run(scaffoldFile, nodeId);
+    this.deleteBaseline({ kind: "scaffold", id: scaffoldFile }, nodeId);
   }
+}
+
+interface BaselineRow {
+  subject_kind: string;
+  subject_id: string;
+  node_id: string;
+  source: string;
+  body_hash: string;
+  fingerprint: string;
+}
+
+function decodeBaseline(row: BaselineRow): GroundingBaseline {
+  return {
+    subject: { kind: row.subject_kind as GroundingSubject["kind"], id: row.subject_id },
+    nodeId: row.node_id,
+    source: row.source,
+    bodyHash: row.body_hash,
+    fingerprint: row.fingerprint,
+  };
 }
 
 function decodeRow(row: FingerprintRow): Fingerprint {

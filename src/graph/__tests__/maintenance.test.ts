@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { GraphMaintenanceOptions } from "../../team/contracts/graph.js";
+import { DB_SCHEMA_VERSION } from "../db/database.js";
 import { openSqlite } from "../db/sqlite.js";
 import { createGraphEngine } from "../engine-impl.js";
 import {
@@ -386,7 +387,7 @@ describe("graph maintenance", () => {
     try {
       db.prepare(
         `INSERT INTO _mex_grounded_source
-         (scaffold_file, node_id, source, body_hash, fingerprint) VALUES (?, ?, ?, ?, ?)`,
+         (subject_kind, subject_id, node_id, source, body_hash, fingerprint) VALUES ('scaffold', ?, ?, ?, ?, ?)`,
       ).run(".mex/context/architecture.md", "legacy-node", "legacy body", "hash", "fingerprint");
       db.exec("DELETE FROM schema_versions");
       db.prepare(
@@ -472,11 +473,11 @@ describe("graph maintenance", () => {
     try {
       db.prepare(
         `INSERT INTO _mex_grounded_source
-         (scaffold_file, node_id, source, body_hash, fingerprint) VALUES (?, ?, ?, ?, ?)`,
+         (subject_kind, subject_id, node_id, source, body_hash, fingerprint) VALUES ('scaffold', ?, ?, ?, ?, ?)`,
       ).run(".mex/context/architecture.md", "future-node", "future body", "hash", "fingerprint");
       db.prepare(
-        "INSERT INTO schema_versions(version, applied_at, description) VALUES(3, ?, ?)",
-      ).run(Date.now(), "future fixture");
+        "INSERT INTO schema_versions(version, applied_at, description) VALUES(?, ?, ?)",
+      ).run(DB_SCHEMA_VERSION + 1, Date.now(), "future fixture");
     } finally {
       db.close();
     }

@@ -34,6 +34,7 @@ import type { SqliteDatabase } from "./db/sqlite.js";
 import type { GraphEngine, SourceChunkMatch } from "./engine.js";
 import { deserializeFingerprint, serializeFingerprint } from "./fingerprint.js";
 import { FingerprintStore } from "./fingerprint-store.js";
+import type { GroundingBaseline, GroundingSubject } from "./grounding.js";
 import {
   GraphMaintenanceError,
   rebuildGraph,
@@ -45,6 +46,7 @@ import {
   type InternalFreshGraphReadResult,
 } from "./read-session.js";
 import { MinHashReconciler } from "./reconcile-engine.js";
+import type { Resolution } from "./reconcile.js";
 import { GRAPH_SNAPSHOT_METADATA_KEY } from "./snapshot.js";
 import { inspectGraphStatus } from "./status.js";
 import { LANGUAGES, NODE_KINDS, type GraphNode } from "./types.js";
@@ -130,6 +132,48 @@ export interface GraphSymbolWorkspaceResult {
   callers: GraphPage<GraphRelation> | null;
   callees: GraphPage<GraphRelation> | null;
   impact: GraphImpactResult | null;
+}
+
+/** @internal Grounding-safe projection of one graph node. */
+export interface RepositoryGraphGroundedNode {
+  id: string;
+  bodyHash: string | null;
+  filePath: string;
+  startLine: number;
+  endLine: number;
+}
+
+/**
+ * @internal Package-private graph snapshot used by Wiki grounding.
+ *
+ * The shape is intentionally structural and graph-owned: this module never
+ * imports Wiki code. Every method reads the same immutable SQLite snapshot,
+ * and the snapshot cannot escape `withFreshGroundingSnapshot`.
+ */
+export interface RepositoryGraphGroundingSnapshot {
+  /** Exact immutable graph snapshot revision, for composite Wiki cursors. */
+  readonly revision: string;
+  getNode(nodeId: string): RepositoryGraphGroundedNode | null;
+  getFingerprint(nodeId: string): string | null;
+  reconcile(nodeId: string, committedFingerprint: string): Resolution | null;
+  getBaselineSource(subject: GroundingSubject, nodeId: string): GroundingBaseline | null;
+}
+
+/**
+ * @internal Opaque two-phase publication prepared while Graph is fresh.
+ *
+ * The graph adapter final-validates its immutable snapshot before calling
+ * `commit`. If that validation fails, it calls `discard` instead. Candidate
+ * paths, SQLite handles, and source bytes never cross this boundary.
+ */
+export interface RepositoryGraphPreparedPublication<T> {
+  preflight(): void | Promise<void>;
+  commit(): T | Promise<T>;
+  discard(): void | Promise<void>;
+}
+
+class GroundingSnapshotCallbackError {
+  constructor(readonly cause: unknown) {}
 }
 
 interface AdapterDependencies {
@@ -283,6 +327,141 @@ export class RepositoryGraphPort implements GraphPort {
     };
   }
 
+  /**
+   * @internal Run Wiki grounding work against one exact fresh Graph snapshot.
+   *
+   * The callback may be asynchronous. Final Graph freshness revalidation and
+   * descriptor cleanup happen only after it settles, so callers cannot mix a
+   * Wiki snapshot with Graph facts from two revisions.
+   */
+  async withFreshGroundingSnapshot<T>(
+    callback: (snapshot: RepositoryGraphGroundingSnapshot) => T | Promise<T>,
+  ): Promise<T> {
+    try {
+      const read = await this.#withFresh(async (context) => {
+        const snapshot = this.#groundingSnapshot(context);
+        try {
+          return await callback(snapshot.value);
+        } catch (error) {
+          throw new GroundingSnapshotCallbackError(error);
+        } finally {
+          snapshot.revoke();
+        }
+      });
+      return read.value;
+    } catch (error) {
+      if (error instanceof GroundingSnapshotCallbackError) throw error.cause;
+      throw error;
+    }
+  }
+
+  /**
+   * @internal Prepare a Wiki candidate under Graph, then publish it only after
+   * Graph's final freshness proof succeeds and before the Graph session closes.
+   */
+  async withFreshGroundingPublication<T>(
+    prepare: (
+      snapshot: RepositoryGraphGroundingSnapshot,
+    ) => RepositoryGraphPreparedPublication<T> | Promise<RepositoryGraphPreparedPublication<T>>,
+  ): Promise<T> {
+    let prepared: RepositoryGraphPreparedPublication<T> | undefined;
+    let commitStarted = false;
+    let committed: T | undefined;
+    try {
+      await this.#withFresh(async (context) => {
+        const snapshot = this.#groundingSnapshot(context);
+        try {
+          prepared = await prepare(snapshot.value);
+          await prepared.preflight();
+          return prepared;
+        } catch (error) {
+          throw new GroundingSnapshotCallbackError(error);
+        } finally {
+          snapshot.revoke();
+        }
+      }, async (publication) => {
+        commitStarted = true;
+        committed = await publication.commit();
+      });
+      return committed!;
+    } catch (error) {
+      if (prepared !== undefined && !commitStarted) {
+        try {
+          await prepared.discard();
+        } catch {
+          // The candidate stays private and no Wiki generation was published.
+          // Preserve the primary Graph/callback failure at this boundary.
+        }
+      }
+      if (error instanceof GroundingSnapshotCallbackError) throw error.cause;
+      throw error;
+    }
+  }
+
+  #groundingSnapshot(context: FreshContext): {
+    value: RepositoryGraphGroundingSnapshot;
+    revoke(): void;
+  } {
+      const store = new FingerprintStore(context.session.db);
+      const reconciler = new MinHashReconciler(store);
+      let active = true;
+      const assertActive = (): void => {
+        if (!active) {
+          throw interruptedRead("The graph grounding snapshot is no longer active.");
+        }
+      };
+      const snapshot: RepositoryGraphGroundingSnapshot = {
+        revision: context.revision,
+        getNode(nodeId) {
+          assertActive();
+          try {
+            const node = context.session.graph.getNode(nodeId);
+            return node === null ? null : {
+              id: node.id,
+              bodyHash: node.bodyHash ?? null,
+              filePath: node.filePath,
+              startLine: node.startLine,
+              endLine: node.endLine,
+            };
+          } catch {
+            throw interruptedRead("The graph grounding snapshot could not read a node safely.");
+          }
+        },
+        getFingerprint(nodeId) {
+          assertActive();
+          try {
+            const fingerprint = store.get(nodeId);
+            return fingerprint === null ? null : serializeFingerprint(fingerprint);
+          } catch {
+            throw interruptedRead("The graph grounding snapshot could not read a fingerprint safely.");
+          }
+        },
+        reconcile(nodeId, committedFingerprint) {
+          assertActive();
+          try {
+            const fingerprint = deserializeFingerprint(committedFingerprint);
+            return fingerprint === null ? null : reconciler.reconcile(nodeId, fingerprint);
+          } catch {
+            throw interruptedRead("The graph grounding snapshot could not reconcile a code reference safely.");
+          }
+        },
+        getBaselineSource(subject, nodeId) {
+          assertActive();
+          try {
+            return store.getBaseline(subject, nodeId);
+          } catch {
+            throw interruptedRead("The graph grounding snapshot could not read a baseline safely.");
+          }
+        },
+      };
+      return {
+        value: snapshot,
+        revoke() {
+          active = false;
+        },
+      };
+  }
+
   async #maintain(
     operation: "refresh" | "rebuild",
     options: GraphMaintenanceOptions,
@@ -296,7 +475,10 @@ export class RepositoryGraphPort implements GraphPort {
     }
   }
 
-  async #withFresh<T>(build: (context: FreshContext) => T): Promise<{
+  async #withFresh<T>(
+    build: (context: FreshContext) => T | Promise<T>,
+    afterValidation?: (value: T) => void | Promise<void>,
+  ): Promise<{
     revision: string;
     status: GraphStatus;
     value: T;
@@ -321,7 +503,7 @@ export class RepositoryGraphPort implements GraphPort {
       };
       let value: T;
       try {
-        value = build(context);
+        value = await build(context);
       } catch (error) {
         let validation;
         try {
@@ -332,7 +514,7 @@ export class RepositoryGraphPort implements GraphPort {
         if (!validation.valid) {
           throw interruptedRead("The graph changed while the read was being prepared.");
         }
-        if (error instanceof MexPortError) throw error;
+        if (error instanceof MexPortError || error instanceof GroundingSnapshotCallbackError) throw error;
         throw corruptIndex("Graph data could not be read safely.");
       }
       let final;
@@ -344,6 +526,7 @@ export class RepositoryGraphPort implements GraphPort {
       if (!final.valid) {
         throw interruptedRead("Graph freshness changed while the read was being prepared.");
       }
+      await afterValidation?.(value);
       return { revision, status: final.graphStatus, value };
     } finally {
       try {

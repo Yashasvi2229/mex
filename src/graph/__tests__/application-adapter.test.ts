@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MexPortError } from "../../team/contracts/shared.js";
 import {
   createRepositoryGraphPort,
+  type RepositoryGraphGroundingSnapshot,
   type GraphSearchBundleResult,
 } from "../application-adapter.js";
 import { openSqlite } from "../db/sqlite.js";
@@ -379,6 +380,202 @@ describe("RepositoryGraphPort", () => {
       return true;
     });
   }, 20_000);
+
+  it("holds one fresh grounding snapshot through async work and discards it on source invalidation", async () => {
+    const { root, port: basePort } = await fixture();
+    const target = (await basePort.searchNodes({ query: "serviceTarget", limit: 1 })).items[0]!;
+    let escaped: RepositoryGraphGroundingSnapshot | null = null;
+    let callbackSettled = false;
+    const port = createRepositoryGraphPort(root, {
+      __internal: {
+        loadFresh: async (...args) => {
+          const loaded = await loadFreshGraphReadSession(...args);
+          if (!loaded.session) return loaded;
+          const revalidateFreshness = loaded.session.revalidateFreshness.bind(loaded.session);
+          return {
+            ...loaded,
+            session: {
+              ...loaded.session,
+              revalidateFreshness: async () => {
+                expect(callbackSettled).toBe(true);
+                return revalidateFreshness();
+              },
+            },
+          };
+        },
+      },
+    });
+    callbackSettled = false;
+    const projection = await port.withFreshGroundingSnapshot(async (snapshot) => {
+      escaped = snapshot;
+      const node = snapshot.getNode(target.ref.symbolId);
+      const fingerprint = snapshot.getFingerprint(target.ref.symbolId);
+      await Promise.resolve();
+      callbackSettled = true;
+      return { node, fingerprint };
+    });
+    expect(projection.node).toMatchObject({
+      id: target.ref.symbolId,
+      filePath: "src/service.ts",
+    });
+    expect(projection.fingerprint).toEqual(expect.any(String));
+    expect(() => escaped!.getNode(target.ref.symbolId)).toThrowError(MexPortError);
+    try {
+      escaped!.getNode(target.ref.symbolId);
+    } catch (error) {
+      expectPortCode(error, "OPERATION_INTERRUPTED");
+      expect((error as MexPortError).problem.detail).not.toContain(root);
+    }
+
+    callbackSettled = false;
+    await expect(port.withFreshGroundingSnapshot(async (snapshot) => {
+      const buffered = snapshot.getNode(target.ref.symbolId);
+      source(root, "src/service.ts", "export const changedDuringGrounding = true;\n");
+      await Promise.resolve();
+      callbackSettled = true;
+      return buffered;
+    })).rejects.toSatisfy((error) => {
+      expectPortCode(error, "OPERATION_INTERRUPTED");
+      return true;
+    });
+  }, 30_000);
+
+  it("brands grounding accessor failures as sanitized interrupted Graph reads", async () => {
+    const { root } = await fixture();
+    const port = createRepositoryGraphPort(root, {
+      __internal: {
+        loadFresh: async (...args) => {
+          const loaded = await loadFreshGraphReadSession(...args);
+          if (!loaded.session) return loaded;
+          const graph = new Proxy(loaded.session.graph, {
+            get(target, property, receiver) {
+              if (property === "getNode") {
+                return () => {
+                  throw new Error(`raw graph accessor failure at ${root}`);
+                };
+              }
+              return Reflect.get(target, property, receiver);
+            },
+          });
+          return {
+            ...loaded,
+            session: { ...loaded.session, graph },
+          };
+        },
+      },
+    });
+
+    await expect(port.withFreshGroundingSnapshot((snapshot) => {
+      snapshot.getNode("function:1111111111111111");
+    })).rejects.toSatisfy((error) => {
+      expectPortCode(error, "OPERATION_INTERRUPTED");
+      expect((error as MexPortError).problem.detail).not.toContain(root);
+      expect((error as MexPortError).problem.detail).not.toContain("raw graph accessor failure");
+      return true;
+    });
+  }, 30_000);
+
+  it("commits prepared grounding work only after final Graph validation and discards on invalidation", async () => {
+    const { root } = await fixture();
+    let revalidated = false;
+    let committed = false;
+    let discarded = false;
+    const stable = createRepositoryGraphPort(root, {
+      __internal: {
+        loadFresh: async (...args) => {
+          const loaded = await loadFreshGraphReadSession(...args);
+          if (!loaded.session) return loaded;
+          const revalidateFreshness = loaded.session.revalidateFreshness.bind(loaded.session);
+          return {
+            ...loaded,
+            session: {
+              ...loaded.session,
+              revalidateFreshness: async () => {
+                const result = await revalidateFreshness();
+                revalidated = true;
+                return result;
+              },
+            },
+          };
+        },
+      },
+    });
+
+    await expect(stable.withFreshGroundingPublication(async (snapshot) => {
+      expect(snapshot.getNode("function:missing")).toBeNull();
+      return {
+        preflight() {
+          expect(revalidated).toBe(false);
+        },
+        commit() {
+          expect(revalidated).toBe(true);
+          committed = true;
+          return "published";
+        },
+        discard() {
+          discarded = true;
+        },
+      };
+    })).resolves.toBe("published");
+    expect({ committed, discarded }).toEqual({ committed: true, discarded: false });
+
+    committed = false;
+    discarded = false;
+    const unstable = createRepositoryGraphPort(root, {
+      __internal: {
+        loadFresh: async (...args) => {
+          const loaded = await loadFreshGraphReadSession(...args);
+          if (!loaded.session) return loaded;
+          return {
+            ...loaded,
+            session: {
+              ...loaded.session,
+              revalidateFreshness: async () => ({
+                valid: false,
+                code: "GRAPH_INDEX_READER_SNAPSHOT_CHANGED",
+                message: "private-test-race",
+                graphStatus: loaded.graphStatus,
+              }),
+            },
+          };
+        },
+      },
+    });
+    await expect(unstable.withFreshGroundingPublication(async () => ({
+      preflight() {},
+      commit() {
+        committed = true;
+        return "must-not-publish";
+      },
+      discard() {
+        discarded = true;
+      },
+    }))).rejects.toSatisfy((error) => {
+      expectPortCode(error, "OPERATION_INTERRUPTED");
+      return true;
+    });
+    expect({ committed, discarded }).toEqual({ committed: false, discarded: true });
+
+    const callbackFailure = new Error("wiki-preparation-failed");
+    await expect(stable.withFreshGroundingSnapshot(async () => {
+      throw callbackFailure;
+    })).rejects.toBe(callbackFailure);
+
+    const preflightFailure = new Error("wiki-preflight-failed");
+    discarded = false;
+    await expect(stable.withFreshGroundingPublication(async () => ({
+      preflight() {
+        throw preflightFailure;
+      },
+      commit() {
+        return "must-not-publish";
+      },
+      discard() {
+        discarded = true;
+      },
+    }))).rejects.toBe(preflightFailure);
+    expect(discarded).toBe(true);
+  }, 30_000);
 
   it("fails closed on out-of-range confidence and unknown relation provenance", async () => {
     const { root, port } = await fixture();
