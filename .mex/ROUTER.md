@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-08-26
+last_updated: 2026-08-27
 ---
 
 # Session Bootstrap
@@ -61,6 +61,21 @@ Then read this file fully before doing anything else in this session.
   Search, read-only Knowledge browse/detail, explicit Code-to-Knowledge links,
   structured Wiki Health, and explicit refresh/rebuild jobs all use the real
   repository adapter. Ordinary Hub reads never repair either local index.
+- Checkpoint A supplies a pinned Ubuntu 24.04/Node 22 release benchmark with
+  deterministic small/medium/large fixtures, production asset closure budgets,
+  Hub readiness/idle/read/browser measurements, and explicit Graph/Wiki
+  maintenance and database-ratio measurements. Node 24 remains compatibility
+  coverage rather than a second calibration environment.
+- Hub workbenches are route-lazy, Home excludes Code/Knowledge/Activity/setup
+  closures, idle job discovery is event-driven rather than polled, and browser
+  pagination, query/mutation caches, terminal jobs, corpus scans, diagnostics,
+  and maintenance working sets have hard bounds.
+- `mex capabilities --json` provides bounded, deterministic, read-only schema-v1
+  discovery for the installed Project Hub, canonical Activity read, Graph, and
+  Wiki surfaces, plus only the registered structured Graph/Wiki reads, previews,
+  and explicit apply/maintenance commands that are currently safe. Generated
+  agent anchors require discovery first, structured reads, mutation preview,
+  and explicit approval before apply.
 
 **Not Built:**
 - Wiki creation/editing, migration and synthesis UI, grounding-drift/review
