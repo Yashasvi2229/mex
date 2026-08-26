@@ -73,6 +73,7 @@ interface ReadOnlyGroundingRuntimeInternalHooks {
   ) => void | Promise<void>;
   afterDatabaseIdentityRead?: () => void | Promise<void>;
   afterDatabaseOpen?: (database: SqliteDatabase) => void | Promise<void>;
+  afterDatabaseDescriptorClose?: () => void;
 }
 
 type LoadReadOnlyGroundingRuntimeInternalOptions = LoadReadOnlyGroundingRuntimeOptions & {
@@ -107,6 +108,7 @@ export async function loadReadOnlyGroundingRuntime(
     hooks: {
       afterDatabaseIdentityRead: internal?.afterDatabaseIdentityRead,
       afterDatabaseOpen: internal?.afterDatabaseOpen,
+      afterDatabaseDescriptorClose: internal?.afterDatabaseDescriptorClose,
     },
   });
   if (!loaded.session) return { graphStatus: loaded.graphStatus, runtime: null };

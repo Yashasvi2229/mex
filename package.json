@@ -50,9 +50,15 @@
     "node": ">=22.5"
   },
   "scripts": {
-    "build": "tsup && node scripts/copy-graph-assets.mjs",
+    "build": "npm run build:node && npm run build:hub",
+    "build:contracts": "npm run build --workspace @mex/hub-contracts",
+    "build:node": "npm run build:contracts && tsup && node scripts/copy-graph-assets.mjs",
+    "build:hub": "npm run build --workspace @mex/hub-web",
     "dev": "tsup --watch",
     "test": "vitest run",
+    "test:hub:web": "npm run test --workspace @mex/hub-web",
+    "test:hub:e2e": "npm run build && playwright test",
+    "test:hub:package": "node scripts/hub-pack-smoke.mjs",
     "test:watch": "vitest",
     "eval": "node evaluate/graph/index.mjs",
     "eval:legacy": "node evaluate/index.mjs",
@@ -63,14 +69,16 @@
     "eval:compare": "node evaluate/compare/index.mjs",
     "eval:compare:test": "node --test evaluate/compare/test/*.test.mjs",
     "benchmark:graph-status": "npm run build && node scripts/benchmark-graph-status.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "npm run typecheck --workspace @mex/hub-contracts && tsc --noEmit && npm run typecheck --workspace @mex/hub-web",
     "prepare": "npm run build"
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.17",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "cross-spawn": "^7.0.6",
     "glob": "^13.0.6",
+    "hono": "^4.13.3",
     "ink": "^7.0.3",
     "posthog-node": "^5.21.2",
     "react": "^19.2.6",
@@ -81,9 +89,12 @@
     "unified": "^11.0.5",
     "unist-util-visit": "^5.0.0",
     "web-tree-sitter": "^0.25.10",
-    "yaml": "^2.7.0"
+    "yaml": "^2.7.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.62.1",
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.14",

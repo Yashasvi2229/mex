@@ -28,6 +28,11 @@ Thumbs.db
 .mex/eval-results/
 evaluate/results/
 
+# Browser-test output (visual baselines under test/hub-e2e are tracked)
+playwright-report/
+test-results/
+blob-report/
+
 #misc
 claude-talks
 .demo

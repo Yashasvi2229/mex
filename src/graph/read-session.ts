@@ -191,17 +191,21 @@ export function openImmutableGraphReadSessionSync(
       },
     };
   } catch (error) {
+    const classified = classifyOpenFailure(
+      error,
+      projectRoot,
+      dbPath,
+      canonicalDbPath,
+      databaseIdentityBefore,
+      inspectSidecars,
+    );
     try {
       graph?.close();
       pendingDb?.close();
     } finally {
       boundFile?.close();
     }
-    if (error instanceof GraphReadSessionError) throw error;
-    throw new GraphReadSessionError(
-      "GRAPH_INDEX_READER_OPEN_FAILED",
-      "The graph changed or became unavailable while immutable readers were opening.",
-    );
+    throw classified;
   }
 }
 
@@ -307,17 +311,21 @@ export async function openImmutableGraphReadSession(
       },
     };
   } catch (error) {
+    const classified = classifyOpenFailure(
+      error,
+      projectRoot,
+      dbPath,
+      canonicalDbPath,
+      databaseIdentityBefore,
+      inspectSidecars,
+    );
     try {
       graph?.close();
       pendingDb?.close();
     } finally {
       boundFile?.close();
     }
-    if (error instanceof GraphReadSessionError) throw error;
-    throw new GraphReadSessionError(
-      "GRAPH_INDEX_READER_OPEN_FAILED",
-      "The graph changed or became unavailable while immutable readers were opening.",
-    );
+    throw classified;
   }
 }
 
@@ -574,6 +582,31 @@ function graphReadError(error: unknown): { code: string; message: string } {
     code: "GRAPH_INDEX_READER_OPEN_FAILED",
     message: "The graph changed or became unavailable while immutable readers were opening.",
   };
+}
+
+function classifyOpenFailure(
+  error: unknown,
+  projectRoot: string,
+  requestedDbPath: string,
+  canonicalDbPath: string,
+  expectedIdentity: string,
+  inspectSidecars: typeof inspectGraphSidecars,
+): GraphReadSessionError {
+  if (error instanceof GraphReadSessionError) return error;
+  const validation = validateReadPath(
+    projectRoot,
+    requestedDbPath,
+    canonicalDbPath,
+    expectedIdentity,
+    inspectSidecars,
+  );
+  if (!validation.valid) {
+    return new GraphReadSessionError(validation.code!, validation.message!);
+  }
+  return new GraphReadSessionError(
+    "GRAPH_INDEX_READER_OPEN_FAILED",
+    "The graph changed or became unavailable while immutable readers were opening.",
+  );
 }
 
 function readDatabaseIdentity(dbPath: string): string {

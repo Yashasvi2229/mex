@@ -230,6 +230,7 @@ After setup:
 mex check                    # Check wiki health and code grounding
 mex sync                     # Repair drift with targeted agent prompts
 mex graph scope "<task>"     # Retrieve compact task context
+mex hub                      # Open the local Project Hub
 ```
 
 If you skipped global installation, use `npx mex-agent` in place of `mex`. Install globally at any time with:
@@ -251,6 +252,7 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | Command | What it does |
 |---|---|
 | `mex` / `mex tui` | Open the interactive terminal dashboard |
+| `mex hub [--port <n>] [--no-open]` | Open the secure local Project Hub |
 | `mex setup` | Create and populate the living wiki |
 | `mex check` | Check wiki health and calculate a drift score |
 | `mex sync` | Repair stale or inconsistent knowledge |
@@ -268,6 +270,19 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | `mex heartbeat` | Run persistent-agent health checks |
 | `mex completion <shell>` | Print shell completions |
 | `mex commands` | List every command and script |
+
+### Project Hub
+
+`mex hub` starts a desktop-oriented control room on `127.0.0.1` and opens it in
+your browser. The bootstrap link is one-use, ordinary API requests require an
+in-memory session, and mutating requests also require same-origin CSRF proof.
+Use `--no-open` to print the launch URL without opening a browser, or `--port`
+to request a specific loopback port.
+
+This foundation displays repository context and locally persisted job history.
+Graph and Wiki actions remain visibly unavailable until their real adapters are
+integrated; the packaged UI never substitutes development fixtures for project
+data.
 
 ## Existing mex projects
 

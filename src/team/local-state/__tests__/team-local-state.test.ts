@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -26,6 +27,7 @@ const NOW = "2026-08-23T10:00:00.000Z";
 const LATER = "2026-08-23T11:00:00.000Z";
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);
+const LEASE_A = "a".repeat(64);
 
 const roots: string[] = [];
 
@@ -392,6 +394,123 @@ describe("TeamLocalState", () => {
     expect(state(root).getConfiguredMember()).toEqual(selection);
   });
 
+  it("migrates v1 to v2 in order while preserving Lane C rows", () => {
+    const root = tempProject();
+    createRawV1(root);
+    const dbPath = join(root, ".mex/local/team.db");
+    const actor = { kind: "member" as const, memberId: MEMBER_A };
+    const actorJson = JSON.stringify(actor);
+    const memberRevision = createHash("sha256").update(JSON.stringify({
+      schemaVersion: 1,
+      scaffoldId: "scaffold-a",
+      memberId: MEMBER_A,
+      updatedAt: NOW,
+    })).digest("hex");
+    const cursorRevision = createHash("sha256").update(JSON.stringify({
+      schemaVersion: 1,
+      scaffoldId: "scaffold-a",
+      actor,
+      head: HEAD_A,
+      branch: "main",
+      timestamp: NOW,
+    })).digest("hex");
+    const seed = new DatabaseSync(dbPath);
+    seed.prepare(`
+      INSERT INTO configured_member_selections
+        (scaffold_id, member_id, updated_at, revision)
+      VALUES (?, ?, ?, ?)
+    `).run("scaffold-a", MEMBER_A, NOW, memberRevision);
+    seed.prepare(`
+      INSERT INTO catch_up_cursors
+        (scaffold_id, actor_key, actor_json, head, branch, timestamp, revision)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run("scaffold-a", MEMBER_A, actorJson, HEAD_A, "main", NOW, cursorRevision);
+    seed.close();
+    const beforeRead = readFileSync(dbPath);
+
+    expectCode(() => state(root).getConfiguredMember(), "MIGRATION_REQUIRED");
+    expect(readFileSync(dbPath)).toEqual(beforeRead);
+
+    const store = state(root);
+    store.initializeHubState();
+    expect(store.getConfiguredMember()).toMatchObject({
+      memberId: MEMBER_A,
+      revision: memberRevision,
+    });
+    expect(store.getCatchUpCursor(actor)).toMatchObject({
+      head: HEAD_A,
+      branch: "main",
+      revision: cursorRevision,
+    });
+
+    const migrated = new DatabaseSync(dbPath, { readOnly: true });
+    expect(migrated.prepare("SELECT version FROM local_state_schema").get()).toEqual({
+      version: 2,
+    });
+    const hubTable = migrated.prepare(`
+      SELECT strict
+      FROM pragma_table_list
+      WHERE schema = 'main' AND name = 'hub_jobs'
+    `).get();
+    expect(hubTable).toEqual({ strict: 1 });
+    const indexes = migrated.prepare(`
+      SELECT name
+      FROM pragma_index_list('hub_jobs')
+      WHERE origin = 'c'
+      ORDER BY name
+    `).all();
+    expect(indexes).toEqual([
+      { name: "hub_jobs_generation_per_kind" },
+      { name: "hub_jobs_one_active_index_job_per_scaffold" },
+      { name: "hub_jobs_scaffold_created" },
+    ]);
+    migrated.close();
+  });
+
+  it("rolls back the v1-to-v2 migration when the requested job mutation fails", () => {
+    const root = tempProject();
+    createRawV1(root);
+    const store = state(root);
+
+    expectCode(() => store.updateHubJobRecord({
+      leaseToken: LEASE_A,
+      id: "job_01K3CQW3G00000000000000000",
+      generation: 1,
+      expectedRevision: "a".repeat(64),
+      phase: "running",
+      progress: null,
+      cancelRequested: false,
+      state: "running",
+      startedAt: NOW,
+    }), "REVISION_CONFLICT");
+    expectCode(() => store.getConfiguredMember(), "MIGRATION_REQUIRED");
+
+    const db = new DatabaseSync(join(root, ".mex/local/team.db"), { readOnly: true });
+    expect(db.prepare("SELECT version FROM local_state_schema").get()).toEqual({ version: 1 });
+    expect(db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'hub_jobs'
+    `).get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it("rejects a v2 database whose required partial index was replaced", () => {
+    const root = tempProject();
+    const store = state(root);
+    store.initializeHubState();
+    const db = new DatabaseSync(join(root, ".mex/local/team.db"));
+    db.exec("DROP INDEX hub_jobs_one_active_index_job_per_scaffold");
+    db.exec(`
+      CREATE UNIQUE INDEX hub_jobs_one_active_index_job_per_scaffold
+      ON hub_jobs (scaffold_id)
+      WHERE state = 'running'
+    `);
+    db.close();
+
+    expectCode(() => store.listHubJobs(), "INDEX_CORRUPT");
+  });
+
   it("rolls a schema migration back when the requested mutation conflicts", () => {
     const root = tempProject();
     createSchemaVersionOnly(root, 0);
@@ -408,7 +527,7 @@ describe("TeamLocalState", () => {
 
   it("reports newer schemas as migration-required", () => {
     const root = tempProject();
-    createSchemaVersionOnly(root, 2);
+    createSchemaVersionOnly(root, 3);
 
     expectCode(() => state(root).getConfiguredMember(), "MIGRATION_REQUIRED");
     expectCode(

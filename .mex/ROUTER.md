@@ -34,6 +34,9 @@ Then read this file fully before doing anything else in this session.
 - Lane C provides internal canonical team-member/activity artifacts, actor
   resolution, bounded read-only Git access, legacy timeline normalization, and
   local configured-member/Catch Up cursor state. These remain non-public.
+- Lane B provides the loopback-only Project Hub, secure browser-session
+  bootstrap, bounded `/api/v1` contracts, persistent local job orchestration,
+  packaged React shell, and honest Home/Search/Health/Jobs states.
 - Versioned graph snapshot provenance and read-only freshness inspection gate
   grounding in check, doctor, and dashboard flows without implicit graph sync.
 - Explicit graph status, refresh, and isolated rebuild/recovery commands preserve
@@ -45,8 +48,8 @@ Then read this file fully before doing anything else in this session.
 
 **Not Built:**
 - The real Wiki adapter and type-parity registration against the teammate engine.
-- Project Hub, Workstream/Inbox/Relay/Playbook persistence, and later delivery
-  checkpoints from the human-team program.
+- Real Graph/Wiki Hub adapters, Workstream/Inbox/Relay/Playbook persistence,
+  and later delivery checkpoints from the human-team program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
@@ -56,6 +59,8 @@ Then read this file fully before doing anything else in this session.
   context files are still largely unpopulated placeholders.
 - Real parser, filesystem, index, migration, and graph-grounding compliance must
   be verified against the pinned teammate implementation, not inferred from the mock.
+- Hub Graph/Wiki controls remain unavailable until their corresponding real
+  adapters are integrated; development fixtures are never production data.
 
 ## Routing Table
 

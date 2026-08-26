@@ -37,7 +37,30 @@ export function parsePositiveIntArg(raw: string): number {
   return n;
 }
 
+export function parsePortArg(raw: string): number {
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new InvalidArgumentError(`Expected a positive integer, got "${raw}".`);
+  }
+  const port = Number(raw);
+  if (!Number.isSafeInteger(port) || port <= 0) {
+    throw new InvalidArgumentError(`Expected a positive integer, got "${raw}".`);
+  }
+  if (port > 65_535) {
+    throw new InvalidArgumentError(`Expected a TCP port from 1 to 65535, got "${raw}".`);
+  }
+  return port;
+}
+
 export const program = new Command();
+
+export function isTelemetryExemptCommand(
+  commandName: string,
+  parentName?: string,
+): boolean {
+  return parentName === "telemetry"
+    || parentName === "config"
+    || commandName === "hub";
+}
 
 async function runTuiCommand(): Promise<void> {
   const { launchTui } = await import("./tui.js");
@@ -58,7 +81,7 @@ program.hook("preAction", (_thisCommand, actionCommand) => {
     // `telemetry inspect` must have zero side effects — no event sent, no
     // machine-id file created — so it stays a pure audit surface.
     const parentName = actionCommand.parent?.name();
-    if (parentName === "telemetry" || parentName === "config") return;
+    if (isTelemetryExemptCommand(actionCommand.name(), parentName)) return;
 
     let scaffoldId: string | undefined;
     try {
@@ -75,7 +98,8 @@ program.hook("preAction", (_thisCommand, actionCommand) => {
 // postAction: best-effort bounded flush for commands that exit naturally.
 // Commands that process.exit() skip this, but their event was already sent
 // from preAction (flushAt:1 fires the request immediately).
-program.hook("postAction", async () => {
+program.hook("postAction", async (_thisCommand, actionCommand) => {
+  if (isTelemetryExemptCommand(actionCommand.name(), actionCommand.parent?.name())) return;
   try {
     await flush();
   } catch {
@@ -97,6 +121,28 @@ program
   .description("Open the interactive mex dashboard")
   .action(async () => {
     await runTuiCommand();
+  });
+
+program
+  .command("hub")
+  .description("Launch the local Project Hub")
+  .option("--port <n>", "Bind a specific loopback port", parsePortArg)
+  .option("--no-open", "Do not open the browser automatically")
+  .action(async (opts: { port?: number; open: boolean }) => {
+    try {
+      const config = loadConfig();
+      const identity = getScaffoldIdentity(config);
+      const { runHubCommand } = await import("./hub/command.js");
+      await runHubCommand({
+        projectRoot: config.projectRoot,
+        scaffoldId: identity.scaffold_id,
+        port: opts.port,
+        openBrowser: opts.open,
+      });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
   });
 
 // ── Setup (npx entry point) ──
@@ -577,6 +623,8 @@ program
     console.log("  mex heartbeat          Run lightweight agent-memory health checks");
     console.log("  mex doctor             Friendly scaffold health summary");
     console.log("  mex tui                Open the interactive mex dashboard");
+    console.log("  mex hub                Launch the local Project Hub");
+    console.log("  mex hub --no-open      Launch without opening a browser");
     console.log("  mex pattern add <name> Create a new pattern file");
     console.log("  mex watch              Install post-commit hook for auto drift score");
     console.log("  mex watch --interval   Run heartbeat every 30 minutes (or config value)");
@@ -608,7 +656,7 @@ if (process.argv[1]) {
   }
 }
 if (isMainModule) {
-  showFirstRunNotice();
+  if (process.argv[2] !== "hub") showFirstRunNotice();
   program.parseAsync().catch((err: Error) => {
     console.error(err.message);
     process.exit(1);
@@ -619,7 +667,7 @@ function buildCompletion(shell: string): string {
   const commands = [
     "setup", "check", "init", "graph", "impact", "sync", "pattern", "log", "timeline",
     "heartbeat", "doctor", "watch", "tui", "commands", "completion",
-    "telemetry", "config", "feedback",
+    "telemetry", "config", "feedback", "hub",
   ];
   if (shell === "bash") {
     return `_mex_completion() {

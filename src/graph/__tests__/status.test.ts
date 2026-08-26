@@ -687,8 +687,11 @@ describe("inspectGraphStatus", () => {
     const dbPath = await build(root);
     const db = openSqlite(dbPath);
     try {
-      db.exec("DROP TABLE nodes_fts_config");
-      db.exec("DROP TABLE source_chunks_fts_config");
+      // SQLite 3.50+ protects FTS5 shadow tables from direct mutation. Dropping
+      // each owning virtual table is the supported, portable way to remove the
+      // complete retrieval structure, including every required shadow table.
+      db.exec("DROP TABLE nodes_fts");
+      db.exec("DROP TABLE source_chunks_fts");
     } finally {
       db.close();
     }
@@ -862,8 +865,10 @@ describe("inspectGraphStatus", () => {
     const dbPath = await build(root);
     const db = openSqlite(dbPath);
     try {
-      db.exec("DELETE FROM nodes_fts_docsize");
-      db.exec("DELETE FROM source_chunks_fts_docsize");
+      // Use the supported FTS5 control command instead of mutating protected
+      // shadow tables directly (which SQLite 3.50+ rejects).
+      db.prepare("INSERT INTO nodes_fts(nodes_fts) VALUES (?)").run("delete-all");
+      db.prepare("INSERT INTO source_chunks_fts(source_chunks_fts) VALUES (?)").run("delete-all");
     } finally {
       db.close();
     }
