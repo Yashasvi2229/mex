@@ -26,26 +26,58 @@ import type {
   HubJobProgress,
   HubJobSnapshot,
 } from "../../hub/jobs/types.js";
-import type { ActorRef, Revision } from "../contracts/shared.js";
+import type {
+  ActorRef,
+  CodeRef,
+  EntityRef,
+  JsonValue,
+  RepoRelativePath,
+  RepoState,
+  Revision,
+} from "../contracts/shared.js";
 import { isRevision, JOB_STATES, MexPortError } from "../contracts/shared.js";
-import type { CatchUpCursor } from "../contracts/workflow.js";
+import type { ActivitySubjectRef, CatchUpCursor } from "../contracts/workflow.js";
+import { ACTIVITY_SUBJECT_LIMIT } from "../artifacts/codecs.js";
 
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
   DatabaseSync: typeof import("node:sqlite").DatabaseSync;
 };
 type DatabaseSync = NodeDatabaseSync;
 
-const LOCAL_STATE_SCHEMA_VERSION = 3 as const;
+const LOCAL_STATE_SCHEMA_VERSION = 4 as const;
 const LOCAL_STATE_RECORD_REVISION_VERSION = 1 as const;
 const LOCAL_STATE_RELATIVE_PATH = ".mex/local/team.db";
 const MEMBER_ID = /^member_[0-9A-HJKMNP-TV-Z]{26}$/;
 const HUB_JOB_ID = /^job_[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 const GIT_HEAD = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const LOCAL_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const WORKFLOW_NAMESPACE = /^[a-z][a-z0-9-]{0,63}$/;
 const MAX_JOB_PROBLEM_JSON_BYTES = 4_096;
 const DEFAULT_JOB_PAGE_SIZE = 25;
 const MAX_JOB_PAGE_SIZE = 100;
 const TERMINAL_JOB_RETENTION = 200;
 const HUB_LEASE_TOKEN = /^[a-f0-9]{64}$/;
+
+export const TEAM_LOCAL_STATE_LIMITS = {
+  maxDraftBytes: 64 * 1024,
+  maxDraftsPerKindPerScaffold: 512,
+  defaultDraftPageSize: 50,
+  maxDraftPageSize: 100,
+  maxCursorBytes: 4 * 1024,
+  maxWorkflowEffects: 16,
+  maxWorkflowEffectBytes: 64 * 1024,
+  terminalWorkflowRetention: 256,
+} as const;
+
+export const TEAM_WORKFLOW_JOURNAL_PHASES = [
+  "intent",
+  "canonical_published",
+  "local_finalized",
+  "complete",
+] as const;
+
+export type TeamLocalDraftKind = "inbox" | "relay";
+export type TeamWorkflowJournalPhase = (typeof TEAM_WORKFLOW_JOURNAL_PHASES)[number];
 
 const HUB_JOB_SELECT_COLUMNS = `
   id, scaffold_id, kind, generation, phase,
@@ -188,6 +220,67 @@ const V3_SCHEMA_SQL = `
     ON hub_jobs (scaffold_id, created_at DESC, id DESC);
 `;
 
+const V4_SCHEMA_SQL = `
+  CREATE TABLE inbox_drafts (
+    scaffold_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    payload_json TEXT NOT NULL CHECK (
+      length(CAST(payload_json AS BLOB)) <= ${TEAM_LOCAL_STATE_LIMITS.maxDraftBytes}
+    ),
+    updated_at TEXT NOT NULL,
+    revision TEXT NOT NULL CHECK (length(revision) = 64),
+    PRIMARY KEY (scaffold_id, id)
+  ) STRICT;
+
+  CREATE TABLE relay_drafts (
+    scaffold_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    payload_json TEXT NOT NULL CHECK (
+      length(CAST(payload_json AS BLOB)) <= ${TEAM_LOCAL_STATE_LIMITS.maxDraftBytes}
+    ),
+    updated_at TEXT NOT NULL,
+    revision TEXT NOT NULL CHECK (length(revision) = 64),
+    PRIMARY KEY (scaffold_id, id)
+  ) STRICT;
+
+  CREATE TABLE team_workflow_lease (
+    scaffold_id TEXT NOT NULL PRIMARY KEY,
+    pid INTEGER NOT NULL CHECK (pid >= 1),
+    token TEXT NOT NULL CHECK (length(token) = 64),
+    acquired_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE team_workflow_operations (
+    scaffold_id TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    command_revision TEXT NOT NULL CHECK (length(command_revision) = 64),
+    preview_revision TEXT NOT NULL CHECK (length(preview_revision) = 64),
+    phase TEXT NOT NULL CHECK (
+      phase IN ('intent', 'canonical_published', 'local_finalized', 'complete')
+    ),
+    effects_json TEXT NOT NULL CHECK (
+      length(CAST(effects_json AS BLOB)) <= ${TEAM_LOCAL_STATE_LIMITS.maxWorkflowEffectBytes}
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revision TEXT NOT NULL CHECK (length(revision) = 64),
+    PRIMARY KEY (scaffold_id, operation_id)
+  ) STRICT;
+
+  CREATE INDEX inbox_drafts_scaffold_updated
+    ON inbox_drafts (scaffold_id, updated_at DESC, id DESC);
+
+  CREATE INDEX relay_drafts_scaffold_updated
+    ON relay_drafts (scaffold_id, updated_at DESC, id DESC);
+
+  CREATE UNIQUE INDEX team_workflow_one_incomplete_per_scaffold
+    ON team_workflow_operations (scaffold_id)
+    WHERE phase <> 'complete';
+
+  CREATE INDEX team_workflow_operations_scaffold_updated
+    ON team_workflow_operations (scaffold_id, updated_at DESC, operation_id DESC);
+`;
+
 const EXPECTED_V1_TABLES = {
   local_state_schema: [
     { name: "singleton", type: "INTEGER", notNull: 1, primaryKeyPosition: 1 },
@@ -238,8 +331,42 @@ const EXPECTED_HUB_LEASE_COLUMNS = [
   { name: "acquired_at", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
 ] as const;
 
+const EXPECTED_DRAFT_COLUMNS = [
+  { name: "scaffold_id", type: "TEXT", notNull: 1, primaryKeyPosition: 1 },
+  { name: "id", type: "TEXT", notNull: 1, primaryKeyPosition: 2 },
+  { name: "payload_json", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "updated_at", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "revision", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+] as const;
+
+const EXPECTED_WORKFLOW_LEASE_COLUMNS = [
+  { name: "scaffold_id", type: "TEXT", notNull: 1, primaryKeyPosition: 1 },
+  { name: "pid", type: "INTEGER", notNull: 1, primaryKeyPosition: 0 },
+  { name: "token", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "acquired_at", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+] as const;
+
+const EXPECTED_WORKFLOW_OPERATION_COLUMNS = [
+  { name: "scaffold_id", type: "TEXT", notNull: 1, primaryKeyPosition: 1 },
+  { name: "operation_id", type: "TEXT", notNull: 1, primaryKeyPosition: 2 },
+  { name: "command_revision", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "preview_revision", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "phase", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "effects_json", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "created_at", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "updated_at", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+  { name: "revision", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
+] as const;
+
 type V1LocalStateTable = keyof typeof EXPECTED_V1_TABLES;
-type LocalStateTable = V1LocalStateTable | "hub_jobs" | "hub_runtime_lease";
+type LocalStateTable =
+  | V1LocalStateTable
+  | "hub_jobs"
+  | "hub_runtime_lease"
+  | "inbox_drafts"
+  | "relay_drafts"
+  | "team_workflow_lease"
+  | "team_workflow_operations";
 
 interface DatabaseFileIdentity {
   device: bigint;
@@ -291,6 +418,34 @@ interface HubLeaseRow {
   pid: unknown;
   token: unknown;
   acquired_at: unknown;
+}
+
+interface LocalDraftRow {
+  scaffold_id: unknown;
+  id: unknown;
+  kind?: unknown;
+  payload_json: unknown;
+  updated_at: unknown;
+  revision: unknown;
+}
+
+interface TeamWorkflowLeaseRow {
+  scaffold_id: unknown;
+  pid: unknown;
+  token: unknown;
+  acquired_at: unknown;
+}
+
+interface TeamWorkflowOperationRow {
+  scaffold_id: unknown;
+  operation_id: unknown;
+  command_revision: unknown;
+  preview_revision: unknown;
+  phase: unknown;
+  effects_json: unknown;
+  created_at: unknown;
+  updated_at: unknown;
+  revision: unknown;
 }
 
 export interface ConfiguredMemberSelection {
@@ -370,6 +525,152 @@ export interface UpdateHubJobRecordRequest {
 export interface ReconcileHubJobsResult {
   interrupted: readonly HubJobSnapshot[];
   pruned: number;
+}
+
+export interface StoredLocalDraft<TPayload = unknown> {
+  scaffoldId: string;
+  id: string;
+  kind: TeamLocalDraftKind;
+  payload: TPayload;
+  updatedAt: string;
+  revision: Revision;
+}
+
+export interface SaveLocalDraftRequest<TPayload = unknown> {
+  id: string;
+  kind: TeamLocalDraftKind;
+  payload: TPayload;
+  expectedRevision: Revision | null;
+  /** Service-owned preview timestamp; pass it back on apply to bind the exact revision. */
+  updatedAt?: string;
+}
+
+export interface DeleteLocalDraftRequest {
+  id: string;
+  kind: TeamLocalDraftKind;
+  expectedRevision: Revision;
+}
+
+export interface LocalDraftStoreListRequest {
+  kind?: TeamLocalDraftKind;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface LocalDraftStorePage<TPayload = unknown> {
+  items: readonly StoredLocalDraft<TPayload>[];
+  nextCursor: string | null;
+  truncated: boolean;
+}
+
+export interface TeamWorkflowLease {
+  scaffoldId: string;
+  pid: number;
+  token: string;
+  acquiredAt: string;
+}
+
+export interface AcquireTeamWorkflowLeaseRequest {
+  pid: number;
+  token: string;
+  acquiredAt: string;
+}
+
+export interface CanonicalWorkflowEffect {
+  kind: "canonical";
+  namespace: string;
+  id: string;
+  path: RepoRelativePath;
+  beforeRevision: Revision | null;
+  afterRevision: Revision | null;
+}
+
+/** Bounded immutable audit state needed to recreate an exact missing Activity file. */
+export interface ActivityWorkflowEffect {
+  kind: "activity";
+  id: string;
+  path: RepoRelativePath;
+  revision: Revision;
+  action: string;
+  actor: ActorRef;
+  occurredAt: string;
+  repoState: RepoState;
+  subjects: readonly ActivitySubjectRef[];
+  workstream?: EntityRef;
+  metadata?: Readonly<Record<string, JsonValue>>;
+}
+
+export interface LocalWorkflowEffect {
+  kind: "local";
+  namespace: string;
+  id: string;
+  beforeRevision: Revision | null;
+  afterRevision: Revision | null;
+}
+
+export interface LocalCleanupWorkflowEffect {
+  kind: "local_cleanup";
+  draftKind: TeamLocalDraftKind;
+  draftId: string;
+  expectedRevision: Revision;
+}
+
+/** Metadata-only recovery effects. Source bodies, diffs, prompts, and raw errors are impossible. */
+export type TeamWorkflowJournalEffect =
+  | CanonicalWorkflowEffect
+  | ActivityWorkflowEffect
+  | LocalWorkflowEffect
+  | LocalCleanupWorkflowEffect;
+
+export interface TeamWorkflowJournalEntry {
+  scaffoldId: string;
+  operationId: string;
+  commandRevision: Revision;
+  previewRevision: Revision;
+  phase: TeamWorkflowJournalPhase;
+  effects: readonly TeamWorkflowJournalEffect[];
+  createdAt: string;
+  updatedAt: string;
+  revision: Revision;
+}
+
+export interface BeginTeamWorkflowOperationRequest {
+  leaseToken: string;
+  operationId: string;
+  commandRevision: Revision;
+  previewRevision: Revision;
+  effects: readonly TeamWorkflowJournalEffect[];
+}
+
+export interface BeginTeamWorkflowOperationResult {
+  entry: TeamWorkflowJournalEntry;
+  idempotentReplay: boolean;
+}
+
+export interface WorkflowDraftCleanupRequest {
+  kind: TeamLocalDraftKind;
+  id: string;
+  expectedRevision: Revision;
+}
+
+export interface AdvanceTeamWorkflowOperationRequest {
+  leaseToken: string;
+  operationId: string;
+  commandRevision: Revision;
+  previewRevision: Revision;
+  expectedRevision: Revision;
+  phase: Exclude<TeamWorkflowJournalPhase, "intent">;
+  effects: readonly TeamWorkflowJournalEffect[];
+  /** Allowed only for the local_finalized transition and committed atomically with it. */
+  deleteDrafts?: readonly WorkflowDraftCleanupRequest[];
+}
+
+export interface AbandonTeamWorkflowOperationRequest {
+  leaseToken: string;
+  operationId: string;
+  commandRevision: Revision;
+  previewRevision: Revision;
+  expectedRevision: Revision;
 }
 
 /**
@@ -480,9 +781,404 @@ export class TeamLocalState {
     return this.writeCursor(request, true);
   }
 
-  /** Explicit write-side initialization/migration used by `mex hub` startup. */
-  initializeHubState(): void {
+  getLocalDraft<TPayload = unknown>(idValue: string): StoredLocalDraft<TPayload> | null {
+    const id = validateLocalIdentifier(idValue, "draft ID");
+    return this.read((db) => readLocalDraft<TPayload>(db, this.scaffoldId, id), 4);
+  }
+
+  listLocalDrafts<TPayload = unknown>(
+    request: LocalDraftStoreListRequest = {},
+  ): LocalDraftStorePage<TPayload> {
+    const kind = request.kind === undefined ? undefined : validateDraftKind(request.kind);
+    const limit = validateDraftPageLimit(request.limit);
+    const cursor = decodeDraftCursor(request.cursor);
+    const page = this.read((db) => {
+      const rows = readLocalDraftPageRows(db, this.scaffoldId, kind, cursor, limit + 1);
+      const decoded = rows.map((row) => decodeLocalDraft<TPayload>(
+        row,
+        this.scaffoldId,
+        validateStoredDraftKind(row.kind),
+      ));
+      const truncated = decoded.length > limit;
+      const items = truncated ? decoded.slice(0, limit) : decoded;
+      const last = items.at(-1);
+      return {
+        items,
+        nextCursor: truncated && last
+          ? encodeDraftCursor(last.updatedAt, last.kind, last.id)
+          : null,
+        truncated,
+      };
+    }, 4);
+    return page ?? { items: [], nextCursor: null, truncated: false };
+  }
+
+  saveLocalDraft<TPayload>(request: SaveLocalDraftRequest<TPayload>): StoredLocalDraft<TPayload> {
+    const id = validateLocalIdentifier(request.id, "draft ID");
+    const kind = validateDraftKind(request.kind);
+    const payloadJson = canonicalDraftPayloadJson(request.payload);
+    const expectedRevision = validateExpectedRevision(request.expectedRevision);
+    const updatedAt = validateTimestamp(request.updatedAt ?? this.now(), "draft updatedAt");
+    this.assertExistingRevisionCanMatch(expectedRevision, `${kind} draft`);
+
+    return this.write((db) => {
+      const current = readLocalDraft<TPayload>(db, this.scaffoldId, id);
+      if (current && current.kind !== kind) {
+        throw revisionConflict(`Draft ID ${id} is already used by a ${current.kind} draft.`);
+      }
+      assertExpectedRevision(current?.revision ?? null, expectedRevision, `${kind} draft`);
+      if (!current) assertDraftCapacity(db, this.scaffoldId, kind);
+
+      const revision = localDraftRevision(
+        this.scaffoldId,
+        id,
+        kind,
+        payloadJson,
+        updatedAt,
+      );
+      const table = draftTable(kind);
+      db.prepare(`
+        INSERT INTO ${table} (scaffold_id, id, payload_json, updated_at, revision)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(scaffold_id, id) DO UPDATE SET
+          payload_json = excluded.payload_json,
+          updated_at = excluded.updated_at,
+          revision = excluded.revision
+      `).run(this.scaffoldId, id, payloadJson, updatedAt, revision);
+      return {
+        scaffoldId: this.scaffoldId,
+        id,
+        kind,
+        payload: parseCanonicalDraftPayload<TPayload>(payloadJson),
+        updatedAt,
+        revision,
+      };
+    });
+  }
+
+  previewSaveLocalDraft<TPayload>(
+    request: SaveLocalDraftRequest<TPayload>,
+  ): StoredLocalDraft<TPayload> {
+    const id = validateLocalIdentifier(request.id, "draft ID");
+    const kind = validateDraftKind(request.kind);
+    const payloadJson = canonicalDraftPayloadJson(request.payload);
+    const expectedRevision = validateExpectedRevision(request.expectedRevision);
+    const updatedAt = validateTimestamp(request.updatedAt ?? this.now(), "draft updatedAt");
+    this.assertExistingRevisionCanMatch(expectedRevision, `${kind} draft`);
+    const prepared: StoredLocalDraft<TPayload> = {
+      scaffoldId: this.scaffoldId,
+      id,
+      kind,
+      payload: parseCanonicalDraftPayload<TPayload>(payloadJson),
+      updatedAt,
+      revision: localDraftRevision(this.scaffoldId, id, kind, payloadJson, updatedAt),
+    };
+    const observed = this.read((db) => {
+      const current = readLocalDraft<TPayload>(db, this.scaffoldId, id);
+      if (current && current.kind !== kind) {
+        throw revisionConflict(`Draft ID ${id} is already used by a ${current.kind} draft.`);
+      }
+      assertExpectedRevision(current?.revision ?? null, expectedRevision, `${kind} draft`);
+      if (!current) assertDraftCapacity(db, this.scaffoldId, kind);
+      return prepared;
+    }, 4);
+    if (observed !== null) return observed;
+    assertExpectedRevision(null, expectedRevision, `${kind} draft`);
+    return prepared;
+  }
+
+  deleteLocalDraft(request: DeleteLocalDraftRequest): void {
+    const id = validateLocalIdentifier(request.id, "draft ID");
+    const kind = validateDraftKind(request.kind);
+    const expectedRevision = validateRequiredRevision(request.expectedRevision, "draft revision");
+    this.assertExistingRevisionCanMatch(expectedRevision, `${kind} draft`);
+    this.write((db) => deleteLocalDraftExact(
+      db,
+      this.scaffoldId,
+      kind,
+      id,
+      expectedRevision,
+    ));
+  }
+
+  previewDeleteLocalDraft(request: DeleteLocalDraftRequest): StoredLocalDraft {
+    const id = validateLocalIdentifier(request.id, "draft ID");
+    const kind = validateDraftKind(request.kind);
+    const expectedRevision = validateRequiredRevision(request.expectedRevision, "draft revision");
+    this.assertExistingRevisionCanMatch(expectedRevision, `${kind} draft`);
+    const current = this.read((db) => readLocalDraft(db, this.scaffoldId, id), 4);
+    if (current && current.kind !== kind) {
+      throw revisionConflict(`Draft ID ${id} belongs to ${current.kind}, not ${kind}.`);
+    }
+    assertExpectedRevision(current?.revision ?? null, expectedRevision, `${kind} draft`);
+    return current!;
+  }
+
+  acquireTeamWorkflowLease(request: AcquireTeamWorkflowLeaseRequest): TeamWorkflowLease {
+    const pid = requireSafeInteger(request.pid, "workflow lease pid", 1);
+    const token = validateWorkflowLeaseToken(request.token);
+    const acquiredAt = validateTimestamp(request.acquiredAt, "workflow lease acquiredAt");
+    return this.write((db) => {
+      const current = readTeamWorkflowLease(db, this.scaffoldId);
+      if (current?.pid === pid && current.token === token) return current;
+      if (current) {
+        const status = safeProcessStatus(this.processStatus, current.pid);
+        if (status !== "dead") throw workflowLeaseHeldError(current.pid, status);
+        const replaced = db.prepare(`
+          UPDATE team_workflow_lease
+          SET pid = ?, token = ?, acquired_at = ?
+          WHERE scaffold_id = ? AND pid = ? AND token = ?
+        `).run(
+          pid,
+          token,
+          acquiredAt,
+          this.scaffoldId,
+          current.pid,
+          current.token,
+        );
+        if (Number(replaced.changes) !== 1) {
+          throw revisionConflict("The Team workflow lease changed during dead-holder recovery.");
+        }
+      } else {
+        db.prepare(`
+          INSERT INTO team_workflow_lease (scaffold_id, pid, token, acquired_at)
+          VALUES (?, ?, ?, ?)
+        `).run(this.scaffoldId, pid, token, acquiredAt);
+      }
+      return { scaffoldId: this.scaffoldId, pid, token, acquiredAt };
+    });
+  }
+
+  releaseTeamWorkflowLease(tokenValue: string): void {
+    const token = validateWorkflowLeaseToken(tokenValue);
+    this.write((db) => {
+      assertTeamWorkflowLease(db, this.scaffoldId, token);
+      const incomplete = readIncompleteWorkflowOperation(db, this.scaffoldId);
+      if (incomplete) {
+        throw revisionConflict(
+          `Workflow operation ${incomplete.operationId} must complete or be abandoned before lease release.`,
+        );
+      }
+      const deleted = db.prepare(`
+        DELETE FROM team_workflow_lease
+        WHERE scaffold_id = ? AND token = ?
+      `).run(this.scaffoldId, token);
+      if (Number(deleted.changes) !== 1) {
+        throw revisionConflict("The Team workflow lease changed before release.");
+      }
+    });
+  }
+
+  getWorkflowOperation(operationIdValue: string): TeamWorkflowJournalEntry | null {
+    const operationId = validateLocalIdentifier(operationIdValue, "workflow operation ID");
+    return this.read((db) => readWorkflowOperation(db, this.scaffoldId, operationId), 4);
+  }
+
+  getIncompleteWorkflowOperation(): TeamWorkflowJournalEntry | null {
+    return this.read((db) => readIncompleteWorkflowOperation(db, this.scaffoldId), 4);
+  }
+
+  beginWorkflowOperation(
+    request: BeginTeamWorkflowOperationRequest,
+  ): BeginTeamWorkflowOperationResult {
+    const leaseToken = validateWorkflowLeaseToken(request.leaseToken);
+    const operationId = validateLocalIdentifier(request.operationId, "workflow operation ID");
+    const commandRevision = validateRequiredRevision(
+      request.commandRevision,
+      "workflow command revision",
+    );
+    const previewRevision = validateRequiredRevision(
+      request.previewRevision,
+      "workflow preview revision",
+    );
+    const effectsJson = canonicalWorkflowEffectsJson(request.effects);
+    const timestamp = validateTimestamp(this.now(), "workflow operation timestamp");
+
+    return this.write((db) => {
+      assertTeamWorkflowLease(db, this.scaffoldId, leaseToken);
+      const current = readWorkflowOperation(db, this.scaffoldId, operationId);
+      if (current) {
+        if (current.commandRevision !== commandRevision) {
+          throw revisionConflict(
+            `Workflow operation ID ${operationId} was already used for a different command.`,
+          );
+        }
+        if (current.previewRevision !== previewRevision) {
+          throw revisionConflict(
+            `Workflow operation ID ${operationId} was already bound to a different preview.`,
+          );
+        }
+        if (canonicalWorkflowEffectsJson(current.effects) !== effectsJson) {
+          throw revisionConflict(
+            `Workflow operation ID ${operationId} was already used with different effects.`,
+          );
+        }
+        return { entry: current, idempotentReplay: true };
+      }
+      const incomplete = readIncompleteWorkflowOperation(db, this.scaffoldId);
+      if (incomplete) {
+        throw revisionConflict(
+          `Workflow operation ${incomplete.operationId} must be recovered before starting another.`,
+        );
+      }
+      const entry: TeamWorkflowJournalEntry = {
+        scaffoldId: this.scaffoldId,
+        operationId,
+        commandRevision,
+        previewRevision,
+        phase: "intent",
+        effects: parseWorkflowEffects(effectsJson),
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        revision: workflowOperationRevision({
+          scaffoldId: this.scaffoldId,
+          operationId,
+          commandRevision,
+          previewRevision,
+          phase: "intent",
+          effectsJson,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        }),
+      };
+      insertWorkflowOperation(db, entry, effectsJson);
+      return { entry, idempotentReplay: false };
+    });
+  }
+
+  advanceWorkflowOperation(
+    request: AdvanceTeamWorkflowOperationRequest,
+  ): TeamWorkflowJournalEntry {
+    const leaseToken = validateWorkflowLeaseToken(request.leaseToken);
+    const operationId = validateLocalIdentifier(request.operationId, "workflow operation ID");
+    const commandRevision = validateRequiredRevision(
+      request.commandRevision,
+      "workflow command revision",
+    );
+    const previewRevision = validateRequiredRevision(
+      request.previewRevision,
+      "workflow preview revision",
+    );
+    const expectedRevision = validateRequiredRevision(
+      request.expectedRevision,
+      "workflow operation revision",
+    );
+    const phase = validateWorkflowAdvancePhase(request.phase);
+    const effectsJson = canonicalWorkflowEffectsJson(request.effects);
+    const deleteDrafts = validateWorkflowDraftCleanups(request.deleteDrafts ?? []);
+    if (deleteDrafts.length > 0 && phase !== "local_finalized") {
+      throw validationError("Draft cleanup is allowed only during local_finalized.");
+    }
+    if (phase === "local_finalized") {
+      assertCleanupRequestsMatchEffects(deleteDrafts, request.effects);
+    }
+    const updatedAt = validateTimestamp(this.now(), "workflow operation timestamp");
+
+    return this.write((db) => {
+      assertTeamWorkflowLease(db, this.scaffoldId, leaseToken);
+      const current = readWorkflowOperation(db, this.scaffoldId, operationId);
+      if (!current) throw workflowOperationNotFoundError(operationId);
+      if (current.commandRevision !== commandRevision) {
+        throw revisionConflict(
+          `Workflow operation ID ${operationId} belongs to a different command.`,
+        );
+      }
+      if (current.previewRevision !== previewRevision) {
+        throw revisionConflict("The workflow preview revision no longer matches the journal.");
+      }
+      assertExpectedRevision(current.revision, expectedRevision, "workflow operation");
+      assertNextWorkflowPhase(current.phase, phase);
+      if (canonicalWorkflowEffectsJson(current.effects) !== effectsJson) {
+        throw revisionConflict("Workflow journal effects cannot change after intent.");
+      }
+
+      for (const cleanup of deleteDrafts) {
+        deleteLocalDraftExact(
+          db,
+          this.scaffoldId,
+          cleanup.kind,
+          cleanup.id,
+          cleanup.expectedRevision,
+        );
+      }
+
+      const next: TeamWorkflowJournalEntry = {
+        scaffoldId: this.scaffoldId,
+        operationId,
+        commandRevision,
+        previewRevision,
+        phase,
+        effects: parseWorkflowEffects(effectsJson),
+        createdAt: current.createdAt,
+        updatedAt,
+        revision: workflowOperationRevision({
+          scaffoldId: this.scaffoldId,
+          operationId,
+          commandRevision,
+          previewRevision,
+          phase,
+          effectsJson,
+          createdAt: current.createdAt,
+          updatedAt,
+        }),
+      };
+      replaceWorkflowOperation(db, next, effectsJson, expectedRevision);
+      if (phase === "complete") {
+        pruneTerminalWorkflowOperations(db, this.scaffoldId, operationId);
+      }
+      return next;
+    });
+  }
+
+  abandonWorkflowOperation(request: AbandonTeamWorkflowOperationRequest): void {
+    const leaseToken = validateWorkflowLeaseToken(request.leaseToken);
+    const operationId = validateLocalIdentifier(request.operationId, "workflow operation ID");
+    const commandRevision = validateRequiredRevision(
+      request.commandRevision,
+      "workflow command revision",
+    );
+    const previewRevision = validateRequiredRevision(
+      request.previewRevision,
+      "workflow preview revision",
+    );
+    const expectedRevision = validateRequiredRevision(
+      request.expectedRevision,
+      "workflow operation revision",
+    );
+    this.write((db) => {
+      assertTeamWorkflowLease(db, this.scaffoldId, leaseToken);
+      const current = readWorkflowOperation(db, this.scaffoldId, operationId);
+      if (!current) throw workflowOperationNotFoundError(operationId);
+      if (current.commandRevision !== commandRevision) {
+        throw revisionConflict(
+          `Workflow operation ID ${operationId} belongs to a different command.`,
+        );
+      }
+      if (current.previewRevision !== previewRevision) {
+        throw revisionConflict("The workflow preview revision no longer matches the journal.");
+      }
+      assertExpectedRevision(current.revision, expectedRevision, "workflow operation");
+      if (current.phase !== "intent") {
+        throw revisionConflict("Only an unpublished intent may be abandoned.");
+      }
+      const deleted = db.prepare(`
+        DELETE FROM team_workflow_operations
+        WHERE scaffold_id = ? AND operation_id = ? AND revision = ? AND phase = 'intent'
+      `).run(this.scaffoldId, operationId, expectedRevision);
+      if (Number(deleted.changes) !== 1) {
+        throw revisionConflict("The workflow operation changed before abandonment.");
+      }
+    });
+  }
+
+  /** Explicit write-side initialization/migration for a caller-authorized mutation. */
+  initializeForMutation(): void {
     this.write(() => undefined);
+  }
+
+  /** Compatibility entry used by `mex hub` startup. */
+  initializeHubState(): void {
+    this.initializeForMutation();
   }
 
   /** Acquire the repository-singleton Hub job lease before reconciliation. */
@@ -580,16 +1276,16 @@ export class TeamLocalState {
           ? { nextCursor: encodeJobCursor(last.createdAt, last.id) }
           : {}),
       };
-    }) ?? { items: [] };
+    }, 2) ?? { items: [] };
   }
 
   getHubJob(id: string): HubJobSnapshot | null {
     const jobId = validateHubJobId(id);
-    return this.read((db) => readHubJob(db, this.scaffoldId, jobId));
+    return this.read((db) => readHubJob(db, this.scaffoldId, jobId), 2);
   }
 
   getActiveHubJob(): HubJobSnapshot | null {
-    return this.read((db) => readActiveHubJob(db, this.scaffoldId));
+    return this.read((db) => readActiveHubJob(db, this.scaffoldId), 2);
   }
 
   createHubJobRecord(request: CreateHubJobRecordRequest): HubJobSnapshot {
@@ -792,7 +1488,7 @@ export class TeamLocalState {
     });
   }
 
-  private read<T>(operation: (db: DatabaseSync) => T): T | null {
+  private read<T>(operation: (db: DatabaseSync) => T, minimumSchemaVersion = 1): T | null {
     this.assertDatabasePathSafe();
     const observedIdentity = beginImmutableObservation(this.databasePath);
     if (observedIdentity === null) return null;
@@ -803,7 +1499,7 @@ export class TeamLocalState {
     try {
       const location = `${pathToFileURL(this.databasePath).href}?mode=ro&immutable=1`;
       db = new DatabaseSync(location, { readOnly: true });
-      validateReadableSchema(db);
+      validateReadableSchema(db, minimumSchemaVersion);
       result = operation(db);
     } catch (error) {
       operationError = error;
@@ -897,6 +1593,970 @@ export function canonicalActorKey(actor: ActorRef): string | null {
   if (name === null && email === null) return null;
   const digest = sha256(JSON.stringify({ name, email }));
   return `git:${digest}`;
+}
+
+interface DecodedDraftCursor {
+  updatedAt: string;
+  kind: TeamLocalDraftKind;
+  id: string;
+}
+
+interface WorkflowOperationRevisionInput {
+  scaffoldId: string;
+  operationId: string;
+  commandRevision: Revision;
+  previewRevision: Revision;
+  phase: TeamWorkflowJournalPhase;
+  effectsJson: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function validateDraftKind(value: unknown): TeamLocalDraftKind {
+  if (value !== "inbox" && value !== "relay") {
+    throw validationError("Draft kind must be inbox or relay.");
+  }
+  return value;
+}
+
+function validateStoredDraftKind(value: unknown): TeamLocalDraftKind {
+  if (value !== "inbox" && value !== "relay") {
+    throw corruptError("A persisted local draft has an invalid kind.");
+  }
+  return value;
+}
+
+function draftTable(kind: TeamLocalDraftKind): "inbox_drafts" | "relay_drafts" {
+  return kind === "inbox" ? "inbox_drafts" : "relay_drafts";
+}
+
+function validateLocalIdentifier(value: unknown, label: string): string {
+  if (typeof value !== "string" || !LOCAL_IDENTIFIER.test(value)) {
+    throw validationError(
+      `${label} must be a bounded ASCII identifier without paths or whitespace.`,
+    );
+  }
+  return value;
+}
+
+function validateStoredLocalIdentifier(value: unknown, label: string): string {
+  if (typeof value !== "string" || !LOCAL_IDENTIFIER.test(value)) {
+    throw corruptError(`A persisted ${label} is invalid.`);
+  }
+  return value;
+}
+
+function validateRequiredRevision(value: unknown, label: string): Revision {
+  if (typeof value !== "string" || !isRevision(value)) {
+    throw validationError(`${label} must be a lower-case SHA-256 revision.`);
+  }
+  return value;
+}
+
+function canonicalDraftPayloadJson(value: unknown): string {
+  return canonicalBoundedJson(value, TEAM_LOCAL_STATE_LIMITS.maxDraftBytes, "draft payload");
+}
+
+function parseCanonicalDraftPayload<TPayload>(json: string): TPayload {
+  if (Buffer.byteLength(json, "utf8") > TEAM_LOCAL_STATE_LIMITS.maxDraftBytes) {
+    throw corruptError("A persisted local draft exceeds the byte limit.");
+  }
+  try {
+    const parsed: unknown = JSON.parse(json);
+    const canonical = canonicalDraftPayloadJson(parsed);
+    if (canonical !== json) throw new Error("not canonical");
+    return parsed as TPayload;
+  } catch (error) {
+    if (error instanceof MexPortError && error.problem.code === "INDEX_CORRUPT") throw error;
+    throw corruptError("A persisted local draft payload is invalid or non-canonical.");
+  }
+}
+
+function localDraftRevision(
+  scaffoldId: string,
+  id: string,
+  kind: TeamLocalDraftKind,
+  payloadJson: string,
+  updatedAt: string,
+): Revision {
+  return sha256(JSON.stringify({
+    schemaVersion: LOCAL_STATE_RECORD_REVISION_VERSION,
+    scaffoldId,
+    id,
+    kind,
+    payload: JSON.parse(payloadJson) as unknown,
+    updatedAt,
+  }));
+}
+
+function readLocalDraft<TPayload>(
+  db: DatabaseSync,
+  scaffoldId: string,
+  id: string,
+): StoredLocalDraft<TPayload> | null {
+  const rows: Array<{ row: LocalDraftRow; kind: TeamLocalDraftKind }> = [];
+  for (const kind of ["inbox", "relay"] as const) {
+    const row = db.prepare(`
+      SELECT scaffold_id, id, payload_json, updated_at, revision
+      FROM ${draftTable(kind)}
+      WHERE scaffold_id = ? AND id = ?
+    `).get(scaffoldId, id) as LocalDraftRow | undefined;
+    if (row) rows.push({ row, kind });
+  }
+  if (rows.length > 1) {
+    throw corruptError(`Local draft ID ${id} is duplicated across draft kinds.`);
+  }
+  const found = rows[0];
+  return found ? decodeLocalDraft<TPayload>(found.row, scaffoldId, found.kind) : null;
+}
+
+function readLocalDraftPageRows(
+  db: DatabaseSync,
+  scaffoldId: string,
+  kind: TeamLocalDraftKind | undefined,
+  cursor: DecodedDraftCursor | null,
+  limit: number,
+): LocalDraftRow[] {
+  return db.prepare(`
+    SELECT scaffold_id, id, kind, payload_json, updated_at, revision
+    FROM (
+      SELECT scaffold_id, id, 'inbox' AS kind, payload_json, updated_at, revision
+      FROM inbox_drafts
+      WHERE scaffold_id = ?
+      UNION ALL
+      SELECT scaffold_id, id, 'relay' AS kind, payload_json, updated_at, revision
+      FROM relay_drafts
+      WHERE scaffold_id = ?
+    )
+    WHERE (? IS NULL OR kind = ?)
+      AND (
+        ? IS NULL
+        OR updated_at < ?
+        OR (
+          updated_at = ?
+          AND (kind > ? OR (kind = ? AND id < ?))
+        )
+      )
+    ORDER BY updated_at DESC, kind ASC, id DESC
+    LIMIT ?
+  `).all(
+    scaffoldId,
+    scaffoldId,
+    kind ?? null,
+    kind ?? null,
+    cursor?.updatedAt ?? null,
+    cursor?.updatedAt ?? null,
+    cursor?.updatedAt ?? null,
+    cursor?.kind ?? null,
+    cursor?.kind ?? null,
+    cursor?.id ?? null,
+    limit,
+  ) as unknown as LocalDraftRow[];
+}
+
+function decodeLocalDraft<TPayload>(
+  row: LocalDraftRow,
+  expectedScaffoldId: string,
+  kind: TeamLocalDraftKind,
+): StoredLocalDraft<TPayload> {
+  if (row.scaffold_id !== expectedScaffoldId) {
+    throw corruptError("Local draft scaffold mismatch.");
+  }
+  const id = validateStoredLocalIdentifier(row.id, "local draft ID");
+  if (typeof row.payload_json !== "string") {
+    throw corruptError("A persisted local draft payload is not JSON text.");
+  }
+  if (typeof row.updated_at !== "string" || !isCanonicalTimestamp(row.updated_at)) {
+    throw corruptError("A persisted local draft timestamp is invalid.");
+  }
+  if (typeof row.revision !== "string" || !isRevision(row.revision)) {
+    throw corruptError("A persisted local draft revision is invalid.");
+  }
+  const payload = parseCanonicalDraftPayload<TPayload>(row.payload_json);
+  const expectedRevision = localDraftRevision(
+    expectedScaffoldId,
+    id,
+    kind,
+    row.payload_json,
+    row.updated_at,
+  );
+  if (expectedRevision !== row.revision) {
+    throw corruptError("A persisted local draft revision does not match its content.");
+  }
+  return {
+    scaffoldId: expectedScaffoldId,
+    id,
+    kind,
+    payload,
+    updatedAt: row.updated_at,
+    revision: row.revision,
+  };
+}
+
+function assertDraftCapacity(
+  db: DatabaseSync,
+  scaffoldId: string,
+  kind: TeamLocalDraftKind,
+): void {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM ${draftTable(kind)}
+    WHERE scaffold_id = ?
+  `).get(scaffoldId) as { count: unknown };
+  const count = sqliteInteger(row.count);
+  if (count === null || count < 0) throw corruptError("The local draft count is invalid.");
+  if (count >= TEAM_LOCAL_STATE_LIMITS.maxDraftsPerKindPerScaffold) {
+    throw validationError(
+      `The ${kind} draft limit of ${TEAM_LOCAL_STATE_LIMITS.maxDraftsPerKindPerScaffold} was reached.`,
+    );
+  }
+}
+
+function deleteLocalDraftExact(
+  db: DatabaseSync,
+  scaffoldId: string,
+  kind: TeamLocalDraftKind,
+  id: string,
+  expectedRevision: Revision,
+): void {
+  const current = readLocalDraft(db, scaffoldId, id);
+  if (current && current.kind !== kind) {
+    throw revisionConflict(`Draft ID ${id} belongs to ${current.kind}, not ${kind}.`);
+  }
+  assertExpectedRevision(current?.revision ?? null, expectedRevision, `${kind} draft`);
+  const deleted = db.prepare(`
+    DELETE FROM ${draftTable(kind)}
+    WHERE scaffold_id = ? AND id = ? AND revision = ?
+  `).run(scaffoldId, id, expectedRevision);
+  if (Number(deleted.changes) !== 1) {
+    throw revisionConflict(`The ${kind} draft changed before deletion.`);
+  }
+}
+
+function validateDraftPageLimit(value: number | undefined): number {
+  if (value === undefined) return TEAM_LOCAL_STATE_LIMITS.defaultDraftPageSize;
+  if (
+    !Number.isSafeInteger(value)
+    || value < 1
+    || value > TEAM_LOCAL_STATE_LIMITS.maxDraftPageSize
+  ) {
+    throw validationError(
+      `Draft page limit must be between 1 and ${TEAM_LOCAL_STATE_LIMITS.maxDraftPageSize}.`,
+    );
+  }
+  return value;
+}
+
+function encodeDraftCursor(
+  updatedAt: string,
+  kind: TeamLocalDraftKind,
+  id: string,
+): string {
+  return Buffer.from(`${updatedAt}\n${kind}\n${id}`, "utf8").toString("base64url");
+}
+
+function decodeDraftCursor(value: string | undefined): DecodedDraftCursor | null {
+  if (value === undefined) return null;
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || Buffer.byteLength(value, "utf8") > TEAM_LOCAL_STATE_LIMITS.maxCursorBytes
+  ) {
+    throw validationError("Draft cursor is invalid or exceeds the byte limit.");
+  }
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(value, "base64url");
+  } catch {
+    throw validationError("Draft cursor is not valid base64url.");
+  }
+  if (bytes.toString("base64url") !== value) {
+    throw validationError("Draft cursor is not canonical base64url.");
+  }
+  const parts = bytes.toString("utf8").split("\n");
+  if (parts.length !== 3) throw validationError("Draft cursor has an invalid shape.");
+  const [updatedAtValue, kindValue, idValue] = parts;
+  return {
+    updatedAt: validateTimestamp(updatedAtValue!, "draft cursor timestamp"),
+    kind: validateDraftKind(kindValue),
+    id: validateLocalIdentifier(idValue, "draft cursor ID"),
+  };
+}
+
+function validateWorkflowLeaseToken(value: unknown): string {
+  if (typeof value !== "string" || !HUB_LEASE_TOKEN.test(value)) {
+    throw validationError("Team workflow lease tokens must be lower-case 256-bit hex values.");
+  }
+  return value;
+}
+
+function readTeamWorkflowLease(
+  db: DatabaseSync,
+  scaffoldId: string,
+): TeamWorkflowLease | null {
+  const rows = db.prepare(`
+    SELECT scaffold_id, pid, token, acquired_at
+    FROM team_workflow_lease
+    WHERE scaffold_id = ?
+  `).all(scaffoldId) as unknown as TeamWorkflowLeaseRow[];
+  if (rows.length === 0) return null;
+  if (rows.length !== 1 || rows[0]?.scaffold_id !== scaffoldId) {
+    throw corruptError("The Team workflow lease row is invalid.");
+  }
+  const row = rows[0]!;
+  const pid = sqliteInteger(row.pid);
+  if (pid === null || pid < 1) throw corruptError("The Team workflow lease PID is invalid.");
+  if (typeof row.token !== "string" || !HUB_LEASE_TOKEN.test(row.token)) {
+    throw corruptError("The Team workflow lease token is invalid.");
+  }
+  if (typeof row.acquired_at !== "string" || !isCanonicalTimestamp(row.acquired_at)) {
+    throw corruptError("The Team workflow lease timestamp is invalid.");
+  }
+  return { scaffoldId, pid, token: row.token, acquiredAt: row.acquired_at };
+}
+
+function assertTeamWorkflowLease(
+  db: DatabaseSync,
+  scaffoldId: string,
+  token: string,
+): void {
+  const current = readTeamWorkflowLease(db, scaffoldId);
+  if (!current || current.token !== token) {
+    throw revisionConflict("The Team workflow lease is absent or no longer owned.");
+  }
+}
+
+function canonicalWorkflowEffectsJson(value: unknown): string {
+  if (!Array.isArray(value)) throw validationError("Workflow effects must be an array.");
+  if (value.length > TEAM_LOCAL_STATE_LIMITS.maxWorkflowEffects) {
+    throw validationError(
+      `Workflow journal entries may contain at most ${TEAM_LOCAL_STATE_LIMITS.maxWorkflowEffects} effects.`,
+    );
+  }
+  const normalized = value.map((effect, index) => normalizeWorkflowEffect(effect, index));
+  const keys = new Set<string>();
+  for (const effect of normalized) {
+    const key = workflowEffectKey(effect);
+    if (keys.has(key)) throw validationError(`Workflow effect ${key} is duplicated.`);
+    keys.add(key);
+  }
+  return canonicalBoundedJson(
+    normalized,
+    TEAM_LOCAL_STATE_LIMITS.maxWorkflowEffectBytes,
+    "workflow effects",
+  );
+}
+
+function parseWorkflowEffects(json: string): readonly TeamWorkflowJournalEffect[] {
+  if (Buffer.byteLength(json, "utf8") > TEAM_LOCAL_STATE_LIMITS.maxWorkflowEffectBytes) {
+    throw corruptError("Persisted workflow effects exceed the byte limit.");
+  }
+  try {
+    const parsed: unknown = JSON.parse(json);
+    const canonical = canonicalWorkflowEffectsJson(parsed);
+    if (canonical !== json) throw new Error("not canonical");
+    return parsed as readonly TeamWorkflowJournalEffect[];
+  } catch {
+    throw corruptError("Persisted workflow effects are invalid or non-canonical.");
+  }
+}
+
+function normalizeWorkflowEffect(value: unknown, index: number): TeamWorkflowJournalEffect {
+  if (!isStrictPlainObject(value) || typeof value.kind !== "string") {
+    throw validationError(`Workflow effect ${index} has an invalid shape.`);
+  }
+  if (value.kind === "canonical") {
+    assertOnlyKeys(
+      value,
+      ["kind", "namespace", "id", "path", "beforeRevision", "afterRevision"],
+      `Workflow effect ${index}`,
+    );
+    const beforeRevision = validateNullableRevision(value.beforeRevision, "beforeRevision");
+    const afterRevision = validateNullableRevision(value.afterRevision, "afterRevision");
+    if (beforeRevision === null && afterRevision === null) {
+      throw validationError(`Workflow effect ${index} must change a revision.`);
+    }
+    return {
+      kind: "canonical",
+      namespace: validateWorkflowNamespace(value.namespace),
+      id: validateLocalIdentifier(value.id, `workflow effect ${index} ID`),
+      path: validateJournalPath(value.path),
+      beforeRevision,
+      afterRevision,
+    };
+  }
+  if (value.kind === "local") {
+    assertOnlyKeys(
+      value,
+      ["kind", "namespace", "id", "beforeRevision", "afterRevision"],
+      `Workflow effect ${index}`,
+    );
+    const beforeRevision = validateNullableRevision(value.beforeRevision, "beforeRevision");
+    const afterRevision = validateNullableRevision(value.afterRevision, "afterRevision");
+    if (beforeRevision === null && afterRevision === null) {
+      throw validationError(`Workflow effect ${index} must change a revision.`);
+    }
+    return {
+      kind: "local",
+      namespace: validateWorkflowNamespace(value.namespace),
+      id: validateLocalIdentifier(value.id, `workflow effect ${index} ID`),
+      beforeRevision,
+      afterRevision,
+    };
+  }
+  if (value.kind === "local_cleanup") {
+    assertOnlyKeys(
+      value,
+      ["kind", "draftKind", "draftId", "expectedRevision"],
+      `Workflow effect ${index}`,
+    );
+    return {
+      kind: "local_cleanup",
+      draftKind: validateDraftKind(value.draftKind),
+      draftId: validateLocalIdentifier(value.draftId, `workflow effect ${index} draft ID`),
+      expectedRevision: validateRequiredRevision(
+        value.expectedRevision,
+        `workflow effect ${index} draft revision`,
+      ),
+    };
+  }
+  if (value.kind === "activity") {
+    assertOnlyKeys(
+      value,
+      [
+        "kind", "id", "path", "revision", "action", "actor", "occurredAt",
+        "repoState", "subjects", "workstream", "metadata",
+      ],
+      `Workflow effect ${index}`,
+    );
+    return {
+      kind: "activity",
+      id: validateLocalIdentifier(value.id, `workflow effect ${index} Activity ID`),
+      path: validateJournalPath(value.path),
+      revision: validateRequiredRevision(value.revision, `workflow effect ${index} revision`),
+      action: validateBoundedAuditText(value.action, "Activity action", 256),
+      actor: normalizeJournalActor(value.actor),
+      occurredAt: validateTimestamp(value.occurredAt as string, "Activity occurredAt"),
+      repoState: normalizeJournalRepoState(value.repoState),
+      subjects: normalizeJournalSubjects(value.subjects),
+      ...(value.workstream === undefined
+        ? {}
+        : { workstream: normalizeJournalEntityRef(value.workstream, "Activity workstream") }),
+      ...(value.metadata === undefined
+        ? {}
+        : { metadata: normalizeActivityMetadata(value.metadata) }),
+    };
+  }
+  throw validationError(`Workflow effect ${index} has an unsupported kind.`);
+}
+
+function workflowEffectKey(effect: TeamWorkflowJournalEffect): string {
+  if (effect.kind === "activity") return `activity:${effect.id}`;
+  if (effect.kind === "local_cleanup") return `cleanup:${effect.draftKind}:${effect.draftId}`;
+  return `${effect.kind}:${effect.namespace}:${effect.id}`;
+}
+
+function validateWorkflowNamespace(value: unknown): string {
+  if (typeof value !== "string" || !WORKFLOW_NAMESPACE.test(value)) {
+    throw validationError("Workflow effect namespace is invalid.");
+  }
+  return value;
+}
+
+function validateNullableRevision(value: unknown, label: string): Revision | null {
+  if (value === null) return null;
+  return validateRequiredRevision(value, label);
+}
+
+function validateJournalPath(value: unknown): RepoRelativePath {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || Buffer.byteLength(value, "utf8") > 1024
+    || value.startsWith("/")
+    || value.includes("\\")
+    || /[\0-\x1f\x7f]/.test(value)
+  ) {
+    throw validationError("Workflow effect path must be a bounded repository-relative path.");
+  }
+  const segments = value.split("/");
+  if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
+    throw validationError("Workflow effect path contains an unsafe segment.");
+  }
+  return value;
+}
+
+function normalizeJournalActor(value: unknown): ActorRef {
+  if (!isStrictPlainObject(value) || typeof value.kind !== "string") {
+    throw validationError("Activity actor has an invalid shape.");
+  }
+  if (value.kind === "unknown") {
+    assertOnlyKeys(value, ["kind"], "Activity actor");
+    return { kind: "unknown" };
+  }
+  if (value.kind === "member") {
+    assertOnlyKeys(value, ["kind", "memberId", "displayName"], "Activity actor");
+    return {
+      kind: "member",
+      memberId: validateMemberId(value.memberId as string),
+      ...(value.displayName === undefined
+        ? {}
+        : { displayName: validateBoundedAuditText(value.displayName, "member display name", 512) }),
+    };
+  }
+  if (value.kind === "git") {
+    assertOnlyKeys(value, ["kind", "name", "email"], "Activity actor");
+    const name = value.name === null
+      ? null
+      : validateBoundedAuditText(value.name, "Git actor name", 512);
+    const email = value.email === null
+      ? null
+      : validateBoundedAuditText(value.email, "Git actor email", 512).toLowerCase();
+    if (name === null && email === null) {
+      throw validationError("A Git Activity actor must have a name or email.");
+    }
+    return { kind: "git", name, email };
+  }
+  throw validationError("Activity actor kind is unsupported.");
+}
+
+function normalizeJournalRepoState(value: unknown): RepoState {
+  if (!isStrictPlainObject(value)) throw validationError("Activity repository state is invalid.");
+  assertOnlyKeys(value, ["branch", "head", "dirty", "observedAt"], "Activity repository state");
+  return {
+    branch: validateBranch(value.branch as string | null),
+    head: validateHead(value.head as string | null),
+    dirty: validateBoolean(value.dirty, "Activity repository dirty state"),
+    observedAt: validateTimestamp(value.observedAt as string, "Activity observedAt"),
+  };
+}
+
+function normalizeJournalSubjects(value: unknown): readonly ActivitySubjectRef[] {
+  if (!Array.isArray(value) || value.length > ACTIVITY_SUBJECT_LIMIT) {
+    throw validationError(
+      `Activity subjects must be an array of at most ${ACTIVITY_SUBJECT_LIMIT} entries.`,
+    );
+  }
+  return value.map((subject, index) => {
+    if (!isStrictPlainObject(subject) || typeof subject.kind !== "string") {
+      throw validationError(`Activity subject ${index} has an invalid shape.`);
+    }
+    if (subject.kind === "entity") {
+      assertOnlyKeys(subject, ["kind", "entity"], `Activity subject ${index}`);
+      return {
+        kind: "entity" as const,
+        entity: normalizeJournalEntityRef(subject.entity, `Activity subject ${index} entity`),
+      };
+    }
+    if (subject.kind === "file") {
+      assertOnlyKeys(subject, ["kind", "path"], `Activity subject ${index}`);
+      return { kind: "file" as const, path: validateJournalPath(subject.path) };
+    }
+    if (subject.kind === "commit") {
+      assertOnlyKeys(subject, ["kind", "hash"], `Activity subject ${index}`);
+      return { kind: "commit" as const, hash: validateHead(subject.hash as string)! };
+    }
+    if (subject.kind === "code") {
+      assertOnlyKeys(subject, ["kind", "code"], `Activity subject ${index}`);
+      return { kind: "code" as const, code: normalizeJournalCodeRef(subject.code, index) };
+    }
+    throw validationError(`Activity subject ${index} has an unsupported kind.`);
+  });
+}
+
+function normalizeJournalEntityRef(value: unknown, label: string): EntityRef {
+  if (!isStrictPlainObject(value)) throw validationError(`${label} has an invalid shape.`);
+  assertOnlyKeys(value, ["id", "kind", "title"], label);
+  return {
+    id: validateLocalIdentifier(value.id, `${label} ID`),
+    kind: validateWorkflowNamespace(value.kind),
+    ...(value.title === undefined
+      ? {}
+      : { title: validateBoundedAuditText(value.title, `${label} title`, 512) }),
+  };
+}
+
+function normalizeJournalCodeRef(value: unknown, index: number): CodeRef {
+  if (!isStrictPlainObject(value) || typeof value.kind !== "string") {
+    throw validationError(`Activity subject ${index} code reference is invalid.`);
+  }
+  if (value.kind === "symbol") {
+    assertOnlyKeys(value, ["kind", "symbolId", "fingerprint"], `Activity subject ${index} code`);
+    return {
+      kind: "symbol",
+      symbolId: validateBoundedAuditText(value.symbolId, "symbol ID", 512),
+      ...(value.fingerprint === undefined
+        ? {}
+        : { fingerprint: validateBoundedAuditText(value.fingerprint, "symbol fingerprint", 512) }),
+    };
+  }
+  if (value.kind === "file") {
+    assertOnlyKeys(value, ["kind", "path", "fingerprint"], `Activity subject ${index} code`);
+    return {
+      kind: "file",
+      path: validateJournalPath(value.path),
+      ...(value.fingerprint === undefined
+        ? {}
+        : { fingerprint: validateBoundedAuditText(value.fingerprint, "file fingerprint", 512) }),
+    };
+  }
+  throw validationError(`Activity subject ${index} code reference kind is unsupported.`);
+}
+
+function normalizeActivityMetadata(value: unknown): Readonly<Record<string, JsonValue>> {
+  if (!isStrictPlainObject(value)) throw validationError("Activity metadata must be an object.");
+  const keys = Object.keys(value);
+  if (keys.length > 32) throw validationError("Activity metadata may contain at most 32 entries.");
+  assertJournalMetadataPrivacy(value);
+  const json = canonicalBoundedJson(value, 8 * 1024, "Activity metadata");
+  return JSON.parse(json) as Readonly<Record<string, JsonValue>>;
+}
+
+function assertJournalMetadataPrivacy(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertJournalMetadataPrivacy(item);
+    return;
+  }
+  if (!isStrictPlainObject(value)) return;
+  for (const [key, child] of Object.entries(value)) {
+    if (/(?:body|source|prompt|transcript|diff|credential|secret|token|raw[-_]?error)/iu.test(key)) {
+      throw validationError(`Activity metadata key ${key} is not safe for the workflow journal.`);
+    }
+    assertJournalMetadataPrivacy(child);
+  }
+}
+
+function validateBoundedAuditText(value: unknown, label: string, maximumBytes: number): string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || Buffer.byteLength(value, "utf8") > maximumBytes
+    || /[\0-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value)
+  ) {
+    throw validationError(`${label} must be non-empty bounded text.`);
+  }
+  return value.normalize("NFC");
+}
+
+function validateWorkflowPhase(value: unknown): TeamWorkflowJournalPhase {
+  if (
+    typeof value !== "string"
+    || !TEAM_WORKFLOW_JOURNAL_PHASES.includes(value as TeamWorkflowJournalPhase)
+  ) {
+    throw validationError("Workflow operation phase is invalid.");
+  }
+  return value as TeamWorkflowJournalPhase;
+}
+
+function validateWorkflowAdvancePhase(
+  value: unknown,
+): Exclude<TeamWorkflowJournalPhase, "intent"> {
+  const phase = validateWorkflowPhase(value);
+  if (phase === "intent") throw validationError("Workflow operations cannot advance to intent.");
+  return phase;
+}
+
+function assertNextWorkflowPhase(
+  current: TeamWorkflowJournalPhase,
+  next: TeamWorkflowJournalPhase,
+): void {
+  const currentIndex = TEAM_WORKFLOW_JOURNAL_PHASES.indexOf(current);
+  const nextIndex = TEAM_WORKFLOW_JOURNAL_PHASES.indexOf(next);
+  if (nextIndex !== currentIndex + 1) {
+    throw revisionConflict(`Workflow operation cannot advance from ${current} to ${next}.`);
+  }
+}
+
+function validateWorkflowDraftCleanups(
+  value: readonly WorkflowDraftCleanupRequest[],
+): readonly WorkflowDraftCleanupRequest[] {
+  if (!Array.isArray(value) || value.length > TEAM_LOCAL_STATE_LIMITS.maxWorkflowEffects) {
+    throw validationError("Workflow draft cleanup list exceeds the effect limit.");
+  }
+  const seen = new Set<string>();
+  return value.map((cleanup, index) => {
+    if (!isStrictPlainObject(cleanup)) {
+      throw validationError(`Workflow draft cleanup ${index} has an invalid shape.`);
+    }
+    assertOnlyKeys(cleanup, ["kind", "id", "expectedRevision"], `Workflow cleanup ${index}`);
+    const normalized = {
+      kind: validateDraftKind(cleanup.kind),
+      id: validateLocalIdentifier(cleanup.id, `workflow cleanup ${index} ID`),
+      expectedRevision: validateRequiredRevision(
+        cleanup.expectedRevision,
+        `workflow cleanup ${index} revision`,
+      ),
+    };
+    const key = `${normalized.kind}:${normalized.id}`;
+    if (seen.has(key)) throw validationError(`Workflow cleanup ${key} is duplicated.`);
+    seen.add(key);
+    return normalized;
+  });
+}
+
+function assertCleanupRequestsMatchEffects(
+  cleanups: readonly WorkflowDraftCleanupRequest[],
+  effects: readonly TeamWorkflowJournalEffect[],
+): void {
+  const effectKeys = effects
+    .filter((effect): effect is LocalCleanupWorkflowEffect => effect.kind === "local_cleanup")
+    .map((effect) => `${effect.draftKind}:${effect.draftId}:${effect.expectedRevision}`)
+    .sort(compareCodeUnits);
+  const cleanupKeys = cleanups
+    .map((cleanup) => `${cleanup.kind}:${cleanup.id}:${cleanup.expectedRevision}`)
+    .sort(compareCodeUnits);
+  if (
+    effectKeys.length !== cleanupKeys.length
+    || effectKeys.some((key, index) => key !== cleanupKeys[index])
+  ) {
+    throw validationError("local_finalized cleanup requests must exactly match journal effects.");
+  }
+}
+
+function workflowOperationRevision(input: WorkflowOperationRevisionInput): Revision {
+  return sha256(JSON.stringify({
+    schemaVersion: LOCAL_STATE_RECORD_REVISION_VERSION,
+    scaffoldId: input.scaffoldId,
+    operationId: input.operationId,
+    commandRevision: input.commandRevision,
+    previewRevision: input.previewRevision,
+    phase: input.phase,
+    effects: JSON.parse(input.effectsJson) as unknown,
+    createdAt: input.createdAt,
+    updatedAt: input.updatedAt,
+  }));
+}
+
+function readWorkflowOperation(
+  db: DatabaseSync,
+  scaffoldId: string,
+  operationId: string,
+): TeamWorkflowJournalEntry | null {
+  const row = db.prepare(`
+    SELECT scaffold_id, operation_id, command_revision, preview_revision, phase, effects_json,
+      created_at, updated_at, revision
+    FROM team_workflow_operations
+    WHERE scaffold_id = ? AND operation_id = ?
+  `).get(scaffoldId, operationId) as TeamWorkflowOperationRow | undefined;
+  return row ? decodeWorkflowOperation(row, scaffoldId) : null;
+}
+
+function readIncompleteWorkflowOperation(
+  db: DatabaseSync,
+  scaffoldId: string,
+): TeamWorkflowJournalEntry | null {
+  const rows = db.prepare(`
+    SELECT scaffold_id, operation_id, command_revision, preview_revision, phase, effects_json,
+      created_at, updated_at, revision
+    FROM team_workflow_operations
+    WHERE scaffold_id = ? AND phase <> 'complete'
+    ORDER BY updated_at ASC, operation_id ASC
+    LIMIT 2
+  `).all(scaffoldId) as unknown as TeamWorkflowOperationRow[];
+  if (rows.length > 1) {
+    throw corruptError("More than one incomplete Team workflow operation exists for a scaffold.");
+  }
+  return rows[0] ? decodeWorkflowOperation(rows[0], scaffoldId) : null;
+}
+
+function decodeWorkflowOperation(
+  row: TeamWorkflowOperationRow,
+  expectedScaffoldId: string,
+): TeamWorkflowJournalEntry {
+  if (row.scaffold_id !== expectedScaffoldId) {
+    throw corruptError("Workflow operation scaffold mismatch.");
+  }
+  const operationId = validateStoredLocalIdentifier(row.operation_id, "workflow operation ID");
+  if (typeof row.command_revision !== "string" || !isRevision(row.command_revision)) {
+    throw corruptError("A persisted workflow command revision is invalid.");
+  }
+  if (typeof row.preview_revision !== "string" || !isRevision(row.preview_revision)) {
+    throw corruptError("A persisted workflow preview revision is invalid.");
+  }
+  let phase: TeamWorkflowJournalPhase;
+  try {
+    phase = validateWorkflowPhase(row.phase);
+  } catch {
+    throw corruptError("A persisted workflow operation phase is invalid.");
+  }
+  if (typeof row.effects_json !== "string") {
+    throw corruptError("Persisted workflow effects are not JSON text.");
+  }
+  const effects = parseWorkflowEffects(row.effects_json);
+  if (
+    typeof row.created_at !== "string"
+    || !isCanonicalTimestamp(row.created_at)
+    || typeof row.updated_at !== "string"
+    || !isCanonicalTimestamp(row.updated_at)
+    || row.updated_at < row.created_at
+  ) {
+    throw corruptError("A persisted workflow operation timestamp is invalid.");
+  }
+  if (typeof row.revision !== "string" || !isRevision(row.revision)) {
+    throw corruptError("A persisted workflow operation revision is invalid.");
+  }
+  const expectedRevision = workflowOperationRevision({
+    scaffoldId: expectedScaffoldId,
+    operationId,
+    commandRevision: row.command_revision,
+    previewRevision: row.preview_revision,
+    phase,
+    effectsJson: row.effects_json,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+  if (expectedRevision !== row.revision) {
+    throw corruptError("A persisted workflow operation revision does not match its content.");
+  }
+  return {
+    scaffoldId: expectedScaffoldId,
+    operationId,
+    commandRevision: row.command_revision,
+    previewRevision: row.preview_revision,
+    phase,
+    effects,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    revision: row.revision,
+  };
+}
+
+function insertWorkflowOperation(
+  db: DatabaseSync,
+  entry: TeamWorkflowJournalEntry,
+  effectsJson: string,
+): void {
+  db.prepare(`
+    INSERT INTO team_workflow_operations (
+      scaffold_id, operation_id, command_revision, preview_revision, phase, effects_json,
+      created_at, updated_at, revision
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    entry.scaffoldId,
+    entry.operationId,
+    entry.commandRevision,
+    entry.previewRevision,
+    entry.phase,
+    effectsJson,
+    entry.createdAt,
+    entry.updatedAt,
+    entry.revision,
+  );
+}
+
+function replaceWorkflowOperation(
+  db: DatabaseSync,
+  entry: TeamWorkflowJournalEntry,
+  effectsJson: string,
+  expectedRevision: Revision,
+): void {
+  const updated = db.prepare(`
+    UPDATE team_workflow_operations
+    SET phase = ?, effects_json = ?, updated_at = ?, revision = ?
+    WHERE scaffold_id = ? AND operation_id = ?
+      AND command_revision = ? AND preview_revision = ? AND revision = ?
+  `).run(
+    entry.phase,
+    effectsJson,
+    entry.updatedAt,
+    entry.revision,
+    entry.scaffoldId,
+    entry.operationId,
+    entry.commandRevision,
+    entry.previewRevision,
+    expectedRevision,
+  );
+  if (Number(updated.changes) !== 1) {
+    throw revisionConflict("The workflow operation changed before phase advancement.");
+  }
+}
+
+function pruneTerminalWorkflowOperations(
+  db: DatabaseSync,
+  scaffoldId: string,
+  currentOperationId: string,
+): number {
+  const keepOthers = TEAM_LOCAL_STATE_LIMITS.terminalWorkflowRetention - 1;
+  const deleted = db.prepare(`
+    DELETE FROM team_workflow_operations
+    WHERE scaffold_id = ?
+      AND phase = 'complete'
+      AND operation_id <> ?
+      AND rowid NOT IN (
+        SELECT rowid
+        FROM team_workflow_operations
+        WHERE scaffold_id = ?
+          AND phase = 'complete'
+          AND operation_id <> ?
+        ORDER BY updated_at DESC, operation_id DESC
+        LIMIT ?
+      )
+  `).run(scaffoldId, currentOperationId, scaffoldId, currentOperationId, keepOthers);
+  return Number(deleted.changes);
+}
+
+function canonicalBoundedJson(value: unknown, maximumBytes: number, label: string): string {
+  let budget = maximumBytes;
+  let nodes = 0;
+  const visit = (current: unknown, depth: number): unknown => {
+    nodes += 1;
+    if (nodes > 8192 || depth > 32) {
+      throw validationError(`${label} exceeds the structural limit.`);
+    }
+    if (current === null || typeof current === "boolean") {
+      budget -= current === null ? 4 : current ? 4 : 5;
+      return current;
+    }
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) throw validationError(`${label} contains a non-finite number.`);
+      const normalized = Object.is(current, -0) ? 0 : current;
+      budget -= String(normalized).length;
+      return normalized;
+    }
+    if (typeof current === "string") {
+      budget -= Buffer.byteLength(current, "utf8") + 2;
+      if (budget < 0) throw validationError(`${label} exceeds the byte limit.`);
+      return current.normalize("NFC");
+    }
+    if (Array.isArray(current)) {
+      if (current.length > 4096) throw validationError(`${label} contains an oversized array.`);
+      budget -= current.length + 2;
+      return current.map((item) => visit(item, depth + 1));
+    }
+    if (!isStrictPlainObject(current)) {
+      throw validationError(`${label} must contain only JSON values.`);
+    }
+    const keys = Object.keys(current).sort(compareCodeUnits);
+    if (keys.length > 4096) throw validationError(`${label} contains too many object keys.`);
+    const normalized: Record<string, unknown> = {};
+    for (const keyValue of keys) {
+      const key = keyValue.normalize("NFC");
+      if (
+        key.length === 0
+        || Buffer.byteLength(key, "utf8") > 256
+        || /[\0-\x1f\x7f]/.test(key)
+      ) {
+        throw validationError(`${label} contains an invalid object key.`);
+      }
+      budget -= Buffer.byteLength(key, "utf8") + 4;
+      if (budget < 0) throw validationError(`${label} exceeds the byte limit.`);
+      normalized[key] = visit(current[keyValue], depth + 1);
+    }
+    budget -= keys.length + 2;
+    return normalized;
+  };
+  const normalized = visit(value, 0);
+  const json = JSON.stringify(normalized);
+  if (json === undefined || Buffer.byteLength(json, "utf8") > maximumBytes) {
+    throw validationError(`${label} exceeds the byte limit.`);
+  }
+  return json;
+}
+
+function isStrictPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!isPlainObject(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function canonicalProjectRoot(projectRoot: string): string {
@@ -1927,7 +3587,7 @@ function isFilesystemError(error: unknown, code: string): boolean {
     && (error as NodeJS.ErrnoException).code === code;
 }
 
-function validateReadableSchema(db: DatabaseSync): void {
+function validateReadableSchema(db: DatabaseSync, minimumVersion: number): void {
   const tables = listUserTables(db);
   if (tables.length === 0) {
     throw migrationError("The local team database has not been initialized.");
@@ -1944,15 +3604,18 @@ function validateReadableSchema(db: DatabaseSync): void {
   }
   if (version === 1) {
     validateV1Tables(db);
-    throw migrationError(
-      "Local team schema 1 requires the explicit Hub schema v2 migration.",
-    );
+    if (minimumVersion <= 1) return;
+    throw migrationError(`This local team read requires schema ${minimumVersion}; found schema 1.`);
   }
   if (version === 2) {
     validateV2Tables(db);
-    throw migrationError(
-      "Local team schema 2 requires the explicit Hub schema v3 migration.",
-    );
+    if (minimumVersion <= 2) return;
+    throw migrationError(`This local team read requires schema ${minimumVersion}; found schema 2.`);
+  }
+  if (version === 3) {
+    validateV3Tables(db);
+    if (minimumVersion <= 3) return;
+    throw migrationError(`This local team read requires schema ${minimumVersion}; found schema 3.`);
   }
   if (version > LOCAL_STATE_SCHEMA_VERSION) {
     throw migrationError(
@@ -1962,14 +3625,14 @@ function validateReadableSchema(db: DatabaseSync): void {
   if (version !== LOCAL_STATE_SCHEMA_VERSION) {
     throw corruptError("The local team schema version is invalid.");
   }
-  validateV3Tables(db);
+  validateV4Tables(db);
 }
 
 function ensureWritableSchema(db: DatabaseSync, now: () => string): void {
   const tables = listUserTables(db);
   if (tables.length === 0) {
-    createV3Schema(db, now());
-    validateV3Tables(db);
+    createV4Schema(db, now());
+    validateV4Tables(db);
     return;
   }
   if (!tables.includes("local_state_schema")) {
@@ -2009,14 +3672,24 @@ function ensureWritableSchema(db: DatabaseSync, now: () => string): void {
       UPDATE local_state_schema
       SET version = ?, applied_at = ?
       WHERE singleton = 1
+    `).run(3, validateTimestamp(now(), "migration timestamp"));
+  }
+  if (version <= 3) {
+    validateV3Tables(db);
+    db.exec(V4_SCHEMA_SQL);
+    db.prepare(`
+      UPDATE local_state_schema
+      SET version = ?, applied_at = ?
+      WHERE singleton = 1
     `).run(LOCAL_STATE_SCHEMA_VERSION, validateTimestamp(now(), "migration timestamp"));
   }
-  validateV3Tables(db);
+  validateV4Tables(db);
 }
 
-function createV3Schema(db: DatabaseSync, timestamp: string): void {
+function createV4Schema(db: DatabaseSync, timestamp: string): void {
   db.exec(V1_SCHEMA_SQL);
   db.exec(V3_SCHEMA_SQL);
+  db.exec(V4_SCHEMA_SQL);
   db.prepare(`
     INSERT INTO local_state_schema (singleton, version, applied_at)
     VALUES (1, ?, ?)
@@ -2106,6 +3779,40 @@ function validateV3Tables(db: DatabaseSync): void {
   validateHubTables(db, V3_SCHEMA_SQL, "v3");
 }
 
+function validateV4Tables(db: DatabaseSync): void {
+  const actualTables = listUserTables(db);
+  const expectedTables = [
+    ...(Object.keys(EXPECTED_V1_TABLES) as V1LocalStateTable[]),
+    "hub_jobs",
+    "hub_runtime_lease",
+    "inbox_drafts",
+    "relay_drafts",
+    "team_workflow_lease",
+    "team_workflow_operations",
+  ] satisfies LocalStateTable[];
+  expectedTables.sort(compareCodeUnits);
+  if (
+    actualTables.length !== expectedTables.length
+    || actualTables.some((table, index) => table !== expectedTables[index])
+  ) {
+    throw corruptError("The local team database contains an invalid v4 table set.");
+  }
+  for (const table of expectedTables) validateTableSemantics(db, table);
+  validateV1TableSql(db);
+  validateHubJobIndexes(db, "v3");
+  validateHubJobSchemaSql(db, V3_SCHEMA_SQL, "v3");
+  validateV4SchemaSql(db);
+  validateNamedSchemaObjects(db, [
+    "hub_jobs_generation_per_kind",
+    "hub_jobs_one_active_index_job_per_scaffold",
+    "hub_jobs_scaffold_created",
+    "inbox_drafts_scaffold_updated",
+    "relay_drafts_scaffold_updated",
+    "team_workflow_one_incomplete_per_scaffold",
+    "team_workflow_operations_scaffold_updated",
+  ]);
+}
+
 function validateHubTables(
   db: DatabaseSync,
   schemaSql: string,
@@ -2142,6 +3849,12 @@ function validateTableSemantics(
     ? EXPECTED_HUB_JOB_COLUMNS
     : table === "hub_runtime_lease"
       ? EXPECTED_HUB_LEASE_COLUMNS
+      : table === "inbox_drafts" || table === "relay_drafts"
+        ? EXPECTED_DRAFT_COLUMNS
+        : table === "team_workflow_lease"
+          ? EXPECTED_WORKFLOW_LEASE_COLUMNS
+          : table === "team_workflow_operations"
+            ? EXPECTED_WORKFLOW_OPERATION_COLUMNS
       : EXPECTED_V1_TABLES[table];
   const tableRows = (db.prepare("PRAGMA table_list").all() as Array<{
     schema: unknown;
@@ -2294,6 +4007,42 @@ function validateHubJobSchemaSql(
   }
 }
 
+function validateV4SchemaSql(db: DatabaseSync): void {
+  const expectedStatements = V4_SCHEMA_SQL
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+  const expectedNames = [
+    "inbox_drafts",
+    "relay_drafts",
+    "team_workflow_lease",
+    "team_workflow_operations",
+    "inbox_drafts_scaffold_updated",
+    "relay_drafts_scaffold_updated",
+    "team_workflow_one_incomplete_per_scaffold",
+    "team_workflow_operations_scaffold_updated",
+  ] as const;
+  for (const name of expectedNames) {
+    const row = db.prepare(`
+      SELECT sql
+      FROM sqlite_master
+      WHERE name = ? AND type IN ('table', 'index')
+    `).get(name) as { sql: unknown } | undefined;
+    const expected = expectedStatements.find((statement) => (
+      statement.startsWith(`CREATE TABLE ${name}`)
+      || statement.includes(`INDEX ${name}\n`)
+    ));
+    if (
+      !row
+      || typeof row.sql !== "string"
+      || expected === undefined
+      || normalizeSchemaSql(row.sql) !== normalizeSchemaSql(expected)
+    ) {
+      throw corruptError(`Local team schema object ${name} does not match schema v4.`);
+    }
+  }
+}
+
 function validateV1TableSql(db: DatabaseSync): void {
   const expectedStatements = V1_SCHEMA_SQL
     .split(";")
@@ -2434,6 +4183,29 @@ function hubLeaseHeldError(pid: number, status: Exclude<HubLeaseProcessStatus, "
     detail: status === "alive"
       ? `Another live Project Hub process (${pid}) owns this repository's job lease.`
       : `The Project Hub job lease holder (${pid}) could not be verified dead; refusing recovery.`,
+  });
+}
+
+function workflowLeaseHeldError(
+  pid: number,
+  status: Exclude<HubLeaseProcessStatus, "dead">,
+): MexPortError {
+  return new MexPortError({
+    title: "Team workflow lease is already held",
+    status: 409,
+    code: "OPERATION_INTERRUPTED",
+    detail: status === "alive"
+      ? `Another live process (${pid}) owns this scaffold's Team workflow lease.`
+      : `The Team workflow lease holder (${pid}) could not be verified dead; refusing recovery.`,
+  });
+}
+
+function workflowOperationNotFoundError(operationId: string): MexPortError {
+  return new MexPortError({
+    title: "Team workflow operation not found",
+    status: 404,
+    code: "NOT_FOUND",
+    detail: `Workflow operation ${operationId} does not exist in this scaffold.`,
   });
 }
 

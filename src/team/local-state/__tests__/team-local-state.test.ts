@@ -28,6 +28,11 @@ const LATER = "2026-08-23T11:00:00.000Z";
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);
 const LEASE_A = "a".repeat(64);
+const LEASE_B = "b".repeat(64);
+const COMMAND_A = "c".repeat(64);
+const PREVIEW_A = "9".repeat(64);
+const DRAFT_A = "draft_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const DRAFT_B = "draft_01ARZ3NDEKTSV4RRFFQ69G5FAW";
 
 const roots: string[] = [];
 
@@ -207,6 +212,19 @@ function createRawV2(path: string, withQueuedJob = false): void {
   db.close();
 }
 
+function createRawV3(path: string): void {
+  state(path).initializeForMutation();
+  const db = new DatabaseSync(join(path, ".mex/local/team.db"));
+  db.exec(`
+    DROP TABLE team_workflow_operations;
+    DROP TABLE team_workflow_lease;
+    DROP TABLE relay_drafts;
+    DROP TABLE inbox_drafts;
+    UPDATE local_state_schema SET version = 3, applied_at = '${NOW}';
+  `);
+  db.close();
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -219,6 +237,14 @@ describe("TeamLocalState", () => {
     expect(store.getConfiguredMember()).toBeNull();
     expect(store.getCatchUpCursor({ kind: "member", memberId: MEMBER_A })).toBeNull();
     expect(store.getCatchUpCursor({ kind: "unknown" })).toBeNull();
+    expect(store.getLocalDraft(DRAFT_A)).toBeNull();
+    expect(store.listLocalDrafts()).toEqual({
+      items: [],
+      nextCursor: null,
+      truncated: false,
+    });
+    expect(store.getWorkflowOperation("operation-a")).toBeNull();
+    expect(store.getIncompleteWorkflowOperation()).toBeNull();
     expect(existsSync(join(root, ".mex"))).toBe(false);
   });
 
@@ -477,7 +503,548 @@ describe("TeamLocalState", () => {
     expect(state(root).getConfiguredMember()).toEqual(selection);
   });
 
-  it("migrates v1 through v2 to v3 while preserving Lane C rows", () => {
+  it("keeps schema v3 reads immutable and migrates only through an explicit initializer", () => {
+    const root = tempProject();
+    createRawV3(root);
+    const dbPath = join(root, ".mex/local/team.db");
+    const localDirectory = join(root, ".mex/local");
+    const actor = { kind: "member" as const, memberId: MEMBER_A };
+    const memberRevision = createHash("sha256").update(JSON.stringify({
+      schemaVersion: 1,
+      scaffoldId: "scaffold-a",
+      memberId: MEMBER_A,
+      updatedAt: NOW,
+    })).digest("hex");
+    const cursorRevision = createHash("sha256").update(JSON.stringify({
+      schemaVersion: 1,
+      scaffoldId: "scaffold-a",
+      actor,
+      head: HEAD_A,
+      branch: "main",
+      timestamp: NOW,
+    })).digest("hex");
+    const jobId = "job_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const jobRevision = createHash("sha256").update(JSON.stringify({
+      schemaVersion: 2,
+      id: jobId,
+      scaffoldId: "scaffold-a",
+      kind: "graph_refresh",
+      generation: 1,
+      phase: "queued",
+      progress: null,
+      cancelRequested: false,
+      state: "queued",
+      createdAt: NOW,
+      startedAt: null,
+      finishedAt: null,
+      interruptedReason: null,
+      problem: null,
+      summary: null,
+    })).digest("hex");
+    const seed = new DatabaseSync(dbPath);
+    seed.prepare(`
+      INSERT INTO configured_member_selections
+        (scaffold_id, member_id, updated_at, revision)
+      VALUES ('scaffold-a', ?, ?, ?)
+    `).run(MEMBER_A, NOW, memberRevision);
+    seed.prepare(`
+      INSERT INTO catch_up_cursors
+        (scaffold_id, actor_key, actor_json, head, branch, timestamp, revision)
+      VALUES ('scaffold-a', ?, ?, ?, 'main', ?, ?)
+    `).run(MEMBER_A, JSON.stringify(actor), HEAD_A, NOW, cursorRevision);
+    seed.prepare(`
+      INSERT INTO hub_jobs (
+        id, scaffold_id, kind, generation, phase,
+        progress_completed, progress_total, progress_message, cancel_requested,
+        state, created_at, started_at, finished_at, interrupted_reason,
+        problem_json, summary, revision
+      ) VALUES (?, 'scaffold-a', 'graph_refresh', 1, 'queued',
+        NULL, NULL, NULL, 0, 'queued', ?, NULL, NULL, NULL, NULL, NULL, ?)
+    `).run(jobId, NOW, jobRevision);
+    seed.close();
+    const beforeBytes = readFileSync(dbPath);
+    const beforeMtime = statSync(dbPath, { bigint: true }).mtimeNs;
+    const beforeEntries = readdirSync(localDirectory).sort();
+    const store = state(root);
+
+    expect(store.getConfiguredMember()).toMatchObject({
+      memberId: MEMBER_A,
+      revision: memberRevision,
+    });
+    expect(store.getCatchUpCursor(actor)).toMatchObject({
+      head: HEAD_A,
+      branch: "main",
+      revision: cursorRevision,
+    });
+    expect(store.listHubJobs().items).toMatchObject([{
+      id: jobId,
+      revision: jobRevision,
+    }]);
+    expectCode(() => store.getLocalDraft(DRAFT_A), "MIGRATION_REQUIRED");
+    expect(readFileSync(dbPath)).toEqual(beforeBytes);
+    expect(statSync(dbPath, { bigint: true }).mtimeNs).toBe(beforeMtime);
+    expect(readdirSync(localDirectory).sort()).toEqual(beforeEntries);
+
+    store.initializeForMutation();
+    const migrated = new DatabaseSync(dbPath, { readOnly: true });
+    expect(migrated.prepare("SELECT version FROM local_state_schema").get()).toEqual({ version: 4 });
+    expect(migrated.prepare(`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table' AND name IN (
+        'inbox_drafts', 'relay_drafts', 'team_workflow_lease', 'team_workflow_operations'
+      )
+      ORDER BY name
+    `).all()).toEqual([
+      { name: "inbox_drafts" },
+      { name: "relay_drafts" },
+      { name: "team_workflow_lease" },
+      { name: "team_workflow_operations" },
+    ]);
+    migrated.close();
+  });
+
+  it("rolls the v3-to-v4 migration back with a conflicting explicit mutation", () => {
+    const root = tempProject();
+    createRawV3(root);
+    const store = state(root);
+
+    expectCode(() => store.deleteLocalDraft({
+      id: DRAFT_A,
+      kind: "inbox",
+      expectedRevision: "d".repeat(64),
+    }), "REVISION_CONFLICT");
+
+    const db = new DatabaseSync(join(root, ".mex/local/team.db"), { readOnly: true });
+    expect(db.prepare("SELECT version FROM local_state_schema").get()).toEqual({ version: 3 });
+    expect(db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'inbox_drafts'
+    `).get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it("previews and applies exact bounded local drafts with stable pagination", () => {
+    const root = tempProject();
+    const store = state(root);
+    const firstRequest = {
+      id: DRAFT_A,
+      kind: "inbox" as const,
+      payload: { rationale: "Review", plan: { z: 2, a: 1 } },
+      expectedRevision: null,
+      updatedAt: NOW,
+    };
+
+    const preview = store.previewSaveLocalDraft(firstRequest);
+    expect(preview).toMatchObject({
+      scaffoldId: "scaffold-a",
+      id: DRAFT_A,
+      kind: "inbox",
+      updatedAt: NOW,
+      revision: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(existsSync(join(root, ".mex"))).toBe(false);
+    expect(store.saveLocalDraft(firstRequest)).toEqual(preview);
+
+    const relay = state(root, "scaffold-a", LATER).saveLocalDraft({
+      id: DRAFT_B,
+      kind: "relay",
+      payload: { summary: "Hand off" },
+      expectedRevision: null,
+      updatedAt: LATER,
+    });
+    const firstPage = store.listLocalDrafts({ limit: 1 });
+    expect(firstPage.items).toEqual([relay]);
+    expect(firstPage.truncated).toBe(true);
+    expect(firstPage.nextCursor).toEqual(expect.any(String));
+    expect(store.listLocalDrafts({ limit: 1, cursor: firstPage.nextCursor! })).toEqual({
+      items: [preview],
+      nextCursor: null,
+      truncated: false,
+    });
+    expect(store.listLocalDrafts({ kind: "inbox" }).items).toEqual([preview]);
+
+    const updated = store.previewSaveLocalDraft({
+      ...firstRequest,
+      payload: { rationale: "Updated", plan: { a: 1, z: 2 } },
+      expectedRevision: preview.revision,
+      updatedAt: LATER,
+    });
+    expect(store.saveLocalDraft({
+      ...firstRequest,
+      payload: updated.payload,
+      expectedRevision: preview.revision,
+      updatedAt: updated.updatedAt,
+    })).toEqual(updated);
+    expectCode(() => store.saveLocalDraft(firstRequest), "REVISION_CONFLICT");
+    expect(store.previewDeleteLocalDraft({
+      id: DRAFT_A,
+      kind: "inbox",
+      expectedRevision: updated.revision,
+    })).toEqual(updated);
+    store.deleteLocalDraft({
+      id: DRAFT_A,
+      kind: "inbox",
+      expectedRevision: updated.revision,
+    });
+    expect(store.getLocalDraft(DRAFT_A)).toBeNull();
+  });
+
+  it("enforces local draft byte and per-kind corpus ceilings before writes", () => {
+    const oversizedRoot = tempProject();
+    expectCode(() => state(oversizedRoot).saveLocalDraft({
+      id: DRAFT_A,
+      kind: "inbox",
+      payload: { text: "x".repeat(64 * 1024) },
+      expectedRevision: null,
+    }), "VALIDATION_FAILED");
+    expect(existsSync(join(oversizedRoot, ".mex"))).toBe(false);
+
+    const fullRoot = tempProject();
+    const store = state(fullRoot);
+    store.initializeForMutation();
+    const db = new DatabaseSync(join(fullRoot, ".mex/local/team.db"));
+    const insert = db.prepare(`
+      INSERT INTO inbox_drafts (scaffold_id, id, payload_json, updated_at, revision)
+      VALUES ('scaffold-a', ?, '{}', ?, ?)
+    `);
+    for (let index = 0; index < 512; index += 1) {
+      insert.run(`seed-${String(index).padStart(3, "0")}`, NOW, "a".repeat(64));
+    }
+    db.close();
+
+    expectCode(() => store.saveLocalDraft({
+      id: DRAFT_A,
+      kind: "inbox",
+      payload: {},
+      expectedRevision: null,
+    }), "VALIDATION_FAILED");
+    const verify = new DatabaseSync(join(fullRoot, ".mex/local/team.db"), { readOnly: true });
+    expect(verify.prepare("SELECT COUNT(*) AS count FROM inbox_drafts").get()).toEqual({ count: 512 });
+    verify.close();
+  });
+
+  it("serializes the Team workflow lease and recovers only a provably dead holder", () => {
+    const root = tempProject();
+    const aliveStore = new TeamLocalState({
+      projectRoot: root,
+      scaffoldId: "scaffold-a",
+      processStatus: () => "alive",
+    });
+    expect(aliveStore.acquireTeamWorkflowLease({
+      pid: 101,
+      token: LEASE_A,
+      acquiredAt: NOW,
+    })).toEqual({
+      scaffoldId: "scaffold-a",
+      pid: 101,
+      token: LEASE_A,
+      acquiredAt: NOW,
+    });
+    expectCode(() => aliveStore.acquireTeamWorkflowLease({
+      pid: 202,
+      token: LEASE_B,
+      acquiredAt: LATER,
+    }), "OPERATION_INTERRUPTED");
+
+    const recovery = new TeamLocalState({
+      projectRoot: root,
+      scaffoldId: "scaffold-a",
+      processStatus: () => "dead",
+    });
+    expect(recovery.acquireTeamWorkflowLease({
+      pid: 202,
+      token: LEASE_B,
+      acquiredAt: LATER,
+    }).token).toBe(LEASE_B);
+    recovery.releaseTeamWorkflowLease(LEASE_B);
+  });
+
+  it("journals immutable recovery effects and atomically finalizes draft cleanup", () => {
+    const root = tempProject();
+    const store = state(root);
+    const draft = store.saveLocalDraft({
+      id: DRAFT_A,
+      kind: "inbox",
+      payload: { rationale: "Ship" },
+      expectedRevision: null,
+      updatedAt: NOW,
+    });
+    store.acquireTeamWorkflowLease({ pid: 101, token: LEASE_A, acquiredAt: NOW });
+    const effects = [
+      {
+        kind: "canonical" as const,
+        namespace: "proposal",
+        id: "proposal_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        path: ".mex/inbox/proposal_01ARZ3NDEKTSV4RRFFQ69G5FAV.md",
+        beforeRevision: null,
+        afterRevision: "d".repeat(64),
+      },
+      {
+        kind: "activity" as const,
+        id: "activity_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        path: ".mex/events/activity/2026-08/activity_01ARZ3NDEKTSV4RRFFQ69G5FAV.md",
+        revision: "e".repeat(64),
+        action: "inbox.publish",
+        actor: { kind: "member" as const, memberId: MEMBER_A },
+        occurredAt: NOW,
+        repoState: { branch: "main", head: HEAD_A, dirty: false, observedAt: NOW },
+        subjects: [{
+          kind: "entity" as const,
+          entity: { id: "proposal_01ARZ3NDEKTSV4RRFFQ69G5FAV", kind: "proposal" },
+        }],
+        metadata: { operation: "publish", attempt: 1 },
+      },
+      {
+        kind: "local_cleanup" as const,
+        draftKind: "inbox" as const,
+        draftId: DRAFT_A,
+        expectedRevision: draft.revision,
+      },
+    ];
+    const begun = store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects,
+    });
+    expect(begun.idempotentReplay).toBe(false);
+    expect(store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects,
+    })).toMatchObject({ idempotentReplay: true, entry: begun.entry });
+    expectCode(() => store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: "8".repeat(64),
+      effects,
+    }), "REVISION_CONFLICT");
+
+    const published = store.advanceWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      expectedRevision: begun.entry.revision,
+      phase: "canonical_published",
+      effects,
+    });
+    const changedEffects = effects.map((effect) => effect.kind === "canonical"
+      ? { ...effect, afterRevision: "f".repeat(64) }
+      : effect);
+    expectCode(() => store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: changedEffects,
+    }), "REVISION_CONFLICT");
+    expectCode(() => store.advanceWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      expectedRevision: published.revision,
+      phase: "local_finalized",
+      effects: changedEffects,
+      deleteDrafts: [{ kind: "inbox", id: DRAFT_A, expectedRevision: draft.revision }],
+    }), "REVISION_CONFLICT");
+    expect(store.getLocalDraft(DRAFT_A)).toEqual(draft);
+
+    const finalized = store.advanceWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      expectedRevision: published.revision,
+      phase: "local_finalized",
+      effects,
+      deleteDrafts: [{ kind: "inbox", id: DRAFT_A, expectedRevision: draft.revision }],
+    });
+    expect(store.getLocalDraft(DRAFT_A)).toBeNull();
+    const completed = store.advanceWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      expectedRevision: finalized.revision,
+      phase: "complete",
+      effects,
+    });
+    expect(completed.effects).toEqual(effects);
+    expect(store.getIncompleteWorkflowOperation()).toBeNull();
+    store.releaseTeamWorkflowLease(LEASE_A);
+  });
+
+  it("rolls back local finalization when exact cleanup cannot be completed", () => {
+    const root = tempProject();
+    const store = state(root);
+    const draft = store.saveLocalDraft({
+      id: DRAFT_A,
+      kind: "inbox",
+      payload: { rationale: "Ship" },
+      expectedRevision: null,
+    });
+    store.acquireTeamWorkflowLease({ pid: 101, token: LEASE_A, acquiredAt: NOW });
+    const effects = [{
+      kind: "local_cleanup" as const,
+      draftKind: "inbox" as const,
+      draftId: DRAFT_A,
+      expectedRevision: "f".repeat(64),
+    }];
+    const intent = store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects,
+    }).entry;
+    const published = store.advanceWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      expectedRevision: intent.revision,
+      phase: "canonical_published",
+      effects,
+    });
+    expectCode(() => store.advanceWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      expectedRevision: published.revision,
+      phase: "local_finalized",
+      effects,
+      deleteDrafts: [{ kind: "inbox", id: DRAFT_A, expectedRevision: "f".repeat(64) }],
+    }), "REVISION_CONFLICT");
+    expect(store.getLocalDraft(DRAFT_A)).toEqual(draft);
+    expect(store.getIncompleteWorkflowOperation()).toEqual(published);
+  });
+
+  it("rejects private or oversized Activity recovery metadata and excess effects", () => {
+    const root = tempProject();
+    const store = state(root);
+    store.acquireTeamWorkflowLease({ pid: 101, token: LEASE_A, acquiredAt: NOW });
+    const activity = {
+      kind: "activity" as const,
+      id: "activity_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      path: ".mex/events/activity/2026-08/activity_01ARZ3NDEKTSV4RRFFQ69G5FAV.md",
+      revision: "e".repeat(64),
+      action: "activity.record",
+      actor: { kind: "member" as const, memberId: MEMBER_A },
+      occurredAt: NOW,
+      repoState: { branch: "main", head: HEAD_A, dirty: false, observedAt: NOW },
+      subjects: [],
+    };
+    expectCode(() => store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-private",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [{ ...activity, metadata: { sourceBody: "private source" } }],
+    }), "VALIDATION_FAILED");
+    expectCode(() => store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-large",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [{ ...activity, metadata: { note: "x".repeat(8 * 1024) } }],
+    }), "VALIDATION_FAILED");
+    expectCode(() => store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-effects",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: Array.from({ length: 17 }, (_, index) => ({
+        kind: "local" as const,
+        namespace: "inbox-draft",
+        id: `draft-${index}`,
+        beforeRevision: null,
+        afterRevision: "a".repeat(64),
+      })),
+    }), "VALIDATION_FAILED");
+    const boundary = store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-subject-boundary",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [{
+        ...activity,
+        subjects: Array.from({ length: 64 }, (_, index) => ({
+          kind: "file" as const,
+          path: `src/boundary-${index}.ts`,
+        })),
+      }],
+    }).entry;
+    expect((boundary.effects[0] as { subjects: readonly unknown[] }).subjects).toHaveLength(64);
+    store.abandonWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-subject-boundary",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      expectedRevision: boundary.revision,
+    });
+    expect(store.getIncompleteWorkflowOperation()).toBeNull();
+  });
+
+  it("retains no more than 256 terminal workflow rows per scaffold", () => {
+    const root = tempProject();
+    const store = state(root);
+    store.acquireTeamWorkflowLease({ pid: 101, token: LEASE_A, acquiredAt: NOW });
+    const db = new DatabaseSync(join(root, ".mex/local/team.db"));
+    const insert = db.prepare(`
+      INSERT INTO team_workflow_operations (
+        scaffold_id, operation_id, command_revision, preview_revision, phase, effects_json,
+        created_at, updated_at, revision
+      ) VALUES ('scaffold-a', ?, ?, ?, 'complete', '[]', ?, ?, ?)
+    `);
+    for (let index = 0; index < 256; index += 1) {
+      insert.run(
+        `retained-${String(index).padStart(3, "0")}`,
+        "c".repeat(64),
+        "9".repeat(64),
+        NOW,
+        NOW,
+        "d".repeat(64),
+      );
+    }
+    db.close();
+
+    let entry = store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-current",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [],
+    }).entry;
+    for (const phase of ["canonical_published", "local_finalized", "complete"] as const) {
+      entry = store.advanceWorkflowOperation({
+        leaseToken: LEASE_A,
+        operationId: "operation-current",
+        commandRevision: COMMAND_A,
+        previewRevision: PREVIEW_A,
+        expectedRevision: entry.revision,
+        phase,
+        effects: [],
+      });
+    }
+    const verify = new DatabaseSync(join(root, ".mex/local/team.db"), { readOnly: true });
+    expect(verify.prepare(`
+      SELECT COUNT(*) AS count
+      FROM team_workflow_operations
+      WHERE scaffold_id = 'scaffold-a' AND phase = 'complete'
+    `).get()).toEqual({ count: 256 });
+    verify.close();
+  });
+
+  it("migrates v1 through v2 and v3 to v4 while preserving Lane C rows", () => {
     const root = tempProject();
     createRawV1(root);
     const dbPath = join(root, ".mex/local/team.db");
@@ -511,7 +1078,15 @@ describe("TeamLocalState", () => {
     seed.close();
     const beforeRead = readFileSync(dbPath);
 
-    expectCode(() => state(root).getConfiguredMember(), "MIGRATION_REQUIRED");
+    expect(state(root).getConfiguredMember()).toMatchObject({
+      memberId: MEMBER_A,
+      revision: memberRevision,
+    });
+    expect(state(root).getCatchUpCursor(actor)).toMatchObject({
+      head: HEAD_A,
+      branch: "main",
+      revision: cursorRevision,
+    });
     expect(readFileSync(dbPath)).toEqual(beforeRead);
 
     const store = state(root);
@@ -528,7 +1103,7 @@ describe("TeamLocalState", () => {
 
     const migrated = new DatabaseSync(dbPath, { readOnly: true });
     expect(migrated.prepare("SELECT version FROM local_state_schema").get()).toEqual({
-      version: 3,
+      version: 4,
     });
     const hubTable = migrated.prepare(`
       SELECT strict
@@ -550,7 +1125,7 @@ describe("TeamLocalState", () => {
     migrated.close();
   });
 
-  it("rolls back the v1-to-v3 migration when the requested job mutation fails", () => {
+  it("rolls back the v1-to-v4 migration when the requested job mutation fails", () => {
     const root = tempProject();
     createRawV1(root);
     const store = state(root);
@@ -566,7 +1141,7 @@ describe("TeamLocalState", () => {
       state: "running",
       startedAt: NOW,
     }), "REVISION_CONFLICT");
-    expectCode(() => store.getConfiguredMember(), "MIGRATION_REQUIRED");
+    expect(store.getConfiguredMember()).toBeNull();
 
     const db = new DatabaseSync(join(root, ".mex/local/team.db"), { readOnly: true });
     expect(db.prepare("SELECT version FROM local_state_schema").get()).toEqual({ version: 1 });
@@ -578,7 +1153,7 @@ describe("TeamLocalState", () => {
     db.close();
   });
 
-  it("keeps schema v2 reads non-mutating and migrates queued jobs to v3 exactly", () => {
+  it("keeps schema v2 reads non-mutating and migrates queued jobs through v4 exactly", () => {
     const root = tempProject();
     createRawV2(root, true);
     const dbPath = join(root, ".mex/local/team.db");
@@ -586,7 +1161,11 @@ describe("TeamLocalState", () => {
     const beforeMtime = statSync(dbPath, { bigint: true }).mtimeNs;
     const store = state(root);
 
-    expectCode(() => store.listHubJobs(), "MIGRATION_REQUIRED");
+    expect(store.listHubJobs().items).toMatchObject([{
+      id: "job_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      phase: "queued",
+      state: "queued",
+    }]);
     expect(readFileSync(dbPath)).toEqual(before);
     expect(statSync(dbPath, { bigint: true }).mtimeNs).toBe(beforeMtime);
 
@@ -598,7 +1177,7 @@ describe("TeamLocalState", () => {
       revision: expect.stringMatching(/^[a-f0-9]{64}$/),
     }]);
     const migrated = new DatabaseSync(dbPath, { readOnly: true });
-    expect(migrated.prepare("SELECT version FROM local_state_schema").get()).toEqual({ version: 3 });
+    expect(migrated.prepare("SELECT version FROM local_state_schema").get()).toEqual({ version: 4 });
     const sql = migrated.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hub_jobs'")
       .get() as { sql: string };
     expect(sql.sql).toContain("'discover'");
@@ -665,7 +1244,7 @@ describe("TeamLocalState", () => {
 
   it("reports newer schemas as migration-required", () => {
     const root = tempProject();
-    createSchemaVersionOnly(root, 4);
+    createSchemaVersionOnly(root, 5);
 
     expectCode(() => state(root).getConfiguredMember(), "MIGRATION_REQUIRED");
     expectCode(
