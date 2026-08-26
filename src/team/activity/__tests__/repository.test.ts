@@ -123,6 +123,53 @@ describe("ActivityRepository", () => {
     });
     expect(repository.list().items).toEqual([]);
   });
+
+  it("fails closed instead of trusting nondeterministic canonical scan prefixes", () => {
+    const root = temporaryRoot();
+    const month = join(root, ".mex/events/activity/2026-08");
+    mkdirSync(month, { recursive: true });
+    for (let index = 0; index < 2_049; index += 1) {
+      writeFileSync(join(month, `unexpected-${String(index).padStart(4, "0")}.txt`), "x", "utf8");
+    }
+
+    const repository = fixedRepository(root, fakeGit(), firstId);
+    const read = repository.readAll();
+    expect(read.events).toEqual([]);
+    expect(read.sourceTruncated).toBe(true);
+    expect(read.diagnostics).toContainEqual(expect.objectContaining({
+      code: "ACTIVITY_SOURCE_TRUNCATED",
+    }));
+    expect(repository.list()).toMatchObject({
+      items: [],
+      truncated: false,
+      sourceTruncated: true,
+    });
+  });
+
+  it("separates legacy corpus truncation from an empty filtered page", () => {
+    const root = temporaryRoot();
+    mkdirSync(join(root, ".mex/events"), { recursive: true });
+    const row = JSON.stringify({
+      timestamp: "2026-08-22T00:00:00.000Z",
+      kind: "note",
+      message: "legacy",
+      files: [],
+    });
+    writeFileSync(
+      join(root, ".mex/events/decisions.jsonl"),
+      `${Array.from({ length: 10_001 }, () => row).join("\n")}\n`,
+      "utf8",
+    );
+    const repository = fixedRepository(root, fakeGit(), firstId);
+    const page = new TimelineReader(root, repository).list({
+      source: "legacy",
+      since: "2030-01-01T00:00:00.000Z",
+      limit: 100,
+    });
+    expect(page.items).toEqual([]);
+    expect(page.truncated).toBe(false);
+    expect(page.sourceTruncated).toBe(true);
+  });
 });
 
 function fixedRepository(root: string, git: FakeGit, id: string): ActivityRepository {

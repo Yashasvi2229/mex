@@ -4,7 +4,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,6 +37,7 @@ try {
   const project = join(work, "project");
   mkdirSync(join(project, ".mex"), { recursive: true });
   writeFileSync(join(project, "package.json"), "{\n  \"private\": true\n}\n");
+  writeFileSync(join(project, ".gitignore"), "node_modules/\n.mex/local/\n");
   writeFileSync(join(project, ".mex", "ROUTER.md"), "# Project Router\n");
   writeFileSync(
     join(project, ".mex", "config.json"),
@@ -43,7 +46,14 @@ try {
       scaffold_name: "packed-hub-smoke",
     }, null, 2) + "\n",
   );
+  writeActivityFixture(project);
+  writeFileSync(join(project, ".mex", "graph.db"), "packed graph sentinel\n");
+  writeFileSync(join(project, ".mex", "wiki.db"), "packed wiki sentinel\n");
   run("git", ["init", "--quiet"], project);
+  run("git", ["config", "user.name", "Packed Ada"], project);
+  run("git", ["config", "user.email", "packed@example.test"], project);
+  run("git", ["add", ".gitignore", "package.json", ".mex"], project);
+  run("git", ["commit", "--quiet", "-m", "test fixture"], project);
   run(npm, [
     "install",
     tarball,
@@ -59,7 +69,11 @@ try {
   const manifest = join(installed, "dist", "hub", ".vite", "manifest.json");
   if (!existsSync(manifest)) throw new Error("The packed package omitted dist/hub assets.");
   const declaration = readFileSync(join(installed, "dist", "index.d.ts"), "utf8");
-  if (/Hub(?:Job|Api|Session|Capabilities)|runHubCommand/.test(declaration)) {
+  if (
+    /Hub(?:Job|Api|Session|Capabilities|Activity)|Activity(?:Request|Response|Item|Diagnostic)|runHubCommand/.test(
+      declaration,
+    )
+  ) {
     throw new Error("Private Hub declarations leaked through the package root.");
   }
 
@@ -73,6 +87,7 @@ try {
   const url = new URL(bootstrapUrl);
   const token = new URLSearchParams(url.hash.slice(1)).get("token");
   if (!token) throw new Error("The packaged Hub did not emit a bootstrap token.");
+  const beforeReads = snapshotProtectedProjectState(project);
 
   const html = await fetch(`${url.origin}/`, { redirect: "error" });
   if (!html.ok || !(await html.text()).includes("<div id=\"root\"></div>")) {
@@ -106,6 +121,44 @@ try {
   if (!capabilities.ok || (await capabilities.json()).apiVersion !== "v1") {
     throw new Error("The packaged Hub capabilities API did not load.");
   }
+  const home = await fetch(`${url.origin}/api/v1/home`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const homeBody = await home.json();
+  if (!home.ok || homeBody.sections?.activity?.count !== 1) {
+    throw new Error("The packaged Hub did not report the exact canonical activity count.");
+  }
+  const activity = await fetch(`${url.origin}/api/v1/activity`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const activityBody = await activity.json();
+  if (
+    !activity.ok
+    || activityBody.items?.length !== 2
+    || !activityBody.items.some((item) => item.source === "activity" && item.action === "activity.packed")
+    || !activityBody.items.some((item) => item.source === "legacy" && item.message === "Packed legacy decision")
+  ) {
+    throw new Error("The packaged Hub did not project real canonical and legacy activity.");
+  }
+  const serializedActivity = JSON.stringify(activityBody);
+  for (const secret of [
+    "fixture must stay private",
+    "/Users/alice/private-project",
+    ".mex/traces/private.md",
+    "private-agent",
+    "private-status",
+    "../outside.ts",
+  ]) {
+    if (serializedActivity.includes(secret)) {
+      throw new Error(`The packaged activity API leaked a private field: ${secret}`);
+    }
+  }
+  const afterReads = snapshotProtectedProjectState(project);
+  if (JSON.stringify(afterReads) !== JSON.stringify(beforeReads)) {
+    throw new Error("Reading packaged Home and Activity mutated protected project state.");
+  }
 
   child.kill("SIGTERM");
   const exit = await waitForExit(child, 8_000);
@@ -117,6 +170,88 @@ try {
 } finally {
   if (child && child.exitCode === null) child.kill("SIGKILL");
   rmSync(work, { recursive: true, force: true });
+}
+
+function writeActivityFixture(project) {
+  const eventId = "event_01K3Q080000000000000000001";
+  const activityRoot = join(project, ".mex", "events", "activity", "2026-08");
+  mkdirSync(activityRoot, { recursive: true });
+  writeFileSync(join(activityRoot, `${eventId}.md`), [
+    "---",
+    "schema_version: 1",
+    `id: ${JSON.stringify(eventId)}`,
+    "timestamp: \"2026-08-23T01:02:03.000Z\"",
+    "actor: {\"email\":\"packed@example.test\",\"kind\":\"git\",\"name\":\"Packed Ada\"}",
+    "action: \"activity.packed\"",
+    "subjects: [{\"kind\":\"file\",\"path\":\"src/packed.ts\"},{\"hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"kind\":\"commit\"}]",
+    "repo_state: {\"branch\":\"main\",\"dirty\":false,\"head\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"observedAt\":\"2026-08-23T01:02:02.000Z\"}",
+    "metadata: {\"internal_note\":\"fixture must stay private\"}",
+    "---",
+    "",
+  ].join("\n"));
+  writeFileSync(join(project, ".mex", "events", "decisions.jsonl"), `${JSON.stringify({
+    timestamp: "2026-08-22T01:02:03.000Z",
+    kind: "decision",
+    message: "Packed legacy decision",
+    files: ["src/packed.ts", "../outside.ts"],
+    cwd: "/Users/alice/private-project",
+    trace: ".mex/traces/private.md",
+    source: "private-agent",
+    status: "private-status",
+  })}\n`);
+}
+
+function snapshotProtectedProjectState(project) {
+  const status = run("git", [
+    "--no-optional-locks",
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+  ], project);
+  const candidates = [
+    join(project, ".mex", "events"),
+    join(project, ".mex", "team"),
+  ];
+  const localRoot = join(project, ".mex", "local");
+  if (existsSync(localRoot)) {
+    for (const name of readdirSync(localRoot)) {
+      if (name.startsWith("team.db")) candidates.push(join(localRoot, name));
+    }
+  }
+  for (const name of readdirSync(join(project, ".mex"))) {
+    if (name.startsWith("graph.db") || name.startsWith("wiki.db")) {
+      candidates.push(join(project, ".mex", name));
+    }
+  }
+  candidates.push(
+    join(project, ".git", "HEAD"),
+    join(project, ".git", "index"),
+    join(project, ".git", "refs", "heads"),
+  );
+
+  const files = [];
+  for (const candidate of candidates) collectSnapshotFiles(project, candidate, files);
+  files.sort((left, right) => left.path.localeCompare(right.path, "en"));
+  return {
+    files,
+    status,
+  };
+}
+
+function collectSnapshotFiles(project, path, files) {
+  if (!existsSync(path)) return;
+  const stats = statSync(path, { bigint: true });
+  if (stats.isDirectory()) {
+    for (const name of readdirSync(path)) collectSnapshotFiles(project, join(path, name), files);
+    return;
+  }
+  if (!stats.isFile()) return;
+  files.push({
+    path: path.slice(project.length + 1),
+    bytes: readFileSync(path).toString("base64"),
+    mtimeNs: stats.mtimeNs.toString(),
+  });
 }
 
 function run(command, args, cwd) {

@@ -15,6 +15,8 @@ const forbiddenFixtureData = [
   "job_01K36WVM6H7JK8M9NPQRSTVVWX",
   "Three knowledge pages lost grounding",
   "scf_mex",
+  "event_01K36WVM6H7JK8M9NPQRSTVVWX",
+  "Keep activity immutable and preserve legacy history",
 ];
 
 for (const file of filesUnder(outputRoot)) {

@@ -1,6 +1,6 @@
 # Project Hub Foundation
 
-Status: Lane B local foundation; real Graph and Wiki adapters pending
+Status: Lane B local foundation plus real read-only Activity; Graph and Wiki adapters pending
 
 Functional reference: TencentDB-Agent-Memory commit
 `97f94654280b2932c35ba4806a491999ed244cc9`, limited to explicit asynchronous
@@ -11,8 +11,8 @@ taxonomy are not adopted.
 The Project Hub is a desktop-oriented, local control room for one repository.
 It adds a browser surface without changing the public library API, terminal UI,
 or code-graph retrieval behavior. Production data remains truthful: repository
-context and local job history may be shown, while unavailable Graph and Wiki
-capabilities are labelled rather than simulated.
+context, local job history, and repository-backed team activity may be shown,
+while unavailable Graph and Wiki capabilities are labelled rather than simulated.
 
 ## Runtime flow
 
@@ -49,6 +49,13 @@ The browser receives direct resource bodies. Failures use RFC-style
 details are projected through a safe allowlist so local paths, stderr, and stack
 traces cannot cross the HTTP boundary.
 
+The Activity read model combines Lane C's canonical event artifacts with the
+legacy decision JSONL without rewriting either source. Its cursor is bound to a
+deterministic timeline revision. Pagination and source safety truncation remain
+separate, canonical metadata and legacy cwd/trace/origin fields are omitted,
+and recorded actors are returned alongside—not replaced by—their current alias
+resolution. Home reports only the exact trusted canonical-event count.
+
 ## Job lifecycle
 
 Jobs use the frozen states:
@@ -73,10 +80,12 @@ transcripts, diffs, arbitrary commands, or secrets.
 ## Browser experience
 
 The shell represents every planned route, with complete Home, Search, Health,
-and Jobs states. Knowledge, Code, Workstreams, Specs, Playbooks, Inbox, Relays,
-and Activity are capability-aware foundations rather than fake CRUD. Search
-keeps Wiki, symbol, and source groups independent, including independent partial
-failure, and never fuses their scores.
+Jobs, and read-only Activity states. Activity is a date-grouped canonical and
+legacy feed with bounded provenance, revision-safe pagination, and explicit
+partial-read diagnostics. Knowledge, Code, Workstreams, Specs, Playbooks,
+Inbox, and Relays remain capability-aware foundations rather than fake CRUD.
+Search keeps Wiki, symbol, and source groups independent, including independent
+partial failure, and never fuses their scores.
 
 The UI is desktop-only at 1024 pixels and wider. It uses a persistent sidebar,
 compact repository context, a balanced dashboard grid, self-hosted fonts, CSS
@@ -91,6 +100,7 @@ the production bundle.
 - No real Wiki read, search, health, or maintenance until the teammate adapter
   passes the Checkpoint 0 contract and Lane D is complete.
 - No Workstream, Inbox, Relay, Spec, or Playbook mutation in Lane B.
+- No Activity creation or Catch Up cursor advancement in the read-only Hub slice.
 - No change to `src/index.ts`, graph retrieval/ranking, protocol-v3 JSONL, or `mex tui`.
 
 ## Verification

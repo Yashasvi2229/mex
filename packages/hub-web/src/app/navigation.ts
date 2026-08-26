@@ -50,7 +50,7 @@ export const navigation: NavigationGroup[] = [
     items: [
       { label: "Inbox", path: "/inbox", icon: Inbox, capability: "team" },
       { label: "Relays", path: "/relays", icon: Send, capability: "team" },
-      { label: "Activity", path: "/activity", icon: Activity, capability: "team" },
+      { label: "Activity", path: "/activity", icon: Activity, capability: "activity" },
     ],
   },
   {

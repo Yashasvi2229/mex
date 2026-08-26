@@ -180,6 +180,72 @@ describe("Project Hub HTTP application", () => {
     expect(unknown.status).toBe(400);
   });
 
+  it("authenticates and strictly validates bounded Activity reads", async () => {
+    const services = readServices();
+    const activity = vi.fn(services.activity);
+    const app = fixtureApp({ services: { ...services, activity } });
+
+    expect((await app.request(`${ORIGIN}/api/v1/activity`, {
+      headers: { host: HOST },
+    })).status).toBe(401);
+
+    const { cookie } = await bootstrapSession(app);
+    const since = "2026-08-22T00:00:00.000Z";
+    const response = await app.request(
+      `${ORIGIN}/api/v1/activity?source=legacy&since=${encodeURIComponent(since)}&limit=1`,
+      { headers: { host: HOST, cookie } },
+    );
+    expect(response.status).toBe(200);
+    expect(activity).toHaveBeenCalledWith({ source: "legacy", since, limit: 1 });
+    expect(await response.json()).not.toHaveProperty("data");
+
+    for (const query of [
+      "source=activity&source=legacy",
+      "source=wiki",
+      "since=2026-08-22",
+      "limit=101",
+      "unsafe=true",
+    ]) {
+      const invalid = await app.request(`${ORIGIN}/api/v1/activity?${query}`, {
+        headers: { host: HOST, cookie },
+      });
+      expect(invalid.status, query).toBe(400);
+      expect((await invalid.json() as { code: string }).code).toBe("INVALID_REQUEST");
+    }
+  });
+
+  it("projects stale Activity cursors as a safe revision conflict", async () => {
+    const services = readServices();
+    const app = fixtureApp({
+      services: {
+        ...services,
+        activity: () => {
+          const error = new Error("stale cursor exposed /Users/alice/private") as Error & {
+            problem: Record<string, unknown>;
+          };
+          error.problem = {
+            status: 409,
+            code: "REVISION_CONFLICT",
+            title: "Timeline changed",
+            detail: "stale cursor exposed /Users/alice/private",
+          };
+          throw error;
+        },
+      },
+    });
+    const { cookie } = await bootstrapSession(app);
+    const response = await app.request(`${ORIGIN}/api/v1/activity?cursor=stale`, {
+      headers: { host: HOST, cookie },
+    });
+    const body = await response.json() as { code: string; detail: string };
+    expect(response.status).toBe(409);
+    expect(body).toMatchObject({
+      code: "REVISION_CONFLICT",
+      detail: "The local state changed before the operation completed; refresh and retry.",
+    });
+    expect(JSON.stringify(body)).not.toContain("/Users/");
+  });
+
   it("does not expose unregistered production jobs", async () => {
     const app = fixtureApp();
     const { cookie } = await bootstrapSession(app);
@@ -521,6 +587,15 @@ function readServices(): HubReadServices {
   return {
     capabilities: () => capabilities,
     home: () => home,
+    activity: () => ({
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+      sourceTruncated: false,
+      deterministicRevision: "a".repeat(64),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    }),
     search: (request: SearchRequest) => ({
       query: request.q,
       observedAt: "2026-08-23T00:00:00.000Z",

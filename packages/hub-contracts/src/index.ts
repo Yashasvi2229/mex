@@ -63,6 +63,17 @@ const scaffoldId = z.string().min(1).max(512)
   .refine((value) => !/[\0-\x1f\x7f]/.test(value), "Scaffold ID contains control characters.");
 const hubJobId = z.string()
   .regex(/^job_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Hub job ID.");
+const revision = z.string().regex(/^[a-f0-9]{64}$/, "Invalid SHA-256 revision.");
+const utf8Text = (maximum: number, minimum = 1) => z.string().min(minimum).max(maximum).refine(
+  (value) => new TextEncoder().encode(value).byteLength <= maximum,
+  `Text exceeds the ${maximum}-byte display limit.`,
+);
+const activityDisplayPath = utf8Text(384).refine((value) => {
+  if (value.includes("\0") || value.includes("\\") || value.startsWith("/")) return false;
+  if (/^[A-Za-z]:\//.test(value)) return false;
+  if (value.normalize("NFC") !== value || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(value)) return false;
+  return value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}, "Path must be a safe repository-relative POSIX path.");
 
 export const HubProblemCodeSchema = z.enum(HUB_PROBLEM_CODES);
 
@@ -260,6 +271,146 @@ export const SearchResponseSchema = z.object({
   }).strict(),
 }).strict();
 
+export const ActivitySourceSchema = z.enum(["activity", "legacy"]);
+
+export const ActivityRequestSchema = z.object({
+  source: ActivitySourceSchema.optional(),
+  since: isoTimestamp.optional(),
+  cursor: cursor.optional(),
+  limit: z.coerce.number().int().min(1).max(HUB_LIMITS.maxPageSize)
+    .default(HUB_LIMITS.defaultPageSize),
+}).strict();
+
+/** Actor as immutably recorded or currently resolved for an activity row. */
+export const ActivityActorSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("member"),
+    memberId: identifier,
+    displayName: utf8Text(256).nullable(),
+  }).strict(),
+  z.object({
+    kind: z.literal("git"),
+    name: utf8Text(256).nullable(),
+    email: utf8Text(320).nullable(),
+  }).strict(),
+  z.object({ kind: z.literal("unknown") }).strict(),
+]).superRefine((value, context) => {
+  if (value.kind === "git" && value.name === null && value.email === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "A Git actor requires a name or email.",
+    });
+  }
+});
+
+export const ActivityEntityRefSchema = z.object({
+  id: utf8Text(256),
+  entityKind: utf8Text(64),
+  title: utf8Text(256).nullable(),
+}).strict();
+
+export const ActivitySubjectSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("entity"),
+    entity: ActivityEntityRefSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal("symbol"),
+    symbolId: utf8Text(512),
+  }).strict(),
+  z.object({
+    kind: z.literal("file"),
+    path: activityDisplayPath,
+  }).strict(),
+  z.object({
+    kind: z.literal("commit"),
+    hash: z.string().regex(/^[a-fA-F0-9]{7,64}$/),
+  }).strict(),
+]);
+
+export const ActivityRepositorySnapshotSchema = z.object({
+  branch: utf8Text(1_024).nullable(),
+  head: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/).nullable(),
+  dirty: z.boolean(),
+  observedAt: isoTimestamp,
+}).strict();
+
+export const ActivityDiagnosticSchema = z.object({
+  code: utf8Text(128),
+  severity: z.enum(["error", "warning", "info"]),
+  message: utf8Text(256),
+  path: activityDisplayPath.optional(),
+}).strict();
+
+const activityItemBase = {
+  timestamp: isoTimestamp,
+  action: utf8Text(128),
+  subjects: z.array(ActivitySubjectSchema).max(8),
+  subjectCount: z.number().int().nonnegative(),
+  subjectsTruncated: z.boolean(),
+  sourcePath: activityDisplayPath,
+} as const;
+
+export const CanonicalActivityItemSchema = z.object({
+  source: z.literal("activity"),
+  id: z.string().regex(/^event_[0-7][0-9A-HJKMNP-TV-Z]{25}$/),
+  ...activityItemBase,
+  recordedActor: ActivityActorSchema,
+  effectiveActor: ActivityActorSchema,
+  actorDiagnostics: z.array(ActivityDiagnosticSchema).max(2),
+  workstream: ActivityEntityRefSchema.nullable(),
+  repository: ActivityRepositorySnapshotSchema,
+  revision,
+}).strict().superRefine((value, context) => {
+  if (value.subjectCount < value.subjects.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["subjectCount"], message: "Subject count cannot be smaller than its preview." });
+  }
+  if (value.subjectsTruncated !== (value.subjectCount > value.subjects.length)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["subjectsTruncated"], message: "Subject truncation must match the preview size." });
+  }
+});
+
+export const LegacyActivityItemSchema = z.object({
+  source: z.literal("legacy"),
+  id: z.string().regex(/^legacy_[a-f0-9]{64}$/),
+  ...activityItemBase,
+  recordedActor: z.null(),
+  effectiveActor: z.null(),
+  actorDiagnostics: z.array(ActivityDiagnosticSchema).length(0),
+  workstream: z.null(),
+  repository: z.null(),
+  revision: z.null(),
+  sourceLine: z.number().int().positive(),
+  message: utf8Text(2_048, 0),
+  messageTruncated: z.boolean(),
+}).strict().superRefine((value, context) => {
+  if (value.subjectCount < value.subjects.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["subjectCount"], message: "Subject count cannot be smaller than its preview." });
+  }
+  if (value.subjectsTruncated !== (value.subjectCount > value.subjects.length)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["subjectsTruncated"], message: "Subject truncation must match the preview size." });
+  }
+});
+
+export const ActivityItemSchema = z.union([
+  CanonicalActivityItemSchema,
+  LegacyActivityItemSchema,
+]);
+
+export const ActivityResponseSchema = z.object({
+  items: z.array(ActivityItemSchema).max(HUB_LIMITS.maxPageSize),
+  nextCursor: cursor.nullable(),
+  hasMore: z.boolean(),
+  sourceTruncated: z.boolean(),
+  deterministicRevision: revision,
+  diagnostics: z.array(ActivityDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
+  diagnosticsTruncated: z.boolean(),
+}).strict().superRefine((value, context) => {
+  if (value.hasMore !== (value.nextCursor !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["hasMore"], message: "hasMore must match nextCursor presence." });
+  }
+});
+
 export const HubHealthStatusSchema = z.enum(["healthy", "degraded", "unavailable"]);
 
 export const HealthComponentSchema = z.object({
@@ -347,6 +498,17 @@ export type HubActor = z.infer<typeof HubActorSchema>;
 export type HomeResponse = z.infer<typeof HomeResponseSchema>;
 export type SearchRequest = z.infer<typeof SearchRequestSchema>;
 export type SearchResponse = z.infer<typeof SearchResponseSchema>;
+export type ActivitySource = z.infer<typeof ActivitySourceSchema>;
+export type ActivityRequest = z.infer<typeof ActivityRequestSchema>;
+export type ActivityActor = z.infer<typeof ActivityActorSchema>;
+export type ActivityEntityRef = z.infer<typeof ActivityEntityRefSchema>;
+export type ActivitySubject = z.infer<typeof ActivitySubjectSchema>;
+export type ActivityRepositorySnapshot = z.infer<typeof ActivityRepositorySnapshotSchema>;
+export type ActivityDiagnostic = z.infer<typeof ActivityDiagnosticSchema>;
+export type CanonicalActivityItem = z.infer<typeof CanonicalActivityItemSchema>;
+export type LegacyActivityItem = z.infer<typeof LegacyActivityItemSchema>;
+export type ActivityItem = z.infer<typeof ActivityItemSchema>;
+export type ActivityResponse = z.infer<typeof ActivityResponseSchema>;
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 export type HubJobKind = z.infer<typeof HubJobKindSchema>;
 export type HubJobState = z.infer<typeof HubJobStateSchema>;

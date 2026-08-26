@@ -62,6 +62,15 @@ describe("Project Hub routes", () => {
     expect(screen.getByText("Source chunks", { selector: "h2" })).toBeVisible();
   });
 
+  it("links Home to canonical Activity while Inbox and Relays stay unavailable", async () => {
+    renderRoute("/");
+    const activityMetric = await screen.findByRole("link", { name: /Canonical events/ });
+    expect(activityMetric).toHaveAttribute("href", "/activity");
+    expect(screen.getByRole("link", { name: "Activity" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Inbox Unavailable" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Relays Unavailable" })).toBeVisible();
+  });
+
   it("keeps the Search input synchronized with browser history", async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     function BackButton() {

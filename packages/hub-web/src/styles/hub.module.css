@@ -587,6 +587,17 @@
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
+  color: inherit;
+  text-decoration: none;
+}
+
+a.metricCard {
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+a.metricCard:hover {
+  background: var(--canvas-raised);
+  border-color: var(--border-strong);
 }
 
 .metricCard::before {
@@ -1771,6 +1782,715 @@
   color: var(--danger);
   font-size: 9px;
   text-align: center;
+}
+
+.activityWorkbench {
+  overflow: hidden;
+}
+
+.activityToolbar {
+  display: grid;
+  grid-template-columns: auto minmax(150px, 190px) auto 1fr;
+  align-items: end;
+  gap: 13px;
+  min-height: 79px;
+  padding: 14px 17px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.activityToolbar > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.activityDateField {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.activityDateField > span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.activityDateField svg {
+  width: 12px;
+}
+
+.activityDateField input {
+  min-width: 0;
+  height: 33px;
+  padding: 6px 9px;
+  color: var(--text);
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  font-size: 10px;
+}
+
+.activityDateField input:hover {
+  border-color: var(--border-strong);
+}
+
+.activityClearFilter {
+  min-height: 33px;
+  padding: 5px 8px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.activityClearFilter:hover {
+  color: var(--primary);
+}
+
+.activityLoadedCount {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 0 4px 6px 0;
+  color: var(--text-tertiary);
+}
+
+.activityLoadedCount strong {
+  color: var(--text);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.activityLoadedCount span {
+  font-size: 9px;
+}
+
+.activityDiagnostics {
+  margin: 14px 17px 0;
+  overflow: hidden;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border: 1px solid #ead9b5;
+  border-radius: 9px;
+}
+
+.activityDiagnostics summary {
+  display: grid;
+  grid-template-columns: 17px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 9px;
+  min-height: 44px;
+  padding: 9px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.activityDiagnostics summary::-webkit-details-marker {
+  display: none;
+}
+
+.activityDiagnostics summary > svg:first-child {
+  width: 16px;
+}
+
+.activityDiagnostics summary > svg:last-child {
+  width: 13px;
+  transition: transform var(--transition-fast);
+}
+
+.activityDiagnostics[open] summary > svg:last-child {
+  transform: rotate(180deg);
+}
+
+.activityDiagnostics summary span {
+  display: flex;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.activityDiagnostics summary strong {
+  color: var(--warning);
+}
+
+.activityDiagnostics ul {
+  margin: 0;
+  padding: 0 12px 9px 38px;
+  list-style: none;
+}
+
+.activityDiagnostics li {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 0;
+  color: var(--text-secondary);
+  border-top: 1px solid rgba(155, 101, 23, 0.16);
+  font-size: 9px;
+}
+
+.activityDiagnostics li > strong {
+  color: var(--text);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 8px;
+}
+
+.activityDiagnostics li span,
+.activityDiagnostics li small {
+  display: block;
+}
+
+.activityDiagnostics li small {
+  margin-top: 4px;
+  color: var(--text-tertiary);
+  font-size: 8px;
+}
+
+.activityDiagnostics > p {
+  margin: 0;
+  padding: 0 12px 11px 38px;
+  color: var(--text-secondary);
+  font-size: 8.5px;
+}
+
+.activitySafetyNotice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 10px 17px 0;
+  padding: 10px 12px;
+  color: var(--info);
+  background: var(--info-soft);
+  border: 1px solid #d5e1f7;
+  border-radius: 9px;
+  font-size: 9.5px;
+}
+
+.activitySafetyNotice > svg {
+  width: 15px;
+  flex: none;
+}
+
+.activitySafetyNotice strong {
+  margin-right: 4px;
+}
+
+.activityFeed {
+  padding: 8px 17px 20px;
+  background: linear-gradient(180deg, var(--surface) 0, var(--canvas-raised) 100%);
+}
+
+.activityDay {
+  padding-top: 18px;
+}
+
+.activityDayHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 0 4px 9px 98px;
+}
+
+.activityDayHeader h2 {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 680;
+  letter-spacing: -0.01em;
+}
+
+.activityDayHeader span {
+  color: var(--text-tertiary);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.activityEntries {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.activityEntry {
+  position: relative;
+  display: grid;
+  grid-template-columns: 66px 32px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding-bottom: 10px;
+}
+
+.activityEntry:not(:last-child)::after {
+  position: absolute;
+  top: 30px;
+  bottom: -1px;
+  left: 81px;
+  width: 1px;
+  background: var(--border);
+  content: "";
+}
+
+.activityEntryTime {
+  padding-top: 11px;
+  color: var(--text-tertiary);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 8px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.activityEntryMarker {
+  z-index: 1;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  margin-top: 2px;
+  place-items: center;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border: 3px solid var(--canvas-raised);
+  border-radius: 9px;
+}
+
+.activityEntryMarker[data-source="legacy"] {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.activityEntryMarker svg {
+  width: 13px;
+}
+
+.activityEntryCard {
+  position: relative;
+  min-width: 0;
+  padding: 13px 14px 10px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.activityEntryCard:hover {
+  border-color: var(--border-strong);
+}
+
+.activityEntryCard[data-source="legacy"]::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: #d4a556;
+  content: "";
+}
+
+.activityEntryTopline {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 7px;
+}
+
+.activitySourceBadge,
+.activityWorkstream,
+.activityIdentityFlag {
+  display: inline-flex;
+  min-height: 19px;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 8px;
+  font-weight: 680;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
+}
+
+.activitySourceBadge {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.activitySourceBadge[data-source="legacy"] {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.activityWorkstream {
+  overflow: hidden;
+  max-width: 260px;
+  color: var(--text-secondary);
+  background: var(--surface-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activityIdentityFlag {
+  margin-left: auto;
+  color: var(--info);
+  background: var(--info-soft);
+}
+
+.activityIdentityFlag svg {
+  width: 9px;
+}
+
+.activityEntryCard > h3 {
+  margin: 10px 0 4px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  line-height: 1.35;
+}
+
+.activityActorLine {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 9.5px;
+}
+
+.activityActorLine strong {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.activityRemap {
+  margin: 4px 0 0;
+  color: var(--info);
+  font-size: 8.5px;
+}
+
+.activitySubjectChips {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.activitySubjectChip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: min(260px, 36%);
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  color: var(--text-secondary);
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 7.5px;
+}
+
+.activitySubjectChip svg {
+  width: 10px;
+  flex: none;
+  color: var(--text-tertiary);
+}
+
+.activitySubjectChip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activitySubjectMore,
+.activityNoSubjects {
+  color: var(--text-tertiary);
+  font-size: 8.5px;
+}
+
+.activityNoSubjects {
+  margin: 10px 0 0;
+  font-style: italic;
+}
+
+.activityDisclosure {
+  display: inline-flex;
+  min-height: 27px;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 4px 5px 3px 0;
+  color: var(--primary);
+  background: transparent;
+  border: 0;
+  font-size: 8.5px;
+  font-weight: 650;
+}
+
+.activityDisclosure svg {
+  width: 12px;
+}
+
+.activityDetails {
+  margin: 3px -14px -10px;
+  padding: 13px 14px 14px;
+  background: var(--surface-subtle);
+  border-top: 1px solid var(--border);
+}
+
+.activityDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 22px;
+  margin: 0;
+}
+
+.activityDetailGrid > div {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.activityDetailGrid dt,
+.activityDetailGrid dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 8.5px;
+}
+
+.activityDetailGrid dt {
+  color: var(--text-tertiary);
+}
+
+.activityDetailGrid dd {
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.activityRepository {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(130px, 0.8fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.activityRepository > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.activityRepository > div > svg {
+  width: 13px;
+  flex: none;
+  color: var(--text-tertiary);
+}
+
+.activityRepository span,
+.activityRepository small,
+.activityRepository strong {
+  display: block;
+  min-width: 0;
+}
+
+.activityRepository small {
+  margin-bottom: 2px;
+  color: var(--text-tertiary);
+  font-size: 7px;
+  text-transform: uppercase;
+}
+
+.activityRepository strong {
+  overflow: hidden;
+  font-size: 8.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activityRepository time {
+  color: var(--text-tertiary);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 7px;
+  white-space: nowrap;
+}
+
+.activitySubjectDetail,
+.activityActorDiagnostics {
+  margin-top: 12px;
+}
+
+.activitySubjectDetail > ul {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 7px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.activitySubjectDetail li {
+  display: grid;
+  grid-template-columns: 27px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.activitySubjectDetail li > span {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border-radius: 6px;
+}
+
+.activitySubjectDetail li svg {
+  width: 12px;
+}
+
+.activitySubjectDetail li div,
+.activitySubjectDetail li small,
+.activitySubjectDetail li strong {
+  display: block;
+  min-width: 0;
+}
+
+.activitySubjectDetail li small {
+  margin-bottom: 2px;
+  color: var(--text-tertiary);
+  font-size: 7px;
+  text-transform: uppercase;
+}
+
+.activitySubjectDetail li strong {
+  overflow: hidden;
+  font-size: 8px;
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activityBoundedNote {
+  margin: 7px 0 0;
+  color: var(--text-tertiary);
+  font-size: 8px;
+}
+
+.activityActorDiagnostics ul {
+  margin: 7px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.activityActorDiagnostics li {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.3fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 9px;
+  color: var(--text-secondary);
+  background: var(--info-soft);
+  border-radius: 7px;
+  font-size: 8.5px;
+}
+
+.activityActorDiagnostics li strong {
+  color: var(--info);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 7.5px;
+}
+
+.activityPagination {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 17px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+.activityLoadMore {
+  min-height: 34px;
+  padding: 7px 16px;
+  color: var(--primary);
+  background: var(--primary-soft);
+  border: 1px solid #d5e0fb;
+  border-radius: var(--radius-control);
+  font-size: 9.5px;
+  font-weight: 670;
+}
+
+.activityLoadMore:hover:not(:disabled) {
+  color: var(--primary-hover);
+  border-color: #b8c9f2;
+}
+
+.activityLoadMore:disabled {
+  opacity: 0.6;
+}
+
+.activityPagination > p {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 8.5px;
+}
+
+.activityPagination > p svg {
+  width: 9px;
+}
+
+.activityPaginationProblem {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 10px;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-radius: 8px;
+}
+
+.activityPaginationProblem > svg {
+  width: 15px;
+}
+
+.activityPaginationProblem span {
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+
+.activityPaginationProblem strong {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--text);
 }
 
 .capabilityHero {

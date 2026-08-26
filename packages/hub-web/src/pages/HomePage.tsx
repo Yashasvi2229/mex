@@ -23,14 +23,27 @@ interface MetricView {
   value: number | string;
   detail: string;
   tone?: Tone;
+  route?: string;
 }
 
 function MetricCard({ metric }: { metric: MetricView }) {
-  return (
-    <article className={styles.metricCard} data-tone={metric.tone ?? "neutral"}>
+  const contents = (
+    <>
       <div className={styles.metricTopline}><span>{metric.label}</span><Gauge aria-hidden="true" /></div>
       <strong>{metric.value}</strong>
       <p>{metric.detail}</p>
+    </>
+  );
+  if (metric.route) {
+    return (
+      <Link className={styles.metricCard} data-tone={metric.tone ?? "neutral"} to={metric.route}>
+        {contents}
+      </Link>
+    );
+  }
+  return (
+    <article className={styles.metricCard} data-tone={metric.tone ?? "neutral"}>
+      {contents}
     </article>
   );
 }
@@ -83,7 +96,7 @@ export function HomePage() {
   const metrics: MetricView[] = [
     { id: "jobs", label: "Active jobs", value: data.activeJobs, detail: data.activeJobs === 1 ? "One local operation in progress" : `${data.activeJobs} local operations in progress`, tone: data.activeJobs ? "info" : "neutral" },
     { id: "workstreams", label: "Workstreams", value: data.sections.workstreams.count ?? "—", detail: data.sections.workstreams.reason ?? "Durable project work", tone: data.sections.workstreams.availability === "unavailable" ? "warning" : "neutral" },
-    { id: "activity", label: "Activity events", value: data.sections.activity.count ?? "—", detail: data.sections.activity.reason ?? "Canonical recent events", tone: data.sections.activity.availability === "unavailable" ? "warning" : "neutral" },
+    { id: "activity", label: "Canonical events", value: data.sections.activity.count ?? "—", detail: data.sections.activity.reason ?? "Open immutable repository activity", tone: data.sections.activity.availability === "unavailable" ? "warning" : "neutral", route: "/activity" },
     { id: "tree", label: "Working tree", value: data.repository.dirty ? "Changed" : "Clean", detail: data.repository.branch ? `Branch ${data.repository.branch}` : "Detached or unknown branch", tone: data.repository.dirty ? "warning" : "success" },
   ];
   const sourcesUnavailable = capabilities

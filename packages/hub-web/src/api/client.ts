@@ -1,4 +1,5 @@
 import {
+  ActivityResponseSchema,
   BootstrapResponseSchema,
   HealthResponseSchema,
   HomeResponseSchema,
@@ -11,6 +12,8 @@ import {
 } from "@mex/hub-contracts";
 import { createFixtureApi } from "virtual:mex-hub-fixture-api";
 import type {
+  ActivityRequest,
+  ActivityResponse,
   BootstrapResponse,
   CapabilitiesResponse,
   HealthResponse,
@@ -48,6 +51,7 @@ export interface HubApi {
   getSession(): Promise<SessionResponse>;
   getCapabilities(): Promise<CapabilitiesResponse>;
   getHome(): Promise<HomeResponse>;
+  getActivity(request: ActivityRequest): Promise<ActivityResponse>;
   search(query: string): Promise<SearchResponse>;
   getHealth(): Promise<HealthResponse>;
   getJobs(cursor?: string): Promise<JobsResponse>;
@@ -159,6 +163,14 @@ export class HttpHubApi implements HubApi {
 
   getHome(): Promise<HomeResponse> {
     return this.#request("/home", HomeResponseSchema);
+  }
+
+  getActivity(request: ActivityRequest): Promise<ActivityResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.source) params.set("source", request.source);
+    if (request.since) params.set("since", request.since);
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/activity?${params}`, ActivityResponseSchema);
   }
 
   search(query: string): Promise<SearchResponse> {

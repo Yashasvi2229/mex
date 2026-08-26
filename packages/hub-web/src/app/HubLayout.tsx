@@ -10,13 +10,14 @@ import styles from "../styles/hub.module.css";
 
 function capabilityAvailable(
   capabilities: CapabilitiesResponse | undefined,
-  name: "graph" | "wiki" | "jobs" | "team" | undefined,
+  name: "graph" | "wiki" | "jobs" | "activity" | "team" | undefined,
 ): boolean | undefined {
   if (!name || !capabilities) return undefined;
   if (name === "graph") return capabilities.graph.read.availability === "available";
   if (name === "wiki") return capabilities.wiki.read.availability === "available";
   if (name === "jobs") return capabilities.jobs.availability === "available";
-  return capabilities.activity.availability === "available";
+  if (name === "activity") return capabilities.activity.availability === "available";
+  return false;
 }
 
 function Sidebar({ capabilities }: { capabilities?: CapabilitiesResponse }) {

@@ -3,6 +3,7 @@ import { HubApiError, type HubApi } from "../api/client";
 import { HubApiProvider, useCapabilities, useSession } from "../api/context";
 import { StatePanel } from "../components/ui";
 import { CapabilityPage, NotFoundPage } from "../pages/CapabilityPage";
+import { ActivityPage } from "../pages/ActivityPage";
 import { HealthPage } from "../pages/HealthPage";
 import { HomePage } from "../pages/HomePage";
 import { JobsPage } from "../pages/JobsPage";
@@ -47,7 +48,7 @@ export function AppRoutes() {
         <Route path="playbooks" element={<CapabilityPage page="playbooks" />} />
         <Route path="inbox" element={<CapabilityPage page="inbox" />} />
         <Route path="relays" element={<CapabilityPage page="relays" />} />
-        <Route path="activity" element={<CapabilityPage page="activity" />} />
+        <Route path="activity" element={<ActivityPage />} />
         <Route path="jobs" element={<JobsPage />} />
         <Route path="health" element={<HealthPage />} />
         <Route path="*" element={<NotFoundPage />} />

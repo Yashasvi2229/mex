@@ -77,4 +77,14 @@ describe("buildTimelinePage", () => {
     );
     expect(page.items).toEqual([expect.objectContaining({ source: "legacy", actor: null })]);
   });
+
+  it("reports source safety truncation independently from pagination", () => {
+    const page = buildTimelinePage([], [], [], { limit: 25 }, true);
+    expect(page).toMatchObject({
+      items: [],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: true,
+    });
+  });
 });
