@@ -1,11 +1,11 @@
 # Human-Team Memory Contract Lock
 
-Status: provisional consumer contract and mock verified; teammate adapter pending
+Status: Checkpoint 0 closed; mock and repository adapter verified
 
-This brief records the proposed application boundary for the MEX OSS human-team
-memory program. It remains provisional until the teammate implementation is
-pinned and passes the same suite. It is an implementation aid, not authorization to widen the
-product scope described in the user-approved build program.
+This brief records the application boundary for the MEX OSS human-team memory
+program. The contract remains an internal, provisional API until a separate
+public-semver decision is made. It is an implementation aid, not authorization
+to widen the product scope described in the user-approved build program.
 
 ## Source authority and pins
 
@@ -33,16 +33,11 @@ health/error UX inspiration only. No Tencent service topology, central database,
 repository cloning, scheduled synchronization, agent hierarchy, proxy, or
 business-response envelope is adopted.
 
-The teammate Wiki implementation branch and commit do not currently exist or
-are not yet available. The supplied Wiki build spec is authoritative for design,
-but it is not proof of implementation identity. Consequently:
-
-- the consumer contracts, behavioral mock, fixture, and conformance suite may
-  progress;
-- no real Wiki adapter is claimed;
-- no parity assertion against teammate types is claimed;
-- the real adapter test remains blocked until an exact branch and commit are
-  provided.
+The Wiki engine dependency is pinned at
+`1b5da62c84ae8f65e897e6958985a658e408315c`. The integration branch carries the
+remaining consumer-contract closure and a repository-bound adapter. The
+behavioral mock and the real adapter both run the same consumer-owned
+conformance suite without skips, including the final canonical team paths.
 
 ## Integration ownership
 
@@ -53,7 +48,7 @@ Checkpoint 0 intentionally changes none of those hotspots.
 
 The internal contract surface is under `src/team/contracts`. It is not exported
 from the package root yet; doing so would create a public semver commitment
-before the real adapter passes the suite.
+before the provisional team API has stabilized.
 
 ## Provisional consumer boundary
 
@@ -123,16 +118,17 @@ failure.
 ## Consumer-owned verification
 
 `test/contracts/wiki-port.contract.ts` is a reusable Vitest conformance suite.
-The current registration uses the in-memory behavioral mock. A teammate adapter
-must register the same suite rather than replacing it with adapter-owned tests.
+Both the in-memory behavioral mock and the repository adapter register the same
+suite rather than replacing it with adapter-owned expectations.
 
 The mock proves consumer-facing ordering, filtering, bounds, read non-mutation,
 preview/apply conflicts, idempotency, scoped refresh behavior, typed failures,
-and abstract migration behavior. It does not prove the future engine's Markdown
-parser, byte-range patcher, SQLite publication/recovery, filesystem atomicity,
-symlink defense, graph-produced grounding provenance, or apply-time ULID
-generation. Those claims require the pinned real adapter and its integration
-fixtures.
+and abstract migration behavior. The pinned repository adapter and its
+integration fixtures additionally cover the Markdown parser, byte-range
+patcher, SQLite publication/recovery, filesystem atomicity, symlink defense,
+graph-produced grounding provenance, and apply-time ULID generation. The
+integration architecture is recorded in
+[`wiki-port-integration.md`](wiki-port-integration.md).
 
 The populated fixture exercises a payment-reliability knowledge slice with
 topics, Specs, requirements, acceptance criteria, current and deprecated
@@ -180,7 +176,7 @@ developer branching and commits explicitly requested for this implementation.
 
 ## Checkpoint status
 
-Implemented as a provisional consumer draft:
+Checkpoint 0 is closed with:
 
 - source revision pins and ownership record;
 - shared application contracts and stable required error codes;
@@ -189,26 +185,21 @@ Implemented as a provisional consumer draft:
 - typed operation metadata with engine-owned operation and migration payloads;
 - populated behavior mock and legacy fixture;
 - reusable Wiki conformance suite;
+- pinned Wiki engine implementation and repository adapter;
+- mock and real-adapter conformance registrations with no skips;
 - protocol-v3 graph golden regressions;
 - explicit exclusions and integration-owner assignment.
 
-Pending before Checkpoint 0 can be fully closed:
-
-- exact teammate implementation branch and commit;
-- confirmation that the teammate parser accepts the final canonical team paths;
-- real Wiki adapter implementation;
-- contract-suite and type-parity results against that pinned implementation.
-
-Downstream lanes may compile against the mock for interface development, but
-must treat it as a test double rather than proof of parser, index, patcher,
-grounding, or migration compliance. They must not invent alternate
-Wiki storage, entity, relationship, operation, migration, or grounding behavior
-while the real adapter is pending.
+Production consumers use the repository adapter. The mock remains a bounded
+test double for consumer behavior, not an alternate storage or mutation
+implementation. Checkpoint 2's completed read-only Hub integration is recorded
+in [`hub-wiki-readonly.md`](hub-wiki-readonly.md).
 
 ## Verification commands
 
 ```bash
 npx vitest run test/wiki-port-mock.contract.test.ts
+npx vitest run test/wiki-port-real.contract.test.ts
 npx vitest run src/graph/__tests__/protocol-v3-golden.test.ts
 npm run typecheck
 npm test

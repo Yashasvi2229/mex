@@ -1,6 +1,11 @@
 # Project Hub Foundation
 
-Status: Lane B local foundation plus real read-only Activity; Graph and Wiki adapters pending
+Status: Lane B foundation complete; Graph and Wiki integrations recorded separately
+
+This document records the Lane B foundation as it originally landed. Its
+Graph- and Wiki-unavailable statements are historical slice boundaries,
+superseded by [`hub-graph-integration.md`](hub-graph-integration.md) and
+[`hub-wiki-readonly.md`](hub-wiki-readonly.md).
 
 Functional reference: TencentDB-Agent-Memory commit
 `97f94654280b2932c35ba4806a491999ed244cc9`, limited to explicit asynchronous
@@ -10,9 +15,10 @@ taxonomy are not adopted.
 
 The Project Hub is a desktop-oriented, local control room for one repository.
 It adds a browser surface without changing the public library API, terminal UI,
-or code-graph retrieval behavior. Production data remains truthful: repository
-context, local job history, and repository-backed team activity may be shown,
-while unavailable Graph and Wiki capabilities are labelled rather than simulated.
+or code-graph retrieval behavior. At the Lane B boundary, production data
+remained truthful: repository context, local job history, and repository-backed
+team activity could be shown, while unavailable Graph and Wiki capabilities
+were labelled rather than simulated.
 
 ## Runtime flow
 
@@ -93,12 +99,12 @@ Modules, semantic design tokens, keyboard/focus handling, and reduced-motion
 support. Fixture data is compile-time development/test input and is absent from
 the production bundle.
 
-## Deliberate boundaries
+## Original Lane B boundaries
 
 - No remote bind, proxy trust, hosted authentication, telemetry, or outbound assets.
-- No real Graph status or maintenance until Lane A is integrated.
-- No real Wiki read, search, health, or maintenance until the teammate adapter
-  passes the Checkpoint 0 contract and Lane D is complete.
+- Graph status and maintenance were deferred to the later Graph integration.
+- Wiki read, search, health, and maintenance were deferred to the later Wiki
+  integration.
 - No Workstream, Inbox, Relay, Spec, or Playbook mutation in Lane B.
 - No Activity creation or Catch Up cursor advancement in the read-only Hub slice.
 - No change to `src/index.ts`, graph retrieval/ranking, protocol-v3 JSONL, or `mex tui`.
