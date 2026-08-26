@@ -1,9 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { globSync } from "glob";
-import { createGraphEngine, graphManifest } from "./engine-impl.js";
+import { graphManifest } from "./engine-impl.js";
 import type { GraphEngine, GraphNeighbor, IndexedFileInfo } from "./engine.js";
-import { openGraphDatabase } from "./db/database.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
 import { isSupportedSourceFile, SUPPORTED_SOURCE_GLOB } from "./extraction/index.js";
 import type { GraphEdge, GraphNode } from "./types.js";
@@ -18,12 +17,23 @@ import {
 } from "./agent-protocol.js";
 import { identifierComponents, isLowValueGraphPath, planGraphQuery } from "./retrieval/query.js";
 import { GraphRebuildRequiredError } from "./errors.js";
+import {
+  loadFreshGraphReadSession,
+  openImmutableGraphReadSessionSync,
+  type GraphFreshnessRevalidation,
+  type GraphReadValidation,
+  type LoadFreshGraphReadSessionOptions,
+} from "./read-session.js";
+import type { GraphStatus } from "../team/contracts/graph.js";
 
 type QueryRelation = "who-calls" | "what-calls" | "where-defined";
 
 interface AgentGraphSession {
   graph: GraphEngine;
   db: SqliteDatabase;
+  readIndexedSource?: (filePath: string) => string;
+  validate?: () => GraphReadValidation;
+  revalidateFreshness?: () => Promise<GraphFreshnessRevalidation>;
   close(): void;
 }
 
@@ -41,12 +51,10 @@ export function runImpact(
   rootDir = process.cwd(),
   deps: AgentCommandDeps = {},
   rawOptions: RawOptions = {},
-): void {
-  const write = deps.write ?? console.log;
+): void | Promise<void> {
+  const output = deps.write ?? console.log;
   const opts = resolveOptions(rawOptions);
-  const session = openSession(rootDir, deps, write);
-  if (!session) return;
-  try {
+  return withAgentGraphSession(rootDir, deps, output, "fresh", (session, write) => {
     const fileNodes = nodesForFile(session, rootDir, target);
     const roots = fileNodes.length > 0 ? fileNodes : resolveSymbol(session.graph, target);
     if (roots.length === 0) {
@@ -101,7 +109,7 @@ export function runImpact(
       emittedNodes.push(entry.node);
     }
 
-    const sourceRecords = planSource(ledger, emittedNodes, rootDir, opts);
+    const sourceRecords = planSource(session, ledger, emittedNodes, rootDir, opts);
 
     const affectedIds = [...new Set([...roots.map((node) => node.id), ...impacted.keys()])];
     const groundingRecords: Rec[] = [];
@@ -118,11 +126,7 @@ export function runImpact(
       truncated,
       suggestedNextCommands: emittedNodes.length > 0 ? [`mex graph get ${emittedNodes[0]!.id} --detail source`] : [],
     })));
-  } catch (error) {
-    unavailable(write, error);
-  } finally {
-    try { session.close(); } catch { /* best-effort degradation cleanup */ }
-  }
+  });
 }
 
 /** Structural graph lookup. Output is newline-delimited JSON (JSONL). */
@@ -132,16 +136,14 @@ export function runGraphQuery(
   rootDir = process.cwd(),
   deps: AgentCommandDeps = {},
   rawOptions: RawOptions = {},
-): void {
-  const write = deps.write ?? console.log;
+): void | Promise<void> {
+  const output = deps.write ?? console.log;
   if (!isRelation(relation)) {
-    writeJson(write, { type: "error", code: "INVALID_QUERY", relation, expected: ["who-calls", "what-calls", "where-defined"] });
+    writeJson(output, { type: "error", code: "INVALID_QUERY", relation, expected: ["who-calls", "what-calls", "where-defined"] });
     return;
   }
   const opts = resolveOptions(rawOptions);
-  const session = openSession(rootDir, deps, write);
-  if (!session) return;
-  try {
+  return withAgentGraphSession(rootDir, deps, output, "fresh", (session, write) => {
     const nodes = resolveSymbol(session.graph, target);
     if (nodes.length === 0) {
       writeJson(write, { type: "error", code: "TARGET_NOT_FOUND", target });
@@ -178,7 +180,7 @@ export function runGraphQuery(
       entries.push({ record, node: pair.node });
     }
 
-    const sourceRecords = planSource(ledger, entries.map((e) => e.node), rootDir, opts);
+    const sourceRecords = planSource(session, ledger, entries.map((e) => e.node), rootDir, opts);
 
     emitAll(write, meta, [...entries.map((e) => e.record), ...sourceRecords]);
     write(JSON.stringify(summaryRecord(ctx, {
@@ -188,11 +190,7 @@ export function runGraphQuery(
       truncated,
       suggestedNextCommands: entries.length > 0 && opts.detail !== "source" ? [`mex graph get ${entries[0]!.node.id} --detail source`] : [],
     })));
-  } catch (error) {
-    unavailable(write, error);
-  } finally {
-    try { session.close(); } catch { /* best-effort degradation cleanup */ }
-  }
+  });
 }
 
 /** Broad graph retrieval. One source-bearing response is the normal success path. */
@@ -202,10 +200,8 @@ export function runGraphScope(
   deps: AgentCommandDeps = {},
   rawOptions: RawOptions = {},
 ): void {
-  const write = deps.write ?? console.log;
-  const session = openSession(rootDir, deps, write);
-  if (!session) return;
-  try {
+  const output = deps.write ?? console.log;
+  return withAgentGraphSession(rootDir, deps, output, "stable", (session, write) => {
     const indexedFiles = session.graph.getIndexedFiles?.() ?? [];
     const opts = resolveScopeOptions(rawOptions, indexedFiles.length);
     const staleFiles = indexedFiles.filter((file) => {
@@ -683,11 +679,7 @@ export function runGraphScope(
       textFallbackFiles,
       warnings,
     })));
-  } catch (error) {
-    unavailable(write, error);
-  } finally {
-    try { session.close(); } catch { /* best-effort degradation cleanup */ }
-  }
+  });
 }
 
 /** Targeted source expansion by node id. Output is JSONL source records. */
@@ -696,12 +688,10 @@ export function runGraphGet(
   rootDir = process.cwd(),
   deps: AgentCommandDeps = {},
   rawOptions: RawOptions = {},
-): void {
-  const write = deps.write ?? console.log;
+): void | Promise<void> {
+  const output = deps.write ?? console.log;
   const opts = resolveOptions({ ...rawOptions, detail: "source" });
-  const session = openSession(rootDir, deps, write);
-  if (!session) return;
-  try {
+  return withAgentGraphSession(rootDir, deps, output, "fresh", (session, write) => {
     const ctx = beginResponse("graph get", { ...opts, maxNodes: ids.length, maxFlowSteps: 0 }, undefined, []);
     const { ledger, meta } = ctx;
 
@@ -717,7 +707,7 @@ export function runGraphGet(
       }
       nodes.push(node);
     }
-    const sourceRecords = planSource(ledger, nodes, rootDir, opts);
+    const sourceRecords = planSource(session, ledger, nodes, rootDir, opts);
     const sourcedIds = new Set(
       sourceRecords.flatMap((record) => (record.ranges as SourceRange[]).flatMap((range) => range.nodeIds)),
     );
@@ -730,11 +720,7 @@ export function runGraphGet(
       truncated,
       suggestedNextCommands: [],
     })));
-  } catch (error) {
-    unavailable(write, error);
-  } finally {
-    try { session.close(); } catch { /* best-effort degradation cleanup */ }
-  }
+  });
 }
 
 // ── shared helpers ──────────────────────────────────────────────────────────
@@ -923,7 +909,13 @@ function finalizedSummary(usedTokens: number, base: Rec): Rec {
  * ledger, only when detail is "source". Source ranges carry their node ids, so
  * facts do not repeat a mutable `sourceIncluded` flag.
  */
-function planSource(ledger: BudgetLedger, nodes: GraphNode[], rootDir: string, opts: AgentOptions): Rec[] {
+function planSource(
+  session: AgentGraphSession,
+  ledger: BudgetLedger,
+  nodes: GraphNode[],
+  rootDir: string,
+  opts: AgentOptions,
+): Rec[] {
   if (opts.detail !== "source") return [];
   const sourceRecords: Rec[] = [];
   const emit = (record: Rec): void => {
@@ -931,8 +923,14 @@ function planSource(ledger: BudgetLedger, nodes: GraphNode[], rootDir: string, o
     sourceRecords.push(record);
   };
   for (const [filePath, fileNodes] of groupByFile(dedupeById(nodes))) {
+    // Default production sessions bind every range for a file to one exact,
+    // hash-verified buffer. Injected fixtures keep their historical synchronous
+    // reader so protocol goldens do not gain filesystem behavior.
+    const source = session.readIndexedSource?.(filePath);
     const ranges = fileNodes
-      .map((node) => readNodeSource(node, rootDir, opts.maxSourceLines))
+      .map((node) => source === undefined
+        ? readNodeSource(node, rootDir, opts.maxSourceLines)
+        : readNodeSourceBuffer(node, source, opts.maxSourceLines))
       .filter((range): range is SourceRange => range !== null);
     if (ranges.length === 0) continue;
     const grouped: Rec = { type: "source", filePath, ranges };
@@ -942,6 +940,24 @@ function planSource(ledger: BudgetLedger, nodes: GraphNode[], rootDir: string, o
     else for (const range of ranges) emit({ type: "source", filePath, ranges: [range] });
   }
   return sourceRecords;
+}
+
+function readNodeSourceBuffer(node: GraphNode, source: string, maxLines: number): SourceRange {
+  const lines = source.split("\n");
+  const body = lines.slice(node.startLine - 1, node.endLine);
+  const truncated = maxLines > 0 && body.length > maxLines;
+  const kept = truncated ? body.slice(0, maxLines) : body;
+  const width = String(node.startLine + Math.max(0, kept.length - 1)).length;
+  return {
+    startLine: node.startLine,
+    endLine: node.startLine + Math.max(0, kept.length - 1),
+    nodeIds: [node.id],
+    content: kept.map((line, index) => (
+      `${String(node.startLine + index).padStart(width)}: ${line}`
+    )).join("\n"),
+    truncated,
+    reason: truncated ? "signature" : "complete-symbol",
+  };
 }
 
 function emitAll(write: (line: string) => void, meta: Rec, records: Rec[]): void {
@@ -1791,29 +1807,173 @@ function scopeEdgeKey(edge: Pick<GraphEdge, "source" | "target" | "kind" | "line
   return `${edge.source}\0${edge.target}\0${edge.kind}\0${edge.line ?? -1}\0${edge.column ?? -1}`;
 }
 
-function openSession(rootDir: string, deps: AgentCommandDeps, write: (line: string) => void): AgentGraphSession | null {
+type AgentSessionMode = "stable" | "fresh";
+type AgentSessionTask = (session: AgentGraphSession, write: (line: string) => void) => void;
+
+interface AgentCommandInternalHooks {
+  freshRead?: Omit<LoadFreshGraphReadSessionOptions, "dbPath" | "loadSession">;
+  beforeFinalFreshnessValidation?: () => void | Promise<void>;
+}
+
+type AgentCommandInternalDeps = AgentCommandDeps & {
+  /** Module-private deterministic race seams; deliberately absent from declarations. */
+  __internal?: AgentCommandInternalHooks;
+};
+
+function withAgentGraphSession(
+  rootDir: string,
+  deps: AgentCommandDeps,
+  write: (line: string) => void,
+  mode: "stable",
+  task: AgentSessionTask,
+): void;
+function withAgentGraphSession(
+  rootDir: string,
+  deps: AgentCommandDeps,
+  write: (line: string) => void,
+  mode: "fresh",
+  task: AgentSessionTask,
+): void | Promise<void>;
+function withAgentGraphSession(
+  rootDir: string,
+  deps: AgentCommandDeps,
+  write: (line: string) => void,
+  mode: AgentSessionMode,
+  task: AgentSessionTask,
+): void | Promise<void> {
+  // Existing injected graph fixtures are already caller-owned snapshots. Keep
+  // them synchronous so protocol goldens and deterministic unit harnesses do
+  // not acquire filesystem/Git behavior they did not request.
+  if (deps.open) return runInjectedAgentSession(rootDir, deps.open, write, task);
+  if (mode === "stable") return runStableAgentSession(rootDir, write, task);
+  return runFreshAgentSession(rootDir, deps as AgentCommandInternalDeps, write, task);
+}
+
+function runInjectedAgentSession(
+  rootDir: string,
+  open: NonNullable<AgentCommandDeps["open"]>,
+  write: (line: string) => void,
+  task: AgentSessionTask,
+): void {
+  let session: AgentGraphSession | null = null;
+  const pending: string[] = [];
   try {
-    if (deps.open) return deps.open(rootDir);
+    session = open(rootDir);
+    task(session, (line) => pending.push(line));
+    for (const line of pending) write(line);
+  } catch (error) {
+    unavailable(write, error);
+  } finally {
+    try { session?.close(); } catch { /* best-effort degradation cleanup */ }
+  }
+}
+
+function runStableAgentSession(
+  rootDir: string,
+  write: (line: string) => void,
+  task: AgentSessionTask,
+): void {
+  let session: AgentGraphSession | null = null;
+  const pending: string[] = [];
+  try {
     const dbPath = resolve(rootDir, ".mex", "graph.db");
     if (!existsSync(dbPath)) {
       writeJson(write, { type: "error", code: "GRAPH_UNAVAILABLE", message: "Run `mex graph` first." });
-      return null;
+      return;
     }
-    const graph = createGraphEngine({ rootDir, dbPath, readOnly: true });
-    const db = openGraphDatabase(dbPath, { readOnly: true });
-    const storedManifest = db.prepare(
+    const opened = openImmutableGraphReadSessionSync(rootDir, dbPath);
+    session = { ...opened };
+    const storedManifest = session.db.prepare(
       "SELECT value FROM project_metadata WHERE key = 'manifest_hash'",
     ).get() as { value: string } | undefined;
     if (storedManifest?.value !== graphManifest(resolve(rootDir)).manifestHash) {
-      graph.close();
-      db.close();
       throw new GraphRebuildRequiredError("The code graph build manifest is stale.");
     }
-    return { graph, db, close: () => { graph.close(); db.close(); } };
+    task(session, (line) => pending.push(line));
+    const validation = session.validate?.() ?? { valid: true };
+    if (!validation.valid) {
+      unavailable(write, Object.assign(
+        new Error(validation.message ?? "The graph changed while output was being prepared."),
+        { code: validation.code ?? "GRAPH_UNAVAILABLE" },
+      ));
+      return;
+    }
+    for (const line of pending) write(line);
   } catch (error) {
     unavailable(write, error);
-    return null;
+  } finally {
+    try { session?.close(); } catch { /* best-effort degradation cleanup */ }
   }
+}
+
+async function runFreshAgentSession(
+  rootDir: string,
+  deps: AgentCommandInternalDeps,
+  write: (line: string) => void,
+  task: AgentSessionTask,
+): Promise<void> {
+  let session: AgentGraphSession | null = null;
+  const pending: string[] = [];
+  try {
+    const dbPath = resolve(rootDir, ".mex", "graph.db");
+    const loaded = await loadFreshGraphReadSession(rootDir, {
+      ...deps.__internal?.freshRead,
+      dbPath,
+      loadSession: true,
+    });
+    if (!loaded.session) {
+      graphStatusUnavailable(write, loaded.graphStatus);
+      return;
+    }
+    session = { ...loaded.session };
+    try {
+      task(session, (line) => pending.push(line));
+    } catch (error) {
+      const validation = session.validate?.();
+      if (validation && !validation.valid) {
+        graphStatusUnavailable(write, loaded.graphStatus, validation);
+        return;
+      }
+      throw error;
+    }
+    await deps.__internal?.beforeFinalFreshnessValidation?.();
+    const final = await session.revalidateFreshness!();
+    if (!final.valid) {
+      graphStatusUnavailable(write, final.graphStatus, final);
+      return;
+    }
+    for (const line of pending) write(line);
+  } catch (error) {
+    unavailable(write, error);
+  } finally {
+    try { session?.close(); } catch { /* best-effort degradation cleanup */ }
+  }
+}
+
+function graphStatusUnavailable(
+  write: (line: string) => void,
+  status: GraphStatus,
+  validation?: GraphReadValidation,
+): void {
+  const diagnostic = validation?.code
+    ? status.diagnostics.find((entry) => entry.code === validation.code)
+    : [...status.diagnostics].reverse().find((entry) => entry.severity !== "info")
+      ?? status.diagnostics.at(-1);
+  const graphStatus = validation && status.status === "fresh" ? "degraded" : status.status;
+  const recoveryCommand = diagnostic?.remediation?.find((entry) => entry.command)?.command
+    ?? status.diagnostics.flatMap((entry) => entry.remediation ?? [])
+      .find((entry) => entry.command)?.command;
+  writeJson(write, {
+    type: "error",
+    code: "GRAPH_UNAVAILABLE",
+    graphStatus,
+    ...(validation?.code || diagnostic?.code
+      ? { reasonCode: validation?.code ?? diagnostic?.code }
+      : {}),
+    message: validation?.message ?? diagnostic?.message
+      ?? `The graph is ${graphStatus}; no graph-derived result was returned.`,
+    ...(recoveryCommand ? { recoveryCommand } : {}),
+  });
 }
 
 function resolveSymbol(graph: GraphEngine, target: string): GraphNode[] {

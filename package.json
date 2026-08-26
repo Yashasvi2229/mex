@@ -62,6 +62,7 @@
     "eval:e2e": "node evaluate/agent-e2e.mjs",
     "eval:compare": "node evaluate/compare/index.mjs",
     "eval:compare:test": "node --test evaluate/compare/test/*.test.mjs",
+    "benchmark:graph-status": "npm run build && node scripts/benchmark-graph-status.mjs",
     "typecheck": "tsc --noEmit",
     "prepare": "npm run build"
   },

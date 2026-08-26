@@ -4,22 +4,69 @@ import { render } from "ink-testing-library";
 import {
   ErrorScreen,
   HeartbeatPanel,
+  DoctorPanel,
   Summary,
   TimelinePanel,
   eventActivityBars,
   progressBar,
   type DashboardData,
 } from "../src/tui.js";
+import type { GraphStatus } from "../src/team/contracts/graph.js";
 
 const h = React.createElement;
 
-function data(overrides: Partial<DashboardData> = {}): DashboardData {
+function graphStatus(status: GraphStatus["status"] = "fresh"): GraphStatus {
   return {
+    status,
+    observedAt: "2026-05-14T00:00:00.000Z",
+    currentRepo: {
+      branch: "feat/graph-freshness-recovery",
+      head: "a".repeat(40),
+      dirty: false,
+      observedAt: "2026-05-14T00:00:00.000Z",
+    },
+    lastSuccessfulIndexAt: "2026-05-14T00:00:00.000Z",
+    indexedAt: "2026-05-14T00:00:00.000Z",
+    indexedBranch: "feat/graph-freshness-recovery",
+    indexedHead: "a".repeat(40),
+    schemaVersion: 2,
+    extractorVersion: "test",
+    grammarVersion: "b".repeat(64),
+    parseHealth: {
+      total: 0,
+      ok: 0,
+      partial: 0,
+      failed: 0,
+      failedPaths: [],
+      failedPathsTruncated: false,
+    },
+    changes: {
+      total: 0,
+      added: [],
+      modified: [],
+      deleted: [],
+      truncated: false,
+      branchChanged: false,
+      manifestChanged: false,
+      configChanged: false,
+      grammarChanged: false,
+    },
+    diagnostics: [],
+  };
+}
+
+type DashboardOverrides = Omit<Partial<DashboardData>, "report"> & {
+  report?: Partial<DashboardData["report"]>;
+};
+
+function data(overrides: DashboardOverrides = {}): DashboardData {
+  const base: DashboardData = {
     report: {
       score: 100,
       issues: [],
       filesChecked: 3,
       timestamp: "2026-05-14T00:00:00.000Z",
+      graphStatus: graphStatus(),
     },
     heartbeat: {
       ok: true,
@@ -28,7 +75,11 @@ function data(overrides: Partial<DashboardData> = {}): DashboardData {
       oldDailyMemoryFiles: [],
     },
     events: [],
+  };
+  return {
+    ...base,
     ...overrides,
+    report: { ...base.report, ...overrides.report },
   };
 }
 
@@ -57,6 +108,48 @@ describe("TUI components", () => {
       notice: null,
     }));
     expect(app.lastFrame()).toContain("1 error · 1 warning");
+  });
+
+  it("renders graph freshness without triggering maintenance", () => {
+    const app = render(h(Summary, {
+      data: data({
+        report: {
+          score: 100,
+          issues: [],
+          filesChecked: 3,
+          timestamp: "2026-05-14T00:00:00.000Z",
+          graphStatus: {
+            ...graphStatus("stale"),
+            changes: {
+              ...graphStatus("stale").changes,
+              total: 1,
+              modified: ["src/service.ts"],
+              branchChanged: true,
+            },
+          },
+        },
+      }),
+      notice: null,
+    }));
+    expect(app.lastFrame()).toContain("Graph");
+    expect(app.lastFrame()).toContain("Attention");
+    expect(app.lastFrame()).toContain("stale · 1 source change");
+    expect(app.lastFrame()).toContain("branch changed");
+  });
+
+  it("renders the primary graph diagnostic in the doctor panel", () => {
+    const stale = graphStatus("corrupt");
+    stale.diagnostics = [{
+      code: "GRAPH_INDEX_CORRUPT",
+      severity: "error",
+      message: "SQLite quick-check failed.",
+    }];
+    const app = render(h(DoctorPanel, {
+      data: data({ report: { graphStatus: stale } }),
+    }));
+    expect(app.lastFrame()).toContain("Graph detail");
+    expect(app.lastFrame()).toContain("GRAPH_INDEX_CORRUPT");
+    expect(app.lastFrame()).toContain("SQLite quick-check failed");
   });
 
   it("renders heartbeat stale files", () => {

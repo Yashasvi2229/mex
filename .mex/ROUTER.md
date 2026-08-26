@@ -34,11 +34,19 @@ Then read this file fully before doing anything else in this session.
 - Lane C provides internal canonical team-member/activity artifacts, actor
   resolution, bounded read-only Git access, legacy timeline normalization, and
   local configured-member/Catch Up cursor state. These remain non-public.
+- Versioned graph snapshot provenance and read-only freshness inspection gate
+  grounding in check, doctor, and dashboard flows without implicit graph sync.
+- Explicit graph status, refresh, and isolated rebuild/recovery commands preserve
+  the last trustworthy index behind one cross-process maintenance lease.
+- Targeted graph get/query/impact consumers use one provenance-bound immutable
+  snapshot and discard output if graph or exact source identity changes.
+- Graph evaluator determinism includes semantic snapshot provenance while
+  excluding only operational timestamps and Git coordinates.
 
 **Not Built:**
 - The real Wiki adapter and type-parity registration against the teammate engine.
-- Project Hub, Workstream/Inbox/Relay/Playbook persistence, graph
-  freshness/recovery, and later delivery checkpoints from the human-team program.
+- Project Hub, Workstream/Inbox/Relay/Playbook persistence, and later delivery
+  checkpoints from the human-team program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
