@@ -5,6 +5,7 @@ import type {
   FileChange,
   JsonValue,
   RepoRelativePath,
+  RepoState,
   Revision,
 } from "../contracts/shared.js";
 import { MexPortError } from "../contracts/shared.js";
@@ -60,6 +61,12 @@ export interface ActivityCreatePreview {
   changes: readonly [FileChange];
 }
 
+/** Service-captured authority for a workflow event prepared outside this repository. */
+export interface PreparedActivityAuthority {
+  timestamp: string;
+  repoState: RepoState;
+}
+
 export interface ActivityReadResult {
   events: readonly StoredActivityEvent[];
   diagnostics: readonly Diagnostic[];
@@ -103,16 +110,41 @@ export class ActivityRepository {
     if (Number.isNaN(now.getTime())) {
       throw artifactError("VALIDATION_FAILED", "Invalid activity event", "Activity clock is invalid.");
     }
-    const timestamp = now.toISOString();
+    return this.previewCreateWithAuthority(input, {
+      timestamp: now.toISOString(),
+      repoState: await this.git.getRepoState(),
+    });
+  }
+
+  /**
+   * Prepare an event from authority captured by the enclosing workflow service.
+   * Callers cannot publish arbitrary authority: apply still revalidates the
+   * exact issued preview and the live repository branch/HEAD/dirty checkpoint.
+   */
+  async previewCreateWithAuthority(
+    input: ActivityCreateInput,
+    authority: PreparedActivityAuthority,
+  ): Promise<ActivityCreatePreview> {
+    const timestampDate = new Date(authority.timestamp);
+    if (
+      Number.isNaN(timestampDate.getTime())
+      || timestampDate.toISOString() !== authority.timestamp
+    ) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Invalid activity event",
+        "Activity authority timestamp must be a canonical ISO timestamp.",
+      );
+    }
     const event: ActivityEvent = {
       schemaVersion: 1,
-      id: this.generateId(now.getTime()),
-      timestamp,
+      id: this.generateId(timestampDate.getTime()),
+      timestamp: authority.timestamp,
       actor: input.actor,
       action: input.action,
       subjects: input.subjects,
       ...(input.workstream === undefined ? {} : { workstream: input.workstream }),
-      repoState: await this.git.getRepoState(),
+      repoState: { ...authority.repoState },
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
     };
     const issued = previewFor(event);

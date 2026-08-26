@@ -23,6 +23,32 @@ afterEach(() => {
 });
 
 describe("ActivityRepository", () => {
+  it("binds an enclosing workflow's service-owned authority and still revalidates Git", async () => {
+    const root = temporaryRoot();
+    const git = fakeGit();
+    const repository = fixedRepository(root, git, firstId);
+    const authority = {
+      timestamp: "2026-08-23T04:05:06.000Z",
+      repoState: { ...git.state },
+    };
+
+    const preview = await repository.previewCreateWithAuthority({
+      actor: { kind: "member", memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+      action: "workstream.created",
+      subjects: [{ kind: "entity", entity: { id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV", kind: "workstream" } }],
+    }, authority);
+
+    expect(preview.event).toMatchObject({
+      timestamp: authority.timestamp,
+      repoState: authority.repoState,
+    });
+    git.state = { ...git.state, head: "2".repeat(40) };
+    await expect(repository.applyCreate(preview, preview.previewRevision)).rejects.toMatchObject({
+      problem: { code: "REVISION_CONFLICT" },
+    });
+    expect(existsSync(join(root, ...preview.sourcePath.split("/")))).toBe(false);
+  });
+
   it("previews without writes, captures Git state, and atomically creates an immutable event", async () => {
     const root = temporaryRoot();
     const git = fakeGit();
