@@ -246,6 +246,20 @@ graphCommand
   });
 
 graphCommand
+  .command("repair")
+  .description("Checkpoint a stranded WAL and verify graph store integrity (no rebuild)")
+  .option("--root <dir>", "Project root (defaults to current directory)")
+  .action(async (opts) => {
+    try {
+      const { runGraphRepair } = await import("./graph/cli-graph.js");
+      process.exit(await runGraphRepair(opts.root));
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+graphCommand
   .command("ground")
   .description("Retro-ground an existing pre-0.7 scaffold using the code graph")
   .option("--dry-run", "Print the migration prompt without launching an agent")

@@ -79,7 +79,16 @@ export async function runDriftCheck(
   let groundingRuntime: GroundingRuntime | null = null;
   if (hasGroundings || needsGroundingMigration) {
     try {
-      groundingRuntime = await (opts.groundingRuntimeLoader ?? loadGroundingRuntime)(config);
+      // Read-only: a drift check must never pay graph staging costs (#140).
+      // A stale graph degrades to a warning, not an in-process rebuild.
+      groundingRuntime = await (opts.groundingRuntimeLoader
+        ?? ((cfg) => loadGroundingRuntime(cfg, { readOnly: true })))(config);
+      if (groundingRuntime && (groundingRuntime.staleSourceFiles ?? 0) > 0) {
+        (opts.graphWarning ?? console.warn)(
+          `Code graph is ${groundingRuntime.staleSourceFiles} source file(s) behind; `
+          + "grounding checks use the last built graph. Run `mex graph` to refresh.",
+        );
+      }
       if (!groundingRuntime && !graphUpgradeNudgeShown) {
         graphUpgradeNudgeShown = true;
         (opts.graphWarning ?? console.warn)(
