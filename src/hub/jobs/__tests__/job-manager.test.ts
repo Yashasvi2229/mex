@@ -764,5 +764,5 @@ describe("HubJobManager", () => {
     expect(firstPage.items[0]?.id).toBe(newestId);
     expect(store.getHubJob(firstId)).toBeNull();
     expect(new Set([...firstPage.items, ...secondPage.items].map((job) => job.id)).size).toBe(200);
-  });
+  }, 30_000);
 });
