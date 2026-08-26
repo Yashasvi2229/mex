@@ -1,0 +1,117 @@
+import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { HubApiError, type HubApi } from "../api/client";
+import { HubApiProvider, useCapabilities, useSession } from "../api/context";
+import { StatePanel } from "../components/ui";
+import { Button } from "../components/primitives/button";
+import { CapabilityPage, NotFoundPage } from "../pages/CapabilityPage";
+import { ActivityPage } from "../pages/ActivityPage";
+import { HealthPage } from "../pages/HealthPage";
+import { HomePage } from "../pages/HomePage";
+import { JobsPage } from "../pages/JobsPage";
+import { KnowledgeDetailPage, KnowledgePage } from "../pages/KnowledgePage";
+import { CodePage, SearchPage } from "../pages/SearchPage";
+import { SymbolPage } from "../pages/SymbolPage";
+import styles from "../styles/hub.module.css";
+import { DesktopRequired, HubLayout } from "./HubLayout";
+
+function SessionBoundary() {
+  const session = useSession();
+  const capabilities = useCapabilities();
+
+  if (session.isPending) {
+    return <div className={styles.fullPageState}><StatePanel state="loading" title="Opening Project Hub" detail="Verifying this process-local session." /></div>;
+  }
+
+  if (session.isError) {
+    const expired = session.error instanceof HubApiError && session.error.problem.code === "UNAUTHORIZED";
+    return (
+      <div className={styles.fullPageState}>
+        <StatePanel
+          state="unavailable"
+          title={expired ? "This Hub session has expired" : "A Hub session is required"}
+          detail="Close this tab and run `mex hub` again. A fresh one-use link will create a new local session."
+        />
+      </div>
+    );
+  }
+
+  if (capabilities.isPending) {
+    return (
+      <div className={styles.fullPageState}>
+        <StatePanel
+          state="loading"
+          title="Loading project capabilities"
+          detail="Checking which local workbenches are available for this repository."
+        />
+      </div>
+    );
+  }
+
+  if (capabilities.isError) {
+    return (
+      <div className={styles.fullPageState}>
+        <StatePanel
+          state="error"
+          title="Project capabilities could not be loaded"
+          detail="The Hub could not safely verify which local workbenches are available. Try the check again before continuing."
+          action={(
+            <Button
+              className={styles.secondaryButton}
+              size="sm"
+              type="button"
+              variant="outline"
+              onClick={() => void capabilities.refetch()}
+            >
+              Try again
+            </Button>
+          )}
+        />
+      </div>
+    );
+  }
+
+  return <HubLayout capabilities={capabilities.data} session={session.data} />;
+}
+
+export function AppRoutes() {
+  return (
+    <Routes>
+      <Route element={<SessionBoundary />}>
+        <Route index element={<HomePage />} />
+        <Route path="search" element={<SearchPage />} />
+        <Route path="knowledge" element={<KnowledgePage />} />
+        <Route path="knowledge/:id" element={<KnowledgeDetailPage />} />
+        <Route path="code" element={<CodePage />} />
+        <Route path="code/symbols/:id" element={<SymbolPage />} />
+        <Route path="workstreams" element={<CapabilityPage page="workstreams" />} />
+        <Route path="specs" element={<CapabilityPage page="specs" />} />
+        <Route path="playbooks" element={<CapabilityPage page="playbooks" />} />
+        <Route path="inbox" element={<CapabilityPage page="inbox" />} />
+        <Route path="relays" element={<CapabilityPage page="relays" />} />
+        <Route path="activity" element={<ActivityPage />} />
+        <Route path="jobs" element={<JobsPage />} />
+        <Route path="health" element={<HealthPage />} />
+        <Route path="*" element={<NotFoundPage />} />
+      </Route>
+    </Routes>
+  );
+}
+
+export function HubApplication({ api, startupError }: { api: HubApi; startupError?: Error | null }) {
+  return (
+    <HubApiProvider api={api}>
+      <div className={styles.desktopOnly}>
+        {startupError ? (
+          <div className={styles.fullPageState}>
+            <StatePanel state="error" title="The one-use Hub link was not accepted" detail={startupError.message} />
+          </div>
+        ) : <AppRoutes />}
+      </div>
+      <div className={styles.compactOnly}><DesktopRequired /></div>
+    </HubApiProvider>
+  );
+}
+
+export function BrowserHubApplication(props: { api: HubApi; startupError?: Error | null }) {
+  return <BrowserRouter><HubApplication {...props} /></BrowserRouter>;
+}

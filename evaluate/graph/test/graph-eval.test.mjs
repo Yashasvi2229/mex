@@ -57,6 +57,67 @@ function fixture(gates = null) {
   return { subjectRoot, suite: loadGraphSuite(suitePath), outputDir: mkdtempSync(join(tmpdir(), "mex-graph-output-")) };
 }
 
+const digest = (character) => character.repeat(64);
+
+function completeGraphSnapshot(overrides = {}) {
+  return {
+    version: 1,
+    indexedAt: "2026-08-22T00:00:00.000Z",
+    lastSuccessfulIndexAt: "2026-08-22T00:00:00.000Z",
+    indexedBranch: "main",
+    indexedHead: "1".repeat(40),
+    schemaVersion: 3,
+    compilerVersion: "5.9.3",
+    extractorVersion: "typescript-5.9-v1+tree-sitter-v2",
+    resolverVersion: "compiler-first-v2",
+    grammarHash: digest("a"),
+    configHash: digest("b"),
+    manifestHash: digest("c"),
+    sourceCorpusDigest: digest("d"),
+    sourceCount: 1,
+    semanticInputs: [
+      { path: "config/base.json", contentHash: digest("e") },
+      { path: "config/missing.json", contentHash: null },
+    ],
+    parseHealth: { total: 1, ok: 0, partial: 1, failed: 0 },
+    ...overrides,
+  };
+}
+
+function snapshotIntegrityFixture() {
+  const root = mkdtempSync(join(tmpdir(), "mex-integrity-snapshot-"));
+  const path = join(root, "graph.db");
+  const db = new DatabaseSync(path);
+  db.exec(readFileSync(join(HARNESS_ROOT, "src", "graph", "schema.sql"), "utf8"));
+  db.prepare(`INSERT INTO files (
+    path, content_hash, language, size, modified_at, indexed_at, node_count, errors,
+    parse_status, diagnostic_count, missing_count, error_coverage, extractor_version
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    "src/a.ts", digest("f"), "typescript", 100, 1, 2, 0, "[]", "partial", 2, 1, 0.1, "typescript-5.9.3",
+  );
+  db.close();
+  return path;
+}
+
+function writeGraphSnapshot(path, snapshot, updatedAt = 600) {
+  writeRawGraphSnapshot(path, JSON.stringify(snapshot), updatedAt);
+}
+
+function writeRawGraphSnapshot(path, raw, updatedAt = 600) {
+  const db = new DatabaseSync(path);
+  db.prepare(`INSERT INTO project_metadata (key, value, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`).run(
+    "graph_snapshot_v1",
+    raw,
+    updatedAt,
+  );
+  db.close();
+}
+
+function normalizedHash(path) {
+  return inspectGraphDatabase(path).normalizedGraphSha256;
+}
+
 test("suite schema rejects empty, duplicate, and underspecified task fixtures", () => {
   assert.throws(() => validateGraphSuite(rawSuite([])), /tasks must be non-empty/);
   const duplicate = rawSuite([positiveTask(), positiveTask()]);
@@ -82,7 +143,7 @@ test("suite integrity thresholds must be finite numeric metric maps", () => {
   assert.throws(() => validateGraphSuite(wrongShape), /gates\.integrityCeilings must be an object/);
 });
 
-test("v2 integrity hashing includes semantic metadata but ignores timestamps", () => {
+test("current-schema integrity hashing includes graph rows and semantic metadata but ignores row timestamps", () => {
   const root = mkdtempSync(join(tmpdir(), "mex-integrity-v2-"));
   const path = join(root, "graph.db");
   const db = new DatabaseSync(path);
@@ -126,7 +187,7 @@ test("v2 integrity hashing includes semantic metadata but ignores timestamps", (
   db.close();
 
   const first = inspectGraphDatabase(path, { nodesCreated: 1 });
-  assert.equal(first.schemaVersion, 2);
+  assert.equal(first.schemaVersion, 3);
   assert.deepEqual(first.parseStatusCounts, { partial: 1 });
   assert.equal(first.totalDiagnostics, 2);
   assert.equal(first.resolvedReferences, 1);
@@ -147,6 +208,146 @@ test("v2 integrity hashing includes semantic metadata but ignores timestamps", (
   const changed = inspectGraphDatabase(path);
   assert.notEqual(changed.normalizedGraphSha256, first.normalizedGraphSha256);
   assert.equal(changed.belowFlowThresholdEdges, 1);
+});
+
+test("graph snapshot hashing excludes only timestamps and Git coordinates", () => {
+  const path = snapshotIntegrityFixture();
+  const absentHash = normalizedHash(path);
+  const base = completeGraphSnapshot();
+  writeGraphSnapshot(path, base);
+  const baseHash = normalizedHash(path);
+  assert.notEqual(baseHash, absentHash, "snapshot presence must participate in semantic identity");
+
+  const volatileVariants = [
+    ["indexedAt", { ...base, indexedAt: "2026-08-23T00:00:00.000Z" }],
+    ["lastSuccessfulIndexAt", { ...base, lastSuccessfulIndexAt: "2026-08-24T00:00:00.000Z" }],
+    ["indexedBranch", { ...base, indexedBranch: "feature/evaluator" }],
+    ["indexedHead", { ...base, indexedHead: "2".repeat(40) }],
+    ["all volatile fields", {
+      ...base,
+      indexedAt: "2026-08-25T00:00:00.000Z",
+      lastSuccessfulIndexAt: "2026-08-26T00:00:00.000Z",
+      indexedBranch: null,
+      indexedHead: null,
+    }],
+  ];
+  for (const [label, snapshot] of volatileVariants) {
+    writeGraphSnapshot(path, snapshot, 700);
+    assert.equal(normalizedHash(path), baseHash, `${label} must be excluded from semantic identity`);
+  }
+
+  const reordered = Object.fromEntries(Object.entries(base).reverse());
+  reordered.parseHealth = Object.fromEntries(Object.entries(base.parseHealth).reverse());
+  reordered.semanticInputs = base.semanticInputs.map(({ path: inputPath, contentHash }) => ({
+    contentHash,
+    path: inputPath,
+  }));
+  writeRawGraphSnapshot(path, JSON.stringify(reordered, null, 2), 800);
+  assert.equal(normalizedHash(path), baseHash, "JSON property order and whitespace must be normalized");
+
+  const timestamps = new DatabaseSync(path);
+  timestamps.exec("UPDATE project_metadata SET updated_at = 900 WHERE key = 'graph_snapshot_v1'");
+  timestamps.close();
+  assert.equal(normalizedHash(path), baseHash, "metadata row timestamps must remain operational");
+});
+
+test("graph snapshot hashing retains every semantic provenance field", () => {
+  const path = snapshotIntegrityFixture();
+  const base = completeGraphSnapshot();
+  writeGraphSnapshot(path, base);
+  const baseHash = normalizedHash(path);
+  const semanticVariants = [
+    ["schemaVersion", { ...base, schemaVersion: 2 }],
+    ["compilerVersion", { ...base, compilerVersion: "5.9.4" }],
+    ["extractorVersion", { ...base, extractorVersion: "typescript-5.9-v2+tree-sitter-v2" }],
+    ["resolverVersion", { ...base, resolverVersion: "compiler-first-v3" }],
+    ["grammarHash", { ...base, grammarHash: digest("0") }],
+    ["configHash", { ...base, configHash: digest("1") }],
+    ["manifestHash", { ...base, manifestHash: digest("2") }],
+    ["sourceCorpusDigest", { ...base, sourceCorpusDigest: digest("3") }],
+    ["sourceCount", {
+      ...base,
+      sourceCount: 2,
+      parseHealth: { total: 2, ok: 0, partial: 2, failed: 0 },
+    }],
+    ["semantic input path", {
+      ...base,
+      semanticInputs: [
+        { path: "config/alternate.json", contentHash: digest("e") },
+        base.semanticInputs[1],
+      ],
+    }],
+    ["semantic input digest", {
+      ...base,
+      semanticInputs: [
+        { path: base.semanticInputs[0].path, contentHash: digest("4") },
+        base.semanticInputs[1],
+      ],
+    }],
+    ["negative semantic input probe", {
+      ...base,
+      semanticInputs: [
+        base.semanticInputs[0],
+        { path: base.semanticInputs[1].path, contentHash: digest("5") },
+      ],
+    }],
+    ["parseHealth", { ...base, parseHealth: { total: 1, ok: 1, partial: 0, failed: 0 } }],
+  ];
+
+  for (const [label, snapshot] of semanticVariants) {
+    writeGraphSnapshot(path, snapshot);
+    assert.notEqual(normalizedHash(path), baseHash, `${label} must participate in semantic identity`);
+  }
+});
+
+test("graph snapshot hashing fails closed on non-canonical or unsupported provenance", () => {
+  const path = snapshotIntegrityFixture();
+  const base = completeGraphSnapshot();
+  const { manifestHash: _missingManifest, ...missingField } = base;
+  const invalidCases = [
+    ["malformed JSON", "{"],
+    ["incomplete snapshot", JSON.stringify({ version: 1 })],
+    ["missing field", JSON.stringify(missingField)],
+    ["unsupported version", JSON.stringify({ ...base, version: 2 })],
+    ["unknown snapshot field", JSON.stringify({ ...base, futureSemanticField: true })],
+    ["unknown semantic-input field", JSON.stringify({
+      ...base,
+      semanticInputs: [{ ...base.semanticInputs[0], kind: "config" }, base.semanticInputs[1]],
+    })],
+    ["unknown parse-health field", JSON.stringify({
+      ...base,
+      parseHealth: { ...base.parseHealth, unknown: 0 },
+    })],
+    ["duplicate semantic-input path", JSON.stringify({
+      ...base,
+      semanticInputs: [base.semanticInputs[0], { ...base.semanticInputs[0] }],
+    })],
+    ["unsorted semantic-input paths", JSON.stringify({
+      ...base,
+      semanticInputs: [...base.semanticInputs].reverse(),
+    })],
+    ["unsafe semantic-input path", JSON.stringify({
+      ...base,
+      semanticInputs: [{ path: "../outside.json", contentHash: digest("e") }],
+    })],
+    ["invalid semantic-input digest", JSON.stringify({
+      ...base,
+      semanticInputs: [{ path: "config/base.json", contentHash: "not-a-digest" }],
+    })],
+    ["inconsistent parse-health totals", JSON.stringify({
+      ...base,
+      parseHealth: { total: 1, ok: 1, partial: 1, failed: 0 },
+    })],
+  ];
+
+  for (const [label, raw] of invalidCases) {
+    writeRawGraphSnapshot(path, raw);
+    assert.throws(
+      () => inspectGraphDatabase(path),
+      /invalid graph_snapshot_v1/,
+      `${label} must invalidate evaluator normalization`,
+    );
+  }
 });
 
 test("production-to-test integrity permits proven callback wiring but rejects unsupported edges", () => {

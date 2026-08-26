@@ -76,8 +76,13 @@ The code remains the source of truth. The wiki becomes its maintained explanatio
 mex builds a deterministic local code graph using Tree-sitter and SQLite. It indexes symbols and relationships across TypeScript, TSX, JavaScript, JSX, Python, and Rust, including framework-aware Express route-to-handler relationships.
 
 ```bash
-mex graph
+mex graph rebuild
 ```
+
+Graph reads never rebuild implicitly. Use `mex graph status` for a read-only
+freshness check, `mex graph refresh` to explicitly republish a compatible index,
+and `mex graph rebuild` for an isolated full rebuild. The legacy bare
+`mex graph` command remains a safe rebuild alias.
 
 ### 2. Build the wiki
 
@@ -188,6 +193,8 @@ mex impact requireSession
 ```
 
 Agent-facing graph commands use deterministic JSONL envelopes so tools can reliably distinguish metadata, results, and summaries.
+Targeted `get`, `query`, and `impact` reads abstain when freshness cannot be
+proved; they never combine an older node identity with newer source text.
 
 ## Results
 
@@ -223,6 +230,7 @@ After setup:
 mex check                    # Check wiki health and code grounding
 mex sync                     # Repair drift with targeted agent prompts
 mex graph scope "<task>"     # Retrieve compact task context
+mex hub                      # Open the local Project Hub
 ```
 
 If you skipped global installation, use `npx mex-agent` in place of `mex`. Install globally at any time with:
@@ -244,10 +252,14 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | Command | What it does |
 |---|---|
 | `mex` / `mex tui` | Open the interactive terminal dashboard |
+| `mex hub [--port <n>] [--no-open]` | Open the secure local Project Hub |
 | `mex setup` | Create and populate the living wiki |
 | `mex check` | Check wiki health and calculate a drift score |
 | `mex sync` | Repair stale or inconsistent knowledge |
-| `mex graph` | Build or refresh the local code graph |
+| `mex graph` | Backward-compatible alias for a safe isolated rebuild |
+| `mex graph status` | Inspect graph freshness without writing |
+| `mex graph refresh` | Explicitly refresh a compatible graph index |
+| `mex graph rebuild` | Build and validate an isolated candidate, then publish it atomically |
 | `mex graph scope <task>` | Retrieve compact, task-relevant context |
 | `mex graph get <node-id...>` | Expand exact symbols from a retrieval result |
 | `mex graph query <relation> <symbol>` | Query structural code relationships |
@@ -259,12 +271,31 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | `mex completion <shell>` | Print shell completions |
 | `mex commands` | List every command and script |
 
+### Project Hub
+
+`mex hub` starts a desktop-oriented control room on `127.0.0.1` and opens it in
+your browser. The bootstrap link is one-use, ordinary API requests require an
+in-memory session, and mutating requests also require same-origin CSRF proof.
+Use `--no-open` to print the launch URL without opening a browser, or `--port`
+to request a specific loopback port.
+
+The Hub displays repository context, locally persisted job history, and the
+read-only Activity timeline. Its real Code workspace searches symbols and
+source, inspects callers/callees/impact, reports graph Health, and lets you
+explicitly refresh or rebuild the local graph. Its read-only Knowledge workspace
+browses and searches canonical Wiki entries, shows bounded evidence, provenance,
+relations, backlinks, and current grounding, and links Code to Knowledge only
+through explicit groundings. Wiki Health offers explicit refresh/rebuild jobs
+only when a stable status makes them safe. Reads never maintain either index
+automatically, rankings remain domain-local, and the packaged UI never
+substitutes development fixtures for project data.
+
 ## Existing mex projects
 
 Projects created before mex 0.7 can add graph grounding without regenerating or rewriting their existing documentation:
 
 ```bash
-mex graph
+mex graph rebuild
 mex graph ground
 ```
 

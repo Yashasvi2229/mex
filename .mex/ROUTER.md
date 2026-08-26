@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: [YYYY-MM-DD]
+last_updated: 2026-08-26
 ---
 
 # Session Bootstrap
@@ -24,21 +24,58 @@ If you haven't already read `AGENTS.md`, read it now — it contains the project
 Then read this file fully before doing anything else in this session.
 
 ## Current Project State
-<!-- What is working. What is not yet built. Known issues.
-     Update this section whenever significant work is completed.
-     This is the primary drift prevention mechanism — it re-grounds the agent every session.
-     Length: 3 sections (Working / Not Built / Known Issues), 3-7 items each.
-     Example:
-     **Working:**
-     - User authentication and session management
-     - Core CRUD operations for all main entities
 
-     **Not yet built:**
-     - Email notification system
-     - Admin dashboard
+**Working:**
+- MEX v0.7.2 graph retrieval and protocol-v3 JSONL behavior.
+- Internal human-team application contracts, ownership rules, and stable error
+  codes are available under `src/team/contracts` as a provisional boundary.
+- A behavioral WikiPort mock, realistic fixture, reusable conformance suite,
+  and graph protocol goldens cover the consumer-side Checkpoint 0 work.
+- Lane C provides internal canonical team-member/activity artifacts, actor
+  resolution, bounded read-only Git access, legacy timeline normalization, and
+  local configured-member/Catch Up cursor state. These remain non-public.
+- Lane B provides the loopback-only Project Hub, secure browser-session
+  bootstrap, bounded `/api/v1` contracts, persistent local job orchestration,
+  packaged React shell, and honest Home/Search/Health/Jobs states.
+- The Project Hub now projects Lane C's immutable canonical activity and legacy
+  decision log through a bounded, read-only Activity timeline. Recorded actors
+  remain immutable while current alias resolution is shown separately.
+- Versioned graph snapshot provenance and read-only freshness inspection gate
+  grounding in check, doctor, and dashboard flows without implicit graph sync.
+- Explicit graph status, refresh, and isolated rebuild/recovery commands preserve
+  the last trustworthy index behind one cross-process maintenance lease.
+- Targeted graph get/query/impact consumers use one provenance-bound immutable
+  snapshot and discard output if graph or exact source identity changes.
+- The graph half of Checkpoint 2 is working in the Project Hub: grouped symbol
+  and source Search, the read-only Code workspace, structured graph Health, and
+  explicit refresh/rebuild jobs all use the repository-bound GraphPort adapter.
+  Hub graph reads preserve engine ranking and never maintain the index implicitly.
+- Graph evaluator determinism includes semantic snapshot provenance while
+  excluding only operational timestamps and Git coordinates.
+- The pinned Wiki engine now has an internal repository WikiPort adapter with
+  exact-byte index freshness, immutable bounded reads, strict revision-bound
+  cursors, complete entity/relationship/grounding projections, pinned operation
+  and migration plans, and explicit cancellable maintenance. The real adapter
+  passes the consumer-owned conformance suite without skips.
+- The Wiki half of Checkpoint 2 is working in the Project Hub: independent Wiki
+  Search, read-only Knowledge browse/detail, explicit Code-to-Knowledge links,
+  structured Wiki Health, and explicit refresh/rebuild jobs all use the real
+  repository adapter. Ordinary Hub reads never repair either local index.
 
-     **Known issues:**
-     - Pagination breaks on filtered queries with more than 1000 results -->
+**Not Built:**
+- Wiki creation/editing, migration and synthesis UI, grounding-drift/review
+  workbenches, Workstream/Inbox/Relay/Playbook persistence, Catch Up actions,
+  activity creation, and later delivery checkpoints from the human-team
+  program.
+- Public package-root exports for the provisional team contracts.
+
+**Known Issues:**
+- The current scaffold architecture, conventions, decisions, stack, and setup
+  context files are still largely unpopulated placeholders.
+- Development fixtures are never production data. Graph and Wiki repair controls
+  appear only when a stable status observation makes the requested operation
+  safe; migration-required or unstable Wiki observations never fabricate a
+  repair action.
 
 ## Routing Table
 

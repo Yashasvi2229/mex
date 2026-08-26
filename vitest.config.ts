@@ -13,6 +13,10 @@ export default defineConfig({
       // `npm run eval:compare:test`, so Vitest must not collect the same files.
       "evaluate/compare/test/**",
       "evaluate/graph/test/**",
+      // The Hub web workspace supplies its own jsdom/CSS configuration and the
+      // browser suite is collected by Playwright, not the root Node test run.
+      "packages/hub-web/**",
+      "test/hub-e2e/**",
       // Eval runs can contain archived revisions with their own test trees.
       // Results are data, never part of the active repository test suite.
       ".mex/eval-results/**",
