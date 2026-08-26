@@ -15,6 +15,8 @@ last_updated: [YYYY-MM-DD]
 ## Commands
 <!-- Exact commands for health checks, service status, restart/recovery, and mex maintenance. -->
 
+Before using MEX commands, run `mex capabilities --json` and prefer the structured reads it reports. Preview mutations first, then wait for explicit human approval before running an apply command.
+
 ## GROW
 After meaningful work:
 - Ground: what changed in reality?

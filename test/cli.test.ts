@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { Command, InvalidArgumentError } from "commander";
 import { execSync, spawnSync } from "node:child_process";
-import { readFileSync, symlinkSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, symlinkSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -216,7 +216,13 @@ describe("built CLI main-module guard", () => {
   const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { version: string };
 
   beforeAll(() => {
-    execSync("npm run build", { cwd: repoRoot, stdio: "pipe" });
+    // Vitest sets NODE_ENV=test. The build must still select React's production
+    // condition and must not leave a development Hub bundle in dist/.
+    execSync("npm run build", {
+      cwd: repoRoot,
+      env: { ...process.env, NODE_ENV: "test" },
+      stdio: "pipe",
+    });
   }, 30_000);
 
   it("parses argv when invoked through a symlinked bin (npm/npx layout)", () => {
@@ -232,6 +238,43 @@ describe("built CLI main-module guard", () => {
       expect((result.stdout ?? "").trim()).toBe(pkg.version);
     } finally {
       rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("emits the capability golden without writing project or global state", () => {
+    const project = mkdtempSync(join(tmpdir(), "mex-capability-cli-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-capability-home-"));
+    const projectSentinel = join(project, "sentinel.txt");
+    const homeSentinel = join(userHome, "sentinel.txt");
+    writeFileSync(projectSentinel, "project-before\n");
+    writeFileSync(homeSentinel, "home-before\n");
+    const projectEntries = readdirSync(project);
+    const homeEntries = readdirSync(userHome);
+    try {
+      const result = spawnSync(process.execPath, [cliPath, "capabilities", "--json"], {
+        cwd: project,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: userHome,
+          MEX_TELEMETRY: "1",
+          NO_COLOR: "1",
+        },
+      });
+      const golden = JSON.parse(
+        readFileSync(join(repoRoot, "test/fixtures/capabilities/not-git.json"), "utf8"),
+      ) as unknown;
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe(JSON.stringify(golden) + "\n");
+      expect(result.stderr).toBe("");
+      expect(readdirSync(project)).toEqual(projectEntries);
+      expect(readdirSync(userHome)).toEqual(homeEntries);
+      expect(readFileSync(projectSentinel, "utf8")).toBe("project-before\n");
+      expect(readFileSync(homeSentinel, "utf8")).toBe("home-before\n");
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
     }
   });
 
@@ -272,6 +315,66 @@ describe("built CLI main-module guard", () => {
       rmSync(fixture, { recursive: true, force: true });
     }
   }, 10_000);
+
+  it("keeps every advertised Wiki read and preview from minting scaffold identity", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-wiki-readonly-config-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-wiki-readonly-home-"));
+    try {
+      const mexPath = join(fixture, ".mex");
+      mkdirSync(join(fixture, ".git"));
+      mkdirSync(mexPath);
+      const routerPath = join(mexPath, "ROUTER.md");
+      const routerBytes = "# Router\n";
+      writeFileSync(routerPath, routerBytes);
+      const configPath = join(mexPath, "config.json");
+      const configBytes = JSON.stringify({ aiTools: ["claude"], wiki: { exclude: ["private/**"] } });
+      writeFileSync(configPath, configBytes);
+      const operationPath = join(fixture, "operation.json");
+      const operationBytes = "{}\n";
+      writeFileSync(operationPath, operationBytes);
+      const mexEntriesBefore = readdirSync(mexPath).sort();
+      const homeEntriesBefore = readdirSync(userHome).sort();
+
+      const invocations = [
+        ["wiki", "list", "--json"],
+        ["wiki", "show", "missing", "--json"],
+        ["wiki", "query", "missing", "--json"],
+        ["wiki", "related", "missing", "--json"],
+        ["wiki", "backlinks", "missing", "--json"],
+        ["wiki", "validate", "--json"],
+        ["wiki", "graph", "--json"],
+        ["wiki", "for-code", "missing", "--json"],
+        ["wiki", "apply", operationPath, "--json"],
+        ["wiki", "regenerate-views", "--dry-run", "--json"],
+        ["wiki", "migrate", "--dry-run", "--json"],
+      ] as const;
+
+      for (const args of invocations) {
+        const result = spawnSync(process.execPath, [cliPath, ...args], {
+          cwd: fixture,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HOME: userHome,
+            MEX_TELEMETRY: "0",
+            DO_NOT_TRACK: "1",
+            NO_COLOR: "1",
+          },
+        });
+        expect(result.error, args.join(" ")).toBeUndefined();
+      }
+
+      expect(readFileSync(configPath, "utf8")).toBe(configBytes);
+      expect(JSON.parse(readFileSync(configPath, "utf8"))).not.toHaveProperty("scaffold_id");
+      expect(readFileSync(routerPath, "utf8")).toBe(routerBytes);
+      expect(readFileSync(operationPath, "utf8")).toBe(operationBytes);
+      expect(readdirSync(mexPath).sort()).toEqual(mexEntriesBefore);
+      expect(readdirSync(userHome).sort()).toEqual(homeEntriesBefore);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe("mex --version", () => {

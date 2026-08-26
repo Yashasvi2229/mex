@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "data": {
+    "mexVersion": "0.7.2",
+    "repository": {
+      "initializationState": "not_git_repository",
+      "graphIndexState": "unavailable",
+      "wikiIndexState": "unavailable"
+    },
+    "capabilities": [
+      {
+        "id": "project_hub",
+        "installed": true,
+        "availability": "unavailable",
+        "unavailableReason": {
+          "code": "NOT_GIT_REPOSITORY",
+          "detail": "Repository initialization is required before this capability can be used."
+        }
+      },
+      {
+        "id": "activity_read",
+        "installed": true,
+        "availability": "unavailable",
+        "unavailableReason": {
+          "code": "NOT_GIT_REPOSITORY",
+          "detail": "Repository initialization is required before this capability can be used."
+        }
+      },
+      {
+        "id": "code_graph",
+        "installed": true,
+        "availability": "unavailable",
+        "unavailableReason": {
+          "code": "NOT_GIT_REPOSITORY",
+          "detail": "Repository initialization is required before this capability can be used."
+        }
+      },
+      {
+        "id": "wiki",
+        "installed": true,
+        "availability": "unavailable",
+        "unavailableReason": {
+          "code": "NOT_GIT_REPOSITORY",
+          "detail": "Repository initialization is required before this capability can be used."
+        }
+      }
+    ],
+    "commands": {
+      "read": [
+        {
+          "id": "capabilities.inspect",
+          "path": "mex capabilities",
+          "usage": "mex capabilities --json",
+          "output": "json"
+        }
+      ],
+      "preview": [],
+      "apply": []
+    },
+    "nextInitializationAction": {
+      "command": "git init",
+      "reason": "Initialize the repository before MEX setup."
+    }
+  },
+  "diagnostics": []
+}

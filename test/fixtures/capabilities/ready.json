@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "data": {
+    "mexVersion": "0.7.2",
+    "repository": {
+      "initializationState": "ready",
+      "graphIndexState": "fresh",
+      "wikiIndexState": "fresh"
+    },
+    "capabilities": [
+      {
+        "id": "project_hub",
+        "installed": true,
+        "availability": "available",
+        "unavailableReason": null
+      },
+      {
+        "id": "activity_read",
+        "installed": true,
+        "availability": "available",
+        "unavailableReason": null
+      },
+      {
+        "id": "code_graph",
+        "installed": true,
+        "availability": "available",
+        "unavailableReason": null
+      },
+      {
+        "id": "wiki",
+        "installed": true,
+        "availability": "available",
+        "unavailableReason": null
+      }
+    ],
+    "commands": {
+      "read": [
+        {
+          "id": "capabilities.inspect",
+          "path": "mex capabilities",
+          "usage": "mex capabilities --json",
+          "output": "json"
+        },
+        {
+          "id": "graph.status",
+          "path": "mex graph status",
+          "usage": "mex graph status --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.validate",
+          "path": "mex wiki validate",
+          "usage": "mex wiki validate --json",
+          "output": "json"
+        },
+        {
+          "id": "graph.scope",
+          "path": "mex graph scope",
+          "usage": "mex graph scope <task>",
+          "output": "jsonl-v3"
+        },
+        {
+          "id": "graph.get",
+          "path": "mex graph get",
+          "usage": "mex graph get <id...>",
+          "output": "jsonl-v3"
+        },
+        {
+          "id": "graph.query",
+          "path": "mex graph query",
+          "usage": "mex graph query <who-calls|what-calls|where-defined> <target>",
+          "output": "jsonl-v3"
+        },
+        {
+          "id": "graph.impact",
+          "path": "mex impact",
+          "usage": "mex impact <target>",
+          "output": "jsonl-v3"
+        },
+        {
+          "id": "wiki.list",
+          "path": "mex wiki list",
+          "usage": "mex wiki list --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.show",
+          "path": "mex wiki show",
+          "usage": "mex wiki show <id> --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.query",
+          "path": "mex wiki query",
+          "usage": "mex wiki query <text...> --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.related",
+          "path": "mex wiki related",
+          "usage": "mex wiki related <id> --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.backlinks",
+          "path": "mex wiki backlinks",
+          "usage": "mex wiki backlinks <id> --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.graph",
+          "path": "mex wiki graph",
+          "usage": "mex wiki graph --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.for_code",
+          "path": "mex wiki for-code",
+          "usage": "mex wiki for-code <node-id...> --json",
+          "output": "json"
+        }
+      ],
+      "preview": [
+        {
+          "id": "wiki.apply.preview",
+          "path": "mex wiki apply",
+          "usage": "mex wiki apply <operation-file> --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.regenerate_views.preview",
+          "path": "mex wiki regenerate-views",
+          "usage": "mex wiki regenerate-views --dry-run --json",
+          "output": "json"
+        }
+      ],
+      "apply": [
+        {
+          "id": "graph.refresh",
+          "path": "mex graph refresh",
+          "usage": "mex graph refresh --json",
+          "output": "json"
+        },
+        {
+          "id": "graph.rebuild",
+          "path": "mex graph rebuild",
+          "usage": "mex graph rebuild --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.rebuild_index",
+          "path": "mex wiki rebuild-index",
+          "usage": "mex wiki rebuild-index --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.apply.apply",
+          "path": "mex wiki apply",
+          "usage": "mex wiki apply <operation-file> --apply --json",
+          "output": "json"
+        },
+        {
+          "id": "wiki.regenerate_views.apply",
+          "path": "mex wiki regenerate-views",
+          "usage": "mex wiki regenerate-views --json",
+          "output": "json"
+        }
+      ]
+    },
+    "nextInitializationAction": null
+  },
+  "diagnostics": []
+}
