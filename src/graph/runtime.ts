@@ -6,15 +6,30 @@ import { extractGroundings, findMexAnchors, rewriteMexAnchor, writeGroundings } 
 import { createGroundingChecker, type GroundingChecker, type GroundedSource } from "./grounding.js";
 import { createGraphEngine } from "./engine-impl.js";
 import type { GraphEngine } from "./engine.js";
-import { SUPPORTED_SOURCE_GLOB } from "./extraction/grammars.js";
+import {
+  GRAPH_CORPUS_GLOB_OPTIONS,
+  GRAPH_CORPUS_IGNORE_GLOBS,
+  GRAPH_SUPPORTED_SOURCE_GLOB,
+} from "./corpus-policy.js";
 import { openGraphDatabase } from "./db/database.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
 import { FingerprintStore } from "./fingerprint-store.js";
 import { deserializeFingerprint, serializeFingerprint } from "./fingerprint.js";
+import { acquireGraphMaintenanceLease } from "./maintenance.js";
 import { MinHashReconciler } from "./reconcile-engine.js";
 import type { Fingerprint, Reconciler } from "./reconcile.js";
-
-const SOURCE_IGNORE = ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.mex/**", "**/coverage/**", "**/.next/**", "**/out/**"];
+import {
+  inspectGraphSidecars,
+  inspectGraphStatus,
+  inspectGraphStatusWithFreshObservation,
+  type InternalGraphStatusInspection,
+} from "./status.js";
+import {
+  loadFreshGraphReadSession,
+  openImmutableGraphReadSessionSync,
+  type InternalGraphReadSession,
+} from "./read-session.js";
+import type { GraphStatus } from "../team/contracts/graph.js";
 
 export interface GroundingRuntime {
   graph: GraphEngine;
@@ -37,36 +52,163 @@ export interface GroundingBaselineCaptureOptions {
   warn?: (message: string) => void;
 }
 
-export async function loadGroundingRuntime(config: MexConfig): Promise<GroundingRuntime | null> {
+export interface ReadOnlyGroundingRuntimeResult {
+  graphStatus: GraphStatus;
+  runtime: GroundingRuntime | null;
+}
+
+export interface LoadReadOnlyGroundingRuntimeOptions {
+  /** Internal seam for status/error-path tests. */
+  inspectStatus?: typeof inspectGraphStatus;
+  /** Internal seam for deterministic reader-handshake tests. */
+  inspectSidecars?: typeof inspectGraphSidecars;
+  /** Inspect status without opening graph readers when grounding is irrelevant. */
+  loadRuntime?: boolean;
+}
+
+interface ReadOnlyGroundingRuntimeInternalHooks {
+  inspectObservation?: typeof inspectGraphStatusWithFreshObservation;
+  afterStatusInspection?: (
+    inspection: InternalGraphStatusInspection,
+  ) => void | Promise<void>;
+  afterDatabaseIdentityRead?: () => void | Promise<void>;
+  afterDatabaseOpen?: (database: SqliteDatabase) => void | Promise<void>;
+  afterDatabaseDescriptorClose?: () => void;
+}
+
+type LoadReadOnlyGroundingRuntimeInternalOptions = LoadReadOnlyGroundingRuntimeOptions & {
+  /** Module-private deterministic race seams; deliberately absent from declarations. */
+  __internal?: ReadOnlyGroundingRuntimeInternalHooks;
+};
+
+/**
+ * Load grounding readers without synchronizing or otherwise repairing the
+ * graph. A non-fresh snapshot is reported to the caller and never used for
+ * grounding, because doing so could incorrectly present stale facts as clean.
+ */
+export async function loadReadOnlyGroundingRuntime(
+  config: MexConfig,
+  options: LoadReadOnlyGroundingRuntimeOptions = {},
+): Promise<ReadOnlyGroundingRuntimeResult> {
   const dbPath = resolve(config.projectRoot, ".mex", "graph.db");
-  if (!existsSync(dbPath)) return null;
-  const graph = createGraphEngine({ rootDir: config.projectRoot, dbPath });
-  let db: SqliteDatabase | null = null;
+  const internal = (options as LoadReadOnlyGroundingRuntimeInternalOptions).__internal;
+  const statusOptions = { projectRoot: config.projectRoot, dbPath };
+  const inspectObservation = options.inspectStatus
+    ? async (): Promise<InternalGraphStatusInspection> => ({
+        graphStatus: await options.inspectStatus!(statusOptions),
+        freshObservation: null,
+      })
+    : internal?.inspectObservation ?? inspectGraphStatusWithFreshObservation;
+  const loaded = await loadFreshGraphReadSession(config.projectRoot, {
+    dbPath,
+    loadSession: options.loadRuntime,
+    inspectObservation,
+    inspectSidecars: options.inspectSidecars,
+    afterStatusInspection: internal?.afterStatusInspection,
+    hooks: {
+      afterDatabaseIdentityRead: internal?.afterDatabaseIdentityRead,
+      afterDatabaseOpen: internal?.afterDatabaseOpen,
+      afterDatabaseDescriptorClose: internal?.afterDatabaseDescriptorClose,
+    },
+  });
+  if (!loaded.session) return { graphStatus: loaded.graphStatus, runtime: null };
+
+  const session = loaded.session;
   try {
-    db = openGraphDatabase(dbPath);
-    const fingerprints = new FingerprintStore(db);
+    const fingerprints = new FingerprintStore(session.db);
     const anchorFingerprints = snapshotAnchorFingerprints(config, fingerprints);
-    const changed = findChangedSourceFiles(config.projectRoot, db);
-    // sync also checks the persisted compiler/config/grammar manifest, so it
-    // must run even when source mtimes are unchanged.
-    await graph.sync(changed);
-    const reconciler = new MinHashReconciler(fingerprints);
-    const checkerReconciler: Reconciler & GroundingReconcilerCapabilities = {
-      reconcile: (nodeId, baseline) => reconciler.reconcile(nodeId, baseline),
-      getFingerprint: (nodeId) => anchorFingerprints.get(nodeId) ?? reconciler.getFingerprint(nodeId),
-      getGroundedSource: (file, nodeId) => reconciler.getGroundedSource(file, nodeId),
+    const guard: GroundingRuntimeGuard = {
+      validate: () => session.validate().valid,
+      invalidate: () => {
+        if (loaded.graphStatus.diagnostics.some((entry) => entry.code === "GRAPH_INDEX_READER_DATABASE_CHANGED")) {
+          return;
+        }
+        loaded.graphStatus.status = "degraded";
+        loaded.graphStatus.diagnostics = [
+          ...loaded.graphStatus.diagnostics,
+          {
+            code: "GRAPH_INDEX_READER_DATABASE_CHANGED",
+            severity: "warning",
+            message: "The graph changed while grounding checks were running; graph-derived results were discarded.",
+            remediation: [{ label: "Retry after graph maintenance finishes" }],
+          },
+        ];
+      },
     };
     return {
-      graph,
-      reconciler,
-      checker: createGroundingChecker(graph, checkerReconciler),
-      fingerprints,
-      anchorFingerprints,
-      close: () => { graph.close(); db?.close(); db = null; },
+      graphStatus: loaded.graphStatus,
+      runtime: assembleGroundingRuntime(
+        session.graph,
+        null,
+        fingerprints,
+        anchorFingerprints,
+        guard,
+      ),
+    };
+  } catch {
+    session.close();
+    return {
+      graphStatus: {
+        ...loaded.graphStatus,
+        status: "degraded",
+        diagnostics: [
+          ...loaded.graphStatus.diagnostics,
+          {
+            code: "GRAPH_INDEX_READER_OPEN_FAILED",
+            severity: "warning",
+            message: "The graph changed or became unavailable while immutable grounding readers were opening; grounding was skipped.",
+            remediation: [{ label: "Retry after graph maintenance finishes" }],
+          },
+        ],
+      },
+      runtime: null,
+    };
+  }
+}
+
+/**
+ * Load and synchronize grounding state for explicitly mutating setup/sync
+ * workflows. Ordinary reads must use {@link loadReadOnlyGroundingRuntime}.
+ */
+export async function loadGroundingRuntime(config: MexConfig): Promise<GroundingRuntime | null> {
+  const lease = acquireGraphMaintenanceLease(config.projectRoot, "refresh");
+  let priorSession: InternalGraphReadSession | null = null;
+  let graph: GraphEngine | null = null;
+  let db: SqliteDatabase | null = null;
+  try {
+    // Preserve fingerprints for inline ids before refresh can replace them.
+    // The maintenance lease prevents a cooperating publisher from changing the
+    // old snapshot between this read and the isolated refresh publication.
+    priorSession = openImmutableGraphReadSessionSync(config.projectRoot, lease.databasePath);
+    const anchorFingerprints = snapshotAnchorFingerprints(config, new FingerprintStore(priorSession.db));
+    priorSession.close();
+    priorSession = null;
+
+    await lease.refresh();
+    graph = createGraphEngine({ rootDir: config.projectRoot, dbPath: lease.databasePath });
+    db = openGraphDatabase(lease.databasePath);
+    const fingerprints = new FingerprintStore(db);
+    const assembled = assembleGroundingRuntime(graph, db, fingerprints, anchorFingerprints);
+    graph = null;
+    db = null;
+    let closed = false;
+    return {
+      ...assembled,
+      close: () => {
+        if (closed) return;
+        closed = true;
+        try {
+          assembled.close();
+        } finally {
+          lease.release();
+        }
+      },
     };
   } catch (error) {
-    graph.close();
-    db?.close();
+    try { priorSession?.close(); } catch { /* preserve the maintenance failure */ }
+    try { graph?.close(); } catch { /* preserve the maintenance failure */ }
+    try { db?.close(); } catch { /* preserve the maintenance failure */ }
+    lease.release();
     throw error;
   }
 }
@@ -102,7 +244,11 @@ export function findChangedSourceFiles(projectRoot: string, db: SqliteDatabase):
     path: string; size: number; modified_at: number;
   }>;
   const tracked = new Map(rows.map((row) => [row.path, row]));
-  const current = globSync(SUPPORTED_SOURCE_GLOB, { cwd: projectRoot, ignore: SOURCE_IGNORE, nodir: true })
+  const current = globSync(GRAPH_SUPPORTED_SOURCE_GLOB, {
+    ...GRAPH_CORPUS_GLOB_OPTIONS,
+    cwd: projectRoot,
+    ignore: [...GRAPH_CORPUS_IGNORE_GLOBS],
+  })
     .map((path) => path.replaceAll("\\", "/"));
   const changed: string[] = [];
   for (const path of current) {
@@ -184,6 +330,59 @@ export function persistMovedGroundings(
 interface GroundingReconcilerCapabilities {
   getGroundedSource(scaffoldFile: string, nodeId: string): GroundedSource | null;
   getFingerprint(nodeId: string): Fingerprint | null;
+}
+
+interface GroundingRuntimeGuard {
+  validate(): boolean;
+  invalidate(): void;
+}
+
+function assembleGroundingRuntime(
+  graph: GraphEngine,
+  database: SqliteDatabase | null,
+  fingerprints: FingerprintStore,
+  anchorFingerprints: ReadonlyMap<string, Fingerprint>,
+  guard?: GroundingRuntimeGuard,
+): GroundingRuntime {
+  const reconciler = new MinHashReconciler(fingerprints);
+  const checkerReconciler: Reconciler & GroundingReconcilerCapabilities = {
+    reconcile: (nodeId, baseline) => reconciler.reconcile(nodeId, baseline),
+    getFingerprint: (nodeId) => anchorFingerprints.get(nodeId) ?? reconciler.getFingerprint(nodeId),
+    getGroundedSource: (file, nodeId) => reconciler.getGroundedSource(file, nodeId),
+  };
+  const rawChecker = createGroundingChecker(graph, checkerReconciler);
+  const checker: GroundingChecker = guard
+    ? (...args) => {
+        if (!guard.validate()) {
+          guard.invalidate();
+          return [];
+        }
+        let issues;
+        try {
+          issues = rawChecker(...args);
+        } catch (error) {
+          if (!guard.validate()) {
+            guard.invalidate();
+            return [];
+          }
+          throw error;
+        }
+        if (!guard.validate()) {
+          guard.invalidate();
+          return [];
+        }
+        return issues;
+      }
+    : rawChecker;
+  let db: SqliteDatabase | null = database;
+  return {
+    graph,
+    reconciler,
+    checker,
+    fingerprints,
+    anchorFingerprints,
+    close: () => { graph.close(); db?.close(); db = null; },
+  };
 }
 
 function snapshotAnchorFingerprints(config: MexConfig, store: FingerprintStore): Map<string, Fingerprint> {

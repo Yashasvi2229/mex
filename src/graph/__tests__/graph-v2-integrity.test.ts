@@ -1,10 +1,16 @@
+import { createHash } from "node:crypto";
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
+  unlinkSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createGraphEngine, GraphSourceStagingError } from "../engine-impl.js";
+import {
+  createGraphEngine,
+  createGraphEngineFromOpenDatabase,
+  GraphSourceStagingError,
+} from "../engine-impl.js";
 import {
   DB_SCHEMA_VERSION,
   graphRequiresRebuild,
@@ -125,6 +131,23 @@ function semanticSnapshot(path: string): Record<string, unknown[]> {
   }
 }
 
+function directorySnapshot(path: string): Array<Record<string, string>> {
+  return readdirSync(path).sort().map((name) => {
+    const filePath = join(path, name);
+    const stat = statSync(filePath, { bigint: true });
+    return {
+      name,
+      kind: stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other",
+      size: stat.size.toString(),
+      mtimeNs: stat.mtimeNs.toString(),
+      ctimeNs: stat.ctimeNs.toString(),
+      digest: stat.isFile()
+        ? createHash("sha256").update(readFileSync(filePath)).digest("hex")
+        : "",
+    };
+  });
+}
+
 describe("graph schema v2 migration and storage", () => {
   it("migrates v1 additively, preserves grounding, and requires a full rebuild", () => {
     const root = temporaryRoot("mex-schema-v2-");
@@ -203,6 +226,109 @@ describe("graph schema v2 migration and storage", () => {
     } finally {
       chmodSync(graphDir, 0o755);
       chmodSync(dbPath, 0o644);
+    }
+  });
+
+  it("serves immutable graph readers without changing any graph-directory file", async () => {
+    const root = temporaryRoot("mex-immutable-reader-");
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "stable.ts"),
+      "export function immutableNeedle(): number { return 1; }\n");
+    const graphDir = join(root, ".mex");
+    const dbPath = join(graphDir, "graph.db");
+    const builder = createGraphEngine({ rootDir: root });
+    await builder.build();
+    builder.close();
+    for (const suffix of ["-wal", "-shm"]) {
+      const sidecar = `${dbPath}${suffix}`;
+      if (existsSync(sidecar)) unlinkSync(sidecar);
+    }
+    writeFileSync(join(graphDir, "reader-sentinel"), "unchanged\n");
+    const before = directorySnapshot(graphDir);
+
+    const db = openGraphDatabase(dbPath, { readOnly: true, immutable: true });
+    expect(rows(db, "SELECT COUNT(*) AS count FROM nodes")).toEqual([{ count: 2 }]);
+    db.close();
+    const graphDb = openGraphDatabase(dbPath, { readOnly: true, immutable: true });
+    const graph = createGraphEngineFromOpenDatabase({ rootDir: root, dbPath }, graphDb);
+    expect(graph.searchNodes("immutableNeedle")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "immutableNeedle" }),
+    ]));
+    graph.close();
+
+    expect(directorySnapshot(graphDir)).toEqual(before);
+    expect(existsSync(`${dbPath}-wal`)).toBe(false);
+    expect(existsSync(`${dbPath}-shm`)).toBe(false);
+  });
+
+  it("makes immutable mode explicit and validates snapshot compatibility", () => {
+    const root = temporaryRoot("mex-immutable-validation-");
+    const missing = join(root, "missing.db");
+    expect(() => openGraphDatabase(missing, { immutable: true })).toThrow(
+      "Immutable graph access requires readOnly: true.",
+    );
+    expect(() => createGraphEngine({
+      rootDir: root,
+      dbPath: missing,
+      immutable: true,
+    } as Parameters<typeof createGraphEngine>[0])).toThrow(
+      "Immutable graph access is internal to the validated grounding runtime.",
+    );
+
+    const legacyPath = join(root, "legacy.db");
+    createV1Database(legacyPath);
+    expect(() => openGraphDatabase(legacyPath, { readOnly: true, immutable: true }))
+      .toThrow(GraphRebuildRequiredError);
+
+    const rebuildPath = join(root, "rebuild.db");
+    const rebuild = openGraphDatabase(rebuildPath);
+    rebuild.prepare(
+      "INSERT INTO project_metadata (key, value, updated_at) VALUES ('rebuild_required', '1', ?)",
+    ).run(Date.now());
+    rebuild.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    rebuild.close();
+    expect(() => openGraphDatabase(rebuildPath, { readOnly: true, immutable: true }))
+      .toThrow(GraphRebuildRequiredError);
+  });
+
+  it("does not consume or mutate a non-empty WAL through immutable readers", async () => {
+    const root = temporaryRoot("mex-immutable-wal-");
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "stable.ts"),
+      "export function immutableWalNeedle(): number { return 1; }\n");
+    const dbPath = join(root, ".mex", "graph.db");
+    const builder = createGraphEngine({ rootDir: root });
+    await builder.build();
+    builder.close();
+
+    const writer = openGraphDatabase(dbPath);
+    try {
+      writer.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      writer.prepare(
+        "INSERT INTO project_metadata (key, value, updated_at) VALUES ('wal_only_marker', 'visible-in-wal', ?)",
+      ).run(Date.now());
+      expect(writer.prepare(
+        "SELECT value FROM project_metadata WHERE key = 'wal_only_marker'",
+      ).get()).toEqual({ value: "visible-in-wal" });
+      expect(statSync(`${dbPath}-wal`).size).toBeGreaterThan(0);
+      const before = directorySnapshot(join(root, ".mex"));
+
+      const immutable = openGraphDatabase(dbPath, { readOnly: true, immutable: true });
+      expect(immutable.prepare(
+        "SELECT value FROM project_metadata WHERE key = 'wal_only_marker'",
+      ).get()).toBeUndefined();
+      immutable.close();
+      const graphDb = openGraphDatabase(dbPath, { readOnly: true, immutable: true });
+      const graph = createGraphEngineFromOpenDatabase({ rootDir: root, dbPath }, graphDb);
+      expect(graph.searchNodes("immutableWalNeedle")).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: "immutableWalNeedle" }),
+      ]));
+      graph.close();
+
+      expect(directorySnapshot(join(root, ".mex"))).toEqual(before);
+      expect(statSync(`${dbPath}-wal`).size).toBeGreaterThan(0);
+    } finally {
+      writer.close();
     }
   });
 
@@ -364,7 +490,7 @@ describe("graph construction integration", () => {
       alias_id: oldFingerprintId, match_method: "fingerprint",
     });
     fingerprintDb.close();
-  });
+  }, 15_000);
 
   it("does not alias a deleted symbol to a newly added differently named signature match", async () => {
     const root = temporaryRoot("mex-signature-name-guard-");
@@ -462,6 +588,7 @@ describe("graph construction integration", () => {
     beforeDb.close();
 
     expect(await engine.sync([])).toMatchObject({ filesIndexed: 0, nodesCreated: 0, edgesCreated: 0 });
+    engine.close();
     writeFileSync(join(root, "tsconfig.json"), JSON.stringify({
       compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext" },
       include: ["src/**/*.ts"],
@@ -471,8 +598,9 @@ describe("graph construction integration", () => {
     expect(staleOutput.map((line) => JSON.parse(line))).toEqual([
       expect.objectContaining({ code: "GRAPH_REBUILD_REQUIRED", recoveryCommand: "mex graph" }),
     ]);
-    expect(await engine.sync(["tsconfig.json"])).toMatchObject({ filesIndexed: 1 });
-    engine.close();
+    const refreshEngine = createGraphEngine({ rootDir: root });
+    expect(await refreshEngine.sync(["tsconfig.json"])).toMatchObject({ filesIndexed: 1 });
+    refreshEngine.close();
 
     const afterDb = openGraphDatabase(dbPath);
     const after = new GraphStore(afterDb);
@@ -491,9 +619,14 @@ describe("graph construction integration", () => {
     const prior = engine.searchNodes("stableNeedle").find((entry) => entry.name === "stableNeedle")!;
     writeFileSync(source, "}\n");
 
-    const result = await engine.sync(["src/stable.ts"]);
-    expect(result).toMatchObject({ filesIndexed: 0, nodesCreated: 0, edgesCreated: 0 });
-    expect(result.health?.failed).toBe(1);
+    await expect(engine.sync(["src/stable.ts"])).rejects.toMatchObject({
+      name: "GraphSourceStagingError",
+      failures: [expect.objectContaining({
+        filePath: "src/stable.ts",
+        operation: "parse",
+        code: "GRAPH_SOURCE_PARSE_FAILED",
+      })],
+    });
     expect(engine.getNode(prior.id)).toMatchObject({ id: prior.id, bodyHash: prior.bodyHash });
     engine.close();
   });

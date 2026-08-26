@@ -176,7 +176,7 @@ program
   .action(async (opts) => {
     try {
       const config = loadConfig();
-      const { runDriftCheck } = await import("./drift/index.js");
+      const { runDriftCheckWithGraphStatus } = await import("./drift/index.js");
       const { DEFAULT_STALENESS_THRESHOLDS } = await import("./drift/checkers/staleness.js");
 
       const stalenessThresholds = {
@@ -186,7 +186,7 @@ program
         errorCommits: opts.staleErrorCommits ?? config.stalenessThresholds?.errorCommits ?? DEFAULT_STALENESS_THRESHOLDS.errorCommits,
       };
 
-      const report = await runDriftCheck(
+      const report = await runDriftCheckWithGraphStatus(
         { ...config, stalenessThresholds },
         { verbose: opts.verbose },
       );
@@ -244,13 +244,67 @@ program
 // ── Code Graph ──
 const graphCommand = program
   .command("graph")
-  .description("Build/rebuild the code knowledge graph into .mex/graph.db")
+  .description("Inspect or explicitly maintain the code knowledge graph")
   .option("--json", "Output the build summary as JSON")
   .option("--root <dir>", "Project root to index (defaults to current directory)")
   .action(async (opts) => {
     try {
       const { runGraph } = await import("./graph/cli-graph.js");
       await runGraph({ root: opts.root, json: opts.json });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+graphCommand
+  .command("status")
+  .description("Inspect graph freshness without writing or rebuilding")
+  .option("--json", "Output the complete graph status as JSON")
+  .option("--root <dir>", "Project root to inspect (defaults to current directory)")
+  .action(async (opts) => {
+    try {
+      const { runGraphStatus } = await import("./graph/cli-graph.js");
+      await runGraphStatus({
+        root: opts.root ?? graphCommand.opts().root,
+        json: opts.json ?? graphCommand.opts().json,
+      });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+graphCommand
+  .command("refresh")
+  .description("Explicitly refresh a compatible graph from the current repository")
+  .option("--json", "Output the complete refresh result as JSON")
+  .option("--root <dir>", "Project root to refresh (defaults to current directory)")
+  .action(async (opts) => {
+    try {
+      const { runGraphRefresh } = await import("./graph/cli-graph.js");
+      await runGraphRefresh({
+        root: opts.root ?? graphCommand.opts().root,
+        json: opts.json ?? graphCommand.opts().json,
+      });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+  });
+
+graphCommand
+  .command("rebuild")
+  .description("Rebuild in isolation, validate, and atomically publish the graph")
+  .option("--json", "Output the complete rebuild result as JSON")
+  .option("--root <dir>", "Project root to rebuild (defaults to current directory)")
+  .action(async (opts) => {
+    try {
+      const { runGraphRebuild } = await import("./graph/cli-graph.js");
+      await runGraphRebuild({
+        root: opts.root ?? graphCommand.opts().root,
+        json: opts.json ?? graphCommand.opts().json,
+      });
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);

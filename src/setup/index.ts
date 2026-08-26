@@ -239,14 +239,9 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   if (mode === "code-repo" && !dryRun) {
     try {
       info("Building code graph...");
-      const { createGraphEngine } = await import("../graph/index.js");
-      const graph = createGraphEngine({ rootDir: projectRoot });
-      try {
-        await graph.build();
-        ok("Code graph ready");
-      } finally {
-        graph.close();
-      }
+      const { rebuildGraph } = await import("../graph/maintenance.js");
+      await rebuildGraph(projectRoot);
+      ok("Code graph ready");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       warn(`Code graph unavailable — setup will continue: ${message}`);
