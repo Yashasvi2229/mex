@@ -201,7 +201,7 @@ export function proposeUnits(units: readonly AcceptedUnit[], options: ProposeOpt
     if (isReadOnlyPath(file, readOnly)) {
       rejected.push({
         unit,
-        reasons: [`${file} is reserved read-only by wiki.readOnly, so a ${unit.type} cannot be filed there`],
+        reasons: [`${file} is reserved read-only from Wiki writes, so a ${unit.type} cannot be filed there`],
       });
       continue;
     }

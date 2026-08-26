@@ -25,6 +25,7 @@ const TARGET = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJE";
 const THIRD = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJF";
 const TOPIC = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJG";
 const FOURTH = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJH";
+const WORKSTREAM = "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const roots: string[] = [];
 
 afterEach(() => {
@@ -144,6 +145,61 @@ Payment capture and delivery behavior.
 }
 
 describe("RepositoryWikiPort", () => {
+  it("reads a Team-owned mex entity but cannot preview a write to its hard-reserved path", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-wiki-adapter-team-"));
+    roots.push(root);
+    const workstreams = join(root, ".mex", "workstreams");
+    mkdirSync(workstreams, { recursive: true });
+    const sourcePath = join(workstreams, `${WORKSTREAM}.md`);
+    writeFileSync(sourcePath, `<!-- mex:entity
+id: ${WORKSTREAM}
+type: workstream
+status: in_flight
+revision: 1
+-->
+## Release performance baseline
+
+Coordinate the bounded release work.
+`, "utf8");
+    mkdirSync(join(root, ".mex", "events"), { recursive: true });
+    const auditPath = join(root, ".mex", "events", "operations.jsonl");
+    writeFileSync(auditPath, "", "utf8");
+
+    const port = createRepositoryWikiPort(root, { readOnly: [] });
+    await expect(port.rebuildIndex()).resolves.toMatchObject({ entitiesIndexed: 1 });
+    const entity = await port.getEntity(WORKSTREAM);
+    expect(entity).toMatchObject({
+      ref: { id: WORKSTREAM, kind: "workstream", title: "Release performance baseline" },
+      lifecycleState: "in_flight",
+      body: expect.stringContaining("bounded release work"),
+      location: { path: `.mex/workstreams/${WORKSTREAM}.md` },
+    });
+    expect((await port.listEntities({ kinds: ["workstream"] })).items.map((item) => item.ref.id))
+      .toEqual([WORKSTREAM]);
+    if (!entity) throw new Error("team fixture entity missing");
+
+    const beforeSource = readFileSync(sourcePath);
+    const beforeAudit = readFileSync(auditPath);
+    await expectCode(() => port.previewOperations({
+      operation: {
+        opId: "operation_adapter_team_ownership",
+        type: "update-entry",
+        entityId: WORKSTREAM,
+        baseRevision: entity.version.semanticRevision,
+        baseContentHash: entity.version.contentHash,
+        actor: { kind: "human", id: "member_adapter_test" },
+        timestamp: "2026-08-27T00:00:00.000Z",
+        payload: { body: "Wiki must not own this update." },
+      },
+      expectedRevisions: [{
+        target: { kind: "entity", id: WORKSTREAM },
+        version: entity.version,
+      }],
+    }), "PATH_OUTSIDE_PROJECT");
+    expect(readFileSync(sourcePath)).toEqual(beforeSource);
+    expect(readFileSync(auditPath)).toEqual(beforeAudit);
+  });
+
   it("discovers the exact added, modified, and deleted paths for targeted refresh", async () => {
     const target = project();
     const port = createRepositoryWikiPort(target.root);

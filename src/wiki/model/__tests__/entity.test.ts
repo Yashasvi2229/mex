@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   ACTIVE_LIFECYCLE_STATES,
+  TEAM_READABLE_ENTITY_TYPES,
   WIKI_ENTITY_TYPES,
   WIKI_LIFECYCLE_STATES,
   createEntityTypeRegistry,
@@ -28,7 +29,7 @@ function check(value: unknown, validator = validateEntity): { ok: boolean; codes
 }
 
 describe("entity vocabulary", () => {
-  it("has the fourteen required types", () => {
+  it("keeps the fourteen Wiki-authored types separate from Team read types", () => {
     expect([...WIKI_ENTITY_TYPES].sort()).toEqual(
       [
         "acceptance_criterion",
@@ -48,6 +49,18 @@ describe("entity vocabulary", () => {
       ].sort(),
     );
     expect(WIKI_ENTITY_TYPES).toHaveLength(14);
+    expect(TEAM_READABLE_ENTITY_TYPES).toEqual([
+      "member",
+      "workstream",
+      "proposal",
+      "relay",
+      "activity",
+      "playbook",
+      "playbook_run",
+    ]);
+    for (const type of TEAM_READABLE_ENTITY_TYPES) {
+      expect(WIKI_ENTITY_TYPES).not.toContain(type as never);
+    }
   });
 
   it("has the four lifecycle states and no health value among them", () => {
@@ -67,6 +80,8 @@ describe("entity vocabulary", () => {
 
   it("recognizes default types", () => {
     expect(isDefaultEntityType("decision")).toBe(true);
+    expect(isDefaultEntityType("workstream")).toBe(true);
+    expect(isDefaultEntityType("playbook_run")).toBe(true);
     expect(isDefaultEntityType("runbook")).toBe(false);
   });
 });
@@ -77,7 +92,7 @@ describe("validateEntity", () => {
   });
 
   it("accepts every default type", () => {
-    for (const type of WIKI_ENTITY_TYPES) {
+    for (const type of [...WIKI_ENTITY_TYPES, ...TEAM_READABLE_ENTITY_TYPES]) {
       expect(check(entity({ type })).ok, `${type} should be valid`).toBe(true);
     }
   });
@@ -177,7 +192,15 @@ describe("entity type registry", () => {
 
   it("still rejects anything unregistered — extension is explicit, not permissive", () => {
     const validator = createEntityValidator({ registry: createEntityTypeRegistry(["runbook"]) });
-    expect(check(entity({ type: "playbook" }), validator).ok).toBe(false);
+    expect(check(entity({ type: "retrospective" }), validator).ok).toBe(false);
+  });
+
+  it("registers Team kinds for reads without adding them to Wiki-authored types", () => {
+    const registry = createEntityTypeRegistry();
+    for (const type of TEAM_READABLE_ENTITY_TYPES) {
+      expect(registry.has(type), type).toBe(true);
+      expect(WIKI_ENTITY_TYPES).not.toContain(type as never);
+    }
   });
 
   it("lists its types deterministically", () => {

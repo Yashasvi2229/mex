@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   ENTITY_ID_LENGTH,
   ENTITY_ID_PATTERN,
+  ENTITY_ID_PREFIX,
+  READABLE_ENTITY_ID_PREFIXES,
   compareEntityIds,
   entityIdTimestamp,
   findDuplicateEntityIds,
@@ -12,6 +14,7 @@ import {
 } from "../ids.js";
 
 const SAMPLE = "mx_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const ULID = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
 describe("generateEntityId", () => {
   it("produces the canonical form", () => {
@@ -19,6 +22,7 @@ describe("generateEntityId", () => {
       const id = generateEntityId();
       expect(id).toMatch(ENTITY_ID_PATTERN);
       expect(id).toHaveLength(ENTITY_ID_LENGTH);
+      expect(id.startsWith(ENTITY_ID_PREFIX)).toBe(true);
       expect(isEntityId(id)).toBe(true);
     }
   });
@@ -42,6 +46,24 @@ describe("generateEntityId", () => {
 describe("isEntityId", () => {
   it("accepts a canonical id", () => {
     expect(isEntityId(SAMPLE)).toBe(true);
+  });
+
+  it("accepts every canonical Team-owned prefix on read", () => {
+    expect(READABLE_ENTITY_ID_PREFIXES).toEqual([
+      "mx_",
+      "member_",
+      "ws_",
+      "proposal_",
+      "relay_",
+      "event_",
+      "playbook_",
+      "run_",
+    ]);
+    for (const prefix of READABLE_ENTITY_ID_PREFIXES) {
+      const id = `${prefix}${ULID}`;
+      expect(isEntityId(id), prefix).toBe(true);
+      expect(id).toMatch(ENTITY_ID_PATTERN);
+    }
   });
 
   it("rejects the wrong prefix", () => {
@@ -79,6 +101,7 @@ describe("normalizeEntityId", () => {
   it("uppercases the body and lowercases the prefix", () => {
     expect(normalizeEntityId("MX_01arz3ndektsv4rrffq69g5fav")).toBe(SAMPLE);
     expect(normalizeEntityId("Mx_01ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(SAMPLE);
+    expect(normalizeEntityId(`PLAYBOOK_${ULID.toLowerCase()}`)).toBe(`playbook_${ULID}`);
   });
 
   it("trims surrounding whitespace", () => {
@@ -118,6 +141,7 @@ describe("entityIdTimestamp", () => {
 
   it("accepts a non-canonical spelling", () => {
     expect(entityIdTimestamp("MX_01arz3ndektsv4rrffq69g5fav")).toBe(entityIdTimestamp(SAMPLE));
+    expect(entityIdTimestamp(`WS_${ULID.toLowerCase()}`)).toBe(entityIdTimestamp(SAMPLE));
   });
 
   it("returns null for a malformed id", () => {
@@ -140,6 +164,8 @@ describe("findDuplicateEntityIds", () => {
     // The case a case-sensitive check misses: two spellings, one identity, two
     // index rows claiming it.
     expect(findDuplicateEntityIds([SAMPLE, SAMPLE.toUpperCase()])).toEqual([SAMPLE]);
+    expect(findDuplicateEntityIds([`relay_${ULID}`, `RELAY_${ULID.toLowerCase()}`]))
+      .toEqual([`relay_${ULID}`]);
   });
 
   it("ignores values that are not ids at all", () => {
