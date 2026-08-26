@@ -76,8 +76,13 @@ The code remains the source of truth. The wiki becomes its maintained explanatio
 mex builds a deterministic local code graph using Tree-sitter and SQLite. It indexes symbols and relationships across TypeScript, TSX, JavaScript, JSX, Python, and Rust, including framework-aware Express route-to-handler relationships.
 
 ```bash
-mex graph
+mex graph rebuild
 ```
+
+Graph reads never rebuild implicitly. Use `mex graph status` for a read-only
+freshness check, `mex graph refresh` to explicitly republish a compatible index,
+and `mex graph rebuild` for an isolated full rebuild. The legacy bare
+`mex graph` command remains a safe rebuild alias.
 
 ### 2. Build the wiki
 
@@ -188,6 +193,8 @@ mex impact requireSession
 ```
 
 Agent-facing graph commands use deterministic JSONL envelopes so tools can reliably distinguish metadata, results, and summaries.
+Targeted `get`, `query`, and `impact` reads abstain when freshness cannot be
+proved; they never combine an older node identity with newer source text.
 
 ## Results
 
@@ -249,7 +256,10 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | `mex setup` | Create and populate the living wiki |
 | `mex check` | Check wiki health and calculate a drift score |
 | `mex sync` | Repair stale or inconsistent knowledge |
-| `mex graph` | Build or refresh the local code graph |
+| `mex graph` | Backward-compatible alias for a safe isolated rebuild |
+| `mex graph status` | Inspect graph freshness without writing |
+| `mex graph refresh` | Explicitly refresh a compatible graph index |
+| `mex graph rebuild` | Build and validate an isolated candidate, then publish it atomically |
 | `mex graph scope <task>` | Retrieve compact, task-relevant context |
 | `mex graph get <node-id...>` | Expand exact symbols from a retrieval result |
 | `mex graph query <relation> <symbol>` | Query structural code relationships |
@@ -279,7 +289,7 @@ data.
 Projects created before mex 0.7 can add graph grounding without regenerating or rewriting their existing documentation:
 
 ```bash
-mex graph
+mex graph rebuild
 mex graph ground
 ```
 
