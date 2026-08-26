@@ -71,6 +71,32 @@ jobs:
           MEX_TELEMETRY=0 ./node_modules/.bin/mex graph query where-defined Vehicle | grep '"type":"result"'
           MEX_TELEMETRY=0 ./node_modules/.bin/mex graph query where-defined User | grep '"type":"result"'
 
+  storage-portability:
+    # Filesystem containment, SQLite migration/locking, and packed-install
+    # behavior must remain portable whenever local Team state changes.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.22.0
+          cache: npm
+      - run: npm ci
+      - name: Run focused storage and containment tests
+        run: >-
+          npx vitest run
+          src/team/local-state/__tests__/team-local-state.test.ts
+          src/team/artifacts/__tests__/filesystem.test.ts
+          src/team/artifacts/__tests__/filesystem-publish-failure.test.ts
+      - run: npm run build
+      - name: Smoke test the packed install
+        run: npm run test:hub:package
+
   hub-browser:
     # Visual baselines are exact for this runner image; do not float with ubuntu-latest.
     runs-on: ubuntu-24.04
