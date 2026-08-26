@@ -19,8 +19,40 @@ import type {
   SearchResponse,
   SearchResult,
 } from "../api/types";
-import { ErrorState, PageHeader, Panel, StatePanel, StatusPill } from "../components/ui";
-import styles from "../styles/hub.module.css";
+import { ErrorState, PageHeader, StatePanel, StatusPill } from "../components/ui";
+import { Badge } from "../components/primitives/badge";
+import { Button } from "../components/primitives/button";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "../components/primitives/card";
+import {
+  Empty,
+  EmptyContent,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../components/primitives/empty";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+  InputGroupText,
+} from "../components/primitives/input-group";
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemMedia,
+  ItemTitle,
+} from "../components/primitives/item";
+import styles from "../styles/search.module.css";
 
 type GroupKind = keyof SearchResponse["groups"];
 type ResultGroupData = SearchResponse["groups"][GroupKind];
@@ -39,62 +71,62 @@ const cursorField: Record<GroupKind, "wikiCursor" | "symbolCursor" | "sourceCurs
 
 function SymbolResult({ item }: { item: Extract<SearchResult, { kind: "code_symbol" }> }) {
   return (
-    <Link className={styles.searchResult} to={item.route}>
-      <span className={styles.resultIcon}><Braces aria-hidden="true" /></span>
-      <span className={styles.resultBody}>
+    <Item className={styles.searchResult} render={<Link to={item.route} />}>
+      <ItemMedia className={styles.resultIcon} variant="icon"><Braces aria-hidden="true" /></ItemMedia>
+      <ItemContent className={styles.resultBody}>
         <small>{item.symbolKind} · {item.language}</small>
-        <strong>{item.name}</strong>
-        <p className={styles.resultQualified}>{item.qualifiedName}</p>
+        <ItemTitle>{item.name}</ItemTitle>
+        <ItemDescription className={styles.resultQualified}>{item.qualifiedName}</ItemDescription>
         {item.signature ? <code className={styles.resultSignature}>{item.signature}</code> : null}
         <span className={styles.resultMetadata}>
           <span>{item.path}:{item.startLine}–{item.endLine}</span>
         </span>
-      </span>
-      <ArrowUpRight aria-hidden="true" />
-    </Link>
+      </ItemContent>
+      <ItemActions className={styles.resultAction}><ArrowUpRight aria-hidden="true" /></ItemActions>
+    </Item>
   );
 }
 
 function SourceResult({ item }: { item: Extract<SearchResult, { kind: "source_chunk" }> }) {
   const body = (
     <>
-      <span className={styles.resultIcon}><FileCode2 aria-hidden="true" /></span>
-      <span className={styles.resultBody}>
+      <ItemMedia className={styles.resultIcon} variant="icon"><FileCode2 aria-hidden="true" /></ItemMedia>
+      <ItemContent className={styles.resultBody}>
         <small>Source · lines {item.startLine}–{item.endLine}</small>
-        <strong>{item.path}</strong>
+        <ItemTitle>{item.path}</ItemTitle>
         <pre className={styles.sourcePreview}>{item.preview}</pre>
         <span className={styles.resultMetadata}>
-          {item.matchedTerms.slice(0, 4).map((term) => <span className={styles.termChip} key={term}>{term}</span>)}
+          {item.matchedTerms.slice(0, 4).map((term) => <Badge className={styles.termChip} key={term} variant="outline">{term}</Badge>)}
           {item.matchedTerms.length > 4 ? <span>+{item.matchedTerms.length - 4} terms</span> : null}
           {item.symbolIds.slice(0, 2).map((symbolId) => <span key={symbolId}>symbol {symbolId}</span>)}
           {item.symbolIds.length > 2 ? <span>+{item.symbolIds.length - 2} symbols</span> : null}
           {item.previewTruncated ? <span>Preview shortened</span> : null}
         </span>
-      </span>
-      {item.route ? <ArrowUpRight aria-hidden="true" /> : null}
+      </ItemContent>
+      {item.route ? <ItemActions className={styles.resultAction}><ArrowUpRight aria-hidden="true" /></ItemActions> : null}
     </>
   );
   return item.route
-    ? <Link className={styles.searchResult} to={item.route}>{body}</Link>
-    : <article className={styles.searchResult}>{body}</article>;
+    ? <Item className={styles.searchResult} render={<Link to={item.route} />}>{body}</Item>
+    : <Item className={styles.searchResult} render={<article />}>{body}</Item>;
 }
 
 function WikiResult({ item }: { item: Extract<SearchResult, { kind: "wiki" }> }) {
   const body = (
     <>
-      <span className={styles.resultIcon}><FileSearch aria-hidden="true" /></span>
-      <span className={styles.resultBody}>
+      <ItemMedia className={styles.resultIcon} variant="icon"><FileSearch aria-hidden="true" /></ItemMedia>
+      <ItemContent className={styles.resultBody}>
         <small>Knowledge</small>
-        <strong>{item.title}</strong>
-        {item.description ? <p>{item.description}</p> : null}
+        <ItemTitle>{item.title}</ItemTitle>
+        {item.description ? <ItemDescription>{item.description}</ItemDescription> : null}
         {item.path ? <span className={styles.resultMetadata}><span>{item.path}</span></span> : null}
-      </span>
-      {item.route ? <ArrowUpRight aria-hidden="true" /> : null}
+      </ItemContent>
+      {item.route ? <ItemActions className={styles.resultAction}><ArrowUpRight aria-hidden="true" /></ItemActions> : null}
     </>
   );
   return item.route
-    ? <Link className={styles.searchResult} to={item.route}>{body}</Link>
-    : <article className={styles.searchResult}>{body}</article>;
+    ? <Item className={styles.searchResult} render={<Link to={item.route} />}>{body}</Item>
+    : <Item className={styles.searchResult} render={<article />}>{body}</Item>;
 }
 
 function Result({ item }: { item: SearchResult }) {
@@ -162,43 +194,49 @@ function ResultGroup({
   }, [view.group]);
 
   return (
-    <Panel className={styles.searchGroup} aria-labelledby={`group-${view.kind}`}>
-      <div className={styles.searchGroupHeader}>
-        <div><p className={styles.panelEyebrow}>{view.kind}</p><h2 id={`group-${view.kind}`}>{view.label}</h2></div>
-        <StatusPill tone={group.status === "available" ? "neutral" : group.status === "failed" ? "danger" : "warning"}>
+    <Card className={styles.searchGroup} aria-labelledby={`group-${view.kind}`} data-kind={view.kind} size="sm">
+      <CardHeader className={styles.searchGroupHeader}>
+        <CardTitle><h2 id={`group-${view.kind}`}>{view.label}</h2></CardTitle>
+        <CardAction>
+          <StatusPill tone={group.status === "available" ? "neutral" : group.status === "failed" ? "danger" : "warning"}>
           {group.status === "available" ? `${group.items.length} loaded` : group.status}
-        </StatusPill>
-      </div>
-      {group.status === "failed" ? (
-        <div className={styles.groupProblem} role="status"><AlertTriangle aria-hidden="true" /><p><strong>This source failed independently.</strong>{group.detail}</p></div>
-      ) : group.status === "unavailable" ? (
-        <StatePanel compact state="unavailable" title={`${view.label} unavailable`} detail={group.detail ?? "This capability is not connected in the current build."} />
-      ) : group.items.length ? (
-        <div className={styles.searchResults}>{group.items.map((item) => <Result item={item} key={item.id} />)}</div>
-      ) : (
-        <StatePanel compact state="empty" title={`No ${view.label.toLowerCase()} found`} detail="This source completed successfully but returned no results." />
-      )}
+          </StatusPill>
+        </CardAction>
+      </CardHeader>
+      <CardContent className={styles.groupContent}>
+        {group.status === "failed" ? (
+          <div className={styles.groupProblem} role="status"><AlertTriangle aria-hidden="true" /><p><strong>This source failed independently.</strong>{group.detail}</p></div>
+        ) : group.status === "unavailable" ? (
+          <StatePanel compact state="unavailable" title={`${view.label} unavailable`} detail={view.kind === "wiki" ? "Wiki is not connected." : group.detail ?? "This source is unavailable."} />
+        ) : group.items.length ? (
+          <div className={styles.searchResults}>{group.items.map((item) => <Result item={item} key={item.id} />)}</div>
+        ) : (
+          <StatePanel compact state="empty" title={`No ${view.label.toLowerCase()} found`} detail="This source completed successfully but returned no results." />
+        )}
+      </CardContent>
 
       {revisionConflict ? (
-        <div className={styles.groupPaginationProblem} role="alert">
+        <CardFooter className={styles.groupPaginationProblem} role="alert">
           <RefreshCw aria-hidden="true" />
           <span><strong>This source changed while you were paging.</strong>Reload the newest graph snapshot before loading more results.</span>
-          <button className={styles.secondaryButton} onClick={onReload} type="button">Reload results</button>
-        </div>
+          <Button onClick={onReload} size="sm" type="button" variant="outline">Reload results</Button>
+        </CardFooter>
       ) : pagination.isError || pageFailed ? (
-        <div className={styles.groupPaginationProblem} role="alert">
+        <CardFooter className={styles.groupPaginationProblem} role="alert">
           <AlertTriangle aria-hidden="true" />
           <span><strong>More {view.label.toLowerCase()} could not be loaded.</strong>The results already on screen are unchanged.</span>
-          <button className={styles.secondaryButton} onClick={loadMore} type="button">Try again</button>
-        </div>
+          <Button onClick={loadMore} size="sm" type="button" variant="outline">Try again</Button>
+        </CardFooter>
       ) : group.status === "available" && group.nextCursor ? (
-        <button className={styles.loadMore} disabled={pagination.isPending} onClick={loadMore} type="button">
-          {pagination.isPending ? "Loading…" : `Load more ${view.label.toLowerCase()}`}
-        </button>
+        <CardFooter className={styles.groupFooter}>
+          <Button className={styles.loadMore} disabled={pagination.isPending} onClick={loadMore} type="button" variant="outline">
+            {pagination.isPending ? "Loading…" : `Load more ${view.label.toLowerCase()}`}
+          </Button>
+        </CardFooter>
       ) : group.status === "available" && group.truncated ? (
-        <p className={styles.truncatedNote}>This source reached its safety bound. Refine the query to narrow the result.</p>
+        <CardFooter className={styles.truncatedNote}>This source reached its safety bound. Refine the query to narrow the result.</CardFooter>
       ) : null}
-    </Panel>
+    </Card>
   );
 }
 
@@ -241,43 +279,70 @@ function SearchWorkbench({ scope }: { scope: "project" | "code" }) {
   ] : [];
 
   return (
-    <>
-      <form className={styles.searchForm} role="search" onSubmit={submit}>
-        <Search aria-hidden="true" />
-        <label className={styles.srOnly} htmlFor={`${scope}-search`}>{scope === "project" ? "Search project memory and code" : "Search code symbols and source"}</label>
-        <input autoComplete="off" id={`${scope}-search`} maxLength={256} onChange={(event) => setDraft(event.target.value)} placeholder={scope === "project" ? "Search knowledge, symbols, or source…" : "Search symbols, signatures, paths, or source…"} type="search" value={draft} />
-        <span className={styles.queryCount}>{draft.length}/256</span>
-        {draft ? <button aria-label="Clear search" className={styles.iconButton} onClick={clear} type="button"><X /></button> : null}
-        <button className={styles.primaryButton} disabled={!draft.trim()} type="submit">Search</button>
-      </form>
+    <div className={styles.searchWorkbench} data-scope={scope}>
+      <Card className={styles.searchCommand} size="sm">
+        <CardContent className={styles.searchCommandContent}>
+          <form className={styles.searchForm} role="search" onSubmit={submit}>
+            <InputGroup className={styles.searchInputGroup}>
+              <InputGroupAddon className={styles.searchIcon}>
+                <Search aria-hidden="true" />
+              </InputGroupAddon>
+              <label className={styles.srOnly} htmlFor={`${scope}-search`}>{scope === "project" ? "Search project memory and code" : "Search code symbols and source"}</label>
+              <InputGroupInput autoComplete="off" id={`${scope}-search`} maxLength={256} onChange={(event) => setDraft(event.target.value)} placeholder={scope === "project" ? "Search knowledge, symbols, or source" : "Search symbols, signatures, paths, or source"} type="search" value={draft} />
+              <InputGroupAddon align="inline-end" className={styles.searchInputActions}>
+                <InputGroupText className={styles.queryCount}>{draft.length}/256</InputGroupText>
+                {draft ? <InputGroupButton aria-label="Clear search" onClick={clear} size="icon-xs" type="button" variant="ghost"><X aria-hidden="true" /></InputGroupButton> : null}
+                <InputGroupButton className={styles.primaryButton} disabled={!draft.trim()} size="sm" type="submit" variant="default">Search</InputGroupButton>
+              </InputGroupAddon>
+            </InputGroup>
+          </form>
+        </CardContent>
+      </Card>
 
       {!query ? (
-        <div className={`${styles.searchWelcome} ${scope === "code" ? styles.codeSearchWelcome : ""}`}>
-          <span>{scope === "code" ? <Braces aria-hidden="true" /> : <Search aria-hidden="true" />}</span>
-          <h2>{scope === "code" ? "Find the exact symbol behind the change" : "One query, clearly separated sources"}</h2>
-          <p>{scope === "code" ? "Search the local graph by symbol, signature, repository path, or source term. Open a symbol to inspect its bounded source and semantic relationships." : "Enter a file, symbol, decision, topic, or exact phrase. Unavailable sources will be identified instead of silently omitted."}</p>
-          <div>{scope === "project" ? <span>Knowledge</span> : null}<span>Code symbols</span><span>Source matches</span></div>
-        </div>
+        <Card className={styles.searchWelcome} size="sm">
+          <CardContent className={styles.searchWelcomeContent}>
+            <Empty className={styles.searchEmpty}>
+              <EmptyMedia className={styles.welcomeIcon} variant="icon">
+                {scope === "code" ? <Braces aria-hidden="true" /> : <Search aria-hidden="true" />}
+              </EmptyMedia>
+              <EmptyHeader>
+                <EmptyTitle role="heading" aria-level={2}>
+                  {scope === "code" ? "Search symbols and source" : "Search project memory and code"}
+                </EmptyTitle>
+              </EmptyHeader>
+              <EmptyContent className={styles.scopeBadges}>
+                {scope === "project" ? <Badge variant="outline">Knowledge</Badge> : null}
+                <Badge variant="outline">Code symbols</Badge>
+                <Badge variant="outline">Source matches</Badge>
+              </EmptyContent>
+            </Empty>
+          </CardContent>
+        </Card>
       ) : search.isPending ? (
         <StatePanel state="loading" title={`Searching for “${query}”`} detail="Available local sources are being queried independently." />
       ) : search.isError ? (
         <ErrorState error={search.error} retry={() => void search.refetch()} />
       ) : (
         <>
-          <div className={styles.resultsSummary} aria-live="polite" ref={summaryRef} tabIndex={-1}><span>Results for</span><strong>“{search.data.query}”</strong><span>{groups.length} independent source groups</span></div>
+          <div className={styles.resultsSummary} aria-live="polite" ref={summaryRef} tabIndex={-1}>
+            <span>Results for</span>
+            <strong>“{search.data.query}”</strong>
+            <Badge variant="outline">{groups.length} sources</Badge>
+          </div>
           <div className={`${styles.searchGrid} ${scope === "code" ? styles.codeSearchGrid : ""}`}>
             {groups.map((view) => <ResultGroup key={`${query}-${view.kind}`} onReload={() => void search.refetch()} query={query} view={view} />)}
           </div>
         </>
       )}
-    </>
+    </div>
   );
 }
 
 export function SearchPage() {
   return (
     <div className={styles.page}>
-      <PageHeader eyebrow="Grouped retrieval" title="Search the project" description="Query each available source independently. Results stay grouped so scores from different indexes are never presented as directly comparable." />
+      <PageHeader title="Search" />
       <SearchWorkbench scope="project" />
     </div>
   );
@@ -288,7 +353,7 @@ export function CodePage() {
   const unavailable = capabilities?.graph.read.availability === "unavailable";
   return (
     <div className={styles.page}>
-      <PageHeader eyebrow="Repository observatory" title="Explore the code graph" description="Inspect exact indexed source and bounded semantic relationships. This workbench never refreshes or rebuilds the graph during a read." />
+      <PageHeader title="Code" />
       {!capabilities ? (
         <StatePanel state="loading" title="Checking graph availability" detail="Reading the process-local capability boundary before querying the graph." />
       ) : unavailable ? (

@@ -1,81 +1,76 @@
 import type { LucideIcon } from "lucide-react";
 import {
+  ArrowLeft,
   BookOpenText,
-  Boxes,
   Code2,
   FileCheck2,
   GitPullRequestArrow,
   Inbox,
   ListChecks,
-  LockKeyhole,
   Send,
   Workflow,
 } from "lucide-react";
-import { useOutletContext } from "react-router-dom";
+import { Link, useLocation, useOutletContext } from "react-router-dom";
 import type { CapabilitiesResponse, CapabilityName, CapabilityStatus } from "../api/types";
-import { PageHeader, Panel, StatusPill } from "../components/ui";
-import styles from "../styles/hub.module.css";
+import { PageHeader } from "../components/ui";
+import { Badge } from "../components/primitives/badge";
+import { buttonVariants } from "../components/primitives/button";
+import { Card, CardContent } from "../components/primitives/card";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../components/primitives/empty";
+import { cn } from "../lib/utils";
+import capabilityStyles from "../styles/capability.module.css";
+import notFoundStyles from "../styles/not-found.module.css";
 
 interface CapabilityPageDefinition {
   title: string;
-  eyebrow: string;
-  description: string;
   capability: CapabilityName;
   icon: LucideIcon;
-  availableCopy: string;
+  connectedCopy: string;
   unavailableCopy: string;
-  sections: Array<{ title: string; detail: string }>;
 }
 
 export const capabilityPages: Record<string, CapabilityPageDefinition> = {
   knowledge: {
-    title: "Knowledge", eyebrow: "Project memory", capability: "wiki", icon: BookOpenText,
-    description: "Browse durable topics, relationships, provenance, and grounding state.",
-    availableCopy: "The Wiki capability is connected. Browsing tools arrive with the read-only integration lane.",
-    unavailableCopy: "The Wiki capability is not connected in this build.",
-    sections: [{ title: "Topics & relationships", detail: "Structured entities and typed connections." }, { title: "Grounding", detail: "Evidence, backlinks, and health without inferred coverage." }],
+    title: "Knowledge", capability: "wiki", icon: BookOpenText,
+    connectedCopy: "Knowledge browsing is unavailable.",
+    unavailableCopy: "Knowledge is unavailable.",
   },
   code: {
-    title: "Code", eyebrow: "Semantic graph", capability: "graph", icon: Code2,
-    description: "Inspect symbols, sources, callers, callees, and impact from the existing graph.",
-    availableCopy: "The Graph capability is connected. Read-only exploration arrives after freshness integration.",
-    unavailableCopy: "The Graph capability is not available; no placeholder symbols are shown.",
-    sections: [{ title: "Symbols & sources", detail: "Grounded definitions and repository paths." }, { title: "Relationships", detail: "Callers, callees, imports, and impact paths." }],
+    title: "Code", capability: "graph", icon: Code2,
+    connectedCopy: "Code browsing is unavailable.",
+    unavailableCopy: "Code is unavailable.",
   },
   workstreams: {
-    title: "Workstreams", eyebrow: "Coordinated work", capability: "wiki", icon: Workflow,
-    description: "A durable project view for goals, ownership, blockers, and next milestones.",
-    availableCopy: "Wiki storage is connected; Workstream lifecycle actions are intentionally not part of this foundation.",
-    unavailableCopy: "Workstreams require the future Wiki integration.",
-    sections: [{ title: "Current state", detail: "Explicit status, scope, blockers, and milestone." }, { title: "Connections", detail: "Specs, decisions, relays, code, and owners." }],
+    title: "Workstreams", capability: "wiki", icon: Workflow,
+    connectedCopy: "Workstreams are unavailable.",
+    unavailableCopy: "Workstreams are unavailable.",
   },
   specs: {
-    title: "Specs", eyebrow: "Delivery intent", capability: "wiki", icon: FileCheck2,
-    description: "Trace requirements and acceptance criteria to explicit implementation evidence.",
-    availableCopy: "Wiki storage is connected; Spec editing is reserved for the SDD checkpoint.",
-    unavailableCopy: "Specs require the future Wiki integration.",
-    sections: [{ title: "Requirements", detail: "Hierarchy and lifecycle with deliberate deferrals." }, { title: "Traceability", detail: "Explicit links from intent to code and verification." }],
+    title: "Specs", capability: "wiki", icon: FileCheck2,
+    connectedCopy: "Specs are unavailable.",
+    unavailableCopy: "Specs are unavailable.",
   },
   playbooks: {
-    title: "Playbooks", eyebrow: "Repeatable practice", capability: "wiki", icon: ListChecks,
-    description: "Keep team-owned procedures grounded in durable project evidence.",
-    availableCopy: "Wiki storage is connected; Playbook execution is not shipped in this foundation.",
-    unavailableCopy: "Playbooks require the future Wiki integration.",
-    sections: [{ title: "Procedures", detail: "Triggers, prerequisites, owners, and ordered steps." }, { title: "Runs", detail: "Explicit status and evidence from human-launched execution." }],
+    title: "Playbooks", capability: "wiki", icon: ListChecks,
+    connectedCopy: "Playbooks are unavailable.",
+    unavailableCopy: "Playbooks are unavailable.",
   },
   inbox: {
-    title: "Inbox", eyebrow: "Proposed memory", capability: "team", icon: Inbox,
-    description: "Review structured knowledge proposals before anything becomes durable project memory.",
-    availableCopy: "Team identity is available; proposal workflows arrive in the human-team checkpoint.",
-    unavailableCopy: "Inbox proposals are not available in this foundation.",
-    sections: [{ title: "Local drafts", detail: "Private proposals that never enter Git until Publish." }, { title: "Review queue", detail: "Exact previews, revisions, and explicit outcomes." }],
+    title: "Inbox", capability: "team", icon: Inbox,
+    connectedCopy: "Inbox is unavailable.",
+    unavailableCopy: "Inbox is unavailable.",
   },
   relays: {
-    title: "Relays", eyebrow: "Team handoff", capability: "team", icon: Send,
-    description: "Publish concise, evidence-backed handoffs tied to active work.",
-    availableCopy: "Team identity is available; Relay publish and acknowledgement are not shipped yet.",
-    unavailableCopy: "Relays are not available in this foundation.",
-    sections: [{ title: "Outgoing", detail: "Completed work, blockers, decisions, and next actions." }, { title: "For you", detail: "Published handoffs with explicit acknowledgement." }],
+    title: "Relays", capability: "team", icon: Send,
+    connectedCopy: "Relays are unavailable.",
+    unavailableCopy: "Relays are unavailable.",
   },
 };
 
@@ -92,49 +87,87 @@ export function CapabilityPage({ page }: { page: keyof typeof capabilityPages })
   const definition = capabilityPages[page];
   const { capabilities } = useOutletContext<{ capabilities?: CapabilitiesResponse }>();
   const capability = capabilityStatus(capabilities, definition.capability);
-  const available = capability?.availability === "available";
+  const checking = capabilities === undefined;
+  const dependencyAvailable = !checking && capability?.availability === "available";
+  const state = checking ? "checking" : dependencyAvailable ? "connected" : "unavailable";
+  const stateLabel = checking ? "Checking" : dependencyAvailable ? "Dependency connected" : "Unavailable";
+  const boundaryTitle = checking
+    ? `Checking ${definition.title.toLowerCase()} availability`
+    : dependencyAvailable
+      ? definition.connectedCopy
+      : definition.unavailableCopy;
+  const boundaryReason = checking
+    ? "Checking the local capability manifest."
+    : dependencyAvailable
+      ? "This surface is not mounted."
+      : definition.capability === "wiki"
+        ? "Wiki is not connected."
+        : definition.capability === "team"
+          ? "Team features are not connected."
+          : "The code graph is not connected.";
   const Icon = definition.icon;
+
   return (
-    <div className={styles.page}>
+    <div className={capabilityStyles.page}>
       <PageHeader
-        eyebrow={definition.eyebrow}
         title={definition.title}
-        description={definition.description}
-        actions={<StatusPill tone={available ? "success" : "warning"}>{available ? "Foundation ready" : "Unavailable"}</StatusPill>}
+        actions={(
+          <Badge className={capabilityStyles.headerStatus} data-state={state} role="status" variant="outline">
+            <span className={capabilityStyles.statusDot} aria-hidden="true" />
+            {stateLabel}
+          </Badge>
+        )}
       />
-      <Panel className={styles.capabilityHero}>
-        <span className={styles.capabilityIcon}><Icon aria-hidden="true" /></span>
-        <div>
-          <p className={styles.panelEyebrow}>{available ? "Capability detected" : "Honest boundary"}</p>
-          <h2>{available ? definition.availableCopy : definition.unavailableCopy}</h2>
-          <p>{capability?.reason ?? "This route is present now so future behavior has a stable home. It does not create or display fixture records."}</p>
-        </div>
-        <span className={styles.lockBadge}><LockKeyhole aria-hidden="true" /> Read only</span>
-      </Panel>
-      <div className={styles.capabilityGrid}>
-        {definition.sections.map((section, index) => (
-          <Panel className={styles.capabilitySection} key={section.title}>
-            <span className={styles.sectionNumber}>0{index + 1}</span>
-            <Boxes aria-hidden="true" />
-            <h2>{section.title}</h2>
-            <p>{section.detail}</p>
-            <span>Not yet interactive</span>
-          </Panel>
-        ))}
-      </div>
+
+      <Card className={capabilityStyles.boundaryCard} size="sm" aria-labelledby="capability-boundary-title">
+        <CardContent className={capabilityStyles.boundaryContent}>
+          <Empty className={capabilityStyles.boundaryEmpty}>
+            <EmptyMedia className={capabilityStyles.capabilityIcon} data-state={state} variant="icon">
+              <Icon aria-hidden="true" />
+            </EmptyMedia>
+            <EmptyHeader className={capabilityStyles.boundaryHeader}>
+              <EmptyTitle id="capability-boundary-title" role="heading" aria-level={2}>{boundaryTitle}</EmptyTitle>
+              <EmptyDescription>{boundaryReason}</EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent className={capabilityStyles.boundaryMeta}>
+              <Badge variant="outline"><code>{definition.capability}</code></Badge>
+              <Badge variant="outline">Read only</Badge>
+              <Badge variant="outline">No data requested</Badge>
+            </EmptyContent>
+          </Empty>
+        </CardContent>
+      </Card>
     </div>
   );
 }
 
 export function NotFoundPage() {
+  const location = useLocation();
+  const requestedPath = location.pathname || "/";
+
   return (
-    <div className={styles.notFound}>
-      <span className={styles.notFoundCode}>404</span>
-      <GitPullRequestArrow aria-hidden="true" />
-      <p className={styles.eyebrow}>Route not found</p>
-      <h1>This path is outside the workbench.</h1>
-      <p>The local Hub has no view at this address. Return to the project overview to keep working.</p>
-      <a className={styles.primaryButton} href="/">Return home</a>
+    <div className={notFoundStyles.page}>
+      <Card className={notFoundStyles.resolutionCard} size="sm">
+        <CardContent className={notFoundStyles.resolutionContent}>
+          <Empty className={notFoundStyles.resolution}>
+            <EmptyMedia className={notFoundStyles.routeIcon} variant="icon">
+              <GitPullRequestArrow aria-hidden="true" />
+            </EmptyMedia>
+            <Badge className={notFoundStyles.code} variant="outline">404</Badge>
+            <EmptyHeader className={notFoundStyles.resolutionHeader}>
+              <EmptyTitle id="route-resolution-title" role="heading" aria-level={1}>Page not found</EmptyTitle>
+              <EmptyDescription>No route matches this address.</EmptyDescription>
+            </EmptyHeader>
+            <code className={notFoundStyles.requestPath}>{requestedPath}</code>
+            <EmptyContent>
+              <Link className={cn(buttonVariants({ size: "sm" }), notFoundStyles.returnLink)} to="/">
+                <ArrowLeft aria-hidden="true" data-icon="inline-start" />
+                Return home
+              </Link>
+            </EmptyContent>
+          </Empty>
+        </CardContent>
+      </Card>
     </div>
   );
 }

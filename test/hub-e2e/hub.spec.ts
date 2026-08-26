@@ -33,7 +33,7 @@ test.describe("populated development fixture", () => {
   test("renders the deterministic Home workbench", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     await page.goto("/?fixture=populated");
-    await expect(page.getByRole("heading", { name: "Good context starts here." })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     await expect(page.getByLabel("Repository context").getByText("feat/project-hub-foundation", { exact: true })).toBeVisible();
     await expect(page.getByText("The code graph is behind this branch", { exact: true })).toBeVisible();
     await expectAccessible(page);
@@ -44,7 +44,7 @@ test.describe("populated development fixture", () => {
   test("keeps real Graph search groups separate while Wiki is unavailable", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     await page.goto("/search?fixture=populated&q=hub");
-    await expect(page.getByRole("heading", { name: "Search the project" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Search" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Knowledge", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Knowledge unavailable" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Code symbols" })).toBeVisible();
@@ -66,8 +66,8 @@ test.describe("populated development fixture", () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/code?fixture=populated");
 
-    await expect(page.getByRole("heading", { name: "Explore the code graph" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Find the exact symbol behind the change" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Code" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Search symbols and source" })).toBeVisible();
     await page.getByRole("searchbox", { name: "Search code symbols and source" }).fill("hub");
     await page.getByRole("button", { name: "Search", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Code symbols" })).toBeVisible();
@@ -307,7 +307,7 @@ test.describe("populated development fixture", () => {
 
     const routes = [
       ["Knowledge", "Knowledge"],
-      ["Code", "Explore the code graph"],
+      ["Code", "Code"],
       ["Workstreams", "Workstreams"],
       ["Specs", "Specs"],
       ["Playbooks", "Playbooks"],
@@ -335,7 +335,7 @@ test.describe("populated development fixture", () => {
     test(`fits the complete desktop workbench at exactly ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await page.goto("/?fixture=populated");
-      await expect(page.getByRole("heading", { name: "Good context starts here." })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
 
       const sidebar = await page.locator('aside[aria-label="Project Hub navigation"]').boundingBox();
       expect(sidebar?.width).toBe(232);
@@ -382,7 +382,7 @@ test.describe("populated development fixture", () => {
       if (host !== "127.0.0.1") external.push(request.url());
     });
     await page.goto("/?fixture=populated");
-    await expect(page.getByRole("heading", { name: "Good context starts here." })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     await page.goto("/activity?fixture=populated");
     await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
     await page.goto("/code?fixture=populated&q=hub");
@@ -432,7 +432,7 @@ test.describe("built production Hub", () => {
   test("bootstraps once, cleans the fragment, and never exposes fixture content", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     const response = await page.goto(bootstrapUrl);
-    await expect(page.getByRole("heading", { name: "Good context starts here." })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     await expect.poll(() => page.url()).not.toContain("#token=");
     await expect(page.getByRole("link", { name: "Knowledge Unavailable" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Code", exact: true })).toBeVisible();
@@ -443,8 +443,8 @@ test.describe("built production Hub", () => {
     await expect(page.getByRole("link", { name: "Knowledge Unavailable" })).toBeVisible();
 
     await page.goto(`${new URL(bootstrapUrl).origin}/code?fixture=populated`);
-    await expect(page.getByRole("heading", { name: "Explore the code graph" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Find the exact symbol behind the change" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Code" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Search symbols and source" })).toBeVisible();
     await expect(page.getByText("createHubServer", { exact: true })).toHaveCount(0);
 
     await page.goto(`${new URL(bootstrapUrl).origin}/activity?fixture=populated`);

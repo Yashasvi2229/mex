@@ -1,12 +1,16 @@
 import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Braces, Circle, GitBranch, GitCommitHorizontal, Menu, ShieldCheck, X } from "lucide-react";
+import { Circle, FolderGit2, GitBranch, GitCommitHorizontal, Menu, ShieldCheck, X } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import type { CapabilitiesResponse, HomeResponse, SessionResponse } from "../api/types";
 import { useHubApi } from "../api/context";
 import { navigation } from "./navigation";
 import { formatTime, StatusPill } from "../components/ui";
-import styles from "../styles/hub.module.css";
+import { Badge } from "../components/primitives/badge";
+import { Kbd } from "../components/primitives/kbd";
+import { Separator } from "../components/primitives/separator";
+import styles from "../styles/shell.module.css";
+import mexMascot from "../../../../mascot/mex-mascot.svg";
 
 function capabilityAvailable(
   capabilities: CapabilitiesResponse | undefined,
@@ -24,12 +28,16 @@ function Sidebar({ capabilities }: { capabilities?: CapabilitiesResponse }) {
   return (
     <aside className={styles.sidebar} aria-label="Project Hub navigation">
       <div className={styles.brand}>
-        <span className={styles.brandMark} aria-hidden="true"><Braces /></span>
-        <span>
-          <strong>MEX</strong>
-          <small>Project Hub</small>
+        <span className={styles.brandMark} aria-hidden="true">
+          <img alt="" height="32" src={mexMascot} width="32" />
         </span>
+        <span className={styles.brandWordmark}>
+          <strong>MEX</strong>
+          <small>Hub</small>
+        </span>
+        <Badge className={styles.brandContext} variant="outline">Local</Badge>
       </div>
+      <Separator className={styles.sidebarSeparator} />
       <nav className={styles.nav} aria-label="Primary">
         {navigation.map((group) => (
           <div className={styles.navGroup} key={group.label}>
@@ -45,7 +53,7 @@ function Sidebar({ capabilities }: { capabilities?: CapabilitiesResponse }) {
                 >
                   <item.icon aria-hidden="true" />
                   <span>{item.label}</span>
-                  {available === false ? <Circle aria-label="Unavailable" className={styles.navUnavailable} /> : null}
+                  {available === false ? <Circle aria-label="Unavailable" className={styles.navUnavailable} /> : item.path === "/search" ? <Kbd aria-hidden="true">/</Kbd> : null}
                 </NavLink>
               );
             })}
@@ -54,7 +62,7 @@ function Sidebar({ capabilities }: { capabilities?: CapabilitiesResponse }) {
       </nav>
       <div className={styles.localOnly}>
         <ShieldCheck aria-hidden="true" />
-        <span><strong>Loopback only</strong><small>No remote connection</small></span>
+        <span><strong>Local only</strong><small>127.0.0.1</small></span>
       </div>
     </aside>
   );
@@ -65,11 +73,8 @@ function RepositoryBar({ repository, session }: { repository?: HomeResponse["rep
   return (
     <header className={styles.contextBar} aria-label="Repository context">
       <div className={styles.repoIdentity}>
-        <span className={styles.repoGlyph} aria-hidden="true"><Menu /></span>
-        <span>
-          <small>Repository</small>
-          <strong>{context?.name ?? "Current project"}</strong>
-        </span>
+        <span className={styles.repoGlyph} aria-hidden="true"><FolderGit2 /></span>
+        <span><strong>{context?.name ?? "Current project"}</strong></span>
       </div>
       <div className={styles.repoFacts}>
         {context?.branch ? (
@@ -85,8 +90,7 @@ function RepositoryBar({ repository, session }: { repository?: HomeResponse["rep
         ) : null}
       </div>
       <div className={styles.sessionMeta}>
-        <span className={styles.sessionDot} aria-hidden="true" />
-        <span><strong>Local session</strong><small>Expires {formatTime(session.expiresAt)}</small></span>
+        <span><small>Session</small><strong>{formatTime(session.expiresAt)}</strong></span>
       </div>
     </header>
   );

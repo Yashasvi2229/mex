@@ -327,7 +327,7 @@ describe("Search states", () => {
       return pending<SearchResponse>();
     } }));
 
-    expect(await screen.findByRole("heading", { name: "One query, clearly separated sources" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Search project memory and code" })).toBeVisible();
     expect(calls).toBe(0);
   });
 

@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
-import { AlertTriangle, DatabaseZap, X } from "lucide-react";
-import styles from "../styles/hub.module.css";
+import { AlertTriangle, DatabaseZap, LoaderCircle, ShieldCheck, X } from "lucide-react";
+import { Badge } from "./primitives/badge";
+import { Button } from "./primitives/button";
+import { Card, CardAction, CardContent, CardFooter, CardHeader, CardTitle } from "./primitives/card";
+import styles from "../styles/rebuild-confirmation.module.css";
 
 export function RebuildConfirmation({
   open,
@@ -18,24 +21,40 @@ export function RebuildConfirmation({
 
   useEffect(() => {
     if (!open) return undefined;
-    confirmRef.current?.focus({ preventScroll: true });
+    if (pending) dialogRef.current?.focus({ preventScroll: true });
+    else confirmRef.current?.focus({ preventScroll: true });
+
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !pending) onCancel();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (!pending) onCancel();
+        return;
+      }
       if (event.key !== "Tab") return;
+
       const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
         "button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex='-1'])",
       ) ?? []);
-      if (!focusable.length) return;
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogRef.current?.focus({ preventScroll: true });
+        return;
+      }
+
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
+      if (!dialogRef.current?.contains(document.activeElement)) {
         event.preventDefault();
-        last.focus();
+        (event.shiftKey ? last : first).focus({ preventScroll: true });
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus({ preventScroll: true });
       } else if (!event.shiftKey && document.activeElement === last) {
         event.preventDefault();
-        first.focus();
+        first.focus({ preventScroll: true });
       }
     };
+
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onCancel, open, pending]);
@@ -43,39 +62,78 @@ export function RebuildConfirmation({
   if (!open) return null;
 
   return (
-    <div className={styles.dialogBackdrop} role="presentation">
+    <div className={styles.backdrop} role="presentation">
       <section
         aria-describedby="graph-rebuild-description"
         aria-labelledby="graph-rebuild-title"
         aria-modal="true"
-        className={styles.confirmDialog}
+        className={styles.dialog}
+        data-pending={pending ? "true" : "false"}
         ref={dialogRef}
         role="dialog"
+        tabIndex={-1}
       >
-        <div className={styles.confirmDialogHeader}>
-          <span aria-hidden="true"><DatabaseZap /></span>
-          <div>
-            <p className={styles.panelEyebrow}>Explicit graph operation</p>
-            <h2 id="graph-rebuild-title">Rebuild the code graph?</h2>
-          </div>
-          <button aria-label="Close rebuild confirmation" className={styles.iconButton} disabled={pending} onClick={onCancel} type="button"><X /></button>
-        </div>
-        <div className={styles.confirmDialogBody}>
-          <AlertTriangle aria-hidden="true" />
-          <p id="graph-rebuild-description">
-            This replaces the derived graph from repository sources. It never stages or commits files, but it can take longer than an incremental refresh.
-          </p>
-        </div>
-        <div className={styles.confirmDialogFacts}>
-          <span><strong>Previous index</strong> remains trusted until publish</span>
-          <span><strong>Repository</strong> stays read-only</span>
-        </div>
-        <div className={styles.confirmDialogActions}>
-          <button className={styles.secondaryButton} disabled={pending} onClick={onCancel} type="button">Keep current graph</button>
-          <button className={styles.dangerButton} disabled={pending} onClick={onConfirm} ref={confirmRef} type="button">
-            {pending ? "Starting rebuild…" : "Start graph rebuild"}
-          </button>
-        </div>
+        <Card className={styles.dialogCard}>
+          <CardHeader className={styles.header}>
+            <span className={styles.commandIcon} aria-hidden="true"><DatabaseZap /></span>
+            <CardTitle className={styles.heading}>
+              <h2 id="graph-rebuild-title">Rebuild the code graph?</h2>
+            </CardTitle>
+            <CardAction className={styles.headerAction}>
+              <Button
+                aria-label="Close rebuild confirmation"
+                className={styles.closeButton}
+                disabled={pending}
+                onClick={onCancel}
+                size="icon-sm"
+                type="button"
+                variant="ghost"
+              >
+                <X aria-hidden="true" />
+              </Button>
+            </CardAction>
+          </CardHeader>
+
+          <CardContent className={styles.content}>
+            <div className={styles.commandLine} aria-hidden="true">
+              <code>graph_rebuild</code>
+              <Badge className={styles.commandPolicy} variant="outline">confirmation required</Badge>
+            </div>
+
+            <div className={styles.body}>
+              <div className={styles.warning}>
+                <AlertTriangle aria-hidden="true" />
+                <p id="graph-rebuild-description">
+                  This replaces the derived graph from repository sources. It never stages or commits files, but it can take longer than an incremental refresh.
+                </p>
+              </div>
+
+              <dl className={styles.facts}>
+                <div>
+                  <dt><ShieldCheck aria-hidden="true" /> Previous index</dt>
+                  <dd>remains trusted until publish</dd>
+                </div>
+                <div>
+                  <dt><ShieldCheck aria-hidden="true" /> Repository</dt>
+                  <dd>stays read-only</dd>
+                </div>
+              </dl>
+            </div>
+          </CardContent>
+
+          <CardFooter className={styles.actions}>
+            <span className={styles.pendingNote} aria-live="polite">
+              {pending ? "Preparing the persisted graph job…" : "Nothing starts until you confirm."}
+            </span>
+            <Button className={styles.cancelButton} disabled={pending} onClick={onCancel} type="button" variant="outline">
+              Keep current graph
+            </Button>
+            <Button className={styles.confirmButton} disabled={pending} onClick={onConfirm} ref={confirmRef} type="button">
+              {pending ? <LoaderCircle aria-hidden="true" className={styles.spinner} data-icon="inline-start" /> : null}
+              {pending ? "Starting rebuild…" : "Start graph rebuild"}
+            </Button>
+          </CardFooter>
+        </Card>
       </section>
     </div>
   );

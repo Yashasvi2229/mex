@@ -2,6 +2,7 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { HubApiError, type HubApi } from "../api/client";
 import { HubApiProvider, useCapabilities, useSession } from "../api/context";
 import { StatePanel } from "../components/ui";
+import { Button } from "../components/primitives/button";
 import { CapabilityPage, NotFoundPage } from "../pages/CapabilityPage";
 import { ActivityPage } from "../pages/ActivityPage";
 import { HealthPage } from "../pages/HealthPage";
@@ -53,13 +54,15 @@ function SessionBoundary() {
           title="Project capabilities could not be loaded"
           detail="The Hub could not safely verify which local workbenches are available. Try the check again before continuing."
           action={(
-            <button
+            <Button
               className={styles.secondaryButton}
+              size="sm"
               type="button"
+              variant="outline"
               onClick={() => void capabilities.refetch()}
             >
               Try again
-            </button>
+            </Button>
           )}
         />
       </div>

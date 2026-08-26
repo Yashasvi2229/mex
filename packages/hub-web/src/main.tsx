@@ -1,4 +1,3 @@
-import "@fontsource-variable/instrument-sans/wght.css";
 import "@fontsource/ibm-plex-mono/latin-400.css";
 import "@fontsource/ibm-plex-mono/latin-500.css";
 import "@fontsource/ibm-plex-mono/latin-600.css";
@@ -7,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserHubApplication } from "./app/App";
 import { clearBootstrapFragment, readBootstrapToken, resolveApi } from "./api/client";
+import { TooltipProvider } from "./components/primitives/tooltip";
 import "./styles/global.css";
 
 const api = await resolveApi();
@@ -36,7 +36,9 @@ const queryClient = new QueryClient({
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <BrowserHubApplication api={api} startupError={startupError} />
+      <TooltipProvider delay={320}>
+        <BrowserHubApplication api={api} startupError={startupError} />
+      </TooltipProvider>
     </QueryClientProvider>
   </StrictMode>,
 );

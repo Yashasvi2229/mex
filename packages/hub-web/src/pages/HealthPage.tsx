@@ -1,11 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { CheckCircle2, CircleDashed, Database, FileWarning, GitCompare, RefreshCw } from "lucide-react";
 import { Link, useNavigate, useOutletContext } from "react-router-dom";
 import { useHubApi } from "../api/context";
 import type { CapabilitiesResponse, GraphHealthDetails, HealthResponse, JobKind } from "../api/types";
 import { RebuildConfirmation } from "../components/RebuildConfirmation";
-import { ErrorState, formatDate, PageHeader, Panel, StatePanel, StatusPill, stateTone, sentenceCase } from "../components/ui";
+import { Button, buttonVariants } from "../components/primitives/button";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "../components/primitives/card";
+import {
+  Item,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemHeader,
+  ItemMedia,
+  ItemTitle,
+} from "../components/primitives/item";
+import { ErrorState, formatDate, PageHeader, StatePanel, StatusPill, stateTone, sentenceCase } from "../components/ui";
+import { cn } from "../lib/utils";
+import healthStyles from "../styles/health.module.css";
 import styles from "../styles/hub.module.css";
 
 type HealthComponent = HealthResponse["components"][number];
@@ -28,60 +48,19 @@ function shortHead(value: string | null): string {
   return value ? value.slice(0, 10) : "Not indexed";
 }
 
-function GraphHealthReadout({ graph }: { graph: GraphHealthDetails }) {
-  const allChanges = [...graph.changes.added, ...graph.changes.modified, ...graph.changes.deleted];
-  const visibleChanges = allChanges.slice(0, 5);
-  const additionalChangeCount = allChanges.length - visibleChanges.length;
-  const changedSignals = [
-    graph.changes.branchChanged ? "Branch changed" : null,
-    graph.changes.manifestChanged ? "Manifest changed" : null,
-    graph.changes.configChanged ? "Config changed" : null,
-    graph.changes.grammarChanged ? "Grammar changed" : null,
-  ].filter((value): value is string => value !== null);
+function Diagnostics({ diagnostics }: { diagnostics: HealthComponent["diagnostics"] }) {
+  if (!diagnostics.length) return null;
+
   return (
-    <div className={styles.graphHealthReadout}>
-      <div className={styles.graphIndexBanner}>
-        <span><small>Graph index status</small><strong>{sentenceCase(graph.indexStatus)}</strong></span>
-        <StatusPill tone={stateTone(graph.indexStatus)}>{graph.recommendedJobKind ? `${sentenceCase(graph.recommendedJobKind)} recommended` : "No repair recommended"}</StatusPill>
-      </div>
-      <div className={styles.graphSnapshotCompare}>
-        <div><small>Indexed snapshot</small><strong>{graph.indexedBranch ?? "Detached / unavailable"}</strong><code>{shortHead(graph.indexedHead)}</code></div>
-        <GitCompare aria-hidden="true" />
-        <div><small>Current repository</small><strong>{graph.currentBranch ?? "Detached / unborn"}</strong><code>{shortHead(graph.currentHead)}</code></div>
-      </div>
-      <div className={styles.graphHealthMetrics}>
-        <span><small>Parse health</small><strong>{graph.parseHealth.ok}/{graph.parseHealth.total}</strong><em>{graph.parseHealth.failed} failed · {graph.parseHealth.partial} partial</em></span>
-        <span><small>Repository delta</small><strong>{graph.changes.total}</strong><em>{graph.changes.added.length} added · {graph.changes.modified.length} modified · {graph.changes.deleted.length} deleted</em></span>
-        <span><small>Last success</small><strong>{formatDate(graph.lastSuccessfulIndexAt)}</strong><em>Indexed {formatDate(graph.indexedAt)}</em></span>
-      </div>
-      <div className={styles.graphCompatibility}>
-        <span>Schema <code>{graph.schemaVersion ?? "—"}</code></span>
-        <span>Extractor <code>{graph.extractorVersion ?? "—"}</code></span>
-        <span>Grammar <code>{graph.grammarVersion ?? "—"}</code></span>
-      </div>
-      {changedSignals.length || visibleChanges.length ? (
-        <div className={styles.graphChangeEvidence}>
-          <FileWarning aria-hidden="true" />
-          <div>
-            {changedSignals.length ? <p>{changedSignals.join(" · ")}</p> : null}
-            {visibleChanges.length ? <ul>{visibleChanges.map((path) => <li className={styles.mono} key={path}>{path}</li>)}</ul> : null}
-            {additionalChangeCount ? <small>{additionalChangeCount} additional changed path{additionalChangeCount === 1 ? "" : "s"} omitted from this compact readout.</small> : null}
-            {graph.changes.truncated ? <small>Changed paths were shortened by the health response bound.</small> : null}
-          </div>
-        </div>
-      ) : null}
-      {graph.parseHealth.failedPaths.length ? (
-        <div className={styles.graphFailedPaths}>
-          <strong>Files with parse failures</strong>
-          <ul>{graph.parseHealth.failedPaths.map((path) => <li className={styles.mono} key={path}>{path}</li>)}</ul>
-          {graph.parseHealth.failedPathsTruncated ? <small>Additional failed paths were omitted.</small> : null}
-        </div>
-      ) : null}
-    </div>
+    <ul className={healthStyles.diagnosticList}>
+      {diagnostics.map((diagnostic, index) => (
+        <li key={`${diagnostic.code}-${index}`} data-severity={diagnostic.severity}>{diagnostic.message}</li>
+      ))}
+    </ul>
   );
 }
 
-function HealthRow({
+function ActionControls({
   component,
   onAction,
   actionPending,
@@ -94,37 +73,242 @@ function HealthRow({
 }) {
   const actions: JobKind[] = component.graph?.allowedJobKinds
     ?? (component.repairJobKind ? [component.repairJobKind] : []);
+
+  if (!component.graph?.activeJobId && !actions.length) return null;
+
   return (
-    <article className={styles.healthRow}>
-      <span className={styles.healthIcon} data-tone={stateTone(component.status)}><HealthIcon status={component.status} /></span>
-      <div className={styles.healthMain}>
-        <div className={styles.healthTitle}><h2>{component.label}</h2><StatusPill tone={stateTone(component.status)}>{sentenceCase(component.status)}</StatusPill></div>
-        <p>{component.summary}</p>
-        {component.diagnostics.length ? (
-          <ul className={styles.diagnosticList}>
-            {component.diagnostics.map((diagnostic, index) => <li key={`${diagnostic.code}-${index}`} data-severity={diagnostic.severity}>{diagnostic.message}</li>)}
-          </ul>
-        ) : null}
-        {component.graph ? <GraphHealthReadout graph={component.graph} /> : null}
+    <div className={healthStyles.actionControls}>
+      {component.graph?.activeJobId ? (
+        <Link className={cn(buttonVariants({ size: "sm", variant: "outline" }), healthStyles.activeJobLink)} to={`/jobs?job=${component.graph.activeJobId}`}>
+          View active job
+        </Link>
+      ) : null}
+      {actions.length ? (
+        <div className={healthStyles.actionButtons}>
+          {actions.map((kind) => {
+            const recommended = component.graph?.recommendedJobKind === kind;
+            const available = actionAvailable(kind);
+            return (
+              <Button
+                className={healthStyles.operationButton}
+                disabled={!available || actionPending}
+                key={kind}
+                onClick={() => onAction(kind)}
+                size="sm"
+                title={!available ? "This graph operation is unavailable in the current build" : undefined}
+                type="button"
+                variant={recommended && available ? "default" : "outline"}
+              >
+                <RefreshCw aria-hidden="true" className={actionPending ? healthStyles.spin : ""} data-icon="inline-start" />
+                {actionPending ? "Starting…" : kind === "graph_refresh" ? "Refresh graph" : kind === "graph_rebuild" ? "Rebuild graph" : sentenceCase(kind)}
+                {recommended && available ? <small>Recommended</small> : null}
+              </Button>
+            );
+          })}
+        </div>
+      ) : null}
+      {actions.some((kind) => !actionAvailable(kind)) ? (
+        <small className={healthStyles.actionReason}>
+          {component.graph?.activeJobId ? "New operations wait for the active job." : "Operation unavailable in this build."}
+        </small>
+      ) : null}
+    </div>
+  );
+}
+
+function GraphHealthReadout({ graph }: { graph: GraphHealthDetails }) {
+  const allChanges = [...graph.changes.added, ...graph.changes.modified, ...graph.changes.deleted];
+  const visibleChanges = allChanges.slice(0, 5);
+  const additionalChangeCount = allChanges.length - visibleChanges.length;
+  const changedSignals = [
+    graph.changes.branchChanged ? "Branch changed" : null,
+    graph.changes.manifestChanged ? "Manifest changed" : null,
+    graph.changes.configChanged ? "Config changed" : null,
+    graph.changes.grammarChanged ? "Grammar changed" : null,
+  ].filter((value): value is string => value !== null);
+  const parseTotal = graph.parseHealth.total;
+  const percent = (value: number) => parseTotal === 0 ? 0 : (value / parseTotal) * 100;
+  const parseStyle = {
+    "--parse-ok": `${percent(graph.parseHealth.ok)}%`,
+    "--parse-partial": `${percent(graph.parseHealth.partial)}%`,
+    "--parse-failed": `${percent(graph.parseHealth.failed)}%`,
+  } as CSSProperties;
+
+  return (
+    <div className={healthStyles.graphReadout}>
+      <div className={healthStyles.indexBanner}>
+        <span>
+          <small>Graph index status</small>
+          <strong>{sentenceCase(graph.indexStatus)}</strong>
+        </span>
+        <StatusPill tone={stateTone(graph.indexStatus)}>
+          {graph.recommendedJobKind ? `${sentenceCase(graph.recommendedJobKind)} recommended` : "No repair recommended"}
+        </StatusPill>
       </div>
-      <div className={styles.healthAside}>
-        {component.graph?.activeJobId ? <Link className={styles.inlineLink} to={`/jobs?job=${component.graph.activeJobId}`}>View active job</Link> : null}
-        {actions.map((kind) => (
-          <button
-            className={styles.secondaryButton}
-            disabled={!actionAvailable(kind) || actionPending}
-            key={kind}
-            onClick={() => onAction(kind)}
-            title={!actionAvailable(kind) ? "This graph operation is unavailable in the current build" : undefined}
-            type="button"
+
+      <div className={healthStyles.snapshotPair}>
+        <section className={healthStyles.snapshot} aria-labelledby="indexed-snapshot-heading">
+          <small id="indexed-snapshot-heading">Indexed snapshot</small>
+          <strong>{graph.indexedBranch ?? "Detached / unavailable"}</strong>
+          <code>{shortHead(graph.indexedHead)}</code>
+        </section>
+        <span className={healthStyles.compareGlyph} aria-hidden="true"><GitCompare /></span>
+        <section className={healthStyles.snapshot} data-current="true" aria-labelledby="current-repository-heading">
+          <small id="current-repository-heading">Current repository</small>
+          <strong>{graph.currentBranch ?? "Detached / unborn"}</strong>
+          <code>{shortHead(graph.currentHead)}</code>
+        </section>
+      </div>
+
+      <div className={healthStyles.evidenceBand}>
+        <section className={healthStyles.parseEvidence} aria-labelledby="parse-health-heading">
+          <div className={healthStyles.metricTopline}>
+            <small id="parse-health-heading">Parse health</small>
+            <strong>{graph.parseHealth.ok}/{graph.parseHealth.total}</strong>
+          </div>
+          <div
+            aria-label={`${graph.parseHealth.ok} parsed successfully, ${graph.parseHealth.partial} partial, ${graph.parseHealth.failed} failed`}
+            className={healthStyles.parseComposition}
+            role="img"
+            style={parseStyle}
           >
-            <RefreshCw aria-hidden="true" className={actionPending ? styles.spin : ""} />
-            {actionPending ? "Starting…" : kind === "graph_refresh" ? "Refresh graph" : kind === "graph_rebuild" ? "Rebuild graph" : sentenceCase(kind)}
-            {component.graph?.recommendedJobKind === kind ? <small>Recommended</small> : null}
-          </button>
-        ))}
+            <span data-kind="ok" />
+            <span data-kind="partial" />
+            <span data-kind="failed" />
+          </div>
+          <div className={healthStyles.parseLegend}>
+            <span data-kind="ok">{graph.parseHealth.ok} complete</span>
+            <span data-kind="partial">{graph.parseHealth.partial} partial</span>
+            <span data-kind="failed">{graph.parseHealth.failed} failed</span>
+          </div>
+        </section>
+
+        <section className={`${healthStyles.evidenceMetric} ${healthStyles.repositoryDelta}`} aria-labelledby="repository-delta-heading">
+          <small id="repository-delta-heading">Repository delta</small>
+          <strong>{graph.changes.total}</strong>
+          <em>{graph.changes.added.length} added · {graph.changes.modified.length} modified · {graph.changes.deleted.length} deleted</em>
+        </section>
+
+        <section className={healthStyles.evidenceMetric} aria-labelledby="last-success-heading">
+          <small id="last-success-heading">Last success</small>
+          <strong>{formatDate(graph.lastSuccessfulIndexAt)}</strong>
+          <em>Indexed {formatDate(graph.indexedAt)}</em>
+        </section>
       </div>
-    </article>
+
+      <div className={healthStyles.compatibility} aria-label="Graph compatibility versions">
+        <span>Schema <code>{graph.schemaVersion ?? "—"}</code></span>
+        <span>Extractor <code>{graph.extractorVersion ?? "—"}</code></span>
+        <span>Grammar <code>{graph.grammarVersion ?? "—"}</code></span>
+      </div>
+
+      {changedSignals.length || visibleChanges.length ? (
+        <div className={healthStyles.changeEvidence}>
+          <FileWarning aria-hidden="true" />
+          <div>
+            {changedSignals.length ? <p>{changedSignals.join(" · ")}</p> : null}
+            {visibleChanges.length ? <ul>{visibleChanges.map((path) => <li className={healthStyles.mono} key={path}>{path}</li>)}</ul> : null}
+            {additionalChangeCount ? <small>{additionalChangeCount} additional changed path{additionalChangeCount === 1 ? "" : "s"} omitted from this compact readout.</small> : null}
+            {graph.changes.truncated ? <small>Changed paths were shortened by the health response bound.</small> : null}
+          </div>
+        </div>
+      ) : null}
+
+      {graph.parseHealth.failedPaths.length ? (
+        <div className={healthStyles.failedPaths}>
+          <strong>Files with parse failures</strong>
+          <ul>{graph.parseHealth.failedPaths.map((path) => <li className={healthStyles.mono} key={path}>{path}</li>)}</ul>
+          {graph.parseHealth.failedPathsTruncated ? <small>Additional failed paths were omitted.</small> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function GraphDossier({
+  component,
+  onAction,
+  actionPending,
+  actionAvailable,
+  wide,
+}: {
+  component: HealthComponent;
+  onAction: (kind: JobKind) => void;
+  actionPending: boolean;
+  actionAvailable: (kind: JobKind) => boolean;
+  wide: boolean;
+}) {
+  return (
+    <Card
+      aria-labelledby={`health-${component.id}-heading`}
+      className={`${healthStyles.surface} ${healthStyles.graphDossier} ${wide ? healthStyles.graphDossierWide : ""}`}
+      role="region"
+      size="sm"
+    >
+      <CardHeader className={healthStyles.graphHeader}>
+        <span className={healthStyles.componentIcon} data-tone={stateTone(component.status)}><HealthIcon status={component.status} /></span>
+        <div className={healthStyles.graphIdentity}>
+          <CardTitle className={healthStyles.componentTitle}>
+            <h2 id={`health-${component.id}-heading`}>{component.label}</h2>
+            <StatusPill tone={stateTone(component.status)}>{sentenceCase(component.status)}</StatusPill>
+          </CardTitle>
+          <CardDescription className={healthStyles.componentSummary}>{component.summary}</CardDescription>
+          <Diagnostics diagnostics={component.diagnostics} />
+        </div>
+        <CardAction className={healthStyles.graphActions}>
+          <ActionControls
+            actionAvailable={actionAvailable}
+            actionPending={actionPending}
+            component={component}
+            onAction={onAction}
+          />
+        </CardAction>
+      </CardHeader>
+      {component.graph ? <CardContent className={healthStyles.graphContent}><GraphHealthReadout graph={component.graph} /></CardContent> : null}
+    </Card>
+  );
+}
+
+function ServiceRow({
+  component,
+  onAction,
+  actionPending,
+  actionAvailable,
+}: {
+  component: HealthComponent;
+  onAction: (kind: JobKind) => void;
+  actionPending: boolean;
+  actionAvailable: (kind: JobKind) => boolean;
+}) {
+  return (
+    <Item className={healthStyles.serviceRow} role="listitem" size="sm">
+      <ItemMedia className={healthStyles.serviceIcon} data-tone={stateTone(component.status)} variant="icon"><HealthIcon status={component.status} /></ItemMedia>
+      <ItemContent className={healthStyles.serviceMain}>
+        <ItemHeader className={healthStyles.serviceTitle}>
+          <ItemTitle><h3>{component.label}</h3></ItemTitle>
+          <StatusPill tone={stateTone(component.status)}>{sentenceCase(component.status)}</StatusPill>
+        </ItemHeader>
+        <ItemDescription>{component.summary}</ItemDescription>
+        <Diagnostics diagnostics={component.diagnostics} />
+        <ActionControls
+          actionAvailable={actionAvailable}
+          actionPending={actionPending}
+          component={component}
+          onAction={onAction}
+        />
+      </ItemContent>
+    </Item>
+  );
+}
+
+function PageIntro({ action }: { action?: ReactNode }) {
+  return (
+    <div className={healthStyles.pageIntro}>
+      <PageHeader
+        title="Health"
+        actions={action}
+      />
+    </div>
   );
 }
 
@@ -158,44 +342,85 @@ export function HealthPage() {
     start.mutate(kind);
   }
 
+  function isActionAvailable(component: HealthComponent, kind: JobKind): boolean {
+    return operationAvailable(capabilities, kind) && (
+      !component.graph
+      || (component.graph.activeJobId === null && component.graph.allowedJobKinds.some((allowed) => allowed === kind))
+    );
+  }
+
+  function isActionPending(component: HealthComponent): boolean {
+    return start.isPending && start.variables !== undefined && (
+      component.graph?.allowedJobKinds.some((kind) => kind === start.variables)
+      || start.variables === component.repairJobKind
+    );
+  }
+
+  const graphComponent = health.data?.components.find((component) => component.id === "graph");
+  const serviceComponents = health.data?.components.filter((component) => component.id !== "graph") ?? [];
+
   return (
-    <div className={styles.page}>
-      <PageHeader
-        eyebrow="System integrity"
-        title="Health"
-        description="Freshness and availability are reported without triggering hidden writes, refreshes, or rebuilds."
-        actions={health.data ? <StatusPill tone={stateTone(health.data.status)}>{sentenceCase(health.data.status)}</StatusPill> : undefined}
-      />
+    <div className={`${styles.page} ${healthStyles.page}`}>
+      <PageIntro action={health.data ? <StatusPill tone={stateTone(health.data.status)}>{sentenceCase(health.data.status)}</StatusPill> : undefined} />
       {start.isError ? <ErrorState error={start.error} /> : null}
       {health.isPending ? (
         <StatePanel state="loading" title="Inspecting system health" detail="This is a read-only inspection of local repository services." />
       ) : health.isError ? (
         <ErrorState error={health.error} retry={() => void health.refetch()} />
       ) : (
-        <Panel className={styles.healthPanel}>
-          <div className={styles.healthOverview}>
-            <span className={styles.healthOverviewIcon} data-tone={stateTone(health.data.status)}><HealthIcon status={health.data.status} /></span>
-            <div><p className={styles.panelEyebrow}>Current assessment</p><h2>{sentenceCase(health.data.status)}</h2><p>{health.data.components.length} local services reported.</p></div>
-            <time>Checked {formatDate(health.data.observedAt)}</time>
-          </div>
-          <div className={styles.healthList}>
-            {health.data.components.map((component) => (
-              <HealthRow
-                actionAvailable={(kind) => operationAvailable(capabilities, kind) && (
-                  !component.graph
-                  || (component.graph.activeJobId === null && component.graph.allowedJobKinds.some((allowed) => allowed === kind))
-                )}
-                actionPending={start.isPending && start.variables !== undefined && (
-                  component.graph?.allowedJobKinds.some((kind) => kind === start.variables)
-                  || start.variables === component.repairJobKind
-                )}
-                component={component}
-                key={component.id}
+        <>
+          <Card aria-labelledby="health-overview-heading" className={healthStyles.overviewCard} role="region" size="sm">
+            <CardHeader className={healthStyles.overviewBand}>
+              <span className={healthStyles.overviewIcon} data-tone={stateTone(health.data.status)}><HealthIcon status={health.data.status} /></span>
+              <div className={healthStyles.overviewAssessment}>
+                <CardTitle><h2 id="health-overview-heading">{sentenceCase(health.data.status)}</h2></CardTitle>
+                <CardDescription>{health.data.components.length} local services</CardDescription>
+              </div>
+              <CardAction>
+                <time>
+                  <small>Checked</small>
+                  <strong>{formatDate(health.data.observedAt)}</strong>
+                </time>
+              </CardAction>
+            </CardHeader>
+          </Card>
+
+          <div className={healthStyles.dossierGrid}>
+            {graphComponent ? (
+              <GraphDossier
+                actionAvailable={(kind) => isActionAvailable(graphComponent, kind)}
+                actionPending={isActionPending(graphComponent)}
+                component={graphComponent}
                 onAction={requestAction}
+                wide={!serviceComponents.length}
               />
-            ))}
+            ) : null}
+
+            {serviceComponents.length ? (
+              <aside className={`${healthStyles.serviceRail} ${graphComponent ? "" : healthStyles.serviceRailWide}`} aria-labelledby="service-ledger-heading">
+                <Card className={`${healthStyles.surface} ${healthStyles.serviceCard}`} size="sm">
+                  <CardHeader className={healthStyles.railHeader}>
+                    <CardTitle><h2 id="service-ledger-heading">Services</h2></CardTitle>
+                    <CardAction><span className={healthStyles.serviceCount}>{serviceComponents.length}</span></CardAction>
+                  </CardHeader>
+                  <CardContent className={healthStyles.serviceContent}>
+                    <ItemGroup className={healthStyles.serviceList}>
+                      {serviceComponents.map((component) => (
+                        <ServiceRow
+                          actionAvailable={(kind) => isActionAvailable(component, kind)}
+                          actionPending={isActionPending(component)}
+                          component={component}
+                          key={component.id}
+                          onAction={requestAction}
+                        />
+                      ))}
+                    </ItemGroup>
+                  </CardContent>
+                </Card>
+              </aside>
+            ) : null}
           </div>
-        </Panel>
+        </>
       )}
       <RebuildConfirmation
         onCancel={() => {

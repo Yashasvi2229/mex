@@ -1,4 +1,5 @@
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vitest/config";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,9 +8,10 @@ const packageRoot = dirname(fileURLToPath(import.meta.url));
 const fixtureModuleId = "virtual:mex-hub-fixture-api";
 
 export default defineConfig(({ command }) => ({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
+      "@": resolve(packageRoot, "src"),
       [fixtureModuleId]: resolve(
         packageRoot,
         command === "build"

@@ -1,0 +1,276 @@
+.page {
+  display: grid;
+  gap: 18px;
+}
+
+.summaryGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
+.metricLink {
+  display: block;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.metricCard {
+  min-width: 0;
+  min-height: 116px;
+  justify-content: space-between;
+  --card-spacing: 14px;
+  transition: background-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.metricLink:hover .metricCard {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+
+.metricLink:focus-visible {
+  border-radius: var(--radius);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.metricHeader {
+  align-items: center;
+}
+
+.metricLabel {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.metricIcon {
+  display: grid;
+  color: var(--muted-foreground);
+  place-items: center;
+}
+
+.metricIcon svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.75;
+}
+
+.metricContent {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.metricValue {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: clamp(24px, 2.1vw, 30px);
+  font-weight: 550;
+  letter-spacing: -0.035em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metricDetail {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboardGrid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
+.attentionCard {
+  grid-column: span 8;
+}
+
+.coverageCard {
+  grid-column: span 4;
+}
+
+.jobsCard {
+  grid-column: 1 / -1;
+}
+
+.attentionCard,
+.coverageCard,
+.jobsCard {
+  min-width: 0;
+  --card-spacing: 14px;
+}
+
+.cardHeader {
+  min-width: 0;
+  align-items: center;
+  border-color: var(--border);
+}
+
+.cardHeader h2 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 550;
+  letter-spacing: -0.012em;
+  line-height: 1.25;
+}
+
+.cardHeader [data-slot="badge"] {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cardListContent {
+  min-width: 0;
+}
+
+.cardListContent [data-slot="item-group"] {
+  gap: 0;
+}
+
+.cardListContent [data-slot="item"] {
+  min-width: 0;
+}
+
+.attentionCard [data-slot="item"] {
+  color: var(--foreground);
+  text-decoration: none;
+}
+
+.attentionCard [data-slot="item-media"],
+.attentionCard [data-slot="item-actions"] {
+  color: var(--muted-foreground);
+}
+
+.attentionCard [data-slot="item-actions"] svg {
+  width: 14px;
+  height: 14px;
+}
+
+.attentionCard [data-slot="item-title"] {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.attentionCard [data-slot="item-description"] {
+  font-size: 12px;
+}
+
+.coverageCard [data-slot="item-description"] {
+  display: block;
+  overflow: hidden;
+  max-width: 260px;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coverageCard [data-slot="item"] {
+  flex-wrap: nowrap;
+}
+
+.tableContent {
+  min-width: 0;
+  padding: 0;
+}
+
+.tableContent [data-slot="table-head"] {
+  height: 36px;
+  padding-inline: 14px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.tableContent [data-slot="table-cell"] {
+  height: 54px;
+  padding-inline: 14px;
+}
+
+.tableContent [data-slot="table-row"] {
+  border-color: var(--border);
+}
+
+.jobIdentity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--foreground);
+  text-decoration: none;
+}
+
+.jobIdentity:hover span {
+  color: var(--primary);
+}
+
+.jobIdentity span,
+.jobIdentity small {
+  overflow: hidden;
+  max-width: 480px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jobIdentity span {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.jobIdentity small,
+.jobTime {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.jobTime {
+  white-space: nowrap;
+}
+
+.jobActionCell {
+  width: 48px;
+  text-align: right;
+}
+
+@media (max-width: 1190px) {
+  .summaryGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .attentionCard,
+  .coverageCard {
+    grid-column: 1 / -1;
+  }
+
+  .coverageCard [data-slot="item-group"] {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .coverageCard [data-slot="item"] {
+    border: 1px solid var(--border);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .metricCard {
+    transition: none;
+  }
+}

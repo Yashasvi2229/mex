@@ -13,6 +13,7 @@
     "moduleResolution": "Bundler",
     "baseUrl": ".",
     "paths": {
+      "@/*": ["src/*"],
       "virtual:mex-hub-fixture-api": ["src/dev/fixture-api.ts"]
     },
     "resolveJsonModule": true,

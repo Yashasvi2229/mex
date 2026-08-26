@@ -76,7 +76,7 @@ describe("real Graph search", () => {
   it("uses the Code landing for real symbol and source projections without inventing Wiki results", async () => {
     renderRoute("/code?q=hub");
 
-    expect(await screen.findByRole("heading", { level: 1, name: "Explore the code graph" })).toBeVisible();
+    expect(await screen.findByRole("heading", { level: 1, name: "Code" })).toBeVisible();
     const links = await screen.findAllByRole("link", { name: /createHubServer/ });
     expect(links[0]).toHaveAttribute("href", "/code/symbols/sym.createHubServer");
     expect(screen.getByText(/export async function createHubServer/)).toBeVisible();
