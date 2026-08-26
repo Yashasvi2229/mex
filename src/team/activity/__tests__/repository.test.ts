@@ -89,6 +89,41 @@ describe("ActivityRepository", () => {
     expect(existsSync(join(root, ...preview.sourcePath.split("/")))).toBe(false);
   });
 
+  it("validates Git before a workflow write and publishes the exact event afterward", async () => {
+    const root = temporaryRoot();
+    const git = fakeGit();
+    const repository = fixedRepository(root, git, firstId);
+    const preview = await repository.previewCreate({
+      actor: { kind: "unknown" }, action: "workstream.created", subjects: [],
+    });
+
+    const publication = await repository.prepareApplyCreate(
+      preview,
+      preview.previewRevision,
+    );
+    // Simulate the enclosing workflow's reviewed canonical publication.
+    git.state = { ...git.state, dirty: true };
+    const stored = publication.publish();
+
+    expect(stored.revision).toBe(preview.revision);
+    expect(stored.repoState.dirty).toBe(false);
+    expect(() => publication.publish()).toThrowError(MexPortError);
+  });
+
+  it("recovers only an exact journaled Activity event and replays it idempotently", async () => {
+    const root = temporaryRoot();
+    const repository = fixedRepository(root, fakeGit(), firstId);
+    const preview = await repository.previewCreate({
+      actor: { kind: "unknown" }, action: "workstream.created", subjects: [],
+    });
+
+    const recovered = repository.recoverJournaledCreate(preview.event, preview.revision);
+    expect(repository.recoverJournaledCreate(preview.event, preview.revision)).toEqual(recovered);
+    expect(() => repository.recoverJournaledCreate(preview.event, "f".repeat(64))).toThrowError(
+      MexPortError,
+    );
+  });
+
   it("diagnoses malformed and conflicting canonical events", async () => {
     const root = temporaryRoot();
     const first = fixedRepository(root, fakeGit(), firstId);

@@ -26,6 +26,7 @@ import {
   assertContainedArtifactDirectory,
   atomicCreateArtifact,
   readContainedArtifact,
+  tryReadContainedArtifact,
 } from "../artifacts/filesystem.js";
 import { revisionOf } from "../artifacts/revision.js";
 import { canonicalFileDiff } from "../artifacts/unified-diff.js";
@@ -65,6 +66,17 @@ export interface ActivityCreatePreview {
 export interface PreparedActivityAuthority {
   timestamp: string;
   repoState: RepoState;
+}
+
+/**
+ * Single-use publication prepared after the live Git checkpoint is validated.
+ * The enclosing workflow may publish its primary canonical artifact before
+ * invoking `publish`; doing so cannot make the reviewed Activity provenance
+ * appear stale merely because that exact workflow dirtied the checkout.
+ */
+export interface PreparedActivityPublication {
+  previewRevision: Revision;
+  publish(): StoredActivityEvent;
 }
 
 export interface ActivityReadResult {
@@ -160,6 +172,14 @@ export class ActivityRepository {
     preview: ActivityCreatePreview,
     expectedPreviewRevision: Revision,
   ): Promise<StoredActivityEvent> {
+    return (await this.prepareApplyCreate(preview, expectedPreviewRevision)).publish();
+  }
+
+  /** Validate the exact issued preview and live Git checkpoint without writing. */
+  async prepareApplyCreate(
+    preview: ActivityCreatePreview,
+    expectedPreviewRevision: Revision,
+  ): Promise<PreparedActivityPublication> {
     const issued = this.issuedPreviews.get(expectedPreviewRevision);
     if (issued === undefined) {
       throw artifactError(
@@ -196,17 +216,45 @@ export class ActivityRepository {
       );
     }
 
-    const revision = atomicCreateArtifact(this.projectRoot, issued.preview.sourcePath, issued.bytes);
-    if (revision !== preview.revision) {
+    let consumed = false;
+    return Object.freeze({
+      previewRevision: expectedPreviewRevision,
+      publish: (): StoredActivityEvent => {
+        if (consumed) {
+          throw artifactError(
+            "REVISION_CONFLICT",
+            "Activity publication was already consumed",
+            "The prepared Activity publication is single-use.",
+            preview.sourcePath,
+          );
+        }
+        consumed = true;
+        const stored = this.#publishExact(issued.preview, issued.bytes);
+        this.issuedPreviews.delete(expectedPreviewRevision);
+        return stored;
+      },
+    });
+  }
+
+  /**
+   * Complete an Activity effect only after the workflow service has verified a
+   * durable journal entry and all preceding canonical effects. This accepts no
+   * caller-supplied path or bytes: both are derived from the strict event codec.
+   */
+  recoverJournaledCreate(
+    event: ActivityEvent,
+    expectedRevision: Revision,
+  ): StoredActivityEvent {
+    const verified = previewFor(event);
+    if (verified.preview.revision !== expectedRevision) {
       throw artifactError(
-        "INTERNAL_ERROR",
-        "Activity publication failed",
-        "Published activity bytes do not match the reviewed preview.",
-        preview.sourcePath,
+        "REVISION_CONFLICT",
+        "Activity recovery revision conflict",
+        "The journaled Activity event does not match its expected revision.",
+        verified.preview.sourcePath,
       );
     }
-    this.issuedPreviews.delete(expectedPreviewRevision);
-    return parseActivityArtifact(issued.bytes, issued.preview.sourcePath);
+    return this.#publishExact(verified.preview, verified.bytes);
   }
 
   get(id: string): StoredActivityEvent | null {
@@ -341,6 +389,36 @@ export class ActivityRepository {
     // surface those rows as a trusted canonical subset; retain only the safe
     // truncation diagnostic until the corpus can be read completely.
     return { events: sourceTruncated ? [] : events, diagnostics, sourceTruncated };
+  }
+
+  #publishExact(preview: ActivityCreatePreview, bytes: string): StoredActivityEvent {
+    const existing = tryReadContainedArtifact(
+      this.projectRoot,
+      preview.sourcePath,
+      ACTIVITY_ARTIFACT_MAX_BYTES,
+    );
+    if (existing !== null) {
+      if (existing.revision !== preview.revision) {
+        throw artifactError(
+          "REVISION_CONFLICT",
+          "Activity publication conflict",
+          "The canonical Activity path already contains different bytes.",
+          preview.sourcePath,
+        );
+      }
+      return parseActivityArtifact(existing.bytes, preview.sourcePath);
+    }
+
+    const revision = atomicCreateArtifact(this.projectRoot, preview.sourcePath, bytes);
+    if (revision !== preview.revision) {
+      throw artifactError(
+        "INTERNAL_ERROR",
+        "Activity publication failed",
+        "Published activity bytes do not match the reviewed preview.",
+        preview.sourcePath,
+      );
+    }
+    return parseActivityArtifact(bytes, preview.sourcePath);
   }
 }
 
