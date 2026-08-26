@@ -279,10 +279,13 @@ in-memory session, and mutating requests also require same-origin CSRF proof.
 Use `--no-open` to print the launch URL without opening a browser, or `--port`
 to request a specific loopback port.
 
-This foundation displays repository context and locally persisted job history.
-Graph and Wiki actions remain visibly unavailable until their real adapters are
-integrated; the packaged UI never substitutes development fixtures for project
-data.
+The Hub displays repository context, locally persisted job history, and the
+read-only Activity timeline. Its real Code workspace searches symbols and
+source, inspects callers/callees/impact, reports graph Health, and lets you
+explicitly refresh or rebuild the local graph. Reads never maintain the graph
+automatically and preserve the graph engine's result order. Wiki actions remain
+visibly unavailable until the real Wiki adapter is integrated; the packaged UI
+never substitutes development fixtures for project data.
 
 ## Existing mex projects
 

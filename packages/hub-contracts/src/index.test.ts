@@ -3,6 +3,9 @@ import {
   ActivityRequestSchema,
   ActivityResponseSchema,
   BootstrapRequestSchema,
+  CodeWorkspaceRequestSchema,
+  CodeWorkspaceResponseSchema,
+  HealthResponseSchema,
   HUB_LIMITS,
   HomeResponseSchema,
   HubJobIdSchema,
@@ -198,6 +201,8 @@ describe("Hub API contracts", () => {
       items: [],
       nextCursor: null,
       truncated: false,
+      revision: null,
+      code: "CAPABILITY_UNAVAILABLE",
       detail: "The adapter is not installed.",
     } as const;
     const response = {
@@ -207,9 +212,21 @@ describe("Hub API contracts", () => {
         wiki: unavailable,
         symbols: {
           status: "available",
-          items: [{ id: "symbol:router", kind: "code_symbol", title: "Router" }],
+          items: [{
+            id: "symbol:router",
+            kind: "code_symbol",
+            symbolKind: "function",
+            name: "Router",
+            qualifiedName: "Router",
+            language: "typescript",
+            path: "src/router.ts",
+            startLine: 1,
+            endLine: 4,
+            route: "/code/symbols/symbol%3Arouter",
+          }],
           nextCursor: null,
           truncated: false,
+          revision: "b".repeat(64),
         },
         sources: unavailable,
       },
@@ -221,6 +238,97 @@ describe("Hub API contracts", () => {
         ...response.groups,
         wiki: { ...unavailable, items: [{ id: "fake", kind: "wiki", title: "Fake" }] },
       },
+    }).success).toBe(false);
+  });
+
+  it("binds Code workspace queries to one strict traversal shape", () => {
+    expect(CodeWorkspaceRequestSchema.parse({})).toEqual({ view: "overview" });
+    expect(CodeWorkspaceRequestSchema.safeParse({ view: "overview", cursor: "x" }).success).toBe(false);
+    expect(CodeWorkspaceRequestSchema.safeParse({ view: "callers", depth: 2 }).success).toBe(false);
+    expect(CodeWorkspaceRequestSchema.safeParse({ view: "impact", depth: 5 }).success).toBe(false);
+
+    const symbol = {
+      id: "function:router",
+      symbolKind: "function",
+      name: "router",
+      qualifiedName: "router",
+      language: "typescript",
+      path: "src/router.ts",
+      startLine: 1,
+      endLine: 3,
+      route: "/code/symbols/function%3Arouter",
+    };
+    const response = {
+      revision: "a".repeat(64),
+      symbol,
+      source: { items: [], nextCursor: null, truncated: false },
+      view: "callers",
+      traversal: { view: "callers", items: [], nextCursor: null, truncated: false },
+    };
+    expect(CodeWorkspaceResponseSchema.safeParse(response).success).toBe(true);
+    expect(CodeWorkspaceResponseSchema.safeParse({
+      ...response,
+      traversal: { view: "overview" },
+    }).success).toBe(false);
+  });
+
+  it("keeps structured graph health operations internally consistent", () => {
+    const graph = {
+      indexStatus: "stale",
+      observedAt: "2026-08-23T00:00:00.000Z",
+      lastSuccessfulIndexAt: null,
+      indexedAt: null,
+      indexedBranch: null,
+      indexedHead: null,
+      currentBranch: "main",
+      currentHead: "a".repeat(40),
+      schemaVersion: 2,
+      extractorVersion: "extractor-1",
+      grammarVersion: "grammar-1",
+      parseHealth: {
+        total: 1,
+        ok: 1,
+        partial: 0,
+        failed: 0,
+        failedPaths: [],
+        failedPathsTruncated: false,
+      },
+      changes: {
+        total: 1,
+        added: ["src/new.ts"],
+        modified: [],
+        deleted: [],
+        truncated: false,
+        branchChanged: false,
+        manifestChanged: false,
+        configChanged: false,
+        grammarChanged: false,
+      },
+      allowedJobKinds: ["graph_refresh"],
+      recommendedJobKind: "graph_refresh",
+      activeJobId: null,
+    } as const;
+    const response = {
+      status: "degraded",
+      observedAt: "2026-08-23T00:00:00.000Z",
+      components: [{
+        id: "graph",
+        label: "Code graph",
+        status: "degraded",
+        summary: "Refresh required.",
+        diagnostics: [],
+        repairJobKind: "graph_refresh",
+        graph,
+      }],
+    };
+    expect(HealthResponseSchema.safeParse(response).success).toBe(true);
+    expect(HealthResponseSchema.safeParse({
+      ...response,
+      components: [{ ...response.components[0], repairJobKind: "graph_rebuild" }],
+    }).success).toBe(false);
+    expect(HealthResponseSchema.safeParse({
+      ...response,
+      components: [{ ...response.components[0], graph: { ...graph, parseHealth: { ...graph.parseHealth, failed: 1 } } }],
     }).success).toBe(false);
   });
 });

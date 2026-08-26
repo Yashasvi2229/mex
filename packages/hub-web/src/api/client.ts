@@ -1,6 +1,8 @@
 import {
   ActivityResponseSchema,
   BootstrapResponseSchema,
+  CodeWorkspaceResponseSchema,
+  GraphSymbolIdSchema,
   HealthResponseSchema,
   HomeResponseSchema,
   HubCapabilitiesSchema,
@@ -16,11 +18,14 @@ import type {
   ActivityResponse,
   BootstrapResponse,
   CapabilitiesResponse,
+  CodeWorkspaceRequest,
+  CodeWorkspaceResponse,
   HealthResponse,
   HomeResponse,
   JobsResponse,
   JobSummary,
   ProblemDetails,
+  SearchRequest,
   SearchResponse,
   SessionResponse,
   StartJobRequest,
@@ -52,7 +57,8 @@ export interface HubApi {
   getCapabilities(): Promise<CapabilitiesResponse>;
   getHome(): Promise<HomeResponse>;
   getActivity(request: ActivityRequest): Promise<ActivityResponse>;
-  search(query: string): Promise<SearchResponse>;
+  search(request: SearchRequest): Promise<SearchResponse>;
+  getCodeSymbol(id: string, request: CodeWorkspaceRequest): Promise<CodeWorkspaceResponse>;
   getHealth(): Promise<HealthResponse>;
   getJobs(cursor?: string): Promise<JobsResponse>;
   getJob(id: string): Promise<JobSummary>;
@@ -99,6 +105,14 @@ function assertSafeIdentifier(value: string): string {
   const parsed = HubJobSnapshotSchema.shape.id.safeParse(value);
   if (!parsed.success) {
     throw new HubApiError(fallbackProblem(400, "The job identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+function assertSafeSymbolId(value: string): string {
+  const parsed = GraphSymbolIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The graph symbol identifier is invalid."));
   }
   return parsed.data;
 }
@@ -173,9 +187,24 @@ export class HttpHubApi implements HubApi {
     return this.#request(`/activity?${params}`, ActivityResponseSchema);
   }
 
-  search(query: string): Promise<SearchResponse> {
-    const params = new URLSearchParams({ q: query.slice(0, 256), limit: "25" });
+  search(request: SearchRequest): Promise<SearchResponse> {
+    const params = new URLSearchParams({ q: request.q.slice(0, 256), limit: String(request.limit) });
+    if (request.wikiCursor) params.set("wikiCursor", request.wikiCursor.slice(0, 4_096));
+    if (request.symbolCursor) params.set("symbolCursor", request.symbolCursor.slice(0, 4_096));
+    if (request.sourceCursor) params.set("sourceCursor", request.sourceCursor.slice(0, 4_096));
     return this.#request(`/search?${params}`, SearchResponseSchema);
+  }
+
+  async getCodeSymbol(id: string, request: CodeWorkspaceRequest): Promise<CodeWorkspaceResponse> {
+    const params = new URLSearchParams({ view: request.view });
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    if (request.limit !== undefined) params.set("limit", String(request.limit));
+    if (request.depth !== undefined) params.set("depth", String(request.depth));
+    if (request.sourceCursor) params.set("sourceCursor", request.sourceCursor.slice(0, 4_096));
+    return await this.#request(
+      `/code/symbols/${encodeURIComponent(assertSafeSymbolId(id))}?${params}`,
+      CodeWorkspaceResponseSchema,
+    );
   }
 
   getHealth(): Promise<HealthResponse> {

@@ -361,12 +361,14 @@ export class HubJobManager implements HubJobService {
     }
     if (!current || current.generation !== generation || current.state !== "running") return;
 
-    const progress = {
-      completed: safeUpdate.completed,
-      ...(safeUpdate.total === undefined && current.progress?.total !== undefined
-        ? { total: current.progress.total }
-        : safeUpdate.total === undefined ? {} : { total: safeUpdate.total }),
-    };
+    const progress = safeUpdate.completed === undefined
+      ? current.progress
+      : {
+          completed: safeUpdate.completed,
+          ...(safeUpdate.total === undefined && current.progress?.total !== undefined
+            ? { total: current.progress.total }
+            : safeUpdate.total === undefined ? {} : { total: safeUpdate.total }),
+        };
     try {
       const updated = this.localState.updateHubJobRecord({
         leaseToken: this.leaseToken,
@@ -667,7 +669,10 @@ function validateExecutorProgressUpdate(value: unknown): HubJobProgressUpdate {
   if (Object.keys(record).some((key) => !allowed.has(key))) {
     throw invalidJobRequest("Executor progress cannot contain free-text or unknown fields.");
   }
-  if (!Number.isSafeInteger(record.completed) || (record.completed as number) < 0) {
+  if (
+    record.completed !== undefined
+    && (!Number.isSafeInteger(record.completed) || (record.completed as number) < 0)
+  ) {
     throw invalidJobRequest("Executor completed progress must be a non-negative safe integer.");
   }
   if (
@@ -685,8 +690,14 @@ function validateExecutorProgressUpdate(value: unknown): HubJobProgressUpdate {
   ) {
     throw invalidJobRequest("Executor progress phase is not allowed.");
   }
+  if (record.completed === undefined && record.total !== undefined) {
+    throw invalidJobRequest("Executor total progress requires completed progress.");
+  }
+  if (record.completed === undefined && record.phase === undefined) {
+    throw invalidJobRequest("Executor progress must contain a phase or numeric progress.");
+  }
   return {
-    completed: record.completed as number,
+    ...(record.completed === undefined ? {} : { completed: record.completed as number }),
     ...(record.total === undefined ? {} : { total: record.total as number }),
     ...(record.phase === undefined
       ? {}

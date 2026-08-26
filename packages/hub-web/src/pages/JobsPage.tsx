@@ -15,7 +15,8 @@ import {
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import { HubApiError } from "../api/client";
 import { useHubApi } from "../api/context";
-import type { CapabilitiesResponse, JobKind, JobProgress, JobState, JobSummary } from "../api/types";
+import type { CapabilitiesResponse, GraphHealthDetails, JobKind, JobProgress, JobState, JobSummary } from "../api/types";
+import { RebuildConfirmation } from "../components/RebuildConfirmation";
 import {
   ErrorState,
   formatDate,
@@ -29,11 +30,13 @@ import {
 import styles from "../styles/hub.module.css";
 
 const operations: Array<{ kind: JobKind; label: string; detail: string }> = [
-  { kind: "graph_refresh", label: "Refresh graph", detail: "Re-stage the semantic code corpus" },
+  { kind: "graph_refresh", label: "Refresh graph", detail: "Index the bounded repository delta" },
   { kind: "graph_rebuild", label: "Rebuild graph", detail: "Replace the derived graph safely" },
   { kind: "wiki_refresh", label: "Refresh Wiki", detail: "Update structured project memory" },
   { kind: "wiki_rebuild", label: "Rebuild Wiki", detail: "Recreate the derived Wiki index" },
 ];
+
+const graphPhases = ["discover", "stage", "parse", "resolve", "validate", "publish"] as const;
 
 type JobFilter = "all" | "active" | "history";
 
@@ -46,7 +49,36 @@ function percentage(progress: JobProgress | null): number | null {
   return Math.max(0, Math.min(100, Math.round((progress.completed / progress.total) * 100)));
 }
 
-function operationCapability(capabilities: CapabilitiesResponse | undefined, kind: JobKind): { available: boolean; reason?: string } {
+function graphPhaseIndex(phase: string): number {
+  return graphPhases.indexOf(phase.trim().toLowerCase() as typeof graphPhases[number]);
+}
+
+function isGraphJob(kind: JobKind): kind is "graph_refresh" | "graph_rebuild" {
+  return kind === "graph_refresh" || kind === "graph_rebuild";
+}
+
+async function invalidateGraphReads(queryClient: ReturnType<typeof useQueryClient>): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["search"] }),
+    queryClient.invalidateQueries({ queryKey: ["code-symbol"] }),
+    queryClient.invalidateQueries({ queryKey: ["health"] }),
+    queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+  ]);
+}
+
+async function invalidateGraphOperationState(queryClient: ReturnType<typeof useQueryClient>): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: ["health"] }),
+    queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+  ]);
+}
+
+function operationCapability(
+  capabilities: CapabilitiesResponse | undefined,
+  kind: JobKind,
+  graphHealth: GraphHealthDetails | undefined,
+  healthSettled: boolean,
+): { available: boolean; reason?: string } {
   if (!capabilities || capabilities.jobs.availability === "unavailable") {
     return { available: false, reason: capabilities?.jobs.reason ?? "Job execution is unavailable." };
   }
@@ -58,7 +90,19 @@ function operationCapability(capabilities: CapabilitiesResponse | undefined, kin
         ? capabilities.wiki.rebuild
         : null;
   if (!capability) return { available: false, reason: "This build does not advertise a Wiki refresh executor." };
-  return { available: capability.availability === "available", reason: capability.reason };
+  if (capability.availability !== "available") return { available: false, reason: capability.reason };
+  if (isGraphJob(kind)) {
+    if (!healthSettled || !graphHealth) {
+      return { available: false, reason: "Graph health must be readable before starting an index operation." };
+    }
+    if (graphHealth.activeJobId) {
+      return { available: false, reason: `Graph job ${graphHealth.activeJobId} is already active.` };
+    }
+    if (!graphHealth.allowedJobKinds.includes(kind)) {
+      return { available: false, reason: "The current graph state does not allow this operation." };
+    }
+  }
+  return { available: true };
 }
 
 function JobStateIcon({ state }: { state: JobState }) {
@@ -71,13 +115,35 @@ function JobStateIcon({ state }: { state: JobState }) {
 
 function Progress({ job }: { job: JobSummary }) {
   const value = percentage(job.progress);
+  const phase = graphPhaseIndex(job.phase) >= 0 ? sentenceCase(job.phase) : job.phase;
   return (
     <div className={styles.progressBlock}>
       <div>
-        <span>{job.progress?.message ?? job.phase}</span>
+        <span>{phase}</span>
         <span>{value === null ? (job.progress ? `${job.progress.completed} complete · total unknown` : "Total unknown") : `${value}%`}</span>
       </div>
       {value === null ? null : <progress aria-label={`${value}% complete`} className={styles.progressTrack} max={100} value={value}>{value}%</progress>}
+    </div>
+  );
+}
+
+function GraphPhaseRail({ job }: { job: JobSummary }) {
+  if (!isGraphJob(job.kind)) return null;
+  const activeIndex = graphPhaseIndex(job.phase);
+  const complete = job.state === "succeeded";
+  return (
+    <div className={styles.graphPhaseRail} aria-label="Graph operation phases">
+      {graphPhases.map((phase, index) => {
+        const phaseComplete = complete || (activeIndex >= 0 && index < activeIndex);
+        const current = job.state === "running" && activeIndex === index;
+        const stopped = (job.state === "failed" || job.state === "interrupted") && activeIndex === index;
+        return (
+          <span data-state={phaseComplete ? "complete" : current ? "current" : stopped ? "stopped" : "pending"} key={phase}>
+            <i aria-hidden="true">{phaseComplete ? <Check /> : index + 1}</i>
+            <small aria-current={current ? "step" : undefined}>{sentenceCase(phase)}</small>
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -112,7 +178,8 @@ function JobDetail({ jobId, onClose }: { jobId: string; onClose: () => void }) {
     mutationFn: () => api.cancelJob(jobId),
     onSuccess: async (next) => {
       queryClient.setQueryData(["job", jobId], next);
-      await queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      if (isGraphJob(next.kind)) await invalidateGraphOperationState(queryClient);
+      else await queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
   });
 
@@ -131,9 +198,10 @@ function JobDetail({ jobId, onClose }: { jobId: string; onClose: () => void }) {
       </div>
       <div className={styles.detailState}>
         <span className={styles.jobStateIcon} data-tone={stateTone(item.state)}><JobStateIcon state={item.state} /></span>
-        <div><StatusPill tone={stateTone(item.state)}>{item.cancelRequested ? "Cancelling" : sentenceCase(item.state)}</StatusPill><small>{item.phase}</small></div>
+        <div><StatusPill tone={stateTone(item.state)}>{item.cancelRequested ? "Cancelling" : sentenceCase(item.state)}</StatusPill><small>{graphPhaseIndex(item.phase) >= 0 ? sentenceCase(item.phase) : item.phase}</small></div>
       </div>
       <Progress job={item} />
+      <GraphPhaseRail job={item} />
       <dl className={styles.detailList}>
         <div><dt>Job ID</dt><dd className={styles.mono}>{item.id}</dd></div>
         {typeof item.generation === "number" ? <div><dt>Generation</dt><dd className={styles.mono}>{item.generation}</dd></div> : null}
@@ -169,7 +237,10 @@ export function JobsPage() {
   const [params, setParams] = useSearchParams();
   const selectedId = params.get("job");
   const previousSelectedId = useRef<string | null>(selectedId);
+  const rebuildTriggerRef = useRef<HTMLButtonElement>(null);
   const [filter, setFilter] = useState<JobFilter>("all");
+  const [confirmRebuild, setConfirmRebuild] = useState(false);
+  const health = useQuery({ queryKey: ["health"], queryFn: () => api.getHealth(), retry: false });
   const jobs = useInfiniteQuery({
     queryKey: ["jobs"],
     queryFn: ({ pageParam }) => api.getJobs(pageParam),
@@ -180,20 +251,29 @@ export function JobsPage() {
   const start = useMutation({
     mutationFn: (kind: JobKind) => api.startJob({ kind }),
     onSuccess: async (job) => {
-      await queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      if (isGraphJob(job.kind)) await invalidateGraphOperationState(queryClient);
+      else await queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      setConfirmRebuild(false);
       setParams({ job: job.id });
+    },
+    onError: () => {
+      setConfirmRebuild(false);
+      rebuildTriggerRef.current?.focus({ preventScroll: true });
     },
   });
 
   const allJobs = useMemo(() => jobs.data?.pages.flatMap((page) => page.items) ?? [], [jobs.data]);
   const visibleJobs = allJobs.filter((job) => filter === "all" || (filter === "active" ? isActive(job) : !isActive(job)));
   const activeIds = allJobs.filter(isActive).map((job) => job.id).sort().join(",");
+  const graphHealth = health.data?.components.find((component) => component.id === "graph")?.graph;
 
   useEffect(() => {
     if (!activeIds) return;
     const subscriptions = activeIds.split(",").map((id) => api.subscribeToJob(id, (snapshot) => {
       queryClient.setQueryData(["job", id], snapshot);
-      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      if (isGraphJob(snapshot.kind) && snapshot.state === "succeeded") void invalidateGraphReads(queryClient);
+      else if (isGraphJob(snapshot.kind) && (snapshot.state === "failed" || snapshot.state === "interrupted")) void invalidateGraphOperationState(queryClient);
+      else void queryClient.invalidateQueries({ queryKey: ["jobs"] });
     }));
     return () => subscriptions.forEach((subscription) => subscription.close());
   }, [activeIds, api, queryClient]);
@@ -221,13 +301,14 @@ export function JobsPage() {
       <section className={styles.operationStrip} aria-label="Start an operation">
         <div className={styles.operationIntro}><span><DatabaseZap aria-hidden="true" /></span><div><strong>Start local work</strong><p>Only supported executors can run.</p></div></div>
         {operations.map((operation) => {
-          const capability = operationCapability(capabilities, operation.kind);
+          const capability = operationCapability(capabilities, operation.kind, graphHealth, health.isSuccess);
           return (
             <button
               className={styles.operationButton}
               disabled={!capability.available || start.isPending}
               key={operation.kind}
-              onClick={() => start.mutate(operation.kind)}
+              onClick={() => operation.kind === "graph_rebuild" ? setConfirmRebuild(true) : start.mutate(operation.kind)}
+              ref={operation.kind === "graph_rebuild" ? rebuildTriggerRef : undefined}
               title={!capability.available ? (capability.reason ?? `${operation.label} is unavailable in this build`) : operation.detail}
               type="button"
             >
@@ -282,6 +363,15 @@ export function JobsPage() {
         </Panel>
         {selectedId ? <JobDetail jobId={selectedId} onClose={() => setParams({})} /> : null}
       </div>
+      <RebuildConfirmation
+        onCancel={() => {
+          setConfirmRebuild(false);
+          rebuildTriggerRef.current?.focus({ preventScroll: true });
+        }}
+        onConfirm={() => start.mutate("graph_rebuild")}
+        open={confirmRebuild}
+        pending={start.isPending && start.variables === "graph_rebuild"}
+      />
     </div>
   );
 }

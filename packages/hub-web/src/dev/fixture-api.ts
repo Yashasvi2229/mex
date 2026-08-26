@@ -4,10 +4,15 @@ import type {
   ActivityRequest,
   ActivityResponse,
   CapabilitiesResponse,
+  CodeWorkspaceRequest,
+  CodeWorkspaceResponse,
+  GraphSourceProjection,
+  GraphSymbol,
   HealthResponse,
   HomeResponse,
   JobsResponse,
   JobSummary,
+  SearchRequest,
   SearchResponse,
   SessionResponse,
   StartJobRequest,
@@ -23,8 +28,8 @@ const jobs: JobSummary[] = [
     scaffoldId: "scf_mex",
     kind: "graph_refresh",
     generation: 14,
-    phase: "Extracting supported files",
-    progress: { completed: 124, total: 183, message: "Extracting TypeScript sources" },
+    phase: "parse",
+    progress: { completed: 124, total: 183 },
     state: "running",
     cancelRequested: false,
     createdAt: timestamp(9),
@@ -36,7 +41,7 @@ const jobs: JobSummary[] = [
     scaffoldId: "scf_mex",
     kind: "wiki_refresh",
     generation: 8,
-    phase: "Completed",
+    phase: "complete",
     progress: { completed: 42, total: 42 },
     state: "succeeded",
     cancelRequested: false,
@@ -51,8 +56,8 @@ const jobs: JobSummary[] = [
     scaffoldId: "scf_mex",
     kind: "graph_rebuild",
     generation: 13,
-    phase: "Terminated",
-    progress: { completed: 390, message: "Previous total was not retained" },
+    phase: "validate",
+    progress: { completed: 390 },
     state: "interrupted",
     cancelRequested: false,
     createdAt: timestamp(930),
@@ -66,7 +71,7 @@ const jobs: JobSummary[] = [
     scaffoldId: "scf_mex",
     kind: "wiki_rebuild",
     generation: 7,
-    phase: "Validation",
+    phase: "validate",
     progress: { completed: 91, total: 100 },
     state: "failed",
     cancelRequested: false,
@@ -231,7 +236,10 @@ const capabilities: CapabilitiesResponse = {
   activity: available,
   jobs: available,
   graph: { read: available, refresh: available, rebuild: available },
-  wiki: { read: available, rebuild: unavailable("The real Wiki rebuild executor is not registered.") },
+  wiki: {
+    read: unavailable("The real Wiki reader is not connected in this integration slice."),
+    rebuild: unavailable("The real Wiki rebuild executor is not registered."),
+  },
 };
 
 const session: SessionResponse = {
@@ -250,7 +258,7 @@ const home: HomeResponse = {
   },
   actor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
   sections: {
-    workstreams: { availability: "available", count: 4 },
+    workstreams: { availability: "unavailable", count: null, reason: "Workstreams wait for the real Wiki integration." },
     relays: { availability: "unavailable", count: null, reason: "Relay workflows are not part of this read-only slice." },
     inbox: { availability: "unavailable", count: null, reason: "Inbox workflows are not part of this read-only slice." },
     activity: { availability: "available", count: 4 },
@@ -258,7 +266,7 @@ const home: HomeResponse = {
   activeJobs: 1,
   attention: [
     { id: "attention_graph", kind: "job", title: "Graph refresh is in progress", summary: "Extraction is processing generation 14.", route: `/jobs?job=${jobs[0].id}`, tone: "neutral" },
-    { id: "attention_grounding", kind: "health", title: "Three knowledge pages lost grounding", summary: "Their source fingerprints changed on this branch.", route: "/health", tone: "warning" },
+    { id: "attention_graph_freshness", kind: "health", title: "The code graph is behind this branch", summary: "Seven repository changes are outside the last trustworthy graph snapshot.", route: "/health", tone: "warning" },
     { id: "attention_activity", kind: "activity", title: "Repository activity is available", summary: "Immutable canonical and legacy history can be reviewed without changing the project.", route: "/activity", tone: "neutral" },
   ],
 };
@@ -268,43 +276,189 @@ const health: HealthResponse = {
   observedAt: timestamp(0),
   components: [
     { id: "git", label: "Git repository", status: "healthy", summary: "Branch and working tree are readable.", diagnostics: [] },
-    { id: "graph", label: "Code graph", status: "degraded", summary: "A refresh is processing changed files.", diagnostics: [{ code: "GRAPH_STALE", severity: "warning", message: "Last successful index was generation 13." }], repairJobKind: "graph_refresh" },
-    { id: "wiki", label: "Project Wiki", status: "degraded", summary: "42 entities loaded; 3 grounding links need review.", diagnostics: [{ code: "GROUNDING_STALE", severity: "warning", message: "Three source fingerprints no longer match." }], repairJobKind: "wiki_rebuild" },
-    { id: "local_state", label: "Local Hub state", status: "healthy", summary: "Schema v2 jobs and team state are readable.", diagnostics: [] },
+    {
+      id: "graph",
+      label: "Code graph",
+      status: "degraded",
+      summary: "The graph is stale against the current branch; a bounded refresh is recommended.",
+      diagnostics: [{ code: "GRAPH_STALE", severity: "warning", message: "The indexed HEAD differs from the current repository HEAD." }],
+      repairJobKind: "graph_refresh",
+      graph: {
+        observedAt: timestamp(0),
+        indexStatus: "stale",
+        lastSuccessfulIndexAt: timestamp(190),
+        indexedAt: timestamp(190),
+        indexedBranch: "feat/project-hub-foundation",
+        indexedHead: "6484dd00022ac5d704404585d981b4da5f2c1cbf",
+        currentBranch: "feat/hub-graph-integration",
+        currentHead: "aeaf0ab0022ac5d704404585d981b4da5f2c1cbf",
+        schemaVersion: 3,
+        extractorVersion: "0.7.2",
+        grammarVersion: "tree-sitter-2026.08",
+        parseHealth: {
+          total: 183,
+          ok: 179,
+          partial: 3,
+          failed: 1,
+          failedPaths: ["src/legacy/parser.ts"],
+          failedPathsTruncated: false,
+        },
+        changes: {
+          total: 7,
+          added: ["packages/hub-web/src/pages/SymbolPage.tsx"],
+          modified: [
+            "packages/hub-web/src/pages/SearchPage.tsx",
+            "packages/hub-web/src/pages/HealthPage.tsx",
+            "packages/hub-web/src/pages/JobsPage.tsx",
+            "src/hub/services/graph.ts",
+            "packages/hub-contracts/src/index.ts",
+          ],
+          deleted: ["packages/hub-web/src/pages/LegacyCodePlaceholder.tsx"],
+          truncated: false,
+          branchChanged: true,
+          manifestChanged: false,
+          configChanged: false,
+          grammarChanged: false,
+        },
+        allowedJobKinds: ["graph_refresh", "graph_rebuild"],
+        recommendedJobKind: "graph_refresh",
+        activeJobId: jobs[0].id,
+      },
+    },
+    { id: "wiki", label: "Project Wiki", status: "unavailable", summary: "The real Wiki reader and executor are not connected in this integration slice.", diagnostics: [] },
+    { id: "local_state", label: "Local Hub state", status: "healthy", summary: "Schema v3 jobs, graph phases, and team state are readable.", diagnostics: [] },
   ],
 };
 
-const searchResponse = (query: string): SearchResponse => ({
-  query,
+const graphRevision = revision("7");
+
+const graphSymbols: GraphSymbol[] = [
+  {
+    id: "sym.createHubServer",
+    symbolKind: "function",
+    name: "createHubServer",
+    qualifiedName: "hub.server.createHubServer",
+    language: "TypeScript",
+    path: "src/hub/server.ts",
+    startLine: 74,
+    endLine: 126,
+    signature: "createHubServer(options: HubServerOptions): Promise<RunningHub>",
+    route: "/code/symbols/sym.createHubServer",
+  },
+  {
+    id: "sym.GraphPort.searchNodes",
+    symbolKind: "method",
+    name: "searchNodes",
+    qualifiedName: "GraphPort.searchNodes",
+    language: "TypeScript",
+    path: "src/team/contracts/graph.ts",
+    startLine: 249,
+    endLine: 252,
+    signature: "searchNodes(query: string, options?: GraphSearchOptions): Promise<GraphPage<CodeSymbol>>",
+    route: "/code/symbols/sym.GraphPort.searchNodes",
+  },
+] as GraphSymbol[];
+
+const sourcePages: GraphSourceProjection[] = [
+  {
+    path: "src/hub/server.ts",
+    startLine: 74,
+    endLine: 84,
+    content: "export async function createHubServer(options: HubServerOptions) {\n  const app = createHubApp(options);\n  const server = await listenOnLoopback(app, options.port);\n  return { server, address: server.address() };\n}",
+    contentHash: revision("8"),
+    symbolIds: ["sym.createHubServer"],
+  },
+  {
+    path: "src/hub/server.ts",
+    startLine: 85,
+    endLine: 92,
+    content: "\nfunction listenOnLoopback(app: Hono, port: number) {\n  return serve({ fetch: app.fetch, hostname: \"127.0.0.1\", port });\n}",
+    contentHash: revision("9"),
+    symbolIds: ["sym.createHubServer"],
+  },
+];
+
+const searchResponse = (request: SearchRequest): SearchResponse => ({
+  query: request.q,
   observedAt: timestamp(0),
   groups: {
     wiki: {
-      status: "available",
-      items: [
-        { id: "knowledge_secure_hub", kind: "wiki", title: "Secure loopback Hub", description: `The local control plane related to “${query}” uses process-memory sessions and strict request boundaries.`, route: "/knowledge" },
-        { id: "decision_hidden_writes", kind: "wiki", title: "No hidden index writes", description: "Read-only views report freshness without rebuilding derived state.", route: "/knowledge" },
-      ],
-      nextCursor: null,
-      truncated: false,
-    },
-    symbols: {
-      status: "available",
-      items: [
-        { id: "symbol_create_hub", kind: "code_symbol", title: "createHubServer", description: "Creates the authenticated loopback application boundary.", path: "src/hub/server.ts", route: "/code" },
-        { id: "symbol_job_executor", kind: "code_symbol", title: "JobExecutor", description: "Injected executor contract with generation-bound progress.", path: "src/hub/jobs/types.ts", route: "/code" },
-      ],
-      nextCursor: null,
-      truncated: false,
-    },
-    sources: {
-      status: "failed",
+      status: "unavailable",
       items: [],
       nextCursor: null,
       truncated: false,
-      detail: "Source-chunk retrieval failed independently. Knowledge and symbol results remain complete.",
+      revision: null,
+      detail: "The Wiki reader is not connected in this integration slice.",
+    },
+    symbols: {
+      status: "available",
+      items: graphSymbols.map((symbol) => ({ ...symbol, kind: "code_symbol" as const })),
+      nextCursor: null,
+      truncated: false,
+      revision: graphRevision,
+    },
+    sources: {
+      status: "available",
+      items: [{
+        id: "source_hub_server",
+        kind: "source_chunk",
+        path: "src/hub/server.ts",
+        startLine: 74,
+        endLine: 84,
+        preview: `export async function createHubServer(options: HubServerOptions) {\n  const app = createHubApp(options);\n}`,
+        previewTruncated: true,
+        matchedTerms: request.q.split(/\s+/).filter(Boolean).slice(0, 4),
+        symbolIds: ["sym.createHubServer"],
+        route: "/code/symbols/sym.createHubServer",
+      }],
+      nextCursor: null,
+      truncated: false,
+      revision: graphRevision,
     },
   },
 });
+
+function codeWorkspace(id: string, request: CodeWorkspaceRequest): CodeWorkspaceResponse {
+  const symbol = graphSymbols.find((item) => item.id === id) ?? graphSymbols[0];
+  const sourceOffset = request.sourceCursor === "fixture_source_2" ? 1 : 0;
+  const source = sourcePages[sourceOffset];
+  const sourceHasMore = sourceOffset === 0;
+  if (request.view === "callers" || request.view === "callees") {
+    const relation = request.view === "callers"
+      ? { kind: "calls", sourceId: "sym.GraphPort.searchNodes", targetId: symbol.id, path: "src/hub/services/graph.ts", line: 141, confidence: 0.96, provenance: "ast" }
+      : { kind: "calls", sourceId: symbol.id, targetId: "sym.GraphPort.searchNodes", path: "src/hub/server.ts", line: 102, confidence: 0.93, provenance: "ast" };
+    return {
+      revision: graphRevision,
+      symbol,
+      source: { items: [source], nextCursor: sourceHasMore ? "fixture_source_2" : null, truncated: false },
+      view: request.view,
+      traversal: { view: request.view, items: [relation], nextCursor: null, truncated: false },
+    };
+  }
+  if (request.view === "impact") {
+    return {
+      revision: graphRevision,
+      symbol,
+      source: { items: [source], nextCursor: sourceHasMore ? "fixture_source_2" : null, truncated: false },
+      view: "impact",
+      traversal: {
+        view: "impact",
+        targetId: symbol.id,
+        roots: [graphSymbols[1]],
+        impacted: [{ symbol: graphSymbols[1], depth: Math.min(request.depth ?? 2, 2), rootId: graphSymbols[1].id }],
+        relations: [{ kind: "calls", sourceId: graphSymbols[1].id, targetId: symbol.id, confidence: 0.93, provenance: "ast" }],
+        truncated: false,
+      },
+    };
+  }
+  return {
+    revision: graphRevision,
+    symbol,
+    source: { items: [source], nextCursor: sourceHasMore ? "fixture_source_2" : null, truncated: false },
+    view: "overview",
+    traversal: { view: "overview" },
+  };
+}
 
 class FixtureHubApi implements HubApi {
   readonly #jobs = structuredClone(jobs);
@@ -340,7 +494,8 @@ class FixtureHubApi implements HubApi {
       diagnosticsTruncated: false,
     });
   }
-  search(query: string) { return Promise.resolve(searchResponse(query)); }
+  search(request: SearchRequest) { return Promise.resolve(searchResponse(request)); }
+  getCodeSymbol(id: string, request: CodeWorkspaceRequest) { return Promise.resolve(codeWorkspace(id, request)); }
   getHealth() { return Promise.resolve(health); }
   getJobs(): Promise<JobsResponse> { return Promise.resolve({ items: [...this.#jobs], nextCursor: null }); }
   getJob(id: string) { return Promise.resolve(this.#jobs.find((job) => job.id === id) ?? this.#jobs[0]); }
@@ -350,7 +505,7 @@ class FixtureHubApi implements HubApi {
       scaffoldId: "scf_mex",
       kind: request.kind,
       generation: 15,
-      phase: "Queued",
+      phase: "queued",
       progress: null,
       state: "queued",
       cancelRequested: false,
@@ -362,7 +517,7 @@ class FixtureHubApi implements HubApi {
   }
   cancelJob(id: string) {
     const job = this.#jobs.find((candidate) => candidate.id === id) ?? this.#jobs[0];
-    Object.assign(job, { cancelRequested: true, phase: "Stopping safely" });
+    Object.assign(job, { cancelRequested: true, phase: "running" });
     return Promise.resolve(job);
   }
   subscribeToJob(): JobSubscription { return { close() {} }; }

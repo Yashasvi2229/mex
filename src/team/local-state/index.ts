@@ -14,6 +14,7 @@ import {
   HUB_JOB_INTERRUPTION_REASONS,
   HUB_JOB_KINDS,
   HUB_JOB_PHASES,
+  HUB_JOB_PROGRESS_PHASES,
 } from "../../hub/jobs/types.js";
 import type {
   HubJobInterruptionReason,
@@ -34,7 +35,7 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
 };
 type DatabaseSync = NodeDatabaseSync;
 
-const LOCAL_STATE_SCHEMA_VERSION = 2 as const;
+const LOCAL_STATE_SCHEMA_VERSION = 3 as const;
 const LOCAL_STATE_RECORD_REVISION_VERSION = 1 as const;
 const LOCAL_STATE_RELATIVE_PATH = ".mex/local/team.db";
 const MEMBER_ID = /^member_[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -94,6 +95,62 @@ const V2_SCHEMA_SQL = `
     generation INTEGER NOT NULL CHECK (generation >= 1),
     phase TEXT NOT NULL CHECK (
       phase IN ('queued', 'running', 'refreshing', 'rebuilding', 'finalizing', 'complete', 'failed', 'interrupted')
+    ),
+    progress_completed INTEGER CHECK (progress_completed IS NULL OR progress_completed >= 0),
+    progress_total INTEGER CHECK (progress_total IS NULL OR progress_total >= 1),
+    progress_message TEXT CHECK (progress_message IS NULL),
+    cancel_requested INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
+    state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'succeeded', 'failed', 'interrupted')),
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    interrupted_reason TEXT CHECK (
+      interrupted_reason IS NULL
+      OR interrupted_reason IN ('user_cancelled', 'process_restart', 'process_shutdown')
+    ),
+    problem_json TEXT CHECK (problem_json IS NULL OR length(CAST(problem_json AS BLOB)) <= ${MAX_JOB_PROBLEM_JSON_BYTES}),
+    summary TEXT CHECK (summary IS NULL),
+    revision TEXT NOT NULL,
+    CHECK (
+      (progress_completed IS NULL AND progress_total IS NULL AND progress_message IS NULL)
+      OR progress_completed IS NOT NULL
+    ),
+    CHECK (progress_total IS NULL OR progress_completed <= progress_total),
+    CHECK (state <> 'running' OR started_at IS NOT NULL),
+    CHECK (state IN ('queued', 'running') OR finished_at IS NOT NULL),
+    CHECK (state <> 'interrupted' OR interrupted_reason IS NOT NULL)
+  ) STRICT;
+
+  CREATE UNIQUE INDEX hub_jobs_one_active_index_job_per_scaffold
+    ON hub_jobs (scaffold_id)
+    WHERE state IN ('queued', 'running');
+
+  CREATE UNIQUE INDEX hub_jobs_generation_per_kind
+    ON hub_jobs (scaffold_id, kind, generation);
+
+  CREATE INDEX hub_jobs_scaffold_created
+    ON hub_jobs (scaffold_id, created_at DESC, id DESC);
+`;
+
+const V3_SCHEMA_SQL = `
+  CREATE TABLE hub_runtime_lease (
+    singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
+    pid INTEGER NOT NULL CHECK (pid >= 1),
+    token TEXT NOT NULL CHECK (length(token) = 64),
+    acquired_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE hub_jobs (
+    id TEXT NOT NULL PRIMARY KEY,
+    scaffold_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('graph_refresh', 'graph_rebuild', 'wiki_refresh', 'wiki_rebuild')),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    phase TEXT NOT NULL CHECK (
+      phase IN (
+        'queued', 'running', 'refreshing', 'rebuilding', 'finalizing',
+        'discover', 'stage', 'parse', 'resolve', 'validate', 'publish',
+        'complete', 'failed', 'interrupted'
+      )
     ),
     progress_completed INTEGER CHECK (progress_completed IS NULL OR progress_completed >= 0),
     progress_total INTEGER CHECK (progress_total IS NULL OR progress_total >= 1),
@@ -1608,9 +1665,7 @@ function validateJobLifecycle(job: Omit<HubJobSnapshot, "revision">): void {
   }
   if (job.state === "running") {
     if (
-      !(["running", "refreshing", "rebuilding", "finalizing"] as const).includes(
-        job.phase as "running" | "refreshing" | "rebuilding" | "finalizing",
-      )
+      !HUB_JOB_PROGRESS_PHASES.includes(job.phase as (typeof HUB_JOB_PROGRESS_PHASES)[number])
       || job.startedAt === undefined
       || job.finishedAt !== undefined
       || job.interruptedReason !== undefined
@@ -1893,6 +1948,12 @@ function validateReadableSchema(db: DatabaseSync): void {
       "Local team schema 1 requires the explicit Hub schema v2 migration.",
     );
   }
+  if (version === 2) {
+    validateV2Tables(db);
+    throw migrationError(
+      "Local team schema 2 requires the explicit Hub schema v3 migration.",
+    );
+  }
   if (version > LOCAL_STATE_SCHEMA_VERSION) {
     throw migrationError(
       `Local team schema ${version} is newer than supported schema ${LOCAL_STATE_SCHEMA_VERSION}.`,
@@ -1901,14 +1962,14 @@ function validateReadableSchema(db: DatabaseSync): void {
   if (version !== LOCAL_STATE_SCHEMA_VERSION) {
     throw corruptError("The local team schema version is invalid.");
   }
-  validateV2Tables(db);
+  validateV3Tables(db);
 }
 
 function ensureWritableSchema(db: DatabaseSync, now: () => string): void {
   const tables = listUserTables(db);
   if (tables.length === 0) {
-    createV2Schema(db, now());
-    validateV2Tables(db);
+    createV3Schema(db, now());
+    validateV3Tables(db);
     return;
   }
   if (!tables.includes("local_state_schema")) {
@@ -1939,14 +2000,23 @@ function ensureWritableSchema(db: DatabaseSync, now: () => string): void {
       UPDATE local_state_schema
       SET version = ?, applied_at = ?
       WHERE singleton = 1
+    `).run(2, validateTimestamp(now(), "migration timestamp"));
+  }
+  if (version <= 2) {
+    validateV2Tables(db);
+    migrateV2ToV3(db);
+    db.prepare(`
+      UPDATE local_state_schema
+      SET version = ?, applied_at = ?
+      WHERE singleton = 1
     `).run(LOCAL_STATE_SCHEMA_VERSION, validateTimestamp(now(), "migration timestamp"));
   }
-  validateV2Tables(db);
+  validateV3Tables(db);
 }
 
-function createV2Schema(db: DatabaseSync, timestamp: string): void {
+function createV3Schema(db: DatabaseSync, timestamp: string): void {
   db.exec(V1_SCHEMA_SQL);
-  db.exec(V2_SCHEMA_SQL);
+  db.exec(V3_SCHEMA_SQL);
   db.prepare(`
     INSERT INTO local_state_schema (singleton, version, applied_at)
     VALUES (1, ?, ?)
@@ -1954,6 +2024,38 @@ function createV2Schema(db: DatabaseSync, timestamp: string): void {
     LOCAL_STATE_SCHEMA_VERSION,
     validateTimestamp(timestamp, "schema timestamp"),
   );
+}
+
+function migrateV2ToV3(db: DatabaseSync): void {
+  db.exec(`
+    DROP INDEX hub_jobs_generation_per_kind;
+    DROP INDEX hub_jobs_one_active_index_job_per_scaffold;
+    DROP INDEX hub_jobs_scaffold_created;
+    ALTER TABLE hub_jobs RENAME TO hub_jobs_v2;
+  `);
+  const currentStatements = V3_SCHEMA_SQL
+    .split(";")
+    .map((statement) => statement.trim())
+    .filter((statement) => (
+      statement.startsWith("CREATE TABLE hub_jobs")
+      || statement.includes("INDEX hub_jobs_")
+    ));
+  db.exec(`${currentStatements.join(";\n")};`);
+  db.exec(`
+    INSERT INTO hub_jobs (
+      id, scaffold_id, kind, generation, phase,
+      progress_completed, progress_total, progress_message, cancel_requested,
+      state, created_at, started_at, finished_at, interrupted_reason,
+      problem_json, summary, revision
+    )
+    SELECT
+      id, scaffold_id, kind, generation, phase,
+      progress_completed, progress_total, progress_message, cancel_requested,
+      state, created_at, started_at, finished_at, interrupted_reason,
+      problem_json, summary, revision
+    FROM hub_jobs_v2;
+    DROP TABLE hub_jobs_v2;
+  `);
 }
 
 function listUserTables(db: DatabaseSync): string[] {
@@ -1997,6 +2099,18 @@ function validateV1Tables(db: DatabaseSync): void {
 }
 
 function validateV2Tables(db: DatabaseSync): void {
+  validateHubTables(db, V2_SCHEMA_SQL, "v2");
+}
+
+function validateV3Tables(db: DatabaseSync): void {
+  validateHubTables(db, V3_SCHEMA_SQL, "v3");
+}
+
+function validateHubTables(
+  db: DatabaseSync,
+  schemaSql: string,
+  versionLabel: "v2" | "v3",
+): void {
   const actualTables = listUserTables(db);
   const expectedTables = [
     ...(Object.keys(EXPECTED_V1_TABLES) as V1LocalStateTable[]),
@@ -2007,12 +2121,12 @@ function validateV2Tables(db: DatabaseSync): void {
     actualTables.length !== expectedTables.length
     || actualTables.some((table, index) => table !== expectedTables[index])
   ) {
-    throw corruptError("The local team database contains an invalid v2 table set.");
+    throw corruptError(`The local team database contains an invalid ${versionLabel} table set.`);
   }
   for (const table of expectedTables) validateTableSemantics(db, table);
   validateV1TableSql(db);
-  validateHubJobIndexes(db);
-  validateHubJobSchemaSql(db);
+  validateHubJobIndexes(db, versionLabel);
+  validateHubJobSchemaSql(db, schemaSql, versionLabel);
   validateNamedSchemaObjects(db, [
     "hub_jobs_generation_per_kind",
     "hub_jobs_one_active_index_job_per_scaffold",
@@ -2085,7 +2199,7 @@ function validateTableSemantics(
   }
 }
 
-function validateHubJobIndexes(db: DatabaseSync): void {
+function validateHubJobIndexes(db: DatabaseSync, versionLabel: "v2" | "v3"): void {
   const indexes = db.prepare("PRAGMA index_list(hub_jobs)").all() as Array<{
     name: unknown;
     unique: unknown;
@@ -2116,7 +2230,7 @@ function validateHubJobIndexes(db: DatabaseSync): void {
     },
   ] as const;
   if (named.length !== expected.length) {
-    throw corruptError("The local team database contains an invalid v2 Hub job index set.");
+    throw corruptError(`The local team database contains an invalid ${versionLabel} Hub job index set.`);
   }
   for (const [index, wanted] of expected.entries()) {
     const actual = named[index];
@@ -2143,8 +2257,12 @@ function validateHubJobIndexes(db: DatabaseSync): void {
   }
 }
 
-function validateHubJobSchemaSql(db: DatabaseSync): void {
-  const expectedStatements = V2_SCHEMA_SQL
+function validateHubJobSchemaSql(
+  db: DatabaseSync,
+  schemaSql: string,
+  versionLabel: "v2" | "v3",
+): void {
+  const expectedStatements = schemaSql
     .split(";")
     .map((statement) => statement.trim())
     .filter((statement) => statement.length > 0);
@@ -2171,7 +2289,7 @@ function validateHubJobSchemaSql(db: DatabaseSync): void {
       || expected === undefined
       || normalizeSchemaSql(row.sql) !== normalizeSchemaSql(expected)
     ) {
-      throw corruptError(`Hub job schema object ${name} does not match schema v2.`);
+      throw corruptError(`Hub job schema object ${name} does not match schema ${versionLabel}.`);
     }
   }
 }

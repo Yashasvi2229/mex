@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpHubApi, HubApiError, fixturesEnabled, readBootstrapToken } from "./client";
 import type { ActivityResponse, JobSummary } from "./types";
+import { createFixtureApi } from "../dev/fixture-api";
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
   status,
@@ -17,7 +18,7 @@ const job: JobSummary = {
   scaffoldId: "scf_mex",
   kind: "graph_refresh",
   generation: 1,
-  phase: "Queued",
+  phase: "queued",
   progress: null,
   state: "queued",
   cancelRequested: false,
@@ -58,6 +59,35 @@ describe("bootstrap fragment handling", () => {
 });
 
 describe("HttpHubApi shared-contract boundary", () => {
+  it("sends independent search cursors through the strict shared contract", async () => {
+    const response = await createFixtureApi().search({ q: "graph", limit: 25 });
+    const fetchMock = vi.fn().mockResolvedValue(json(response));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new HttpHubApi().search({ q: "graph", limit: 25, symbolCursor: "symbol-page-2" });
+
+    const [rawUrl] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const url = new URL(rawUrl, "http://127.0.0.1");
+    expect(url.pathname).toBe("/api/v1/search");
+    expect(Object.fromEntries(url.searchParams)).toEqual({ q: "graph", limit: "25", symbolCursor: "symbol-page-2" });
+  });
+
+  it("reads a bounded symbol workspace without allowing path-like IDs", async () => {
+    const response = await createFixtureApi().getCodeSymbol("sym.createHubServer", { view: "impact", depth: 3 });
+    const fetchMock = vi.fn().mockResolvedValue(json(response));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpHubApi();
+
+    await expect(api.getCodeSymbol("sym.createHubServer", { view: "impact", depth: 3, sourceCursor: "source-page-2" })).resolves.toEqual(response);
+    const [rawUrl] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const url = new URL(rawUrl, "http://127.0.0.1");
+    expect(url.pathname).toBe("/api/v1/code/symbols/sym.createHubServer");
+    expect(Object.fromEntries(url.searchParams)).toEqual({ view: "impact", depth: "3", sourceCursor: "source-page-2" });
+
+    await expect(api.getCodeSymbol("../../secrets", { view: "overview" })).rejects.toBeInstanceOf(HubApiError);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it("sends bounded Activity filters and parses the shared response contract", async () => {
     const fetchMock = vi.fn().mockResolvedValue(json(activity));
     vi.stubGlobal("fetch", fetchMock);

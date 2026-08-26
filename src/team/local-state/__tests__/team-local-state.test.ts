@@ -124,6 +124,89 @@ function createRawV1(path: string, overrides: RawV1SchemaOverrides = {}): void {
   db.close();
 }
 
+function createRawV2(path: string, withQueuedJob = false): void {
+  createRawV1(path);
+  const db = new DatabaseSync(join(path, ".mex/local/team.db"));
+  db.exec(`
+    CREATE TABLE hub_runtime_lease (
+      singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
+      pid INTEGER NOT NULL CHECK (pid >= 1),
+      token TEXT NOT NULL CHECK (length(token) = 64),
+      acquired_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE hub_jobs (
+      id TEXT NOT NULL PRIMARY KEY,
+      scaffold_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('graph_refresh', 'graph_rebuild', 'wiki_refresh', 'wiki_rebuild')),
+      generation INTEGER NOT NULL CHECK (generation >= 1),
+      phase TEXT NOT NULL CHECK (
+        phase IN ('queued', 'running', 'refreshing', 'rebuilding', 'finalizing', 'complete', 'failed', 'interrupted')
+      ),
+      progress_completed INTEGER CHECK (progress_completed IS NULL OR progress_completed >= 0),
+      progress_total INTEGER CHECK (progress_total IS NULL OR progress_total >= 1),
+      progress_message TEXT CHECK (progress_message IS NULL),
+      cancel_requested INTEGER NOT NULL CHECK (cancel_requested IN (0, 1)),
+      state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'succeeded', 'failed', 'interrupted')),
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT,
+      interrupted_reason TEXT CHECK (
+        interrupted_reason IS NULL
+        OR interrupted_reason IN ('user_cancelled', 'process_restart', 'process_shutdown')
+      ),
+      problem_json TEXT CHECK (problem_json IS NULL OR length(CAST(problem_json AS BLOB)) <= 4096),
+      summary TEXT CHECK (summary IS NULL),
+      revision TEXT NOT NULL,
+      CHECK (
+        (progress_completed IS NULL AND progress_total IS NULL AND progress_message IS NULL)
+        OR progress_completed IS NOT NULL
+      ),
+      CHECK (progress_total IS NULL OR progress_completed <= progress_total),
+      CHECK (state <> 'running' OR started_at IS NOT NULL),
+      CHECK (state IN ('queued', 'running') OR finished_at IS NOT NULL),
+      CHECK (state <> 'interrupted' OR interrupted_reason IS NOT NULL)
+    ) STRICT;
+    CREATE UNIQUE INDEX hub_jobs_one_active_index_job_per_scaffold
+      ON hub_jobs (scaffold_id)
+      WHERE state IN ('queued', 'running');
+    CREATE UNIQUE INDEX hub_jobs_generation_per_kind
+      ON hub_jobs (scaffold_id, kind, generation);
+    CREATE INDEX hub_jobs_scaffold_created
+      ON hub_jobs (scaffold_id, created_at DESC, id DESC);
+    UPDATE local_state_schema SET version = 2, applied_at = '${NOW}';
+  `);
+  if (withQueuedJob) {
+    const id = "job_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const revision = createHash("sha256").update(JSON.stringify({
+      schemaVersion: 2,
+      id,
+      scaffoldId: "scaffold-a",
+      kind: "graph_refresh",
+      generation: 1,
+      phase: "queued",
+      progress: null,
+      cancelRequested: false,
+      state: "queued",
+      createdAt: NOW,
+      startedAt: null,
+      finishedAt: null,
+      interruptedReason: null,
+      problem: null,
+      summary: null,
+    })).digest("hex");
+    db.prepare(`
+      INSERT INTO hub_jobs (
+        id, scaffold_id, kind, generation, phase,
+        progress_completed, progress_total, progress_message, cancel_requested,
+        state, created_at, started_at, finished_at, interrupted_reason,
+        problem_json, summary, revision
+      ) VALUES (?, 'scaffold-a', 'graph_refresh', 1, 'queued', NULL, NULL, NULL, 0,
+        'queued', ?, NULL, NULL, NULL, NULL, NULL, ?)
+    `).run(id, NOW, revision);
+  }
+  db.close();
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -394,7 +477,7 @@ describe("TeamLocalState", () => {
     expect(state(root).getConfiguredMember()).toEqual(selection);
   });
 
-  it("migrates v1 to v2 in order while preserving Lane C rows", () => {
+  it("migrates v1 through v2 to v3 while preserving Lane C rows", () => {
     const root = tempProject();
     createRawV1(root);
     const dbPath = join(root, ".mex/local/team.db");
@@ -445,7 +528,7 @@ describe("TeamLocalState", () => {
 
     const migrated = new DatabaseSync(dbPath, { readOnly: true });
     expect(migrated.prepare("SELECT version FROM local_state_schema").get()).toEqual({
-      version: 2,
+      version: 3,
     });
     const hubTable = migrated.prepare(`
       SELECT strict
@@ -467,7 +550,7 @@ describe("TeamLocalState", () => {
     migrated.close();
   });
 
-  it("rolls back the v1-to-v2 migration when the requested job mutation fails", () => {
+  it("rolls back the v1-to-v3 migration when the requested job mutation fails", () => {
     const root = tempProject();
     createRawV1(root);
     const store = state(root);
@@ -495,7 +578,62 @@ describe("TeamLocalState", () => {
     db.close();
   });
 
-  it("rejects a v2 database whose required partial index was replaced", () => {
+  it("keeps schema v2 reads non-mutating and migrates queued jobs to v3 exactly", () => {
+    const root = tempProject();
+    createRawV2(root, true);
+    const dbPath = join(root, ".mex/local/team.db");
+    const before = readFileSync(dbPath);
+    const beforeMtime = statSync(dbPath, { bigint: true }).mtimeNs;
+    const store = state(root);
+
+    expectCode(() => store.listHubJobs(), "MIGRATION_REQUIRED");
+    expect(readFileSync(dbPath)).toEqual(before);
+    expect(statSync(dbPath, { bigint: true }).mtimeNs).toBe(beforeMtime);
+
+    store.initializeHubState();
+    expect(store.listHubJobs().items).toMatchObject([{
+      id: "job_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      phase: "queued",
+      state: "queued",
+      revision: expect.stringMatching(/^[a-f0-9]{64}$/),
+    }]);
+    const migrated = new DatabaseSync(dbPath, { readOnly: true });
+    expect(migrated.prepare("SELECT version FROM local_state_schema").get()).toEqual({ version: 3 });
+    const sql = migrated.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hub_jobs'")
+      .get() as { sql: string };
+    expect(sql.sql).toContain("'discover'");
+    expect(sql.sql).toContain("'publish'");
+    migrated.close();
+  });
+
+  it("rolls the v2-to-v3 phase migration back when the requested mutation fails", () => {
+    const root = tempProject();
+    createRawV2(root, true);
+    const dbPath = join(root, ".mex/local/team.db");
+    const before = readFileSync(dbPath);
+
+    expectCode(() => state(root).updateHubJobRecord({
+      leaseToken: LEASE_A,
+      id: "job_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      generation: 1,
+      expectedRevision: "a".repeat(64),
+      phase: "discover",
+      progress: null,
+      cancelRequested: false,
+      state: "running",
+      startedAt: NOW,
+    }), "REVISION_CONFLICT");
+
+    expect(readFileSync(dbPath)).toEqual(before);
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    expect(db.prepare("SELECT version FROM local_state_schema").get()).toEqual({ version: 2 });
+    const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'hub_jobs'")
+      .get() as { sql: string };
+    expect(sql.sql).not.toContain("'discover'");
+    db.close();
+  });
+
+  it("rejects a v3 database whose required partial index was replaced", () => {
     const root = tempProject();
     const store = state(root);
     store.initializeHubState();
@@ -527,7 +665,7 @@ describe("TeamLocalState", () => {
 
   it("reports newer schemas as migration-required", () => {
     const root = tempProject();
-    createSchemaVersionOnly(root, 3);
+    createSchemaVersionOnly(root, 4);
 
     expectCode(() => state(root).getConfiguredMember(), "MIGRATION_REQUIRED");
     expectCode(

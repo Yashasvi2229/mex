@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-08-23
+last_updated: 2026-08-24
 ---
 
 # Session Bootstrap
@@ -46,25 +46,31 @@ Then read this file fully before doing anything else in this session.
   the last trustworthy index behind one cross-process maintenance lease.
 - Targeted graph get/query/impact consumers use one provenance-bound immutable
   snapshot and discard output if graph or exact source identity changes.
+- The graph half of Checkpoint 2 is working in the Project Hub: grouped symbol
+  and source Search, the read-only Code workspace, structured graph Health, and
+  explicit refresh/rebuild jobs all use the repository-bound GraphPort adapter.
+  Hub graph reads preserve engine ranking and never maintain the index implicitly.
 - Graph evaluator determinism includes semantic snapshot provenance while
   excluding only operational timestamps and Git coordinates.
 
 **Not Built:**
 - The real Wiki adapter and type-parity registration against the teammate engine.
-- Real Graph/Wiki Hub adapters, Workstream/Inbox/Relay/Playbook persistence,
-  Catch Up actions, activity creation, and later delivery checkpoints from the
-  human-team program.
+- Real Wiki Hub search, health, and maintenance; Workstream/Inbox/Relay/Playbook
+  persistence; Catch Up actions; activity creation; and later delivery
+  checkpoints from the human-team program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
-- The teammate Wiki implementation branch/commit is not yet available, so the
-  consumer contract remains provisional.
+- The teammate Wiki implementation is not yet complete and pinned at a
+  qualifying commit, so the consumer contract remains provisional.
 - The current scaffold architecture, conventions, decisions, stack, and setup
   context files are still largely unpopulated placeholders.
 - Real parser, filesystem, index, migration, and graph-grounding compliance must
-  be verified against the pinned teammate implementation, not inferred from the mock.
-- Hub Graph/Wiki controls remain unavailable until their corresponding real
-  adapters are integrated; development fixtures are never production data.
+  be verified against the completed, pinned teammate implementation, not
+  inferred from the mock.
+- Hub Wiki controls remain unavailable until the real adapter is integrated;
+  development fixtures are never production data. Graph repair controls appear
+  only when a fresh status or executable Lane A remediation makes them safe.
 
 ## Routing Table
 

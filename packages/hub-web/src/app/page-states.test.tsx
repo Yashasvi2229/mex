@@ -24,7 +24,8 @@ function apiWith(overrides: Partial<HubApi>): HubApi {
     getCapabilities: () => fixture.getCapabilities(),
     getHome: () => fixture.getHome(),
     getActivity: (request) => fixture.getActivity(request),
-    search: (query) => fixture.search(query),
+    search: (request) => fixture.search(request),
+    getCodeSymbol: (id, request) => fixture.getCodeSymbol(id, request),
     getHealth: () => fixture.getHealth(),
     getJobs: (cursor) => fixture.getJobs(cursor),
     getJob: (id) => fixture.getJob(id),
@@ -346,13 +347,14 @@ describe("Search states", () => {
 
   it("distinguishes unavailable groups from successful empty groups", async () => {
     const fixture = createFixtureApi();
-    const response = await fixture.search("identity");
-    const emptyGroup = { status: "available" as const, items: [], nextCursor: null, truncated: false };
+    const response = await fixture.search({ q: "identity", limit: 25 });
+    const emptyGroup = { status: "available" as const, items: [], nextCursor: null, truncated: false, revision: "a".repeat(64) };
     const unavailableGroup = {
       status: "unavailable" as const,
       items: [],
       nextCursor: null,
       truncated: false,
+      revision: null,
       detail: "The Wiki reader is not connected.",
     };
     renderRoute("/search?q=identity", apiWith({
@@ -363,8 +365,8 @@ describe("Search states", () => {
     }));
 
     expect(await screen.findByRole("heading", { name: "Knowledge unavailable" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "No code symbols matches" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "No source chunks matches" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "No code symbols found" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "No source matches found" })).toBeVisible();
   });
 });
 
@@ -406,7 +408,7 @@ describe("Health states", () => {
     }));
 
     expect(await screen.findByText("The graph index cannot be inspected.")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Graph refresh" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Refresh graph" })).toBeDisabled();
   });
 });
 

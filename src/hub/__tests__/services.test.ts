@@ -1,10 +1,13 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitPort } from "../../team/contracts/git.js";
 import { TeamIdentityActivityFoundation } from "../../team/foundation.js";
-import { createLocalHubReadServices } from "../services.js";
+import {
+  createLocalHubReadServices,
+  type HubGraphReadService,
+} from "../services.js";
 
 const EVENT = "event_01ARZ3NDEKTSV4RRFFQ69G5FAB";
 const MEMBER = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -92,6 +95,267 @@ describe("createLocalHubReadServices", () => {
       ["graph", "unavailable"],
       ["wiki", "unavailable"],
     ]);
+  });
+
+  it("projects real graph search, workspace, health, and safe maintenance eligibility", async () => {
+    const status = {
+      status: "stale" as const,
+      observedAt: NOW.toISOString(),
+      currentRepo: {
+        branch: "feature",
+        head: "b".repeat(40),
+        dirty: true,
+        observedAt: NOW.toISOString(),
+      },
+      lastSuccessfulIndexAt: NOW.toISOString(),
+      indexedAt: NOW.toISOString(),
+      indexedBranch: "main",
+      indexedHead: "a".repeat(40),
+      schemaVersion: 2,
+      extractorVersion: "extractor-1",
+      grammarVersion: "grammar-1",
+      parseHealth: {
+        total: 2,
+        ok: 1,
+        partial: 1,
+        failed: 0,
+        failedPaths: [],
+        failedPathsTruncated: false,
+      },
+      changes: {
+        total: 1,
+        added: ["src/new.ts"],
+        modified: [],
+        deleted: [],
+        truncated: false,
+        branchChanged: true,
+        manifestChanged: false,
+        configChanged: false,
+        grammarChanged: false,
+      },
+      diagnostics: [{
+        code: "GRAPH_INDEX_BRANCH_CHANGED",
+        severity: "warning" as const,
+        message: "private detail /Users/alice/project",
+        path: "/Users/alice/project.ts",
+        remediation: [{ label: "Refresh", command: "mex graph refresh" }],
+      }],
+    };
+    const symbol = {
+      ref: { kind: "symbol" as const, symbolId: "function:router" },
+      symbolKind: "function",
+      name: "router",
+      qualifiedName: "hub.router",
+      language: "typescript",
+      path: "src/router.ts",
+      startLine: 3,
+      endLine: 7,
+      signature: "router(): void",
+    };
+    const graph: HubGraphReadService = {
+      inspectStatus: async () => status,
+      searchBundle: async () => ({
+        revision: "c".repeat(64),
+        status,
+        nodes: {
+          ok: true,
+          value: { items: [symbol], nextCursor: "next-symbol", truncated: false },
+        },
+        sources: {
+          ok: false,
+          problem: {
+            title: "Stale cursor",
+            status: 409,
+            code: "REVISION_CONFLICT",
+            detail: "private stale cursor detail",
+          },
+        },
+      }),
+      readSymbolWorkspace: async () => ({
+        revision: "c".repeat(64),
+        status,
+        symbol,
+        source: {
+          items: [{
+            path: "src/router.ts",
+            startLine: 3,
+            endLine: 7,
+            content: "export function router() {}",
+            contentHash: "d".repeat(64),
+            symbolRefs: [symbol.ref],
+          }],
+          nextCursor: null,
+          truncated: false,
+        },
+        callers: {
+          items: [{
+            kind: "calls",
+            source: { kind: "symbol", symbolId: "function:caller" },
+            target: symbol.ref,
+            path: "src/caller.ts",
+            line: 9,
+            provenance: "semantic",
+          }],
+          nextCursor: null,
+          truncated: false,
+        },
+        callees: null,
+        impact: null,
+      }),
+    };
+    const services = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      graph,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+
+    await expect(services.capabilities()).resolves.toMatchObject({
+      graph: {
+        read: { availability: "available" },
+        refresh: { availability: "available" },
+        rebuild: { availability: "available" },
+      },
+      wiki: { read: { availability: "unavailable" } },
+    });
+    const search = await services.search({ q: "router", limit: 25 });
+    expect(search.groups.symbols).toMatchObject({
+      status: "available",
+      revision: "c".repeat(64),
+      items: [{ kind: "code_symbol", id: "function:router", path: "src/router.ts" }],
+    });
+    expect(search.groups.sources).toMatchObject({
+      status: "failed",
+      code: "REVISION_CONFLICT",
+      revision: null,
+    });
+
+    await expect(services.codeSymbol?.("function:router", {
+      view: "callers",
+      limit: 25,
+    })).resolves.toMatchObject({
+      revision: "c".repeat(64),
+      symbol: { id: "function:router" },
+      source: { items: [{ content: "export function router() {}" }] },
+      traversal: {
+        view: "callers",
+        items: [{ sourceId: "function:caller", targetId: "function:router" }],
+      },
+    });
+
+    const health = await services.health();
+    const graphHealth = health.components.find((component) => component.id === "graph");
+    expect(graphHealth).toMatchObject({
+      status: "degraded",
+      repairJobKind: "graph_refresh",
+      graph: {
+        indexStatus: "stale",
+        allowedJobKinds: ["graph_refresh"],
+        recommendedJobKind: "graph_refresh",
+      },
+    });
+    expect(JSON.stringify(graphHealth)).not.toContain("/Users/alice");
+    await expect(services.assertJobStartAllowed?.("graph_refresh")).resolves.toBeUndefined();
+    await expect(services.assertJobStartAllowed?.("graph_rebuild")).rejects.toMatchObject({
+      code: "CAPABILITY_UNAVAILABLE",
+    });
+  });
+
+  it("recognizes legacy rebuild remediation and marks structural inspection failure unavailable", async () => {
+    const missing = {
+      status: "missing" as const,
+      observedAt: NOW.toISOString(),
+      currentRepo: { branch: "main", head: null, dirty: false, observedAt: NOW.toISOString() },
+      lastSuccessfulIndexAt: null,
+      indexedAt: null,
+      indexedBranch: null,
+      indexedHead: null,
+      schemaVersion: null,
+      extractorVersion: null,
+      grammarVersion: null,
+      parseHealth: { total: 0, ok: 0, partial: 0, failed: 0, failedPaths: [], failedPathsTruncated: false },
+      changes: {
+        total: 0,
+        added: [],
+        modified: [],
+        deleted: [],
+        truncated: false,
+        branchChanged: false,
+        manifestChanged: false,
+        configChanged: false,
+        grammarChanged: false,
+      },
+      diagnostics: [{
+        code: "GRAPH_INDEX_MISSING",
+        severity: "warning" as const,
+        message: "missing",
+        remediation: [{ label: "Build graph", command: "mex graph" }],
+      }],
+    };
+    const base = {
+      searchBundle: async () => { throw new Error("unused"); },
+      readSymbolWorkspace: async () => { throw new Error("unused"); },
+    };
+    const services = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      graph: { ...base, inspectStatus: async () => missing },
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+    await expect(services.assertJobStartAllowed?.("graph_rebuild")).resolves.toBeUndefined();
+
+    const failed = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      graph: { ...base, inspectStatus: async () => { throw new Error("/Users/alice/private"); } },
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+    const health = await failed.health();
+    expect(health.components.find((component) => component.id === "graph")).toMatchObject({
+      status: "unavailable",
+    });
+    expect(JSON.stringify(health)).not.toContain("/Users/alice");
+  });
+
+  it("lets the durable job manager retain its authoritative active-job conflict", async () => {
+    const inspectStatus = vi.fn(async () => { throw new Error("must not inspect during contention"); });
+    const services = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      graph: {
+        inspectStatus,
+        searchBundle: async () => { throw new Error("unused"); },
+        readSymbolWorkspace: async () => { throw new Error("unused"); },
+      },
+      jobs: {
+        list: () => ({
+          items: [{
+            id: "job_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            scaffoldId: "scaffold-local",
+            kind: "graph_refresh",
+            generation: 1,
+            phase: "running",
+            progress: null,
+            state: "running",
+            cancelRequested: false,
+            createdAt: NOW.toISOString(),
+            startedAt: NOW.toISOString(),
+            revision: "a".repeat(64),
+          }],
+        }),
+      },
+      now: () => new Date(NOW),
+    });
+
+    await expect(services.assertJobStartAllowed?.("graph_rebuild")).resolves.toBeUndefined();
+    expect(inspectStatus).not.toHaveBeenCalled();
   });
 
   it("projects canonical and legacy activity without exposing private fields", async () => {

@@ -3,6 +3,9 @@ import {
   ActivityResponseSchema,
   BootstrapRequestSchema,
   BootstrapResponseSchema,
+  CodeWorkspaceRequestSchema,
+  CodeWorkspaceResponseSchema,
+  GraphSymbolIdSchema,
   HealthResponseSchema,
   HomeResponseSchema,
   HubCapabilitiesSchema,
@@ -16,6 +19,8 @@ import {
   SearchResponseSchema,
   SessionResponseSchema,
   type HealthResponse,
+  type CodeWorkspaceRequest,
+  type CodeWorkspaceResponse,
   type ActivityRequest,
   type ActivityResponse,
   type HomeResponse,
@@ -38,6 +43,7 @@ import {
   problemResponse,
   resourceResponse,
   unavailable,
+  validationFailed,
 } from "./http/errors.js";
 import { readBoundedJson, readStrictQuery } from "./http/request.js";
 import {
@@ -82,7 +88,12 @@ export interface HubReadServices {
   home(): Promise<HomeResponse> | HomeResponse;
   activity(request: ActivityRequest): Promise<ActivityResponse> | ActivityResponse;
   search(request: SearchRequest): Promise<SearchResponse> | SearchResponse;
+  codeSymbol?(
+    symbolId: string,
+    request: CodeWorkspaceRequest,
+  ): Promise<CodeWorkspaceResponse> | CodeWorkspaceResponse;
   health(): Promise<HealthResponse> | HealthResponse;
+  assertJobStartAllowed?(kind: HubJobKind): Promise<void> | void;
 }
 
 interface HubEnvironment {
@@ -201,7 +212,7 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
   });
 
   app.get("/api/v1/search", async (context) => {
-    const request = parseInput(
+    const request = graphInput(() => parseInput(
       SearchRequestSchema,
       readStrictQuery(context.req.raw, [
         "q",
@@ -210,8 +221,23 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
         "symbolCursor",
         "sourceCursor",
       ]),
-    );
+    ));
     return resourceResponse(SearchResponseSchema, await options.services.search(request));
+  });
+
+  app.get("/api/v1/code/symbols/:id", async (context) => {
+    if (!options.services.codeSymbol) {
+      throw unavailable("Code graph reads are not connected in this build.");
+    }
+    const symbolId = graphInput(() => parseInput(GraphSymbolIdSchema, context.req.param("id")));
+    const request = graphInput(() => parseInput(
+      CodeWorkspaceRequestSchema,
+      readStrictQuery(context.req.raw, ["view", "cursor", "limit", "depth", "sourceCursor"]),
+    ));
+    return resourceResponse(
+      CodeWorkspaceResponseSchema,
+      await options.services.codeSymbol(symbolId, request),
+    );
   });
 
   app.get("/api/v1/health", async () => resourceResponse(
@@ -238,6 +264,7 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
       JobStartRequestSchema,
       await readBoundedJson(context.req.raw),
     );
+    await options.services.assertJobStartAllowed?.(request.kind);
     return resourceResponse(HubJobSnapshotSchema, await jobs.start(request), 202);
   });
 
@@ -298,6 +325,17 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
   });
 
   return app;
+}
+
+function graphInput<T>(read: () => T): T {
+  try {
+    return read();
+  } catch (error) {
+    if (error instanceof HubHttpError && error.code === "INVALID_REQUEST") {
+      throw validationFailed(error.message);
+    }
+    throw error;
+  }
 }
 
 function requireJobs(jobs: HubJobService | undefined): HubJobService {

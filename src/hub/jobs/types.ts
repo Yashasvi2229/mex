@@ -19,6 +19,12 @@ export const HUB_JOB_PHASES = [
   "refreshing",
   "rebuilding",
   "finalizing",
+  "discover",
+  "stage",
+  "parse",
+  "resolve",
+  "validate",
+  "publish",
   "complete",
   "failed",
   "interrupted",
@@ -29,6 +35,12 @@ export const HUB_JOB_PROGRESS_PHASES = [
   "refreshing",
   "rebuilding",
   "finalizing",
+  "discover",
+  "stage",
+  "parse",
+  "resolve",
+  "validate",
+  "publish",
 ] as const;
 
 export type HubJobKind = (typeof HUB_JOB_KINDS)[number];
@@ -83,7 +95,7 @@ export interface HubJobStartRequest {
 }
 
 export interface HubJobProgressUpdate {
-  completed: number;
+  completed?: number;
   total?: number;
   phase?: HubJobProgressPhase;
 }

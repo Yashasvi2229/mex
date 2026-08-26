@@ -174,10 +174,87 @@ describe("Project Hub HTTP application", () => {
       headers: { host: HOST, cookie },
     });
     expect(duplicate.status).toBe(400);
+    expect((await duplicate.json() as { code: string }).code).toBe("VALIDATION_FAILED");
     const unknown = await app.request(`${ORIGIN}/api/v1/search?q=a&unsafe=x`, {
       headers: { host: HOST, cookie },
     });
     expect(unknown.status).toBe(400);
+    expect((await unknown.json() as { code: string }).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("authenticates and strictly validates composite Code workspace reads", async () => {
+    const services = readServices();
+    const codeSymbol = vi.fn(services.codeSymbol!);
+    const app = fixtureApp({ services: { ...services, codeSymbol } });
+
+    expect((await app.request(`${ORIGIN}/api/v1/code/symbols/function:router`, {
+      headers: { host: HOST },
+    })).status).toBe(401);
+    const { cookie } = await bootstrapSession(app);
+    const response = await app.request(
+      `${ORIGIN}/api/v1/code/symbols/function:router?view=callers&limit=25`,
+      { headers: { host: HOST, cookie } },
+    );
+    expect(response.status).toBe(200);
+    expect(codeSymbol).toHaveBeenCalledWith("function:router", { view: "callers", limit: 25 });
+    expect(await response.json()).toMatchObject({
+      symbol: { id: "function:router" },
+      traversal: { view: "callers" },
+    });
+
+    const invalidId = await app.request(`${ORIGIN}/api/v1/code/symbols/function%20router`, {
+      headers: { host: HOST, cookie },
+    });
+    expect(invalidId.status).toBe(400);
+    expect((await invalidId.json() as { code: string }).code).toBe("VALIDATION_FAILED");
+
+    for (const path of [
+      "function%2Frouter",
+      "..",
+      "%2500",
+      "function:router?view=overview&cursor=unexpected",
+      "function:router?view=callers&depth=2",
+      "function:router?unknown=true",
+    ]) {
+      const invalid = await app.request(`${ORIGIN}/api/v1/code/symbols/${path}`, {
+        headers: { host: HOST, cookie },
+      });
+      expect([400, 404], path).toContain(invalid.status);
+    }
+  });
+
+  it("revalidates graph job eligibility before creating a durable job", async () => {
+    const services = readServices();
+    const assertJobStartAllowed = vi.fn(() => {
+      const error = new Error("Unsafe graph state with /Users/alice/private details.") as Error & {
+        problem: Record<string, unknown>;
+      };
+      error.problem = {
+        status: 503,
+        code: "CAPABILITY_UNAVAILABLE",
+        title: "unsafe title",
+        detail: error.message,
+      };
+      throw error;
+    });
+    const jobs = jobService();
+    const start = vi.spyOn(jobs, "start");
+    const app = fixtureApp({ services: { ...services, assertJobStartAllowed }, jobs });
+    const { cookie } = await bootstrapSession(app);
+    const session = await app.request(`${ORIGIN}/api/v1/session`, {
+      headers: { host: HOST, cookie },
+    });
+    const csrf = (await session.json() as { csrfToken: string }).csrfToken;
+    const response = await app.request(`${ORIGIN}/api/v1/jobs`, {
+      method: "POST",
+      headers: { ...mutationHeaders(), cookie, "x-mex-csrf": csrf },
+      body: JSON.stringify({ kind: "graph_rebuild" }),
+    });
+    expect(response.status).toBe(503);
+    const body = await response.text();
+    expect(JSON.parse(body)).toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
+    expect(start).not.toHaveBeenCalled();
+    expect(body).not.toContain("/Users/alice");
   });
 
   it("authenticates and strictly validates bounded Activity reads", async () => {
@@ -603,12 +680,52 @@ function readServices(): HubReadServices {
         wiki: unavailableSearch(),
         symbols: {
           status: "available",
-          items: [{ id: "symbol:router", kind: "code_symbol", title: "Router" }],
+          items: [{
+            id: "symbol:router",
+            kind: "code_symbol",
+            symbolKind: "function",
+            name: "Router",
+            qualifiedName: "Router",
+            language: "typescript",
+            path: "src/router.ts",
+            startLine: 1,
+            endLine: 4,
+            route: "/code/symbols/symbol%3Arouter",
+          }],
           nextCursor: null,
           truncated: false,
+          revision: "b".repeat(64),
         },
         sources: unavailableSearch(),
       },
+    }),
+    codeSymbol: (symbolId, request) => ({
+      revision: "b".repeat(64),
+      symbol: {
+        id: symbolId,
+        symbolKind: "function",
+        name: "Router",
+        qualifiedName: "Router",
+        language: "typescript",
+        path: "src/router.ts",
+        startLine: 1,
+        endLine: 4,
+        route: `/code/symbols/${encodeURIComponent(symbolId)}`,
+      },
+      source: { items: [], nextCursor: null, truncated: false },
+      view: request.view,
+      traversal: request.view === "callers" || request.view === "callees"
+        ? { view: request.view, items: [], nextCursor: null, truncated: false }
+        : request.view === "impact"
+          ? {
+              view: "impact",
+              targetId: symbolId,
+              roots: [],
+              impacted: [],
+              relations: [],
+              truncated: false,
+            }
+          : { view: "overview" },
     }),
     health: () => health,
   };
@@ -620,6 +737,8 @@ function unavailableSearch() {
     items: [],
     nextCursor: null,
     truncated: false,
+    revision: null,
+    code: "CAPABILITY_UNAVAILABLE" as const,
     detail: "The adapter is not connected.",
   };
 }
@@ -630,7 +749,7 @@ function jobSnapshot(state: HubJobSnapshot["state"] = "running"): HubJobSnapshot
     scaffoldId: "mex",
     kind: "graph_refresh",
     generation: 1,
-    phase: state === "succeeded" ? "complete" : "indexing",
+    phase: state === "succeeded" ? "complete" : "running",
     progress: state === "succeeded" ? { completed: 1, total: 1 } : null,
     state,
     cancelRequested: false,
