@@ -1,68 +1,52 @@
-# mex 0.7.2 — Source-backed graph retrieval
+# mex 0.7.3 — Graph performance and recovery
 
-mex 0.7.2 makes the code graph useful as a first-response retrieval system rather than only a compact symbol manifest. `mex graph scope` now returns the most relevant source declarations and real execution flows under a hard token budget, so an agent can often answer from one graph call instead of repeatedly expanding node IDs or reopening files.
+mex 0.7.3 makes the code graph affordable to keep. 0.7.2 traded memory, build time, and disk for a compiler-backed graph and deferred the cleanup to a follow-up release. This is that release: `mex check` no longer rebuilds anything, graph builds hold one compiler program at a time, stores are roughly 36-40% smaller, and a graph left behind by an interrupted command can be repaired instead of rebuilt.
+
+It is a maintenance release. Retrieval behavior, the JSONL protocol, scaffold formats, and grounding anchors are unchanged.
 
 ## What changed
 
-- **Source-backed Scope by default.** Task queries return bounded `meta`, `source`, `flow`, and `summary` JSONL records. Primary declarations and trustworthy flows are admitted before optional context.
-- **Compiler-backed TypeScript graph.** The TypeScript compiler API adds resolved calls, imports, inheritance, containment, callback flow, and declaration-aware source regions. TypeScript 5.9.3 is therefore an exact runtime dependency.
-- **Evidence-aware retrieval.** Lexical search, source chunks, graph neighborhoods, compiler callsites, and declaration identity are fused without inventing edges. Displayed flows use stored edges with confidence at least 0.8 and remain bounded by hop, branch, work, and output-step limits.
-- **Honest status and budgets.** `ok`, `partial`, `degraded`, and `no-match` reflect whether mandatory answer evidence was returned. `truncated: true` may now mean only lower-priority optional evidence was omitted.
-- **Safer graph publication.** Parser/read failures preserve the previous graph, rebuilds are deterministic, and integrity checks cover extraction loss, duplicate or dangling rows, FTS drift, identity drift, invalid confidence, and suspicious production-to-test edges.
-- **Stronger evaluation.** Native Hono, TypeScript-compiler, MEX, and mixed-language holdouts validate files, exact source spans, flows, budgets, construction integrity, and deterministic rebuilds. Headless comparisons pin subject and command identity, constrain tools, support safe resume after provider limits, and blind-grade exact source declarations.
-- **Drift-check improvements.** This release also includes frontmatter completeness, stale-pattern checks, and safer tool-config synchronization from the latest `main` branch.
+- **`mex check` never stages the graph.** The grounding pass previously synchronized the graph whenever any source file's timestamp had moved, which in an actively edited repository meant nearly every run. Because a synchronize re-stages the whole corpus, a routine drift check silently paid a full rebuild's memory and wall-clock cost. `mex check` now opens the last published graph read-only and reports how far behind it is, leaving rebuilds to `mex graph`.
+- **One compiler program alive at a time.** TypeScript extraction held every discovered project's program and type checker simultaneously, so peak memory was the sum of all of them. Extraction is now a capture pass per project followed by a compiler-free finishing pass. Cross-project resolution already flowed through declaration locations that are stable across programs, so each program can be released as soon as its own files are captured.
+- **Smaller stores (schema v3).** The fingerprint and locality-sensitive-hashing tables were 40-50% of a typical store: a JSON text MinHash sketch per node, plus 32 index rows per node each repeating the full node id and a 64-character hexadecimal band hash, plus a secondary index over all of it. v3 stores the sketch as a 256-byte binary value, keys index rows on an integer reference, truncates band hashes to 64-bit integers, and uses the composite primary key as the only index.
+- **The semantic type-check pass is opt-in.** Parser health has always been computed from syntactic diagnostics, and reference resolution queries the type checker directly, so the full per-file semantic pass contributed diagnostic detail only. Its cost scales with how much of the dependency tree the compiler can resolve, which is why two checkouts of one repository on one machine could differ enormously in build time. Discovered projects are also configured with `skipLibCheck` and `noEmit`.
+- **`mex graph repair`.** An interrupted writer can leave a large uncheckpointed write-ahead log, which read-only commands then refuse to open, and the only previous remedy was a full rebuild. `mex graph repair` checkpoints the log and runs an integrity check in place, in seconds.
+- **A build survives a hostile file.** A source file that trips an internal assertion in the TypeScript compiler used to abort the entire build with nothing written. The affected project is now isolated and its files fall back to Tree-sitter extraction. Two same-identity declarations in one file are ordinal-disambiguated instead of aborting corpus staging.
+- **A real memory leak is fixed.** Tree-sitter parse trees live in the WebAssembly heap and are not reclaimed by the JavaScript garbage collector. They were never released, so every parsed file leaked for the lifetime of the process, and each file was parsed twice.
 
-## Agent workflow
+## Measurements
 
-For an unfamiliar task, start with:
+Paired builds of the same repositories before and after, producing identical node, edge, and fingerprint counts:
 
-```bash
-mex graph scope "trace the authentication flow"
-```
+| Repository | Peak build memory | Build wall clock | Store size |
+|---|---|---|---|
+| 3,254 files, 92 TypeScript projects | 5.17 GB → 2.11 GB | 448 s → 309 s | 700.1 MB → 451.1 MB |
+| 494 files, single project | unchanged (~1.2 GB) | 195 s → 189 s | 269.8 MB → 162.9 MB |
 
-Treat returned source as already read. If the summary is `ok`, answer from the returned evidence even when optional context was truncated. Use `mex graph get <node-id>` for an exact missing declaration, or follow `suggestedNextCommands` when the summary is `partial` or `degraded`. Fall back to Grep/Glob when the graph evidence does not clearly answer the task.
+Memory reduction scales with the number of TypeScript projects in a repository, because that is what was being held concurrently. Single-project repositories keep their previous peak and still get the smaller store. The fingerprint and LSH tables shrank by roughly 86% and are no longer the largest consumer in a store; `unresolved_refs` and the source-chunk full-text index now are.
 
-Exact structural commands remain available:
-
-```bash
-mex graph query where-defined authenticate
-mex graph query who-calls requireSession
-mex graph query what-calls createServer
-mex impact requireSession
-```
-
-## Benchmark snapshot
-
-A descriptive pilot ran 12 tasks across Hono and MEX once with a files-only search arm and once with the 0.7.2 candidate: 24 valid Claude Sonnet sessions in total.
-
-| Metric | Files baseline | 0.7.2 candidate | Change |
-|---|---:|---:|---:|
-| Blind-correct answers | 6/12 | 7/12 | +1 answer |
-| New tokens | 393,637 | 179,179 | **-54.5%** |
-| Processed tokens | 3,348,865 | 920,544 | **-72.5%** |
-| Estimated cost | $3.6973 | $1.6061 | **-56.6%** |
-| Mean latency | 45.62 s | 35.17 s | **-22.9%** |
-
-Candidate first responses returned 22/23 required source spans, every required Hono flow, and graph evidence for all 12 tasks.
-
-This is a small, one-repetition pilot. It compares the candidate with files-only search, not with the released `main` graph implementation, and individual task results—especially Hono schema retries—were noisy.
+Separately, a 39,312-file repository with 205 TypeScript projects and several thousand deliberately malformed fixture files now builds to completion for the first time, at 3.1 GB peak memory. Previous releases aborted on the first fixture that tripped a compiler assertion.
 
 ## Upgrade and compatibility
 
-mex 0.7.2 requires Node.js 22.5 or newer, unchanged from 0.7.1.
+mex 0.7.3 requires Node.js 22.5 or newer, unchanged from 0.7.2.
 
 ```bash
-npm install -g mex-agent@0.7.2
+npm install -g mex-agent@0.7.3
 ```
 
-Existing Markdown scaffolds remain valid. The graph schema has changed, so rebuild an existing graph once after upgrading:
+Existing Markdown scaffolds remain valid, and serialized `mh:64:` grounding anchors are unchanged.
+
+A schema-v2 store migrates to v3 losslessly the next time a writing command runs — `mex graph`, `mex sync`, or `mex graph ground`. No rebuild is required for the migration itself and existing groundings continue to resolve immediately. Read-only commands report the usual rebuild guidance until a writing command has run. Schema-v1 stores still need a one-time rebuild, unchanged from 0.7.2.
+
+The compiler extractor version advances in this release, so the first `mex graph` after upgrading performs a full rebuild. After that rebuild, graph content is unchanged apart from nodes and edges that previously aborted the build or were missing entirely.
+
+To recover a graph left behind by an interrupted build or check:
 
 ```bash
-mex graph
+mex graph repair
 ```
-
-Existing projects do not automatically receive updated agent instructions. Copy the new `## Code Graph` section from `templates/AGENTS.md` if you want source-backed one-call guidance in an already-created scaffold.
 
 ## Known tradeoff
 
-The compiler-backed graph stores substantially more nodes, edges, source chunks, import bindings, and integrity metadata than 0.7.1, so `.mex/graph.db` is larger. Build memory is not higher than the released baseline in paired Hono/TypeScript measurements, but storage and no-op/incremental rebuild performance remain follow-up work.
+Peak build memory is now bounded by the largest single TypeScript project rather than by the whole repository, which is a floor rather than a ceiling: a repository whose one project covers tens of thousands of files still needs that project in memory at once. Streaming extraction below that floor remains future work, as does incremental synchronization — `mex graph` still re-stages the full corpus for a single changed file, though `mex check` no longer triggers it. Within a store, `unresolved_refs` and the source-chunk full-text index are the remaining storage targets.

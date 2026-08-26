@@ -30,7 +30,7 @@ mex mapeia seu código, transforma o que os agentes aprendem em Markdown estrutu
 
 Cada sessão de programação começa com o contexto arquitetural relevante, e não com mais uma varredura completa do repositório.
 
-> **Novidade na v0.7.2:** recuperação do grafo com código-fonte em uma única chamada, fluxos de TypeScript resolvidos pelo compilador, evidência determinística e limites rígidos de saída.
+> **Novidade na v0.7.3:** as construções do grafo mantêm um programa do compilador por vez, os armazenamentos são 36-40% menores, o `mex check` não reconstrói mais o grafo e o `mex graph repair` recupera um armazenamento interrompido sem reconstruí-lo.
 
 💬 **Entre na comunidade do mex no Discord** — discuta ideias, peça ajuda, compartilhe feedback e contribua com o projeto.
 
@@ -250,6 +250,7 @@ Com o fluxo antigo `setup.sh`, execute instalação, build e CLI no mesmo ambien
 | `mex graph get <node-id...>` | Expande símbolos exatos |
 | `mex graph query <relation> <symbol>` | Consulta relações estruturais |
 | `mex graph ground` | Conecta uma wiki anterior à 0.7 ao grafo |
+| `mex graph repair` | Recupera um armazenamento de grafo interrompido sem reconstruí-lo |
 | `mex impact <symbol\|file>` | Encontra código e wiki afetados por uma mudança |
 | `mex log <message>` | Registra decisão, nota, risco ou tarefa |
 | `mex timeline` | Mostra eventos recentes |
@@ -295,7 +296,7 @@ O pacote MCP ainda não foi publicado. Para desenvolvimento local:
 npm run build --workspace mex-mcp
 ```
 
-O lançamento principal da v0.7.2 continua sendo a CLI `mex-agent`.
+O lançamento principal da v0.7.3 continua sendo a CLI `mex-agent`.
 
 ## Modo de memória do agente
 
