@@ -50,6 +50,11 @@ afterEach(() => {
 describe("compiler program-crash isolation (#140 follow-up)", () => {
   it("completes the build via tree-sitter when every TS program creation asserts", async () => {
     const { root, dbPath } = fixture("mex-140-isolation-");
+    // Hostile-fixture shape from the TypeScript repo: duplicate same-identity
+    // declarations in one file must ordinal-disambiguate, not abort staging.
+    writeFileSync(join(root, "src", "dupes.ts"),
+      "export function duplicated(): number { return 1; }\n"
+      + "export function duplicated(): number { return 2; }\n");
     const engine = createGraphEngine({
       rootDir: root,
       compilerExtraction: {
@@ -67,6 +72,10 @@ describe("compiler program-crash isolation (#140 follow-up)", () => {
       ).get() as { n: number };
       // The function still exists in the graph — extracted by tree-sitter.
       expect(row.n).toBeGreaterThan(0);
+      const dupes = db.prepare(
+        "SELECT COUNT(*) AS n FROM nodes WHERE file_path = 'src/dupes.ts' AND kind = 'function'",
+      ).get() as { n: number };
+      expect(dupes.n).toBe(2);
     } finally {
       db.close();
     }
