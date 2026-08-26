@@ -39,6 +39,20 @@ export interface ContainedArtifactRead {
   canonicalPath: string;
 }
 
+/** Resolve a caller-supplied root once so repositories cannot follow a later symlink swap. */
+export function canonicalizeProjectRoot(projectRoot: string): string {
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync(projectRoot);
+  } catch {
+    throw artifactError("NOT_FOUND", "Repository not found", "The project root does not exist.");
+  }
+  if (!statSync(canonicalRoot).isDirectory()) {
+    throw artifactError("PATH_OUTSIDE_PROJECT", "Unsafe project root", "The project root is not a directory.");
+  }
+  return canonicalRoot;
+}
+
 /** Read one regular artifact without following its final path through a symlink. */
 export function readContainedArtifact(
   projectRoot: string,
@@ -407,15 +421,7 @@ function resolveArtifactPath(
   path: RepoRelativePath,
 ): { canonicalRoot: string; lexicalPath: string } {
   assertValidPath(path);
-  let canonicalRoot: string;
-  try {
-    canonicalRoot = realpathSync(projectRoot);
-  } catch {
-    throw artifactError("NOT_FOUND", "Repository not found", "The project root does not exist.");
-  }
-  if (!statSync(canonicalRoot).isDirectory()) {
-    throw artifactError("PATH_OUTSIDE_PROJECT", "Unsafe project root", "The project root is not a directory.");
-  }
+  const canonicalRoot = canonicalizeProjectRoot(projectRoot);
   const lexicalPath = resolve(canonicalRoot, ...path.split("/"));
   assertContained(canonicalRoot, lexicalPath, path);
   return { canonicalRoot, lexicalPath };

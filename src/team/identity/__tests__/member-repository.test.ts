@@ -4,6 +4,8 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,7 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { memberArtifactPath, serializeMemberArtifact } from "../../artifacts/codecs.js";
 import { atomicCreateArtifact, atomicReplaceArtifact } from "../../artifacts/filesystem.js";
 import { generateArtifactId } from "../../artifacts/ulid.js";
-import { MemberRepository } from "../member-repository.js";
+import { MEMBER_REPOSITORY_LIMITS, MemberRepository } from "../member-repository.js";
 
 const roots: string[] = [];
 
@@ -180,6 +182,42 @@ describe("MemberRepository", () => {
     await expect(repository.list()).rejects.toMatchObject({
       problem: { code: "VALIDATION_FAILED" },
     });
+  });
+
+  it("fails closed before materializing an oversized member collection", async () => {
+    const root = temporaryRoot();
+    const directory = join(root, ".mex", "team", "members");
+    mkdirSync(directory, { recursive: true });
+    for (let index = 0; index <= MEMBER_REPOSITORY_LIMITS.maxRecords; index += 1) {
+      writeFileSync(join(directory, `${String(index).padStart(4, "0")}.md`), "", "utf8");
+    }
+
+    await expect(new MemberRepository(root).list()).rejects.toMatchObject({
+      problem: { code: "VALIDATION_FAILED" },
+    });
+  });
+
+  it("binds a symlinked project root before preview so apply cannot follow a target swap", async () => {
+    const container = temporaryRoot();
+    const original = join(container, "original");
+    const replacement = join(container, "replacement");
+    const link = join(container, "project");
+    mkdirSync(original);
+    mkdirSync(replacement);
+    symlinkSync(original, link);
+    const repository = new MemberRepository(link);
+    const preview = await repository.previewCreate({
+      id: memberId(10),
+      displayName: "Bound Root",
+      gitAliases: [],
+    });
+
+    unlinkSync(link);
+    symlinkSync(replacement, link);
+    await repository.apply(preview, preview.previewRevision);
+
+    expect(readFileSync(join(original, ...preview.change.path.split("/")), "utf8")).toBe(preview.document);
+    expect(() => statSync(join(replacement, ...preview.change.path.split("/")))).toThrow();
   });
 });
 

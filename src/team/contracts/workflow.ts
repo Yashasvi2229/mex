@@ -12,6 +12,10 @@ import type {
   Revision,
   RevisionExpectation,
 } from "./shared.js";
+import type {
+  WikiOperationType,
+  WikiRevisionExpectation,
+} from "./wiki.js";
 
 export const TEAM_READ_LIMITS = {
   defaultPageSize: 50,
@@ -63,6 +67,12 @@ export type TeamArtifactState =
 
 export interface TeamPage<T> extends Page<T> {
   truncated: boolean;
+  /** True only when a bounded source scan could not prove a complete corpus. */
+  sourceTruncated: boolean;
+  /** Hash of the bounded ordered source revisions used for this page. */
+  deterministicRevision: Revision;
+  /** Bounded source/validation diagnostics; never an unbounded error corpus. */
+  diagnostics: readonly Diagnostic[];
 }
 
 export interface TeamArtifactBase<TKind extends TeamArtifactKind> {
@@ -85,6 +95,8 @@ export interface TeamMember extends TeamArtifactBase<"member"> {
 }
 
 export interface Workstream extends TeamArtifactBase<"workstream"> {
+  /** Wiki semantic revision; distinct from the exact-byte artifact revision. */
+  entityRevision: number;
   title: string;
   goal: string;
   summary: string;
@@ -119,7 +131,7 @@ export interface InboxProposal<TWikiOperationPlan>
   author: ActorRef;
   rationale: string;
   evidence: readonly TeamEvidenceRef[];
-  plan: TWikiOperationPlan;
+  request: PortableWikiOperationRequest<TWikiOperationPlan>;
   targetRevisions: readonly RevisionExpectation[];
   reviewer?: ActorRef;
   reviewRationale?: string;
@@ -127,6 +139,8 @@ export interface InboxProposal<TWikiOperationPlan>
 }
 
 export interface Relay extends TeamArtifactBase<"relay"> {
+  /** Wiki semantic revision; distinct from the exact-byte artifact revision. */
+  entityRevision: number;
   state: RelayState;
   sender: ActorRef;
   recipients: readonly ActorRef[];
@@ -156,6 +170,8 @@ export interface PlaybookStepDefinition {
 }
 
 export interface Playbook extends TeamArtifactBase<"playbook"> {
+  /** Wiki semantic revision; distinct from the exact-byte artifact revision. */
+  entityRevision: number;
   state: PlaybookState;
   title: string;
   purpose: string;
@@ -173,6 +189,8 @@ export interface PlaybookRunStep {
 }
 
 export interface PlaybookRun extends TeamArtifactBase<"playbook_run"> {
+  /** Wiki semantic revision; distinct from the exact-byte artifact revision. */
+  entityRevision: number;
   state: PlaybookRunState;
   playbook: EntityRef;
   workstream: EntityRef;
@@ -206,7 +224,7 @@ export interface LocalDraftBase<TKind extends LocalDraftKind> {
 
 export interface InboxDraft<TWikiOperationPlan>
   extends LocalDraftBase<"inbox"> {
-  plan: TWikiOperationPlan;
+  request: PortableWikiOperationRequest<TWikiOperationPlan>;
   rationale: string;
   evidence: readonly TeamEvidenceRef[];
   targetRevisions: readonly RevisionExpectation[];
@@ -300,7 +318,7 @@ export interface WorkstreamUpdatePatch {
 }
 
 export interface InboxDraftInput<TWikiOperationPlan> {
-  plan: TWikiOperationPlan;
+  request: PortableWikiOperationRequest<TWikiOperationPlan>;
   rationale: string;
   evidence: readonly TeamEvidenceRef[];
   targetRevisions: readonly RevisionExpectation[];
@@ -336,7 +354,10 @@ export type TeamWorkflowCreateAction<TWikiOperationPlan> =
   | { kind: "relay.draft.save"; draftId?: never; draft: RelayDraftInput }
   | {
       kind: "playbook.create";
-      playbook: Omit<Playbook, keyof TeamArtifactBase<"playbook"> | "state">;
+      playbook: Omit<
+        Playbook,
+        keyof TeamArtifactBase<"playbook"> | "state" | "entityRevision"
+      >;
     };
 
 /** Actions that mutate or depend on an existing revisioned target. */
@@ -371,13 +392,16 @@ export type TeamWorkflowRevisionBoundAction<TWikiOperationPlan> =
   | {
       kind: "playbook.update";
       playbookId: string;
-      patch: Partial<Omit<Playbook, keyof TeamArtifactBase<"playbook">>>;
+      patch: Partial<
+        Omit<
+          Playbook,
+          keyof TeamArtifactBase<"playbook"> | "entityRevision"
+        >
+      >;
     }
   | { kind: "playbook.archive"; playbookId: string }
   | { kind: "playbook.run.start"; playbook: EntityRef; workstream: EntityRef }
-  | { kind: "playbook.run.complete-step"; runId: string; stepId: string }
-  /** Adapter records the current repository state; callers cannot forge HEAD/time. */
-  | { kind: "catch-up.mark" };
+  | { kind: "playbook.run.complete-step"; runId: string; stepId: string };
 
 export type TeamWorkflowAction<TWikiOperationPlan> =
   | TeamWorkflowCreateAction<TWikiOperationPlan>
@@ -390,8 +414,10 @@ export type NonEmptyRevisionExpectations = readonly [
 
 interface TeamWorkflowCommandBase {
   operationId: string;
-  actor: ActorRef;
-  occurredAt: string;
+  /** Service-owned authority must never be accepted at the caller boundary. */
+  actor?: never;
+  occurredAt?: never;
+  repoState?: never;
 }
 
 /**
@@ -409,7 +435,20 @@ export type TeamWorkflowCommand<TWikiOperationPlan> =
       expectedRevisions: NonEmptyRevisionExpectations;
     });
 
-export interface TeamWorkflowPreview {
+/** Authority captured by the service while preparing an exact preview. */
+export interface TeamWorkflowAuthority {
+  actor: ActorRef;
+  occurredAt: string;
+  repoState: RepoState;
+}
+
+/** Caller intent bound to service-owned identity, time, and repository state. */
+export type PreparedTeamWorkflowCommand<TWikiOperationPlan> =
+  TeamWorkflowCommand<TWikiOperationPlan> & {
+    authority: TeamWorkflowAuthority;
+  };
+
+export interface TeamWorkflowPreview<TWikiOperationPlan> {
   operationId: string;
   previewRevision: Revision;
   valid: boolean;
@@ -417,10 +456,12 @@ export interface TeamWorkflowPreview {
   changes: readonly FileChange[];
   localChanges: readonly LocalStateChange[];
   diagnostics: readonly Diagnostic[];
+  /** Exact prepared command that apply must bind and revalidate. */
+  command: PreparedTeamWorkflowCommand<TWikiOperationPlan>;
 }
 
 export interface TeamWorkflowApplyRequest<TWikiOperationPlan> {
-  command: TeamWorkflowCommand<TWikiOperationPlan>;
+  command: PreparedTeamWorkflowCommand<TWikiOperationPlan>;
   expectedPreviewRevision: Revision;
 }
 
@@ -436,57 +477,39 @@ export interface TeamWorkflowResult<TWikiOperationPlan> {
   events: readonly ActivityEvent[];
 }
 
-export type CatchUpGroup =
-  | "needs_attention"
-  | "workstreams"
-  | "relays"
-  | "knowledge_specs"
-  | "code_changes"
-  | "health";
-
-export interface CatchUpItem {
-  id: string;
-  group: CatchUpGroup;
-  occurredAt: string;
-  title: string;
-  summary: string;
-  actor?: ActorRef;
-  subjects: readonly EntityRef[];
-}
-
-export interface CatchUpRequest extends PageRequest {
-  since?: string;
-  workstreamId?: string;
-  actor?: ActorRef;
-}
-
-export interface CatchUpDigest {
-  baseline: string | null;
-  repoState: RepoState;
-  items: readonly CatchUpItem[];
-  nextCursor: string | null;
-  truncated: boolean;
-  deterministicRevision: Revision;
-}
-
-export interface CatchUpCursor {
-  scaffoldId: string;
-  actor: ActorRef;
-  head: string | null;
-  /** Branch observed when the cursor was explicitly marked or reset. */
-  branch: string | null;
-  timestamp: string;
-  revision: Revision;
-}
-
 export interface ActorResolutionRequest {
   configuredMemberId?: string;
   gitIdentity?: MemberGitAlias;
 }
 
-/** Typed facade for members, Workstreams, Inbox, Relays, Catch Up, and Playbooks. */
+/**
+ * Portable proposal shape. It contains declarative Wiki intent and immutable
+ * preconditions only; executable plans, process handles, actor, and time are
+ * deliberately absent.
+ */
+export interface PortableWikiOperation<TWikiOperationPlan> {
+  opId: string;
+  type: WikiOperationType;
+  entityId?: string;
+  baseRevision?: number;
+  baseContentHash?: Revision;
+  reason?: string;
+  payload: TWikiOperationPlan;
+  actor?: never;
+  timestamp?: never;
+  plan?: never;
+  handle?: never;
+}
+
+export interface PortableWikiOperationRequest<TWikiOperationPlan> {
+  operation: PortableWikiOperation<TWikiOperationPlan>;
+  expectedRevisions: readonly WikiRevisionExpectation[];
+}
+
+/** Typed facade for members, Workstreams, Inbox, Relays, and Playbooks. */
 export interface TeamWorkflowPort<TWikiOperationPlan> {
-  resolveActor(request: ActorResolutionRequest): Promise<ActorRef>;
+  /** Resolve configured-member/Git identity from service-owned configuration. */
+  resolveActor(): Promise<ActorRef>;
   getArtifact(ref: EntityRef): Promise<TeamArtifact<TWikiOperationPlan> | null>;
   listArtifacts(
     request?: TeamArtifactListRequest,
@@ -497,10 +520,19 @@ export interface TeamWorkflowPort<TWikiOperationPlan> {
   ): Promise<TeamPage<LocalDraft<TWikiOperationPlan>>>;
   preview(
     command: TeamWorkflowCommand<TWikiOperationPlan>,
-  ): Promise<TeamWorkflowPreview>;
+  ): Promise<TeamWorkflowPreview<TWikiOperationPlan>>;
   apply(
     request: TeamWorkflowApplyRequest<TWikiOperationPlan>,
   ): Promise<TeamWorkflowResult<TWikiOperationPlan>>;
-  catchUp(request?: CatchUpRequest): Promise<CatchUpDigest>;
-  getCatchUpCursor(actor: ActorRef): Promise<CatchUpCursor | null>;
 }
+
+// Compatibility re-exports keep existing internal imports stable while the
+// future aggregation seam lives in its own module.
+export type {
+  CatchUpCursor,
+  CatchUpDigest,
+  CatchUpGroup,
+  CatchUpItem,
+  CatchUpPort,
+  CatchUpRequest,
+} from "./catch-up.js";

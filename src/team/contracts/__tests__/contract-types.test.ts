@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { HealthComponent } from "../index.js";
 import type { GitHealth, MigrationHealth } from "../health.js";
 import type { FileChange } from "../shared.js";
-import type { ActivityEvent, TeamWorkflowCommand } from "../workflow.js";
+import type {
+  ActivityEvent,
+  PortableWikiOperation,
+  TeamWorkflowApplyRequest,
+  TeamWorkflowCommand,
+} from "../workflow.js";
 
 type IsAssignable<TValue, TTarget> = [TValue] extends [TTarget] ? true : false;
 type AssertTrue<TValue extends true> = TValue;
@@ -22,8 +27,6 @@ type ImpossibleCreateChange = Omit<ValidCreateChange, "beforeRevision"> & {
 
 type RevisionBoundCommandWithoutExpectation = {
   operationId: "op-update";
-  actor: { kind: "unknown" };
-  occurredAt: "2026-08-22T00:00:00.000Z";
   expectedRevisions: readonly [];
   action: {
     kind: "workstream.update";
@@ -41,6 +44,24 @@ type RevisionBoundCommandWithExpectation = Omit<
     revision: string;
     semanticRevision: 1;
   }];
+};
+
+type CommandWithForgedAuthority = RevisionBoundCommandWithExpectation & {
+  actor: { kind: "unknown" };
+  occurredAt: "2026-08-22T00:00:00.000Z";
+};
+
+type ApplyWithoutPreparedAuthority = {
+  command: RevisionBoundCommandWithExpectation;
+  expectedPreviewRevision: string;
+};
+
+type WikiOperationWithForgedAuthority = {
+  opId: "wiki-op";
+  type: "update-entry";
+  payload: { summary: "updated" };
+  actor: { kind: "human"; id: "forged" };
+  timestamp: "2026-08-22T00:00:00.000Z";
 };
 
 type ImpossibleHealthyGit = {
@@ -75,6 +96,15 @@ type _UpdateWithExpectationAccepted = AssertTrue<
 >;
 type _UpdateWithoutExpectationRejected = AssertFalse<
   IsAssignable<RevisionBoundCommandWithoutExpectation, TeamWorkflowCommand<unknown>>
+>;
+type _CallerAuthorityRejected = AssertFalse<
+  IsAssignable<CommandWithForgedAuthority, TeamWorkflowCommand<unknown>>
+>;
+type _ApplyRequiresPreparedAuthority = AssertFalse<
+  IsAssignable<ApplyWithoutPreparedAuthority, TeamWorkflowApplyRequest<unknown>>
+>;
+type _WikiAuthorityRejected = AssertFalse<
+  IsAssignable<WikiOperationWithForgedAuthority, PortableWikiOperation<unknown>>
 >;
 type _HealthyGitRequiresRepo = AssertFalse<IsAssignable<ImpossibleHealthyGit, GitHealth>>;
 type _UnavailableMigrationCannotBeReady = AssertFalse<

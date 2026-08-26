@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { opendirSync } from "node:fs";
 import type { FileChange, RepoRelativePath, Revision } from "../contracts/shared.js";
 import { isRevision } from "../contracts/shared.js";
 import type { MemberGitAlias, TeamMember } from "../contracts/workflow.js";
@@ -13,6 +13,7 @@ import {
   assertContainedArtifactDirectory,
   atomicCreateArtifact,
   atomicReplaceArtifact,
+  canonicalizeProjectRoot,
   tryReadContainedArtifact,
   withContainedArtifactLock,
 } from "../artifacts/filesystem.js";
@@ -22,6 +23,12 @@ import { canonicalFileDiff } from "../artifacts/unified-diff.js";
 import { normalizeGitEmail } from "./aliases.js";
 
 const MEMBERS_DIRECTORY = ".mex/team/members" as RepoRelativePath;
+
+export const MEMBER_REPOSITORY_LIMITS = {
+  maxDirectoryEntries: 4_096,
+  maxRecords: 2_048,
+  maxCorpusBytes: 32 * 1024 * 1024,
+} as const;
 
 export interface MemberCreateInput {
   id?: string;
@@ -79,7 +86,7 @@ export class MemberRepository implements MemberReader {
   readonly #idFactory: () => string;
 
   constructor(projectRoot: string, options: MemberRepositoryOptions = {}) {
-    this.#projectRoot = projectRoot;
+    this.#projectRoot = canonicalizeProjectRoot(projectRoot);
     this.#idFactory = options.idFactory ?? (() => generateArtifactId("member"));
   }
 
@@ -93,9 +100,23 @@ export class MemberRepository implements MemberReader {
     const directory = assertContainedArtifactDirectory(this.#projectRoot, MEMBERS_DIRECTORY);
     if (directory === null) return [];
 
-    const paths = readdirSync(directory, { withFileTypes: true })
-      .filter((entry) => entry.name.endsWith(".md"))
-      .map((entry) => {
+    const paths: RepoRelativePath[] = [];
+    const handle = opendirSync(directory);
+    let entries = 0;
+    try {
+      for (;;) {
+        const entry = handle.readSync();
+        if (entry === null) break;
+        entries += 1;
+        if (entries > MEMBER_REPOSITORY_LIMITS.maxDirectoryEntries) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Member directory is too large",
+            `Member directory exceeds ${MEMBER_REPOSITORY_LIMITS.maxDirectoryEntries} entries.`,
+            MEMBERS_DIRECTORY,
+          );
+        }
+        if (!entry.name.endsWith(".md")) continue;
         if (!entry.isFile()) {
           throw artifactError(
             "PATH_OUTSIDE_PROJECT",
@@ -103,10 +124,22 @@ export class MemberRepository implements MemberReader {
             `Member entry ${entry.name} must be a regular file.`,
           );
         }
-        return `${MEMBERS_DIRECTORY}/${entry.name}` as RepoRelativePath;
-      })
-      .sort(compareCodePoints);
+        paths.push(`${MEMBERS_DIRECTORY}/${entry.name}` as RepoRelativePath);
+        if (paths.length > MEMBER_REPOSITORY_LIMITS.maxRecords) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Member collection is too large",
+            `Member collection exceeds ${MEMBER_REPOSITORY_LIMITS.maxRecords} records.`,
+            MEMBERS_DIRECTORY,
+          );
+        }
+      }
+    } finally {
+      handle.closeSync();
+    }
+    paths.sort(compareCodePoints);
 
+    let corpusBytes = 0;
     return paths.map((path) => {
       const stored = tryReadContainedArtifact(this.#projectRoot, path, MEMBER_ARTIFACT_MAX_BYTES);
       if (stored === null) {
@@ -114,6 +147,15 @@ export class MemberRepository implements MemberReader {
           "REVISION_CONFLICT",
           "Member changed during listing",
           `Member ${path} disappeared while members were being listed.`,
+          path,
+        );
+      }
+      corpusBytes += stored.bytes.byteLength;
+      if (corpusBytes > MEMBER_REPOSITORY_LIMITS.maxCorpusBytes) {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Member corpus is too large",
+          `Member corpus exceeds ${MEMBER_REPOSITORY_LIMITS.maxCorpusBytes} bytes.`,
           path,
         );
       }
