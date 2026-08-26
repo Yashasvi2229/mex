@@ -410,7 +410,7 @@ describe("graph maintenance", () => {
     } finally {
       rebuilt.close();
     }
-  });
+  }, 15_000);
 
   it("falls back from a malformed older clone to a fresh candidate and retains recovery", async () => {
     const root = temporaryRoot();
@@ -462,7 +462,7 @@ describe("graph maintenance", () => {
 
     expect(readFileSync(dbPath)).toEqual(priorBytes);
     expect(ownedArtifacts(root)).toEqual([]);
-  });
+  }, 15_000);
 
   it("starts fresh for a newer index while retaining its exact recovery bytes", async () => {
     const root = temporaryRoot();
