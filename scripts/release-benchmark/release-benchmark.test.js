@@ -54,7 +54,9 @@ describe("release benchmark contract", () => {
       expect(Object.keys(budgets.runtime.browserHeapBytes[profile])).toEqual(RELEASE_ROUTE_KEYS);
     }
     expect(budgets.assets.routes.code).toEqual(budgets.assets.routes.search);
-    expect(budgets.calibration).toMatchObject({
+    expect(budgets.provisional).toBe(false);
+    expect(budgets.calibration).toEqual({
+      status: "calibrated-from-pinned-run-33005876613",
       runtimeFormula: "ceil(measured p95 * 1.15)",
       assetFormula: "ceil(built bytes * 1.05)",
     });
