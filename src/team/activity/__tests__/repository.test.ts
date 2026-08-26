@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -122,6 +122,25 @@ describe("ActivityRepository", () => {
     expect(() => repository.recoverJournaledCreate(preview.event, "f".repeat(64))).toThrowError(
       MexPortError,
     );
+  });
+
+  it("binds the canonical project root before a caller symlink can be swapped", async () => {
+    const firstRoot = temporaryRoot();
+    const secondRoot = temporaryRoot();
+    const links = temporaryRoot();
+    const link = join(links, "repository");
+    symlinkSync(firstRoot, link, "dir");
+    const repository = fixedRepository(link, fakeGit(), firstId);
+    const preview = await repository.previewCreate({
+      actor: { kind: "unknown" }, action: "workstream.created", subjects: [],
+    });
+
+    unlinkSync(link);
+    symlinkSync(secondRoot, link, "dir");
+    await repository.applyCreate(preview, preview.previewRevision);
+
+    expect(existsSync(join(firstRoot, ...preview.sourcePath.split("/")))).toBe(true);
+    expect(existsSync(join(secondRoot, ...preview.sourcePath.split("/")))).toBe(false);
   });
 
   it("diagnoses malformed and conflicting canonical events", async () => {

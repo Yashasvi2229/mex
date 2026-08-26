@@ -1,4 +1,5 @@
-import { opendirSync, type Dirent } from "node:fs";
+import { opendirSync, realpathSync, statSync, type Dirent } from "node:fs";
+import { resolve } from "node:path";
 import type {
   Diagnostic,
   EntityRef,
@@ -110,7 +111,7 @@ export class ActivityRepository {
   private readonly issuedPreviews = new Map<Revision, { preview: ActivityCreatePreview; bytes: string }>();
 
   constructor(options: ActivityRepositoryOptions) {
-    this.projectRoot = options.projectRoot;
+    this.projectRoot = bindProjectRoot(options.projectRoot);
     this.git = options.git;
     this.now = options.now ?? (() => new Date());
     this.generateId = options.generateId
@@ -409,7 +410,24 @@ export class ActivityRepository {
       return parseActivityArtifact(existing.bytes, preview.sourcePath);
     }
 
-    const revision = atomicCreateArtifact(this.projectRoot, preview.sourcePath, bytes);
+    let revision: Revision;
+    try {
+      revision = atomicCreateArtifact(this.projectRoot, preview.sourcePath, bytes);
+    } catch (error) {
+      // Another cooperating writer may have published the same immutable event
+      // between the exact probe above and O_EXCL publication. Treat only the
+      // byte-identical result as an idempotent success.
+      if (!(error instanceof MexPortError) || error.problem.code !== "REVISION_CONFLICT") {
+        throw error;
+      }
+      const raced = tryReadContainedArtifact(
+        this.projectRoot,
+        preview.sourcePath,
+        ACTIVITY_ARTIFACT_MAX_BYTES,
+      );
+      if (raced === null || raced.revision !== preview.revision) throw error;
+      return parseActivityArtifact(raced.bytes, preview.sourcePath);
+    }
     if (revision !== preview.revision) {
       throw artifactError(
         "INTERNAL_ERROR",
@@ -419,6 +437,20 @@ export class ActivityRepository {
       );
     }
     return parseActivityArtifact(bytes, preview.sourcePath);
+  }
+}
+
+function bindProjectRoot(projectRoot: string): string {
+  try {
+    const canonical = realpathSync(resolve(projectRoot));
+    if (!statSync(canonical).isDirectory()) throw new Error("not a directory");
+    return canonical;
+  } catch {
+    throw artifactError(
+      "INVALID_REQUEST",
+      "Invalid project root",
+      "Activity storage requires an existing repository directory.",
+    );
   }
 }
 
