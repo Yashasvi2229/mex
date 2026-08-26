@@ -243,16 +243,29 @@ export interface LocalStateChange {
   summary: string;
 }
 
+/** Stable references that an immutable activity event may point at. */
+export type ActivitySubjectRef =
+  | { kind: "entity"; entity: EntityRef }
+  | { kind: "code"; code: CodeRef }
+  | { kind: "file"; path: RepoRelativePath }
+  | { kind: "commit"; hash: string };
+
 export interface ActivityEvent {
   schemaVersion: 1;
   id: string;
   timestamp: string;
   actor: ActorRef;
   action: string;
-  subjects: readonly EntityRef[];
+  subjects: readonly ActivitySubjectRef[];
   workstream?: EntityRef;
   repoState: RepoState;
   metadata?: Readonly<Record<string, JsonValue>>;
+}
+
+/** Canonical activity event plus its storage identity. */
+export interface StoredActivityEvent extends ActivityEvent {
+  sourcePath: RepoRelativePath;
+  revision: Revision;
 }
 
 export interface WorkstreamCreateInput {
@@ -460,6 +473,8 @@ export interface CatchUpCursor {
   scaffoldId: string;
   actor: ActorRef;
   head: string | null;
+  /** Branch observed when the cursor was explicitly marked or reset. */
+  branch: string | null;
   timestamp: string;
   revision: Revision;
 }

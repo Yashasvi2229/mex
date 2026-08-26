@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { HealthComponent } from "../index.js";
 import type { GitHealth, MigrationHealth } from "../health.js";
 import type { FileChange } from "../shared.js";
-import type { TeamWorkflowCommand } from "../workflow.js";
+import type { ActivityEvent, TeamWorkflowCommand } from "../workflow.js";
 
 type IsAssignable<TValue, TTarget> = [TValue] extends [TTarget] ? true : false;
 type AssertTrue<TValue extends true> = TValue;
@@ -59,6 +59,13 @@ type ImpossibleReadyMigration = {
   toVersion: null;
 };
 
+type ActivityWithFileAndCommitSubjects = Omit<ActivityEvent, "subjects"> & {
+  subjects: readonly [
+    { kind: "file"; path: "src/index.ts" },
+    { kind: "commit"; hash: "48da30c" },
+  ];
+};
+
 type _CreateShapeAccepted = AssertTrue<IsAssignable<ValidCreateChange, FileChange>>;
 type _ImpossibleCreateRejected = AssertFalse<
   IsAssignable<ImpossibleCreateChange, FileChange>
@@ -72,6 +79,9 @@ type _UpdateWithoutExpectationRejected = AssertFalse<
 type _HealthyGitRequiresRepo = AssertFalse<IsAssignable<ImpossibleHealthyGit, GitHealth>>;
 type _UnavailableMigrationCannotBeReady = AssertFalse<
   IsAssignable<ImpossibleReadyMigration, MigrationHealth>
+>;
+type _ActivitySupportsRepositorySubjects = AssertTrue<
+  IsAssignable<ActivityWithFileAndCommitSubjects, ActivityEvent>
 >;
 type _HealthComponentIsBarrelExported = AssertTrue<IsAssignable<GitHealth, HealthComponent>>;
 

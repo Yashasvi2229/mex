@@ -151,6 +151,7 @@ export {
 } from "./workflow.js";
 export type {
   ActivityEvent,
+  ActivitySubjectRef,
   ActorResolutionRequest,
   CatchUpCursor,
   CatchUpDigest,
@@ -194,6 +195,7 @@ export type {
   TeamWorkflowPreview,
   TeamWorkflowRevisionBoundAction,
   TeamWorkflowResult,
+  StoredActivityEvent,
   Workstream,
   WorkstreamCreateInput,
   WorkstreamState,
