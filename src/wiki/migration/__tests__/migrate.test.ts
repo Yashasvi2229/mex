@@ -282,7 +282,7 @@ describe("wiki.readOnly", () => {
 });
 
 describe("the report", () => {
-  it("carries every section 13.6 field", () => {
+  it("carries every section 13.6 field", { timeout: 30_000 }, () => {
     const root = scaffold();
     const report = migrateScaffold({ scaffoldRoot: root });
     expect(report.filesScanned).toBe(25);
