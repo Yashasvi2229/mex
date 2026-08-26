@@ -44,6 +44,10 @@ try {
     JSON.stringify({
       scaffold_id: "11111111-1111-4111-8111-111111111111",
       scaffold_name: "packed-hub-smoke",
+      wiki: {
+        exclude: ["excluded/**"],
+        readOnly: ["context/read-only/**"],
+      },
     }, null, 2) + "\n",
   );
   writeActivityFixture(project);
@@ -58,7 +62,6 @@ try {
     "}",
     "",
   ].join("\n"));
-  writeFileSync(join(project, ".mex", "wiki.db"), "packed wiki sentinel\n");
   run("git", ["init", "--quiet"], project);
   run("git", ["config", "user.name", "Packed Ada"], project);
   run("git", ["config", "user.email", "packed@example.test"], project);
@@ -80,7 +83,7 @@ try {
   if (!existsSync(manifest)) throw new Error("The packed package omitted dist/hub assets.");
   const declaration = readFileSync(join(installed, "dist", "index.d.ts"), "utf8");
   if (
-    /Hub(?:Job|Api|Session|Capabilities|Activity)|Activity(?:Request|Response|Item|Diagnostic)|CodeWorkspace|GraphHealthDetails|RepositoryGraphPort|runHubCommand/.test(
+    /Hub(?:Job|Api|Session|Capabilities|Activity|Wiki)|Activity(?:Request|Response|Item|Diagnostic)|CodeWorkspace|CodeKnowledge(?:Request|Response)|GraphHealthDetails|WikiHealthDetails|WikiEntity(?:List|Detail)(?:Request|Response)|Wiki(?:Relations|Backlinks)(?:Request|Response)|WikiSearchResult|RepositoryGraphPort|RepositoryWiki|createRepositoryWikiPort|runHubCommand/.test(
       declaration,
     )
   ) {
@@ -89,6 +92,40 @@ try {
 
   const cli = join(installed, "dist", "cli.js");
   run(process.execPath, [cli, "graph", "rebuild", "--root", project, "--json"], project);
+  const graphScope = run(process.execPath, [
+    cli,
+    "graph",
+    "scope",
+    "packedService",
+    "--detail",
+    "minimal",
+    "--fingerprint",
+    "--max-nodes",
+    "10",
+    "--max-files",
+    "1",
+    "--max-output-tokens",
+    "2000",
+  ], project).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  const groundedFact = graphScope.find((record) => (
+    record.type === "fact" && record.name === "packedService"
+  ));
+  if (
+    typeof groundedFact?.id !== "string"
+    || typeof groundedFact.fingerprint !== "string"
+    || typeof groundedFact.bodyHash !== "string"
+  ) {
+    throw new Error("The packed graph did not expose exact grounding facts for the Wiki fixture.");
+  }
+  writeWikiFixture(project, {
+    nodeId: groundedFact.id,
+    fingerprint: groundedFact.fingerprint,
+    bodyHash: groundedFact.bodyHash,
+  });
+  run("git", ["add", ".mex/context", ".mex/excluded", ".mex/topics"], project);
+  run("git", ["commit", "--quiet", "-m", "add packed wiki fixture"], project);
+  run(process.execPath, [cli, "graph", "rebuild", "--root", project, "--json"], project);
+  run(process.execPath, [cli, "wiki", "rebuild-index", "--json"], project);
   child = spawn(process.execPath, [cli, "hub", "--no-open"], {
     cwd: project,
     env: { ...process.env, MEX_TELEMETRY: "0", NO_COLOR: "1" },
@@ -137,6 +174,9 @@ try {
     || capabilitiesBody.graph?.read?.availability !== "available"
     || capabilitiesBody.graph?.refresh?.availability !== "available"
     || capabilitiesBody.graph?.rebuild?.availability !== "available"
+    || capabilitiesBody.wiki?.read?.availability !== "available"
+    || capabilitiesBody.wiki?.refresh?.availability !== "available"
+    || capabilitiesBody.wiki?.rebuild?.availability !== "available"
   ) {
     throw new Error("The packaged Hub capabilities API did not load.");
   }
@@ -203,18 +243,142 @@ try {
   ) {
     throw new Error("The packaged Hub did not expose the real symbol workspace.");
   }
+  const wikiSearch = await fetch(`${url.origin}/api/v1/search?q=packed&limit=10`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const wikiSearchBody = await wikiSearch.json();
+  const wikiHit = wikiSearchBody.groups?.wiki?.items?.find((item) => (
+    item.kind === "wiki" && item.title === "Preserve packed retries"
+  ));
+  if (!wikiSearch.ok || wikiSearchBody.groups?.wiki?.status !== "available" || !wikiHit) {
+    throw new Error("The packaged Hub did not expose real Wiki search.");
+  }
+  const excludedSearch = await fetch(`${url.origin}/api/v1/search?q=excluded-only-sentinel&limit=10`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const excludedSearchBody = await excludedSearch.json();
+  if (
+    !excludedSearch.ok
+    || excludedSearchBody.groups?.wiki?.status !== "available"
+    || excludedSearchBody.groups.wiki.items?.length !== 0
+  ) {
+    throw new Error("The packaged Hub ignored the configured Wiki exclusion during search.");
+  }
+  const completeKnowledgeList = await fetch(`${url.origin}/api/v1/wiki/entities?limit=50`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const completeKnowledgeListBody = await completeKnowledgeList.json();
+  if (
+    !completeKnowledgeList.ok
+    || completeKnowledgeListBody.items?.some((item) => item.id === "mx_01J00000000000000000000004")
+  ) {
+    throw new Error("The packaged Hub indexed a Wiki entity excluded by project configuration.");
+  }
+  const knowledgeList = await fetch(
+    `${url.origin}/api/v1/wiki/entities?kind=decision&sourceType=symbol`,
+    { headers: { cookie }, redirect: "error" },
+  );
+  const knowledgeListBody = await knowledgeList.json();
+  if (
+    !knowledgeList.ok
+    || knowledgeListBody.items?.length !== 1
+    || knowledgeListBody.items[0]?.id !== wikiHit.id
+    || knowledgeListBody.items[0]?.groundingHealth !== "fresh"
+  ) {
+    throw new Error("The packaged Hub did not list real filtered Knowledge.");
+  }
+  const knowledge = await fetch(
+    `${url.origin}/api/v1/wiki/entities/${encodeURIComponent(wikiHit.id)}`,
+    { headers: { cookie }, redirect: "error" },
+  );
+  const knowledgeBody = await knowledge.json();
+  if (
+    !knowledge.ok
+    || knowledgeBody.entity?.id !== wikiHit.id
+    || !knowledgeBody.body?.content?.includes("original stable request key")
+    || knowledgeBody.relationCount !== 1
+    || knowledgeBody.backlinkCount !== 1
+    || knowledgeBody.groundings?.items?.[0]?.requestedNode !== symbol.id
+  ) {
+    throw new Error("The packaged Hub did not expose a bounded real Knowledge detail.");
+  }
+  const relations = await fetch(
+    `${url.origin}/api/v1/wiki/entities/${encodeURIComponent(wikiHit.id)}/relations?direction=both`,
+    { headers: { cookie }, redirect: "error" },
+  );
+  const relationsBody = await relations.json();
+  if (
+    !relations.ok
+    || !relationsBody.items?.some((item) => item.direction === "outgoing" && item.relation?.type === "implements")
+    || !relationsBody.items?.some((item) => item.direction === "incoming" && item.relation?.type === "depends_on")
+  ) {
+    throw new Error("The packaged Hub did not expose real Knowledge relations.");
+  }
+  const backlinks = await fetch(
+    `${url.origin}/api/v1/wiki/entities/${encodeURIComponent(wikiHit.id)}/backlinks?type=depends_on`,
+    { headers: { cookie }, redirect: "error" },
+  );
+  const backlinksBody = await backlinks.json();
+  if (!backlinks.ok || backlinksBody.items?.length !== 1 || backlinksBody.items[0]?.type !== "depends_on") {
+    throw new Error("The packaged Hub did not expose real Knowledge backlinks.");
+  }
+  const codeKnowledge = await fetch(
+    `${url.origin}/api/v1/code/symbols/${encodeURIComponent(symbol.id)}/knowledge`,
+    { headers: { cookie }, redirect: "error" },
+  );
+  const codeKnowledgeBody = await codeKnowledge.json();
+  if (
+    !codeKnowledge.ok
+    || codeKnowledgeBody.items?.length !== 1
+    || codeKnowledgeBody.items[0]?.entity?.id !== wikiHit.id
+    || codeKnowledgeBody.items[0]?.matchedNodes?.[0] !== symbol.id
+  ) {
+    throw new Error("The packaged Hub did not expose explicit Code-to-Knowledge links.");
+  }
+  const serializedKnowledge = JSON.stringify({
+    wikiSearchBody,
+    knowledgeListBody,
+    knowledgeBody,
+    relationsBody,
+    backlinksBody,
+    codeKnowledgeBody,
+    excludedSearchBody,
+    completeKnowledgeListBody,
+  });
+  for (const secret of [
+    project,
+    "packed-private-session",
+    "packed-topic-private-metadata",
+    "packed-source-private-metadata",
+    "packed-entity-private-metadata",
+    "excluded-only-private-body",
+  ]) {
+    if (serializedKnowledge.includes(secret)) {
+      throw new Error(`The packaged Knowledge API leaked a private field: ${secret}`);
+    }
+  }
   const health = await fetch(`${url.origin}/api/v1/health`, {
     headers: { cookie },
     redirect: "error",
   });
   const healthBody = await health.json();
   const graphHealth = healthBody.components?.find((component) => component.id === "graph");
-  if (!health.ok || graphHealth?.graph?.indexStatus !== "fresh") {
-    throw new Error("The packaged Hub did not report fresh graph health.");
+  const wikiHealth = healthBody.components?.find((component) => component.id === "wiki");
+  if (
+    !health.ok
+    || graphHealth?.graph?.indexStatus !== "fresh"
+    || wikiHealth?.wiki?.indexStatus !== "fresh"
+    || JSON.stringify(wikiHealth.wiki.allowedJobKinds) !== JSON.stringify(["wiki_refresh", "wiki_rebuild"])
+    || wikiHealth.wiki.recommendedJobKind !== null
+  ) {
+    throw new Error("The packaged Hub did not report fresh graph and Wiki health.");
   }
   const afterReads = snapshotProtectedProjectState(project);
   if (JSON.stringify(afterReads) !== JSON.stringify(beforeReads)) {
-    throw new Error("Reading packaged Home, Activity, Search, Code, or Health mutated protected project state.");
+    throw new Error("Reading packaged Home, Activity, Search, Code, Knowledge, or Health mutated protected project state.");
   }
 
   const beforeMaintenance = snapshotProtectedProjectState(project, { includeRuntimeState: false });
@@ -266,6 +430,96 @@ try {
     throw new Error("Packaged graph maintenance mutated source, Git, activity, member, or Wiki state.");
   }
 
+  const wikiSource = join(project, ".mex", "context", "packed-knowledge.md");
+  writeFileSync(
+    wikiSource,
+    readFileSync(wikiSource, "utf8").replace(
+      "The packed service retries only with the original stable request key.",
+      "The packed service retries transient failures with the original stable request key.",
+    ),
+  );
+  const staleWikiHealth = await fetch(`${url.origin}/api/v1/health`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const staleWikiHealthBody = await staleWikiHealth.json();
+  const staleWiki = staleWikiHealthBody.components?.find((component) => component.id === "wiki");
+  if (
+    !staleWikiHealth.ok
+    || staleWiki?.wiki?.indexStatus !== "stale"
+    || staleWiki?.wiki?.recommendedJobKind !== "wiki_refresh"
+  ) {
+    throw new Error("The packaged Hub did not recommend explicit Wiki refresh for stale canonical Markdown.");
+  }
+  const beforeWikiMaintenance = snapshotProtectedProjectState(project, {
+    includeRuntimeState: false,
+    includeGraphIndex: true,
+    includeWikiIndex: false,
+  });
+  const wikiRefresh = await startJob(
+    url.origin,
+    cookie,
+    sessionBody.csrfToken,
+    "wiki_refresh",
+    [project],
+  );
+  if (wikiRefresh.state !== "succeeded") {
+    throw new Error("The packaged Hub wiki_refresh job did not succeed.");
+  }
+  const refreshedWikiHealth = await fetch(`${url.origin}/api/v1/health`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const refreshedWikiBody = await refreshedWikiHealth.json();
+  if (
+    !refreshedWikiHealth.ok
+    || refreshedWikiBody.components?.find((component) => component.id === "wiki")?.wiki?.indexStatus !== "fresh"
+  ) {
+    throw new Error("The packaged Hub did not report fresh Wiki health after refresh.");
+  }
+
+  writeFileSync(join(project, ".mex", "wiki.db"), "intentionally corrupt Wiki index for rebuild coverage\n");
+  const corruptWikiHealth = await fetch(`${url.origin}/api/v1/health`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const corruptWikiBody = await corruptWikiHealth.json();
+  if (
+    !corruptWikiHealth.ok
+    || corruptWikiBody.components?.find((component) => component.id === "wiki")?.wiki?.indexStatus !== "corrupt"
+  ) {
+    throw new Error("The packaged Hub did not observe the intentionally corrupt Wiki index before rebuild.");
+  }
+  const wikiRebuild = await startJob(
+    url.origin,
+    cookie,
+    sessionBody.csrfToken,
+    "wiki_rebuild",
+    [project],
+  );
+  if (wikiRebuild.state !== "succeeded") {
+    throw new Error("The packaged Hub wiki_rebuild job did not succeed.");
+  }
+  const repairedWikiHealth = await fetch(`${url.origin}/api/v1/health`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const repairedWikiBody = await repairedWikiHealth.json();
+  if (
+    !repairedWikiHealth.ok
+    || repairedWikiBody.components?.find((component) => component.id === "wiki")?.wiki?.indexStatus !== "fresh"
+  ) {
+    throw new Error("The packaged Hub Wiki rebuild did not publish a fresh replacement index.");
+  }
+  const afterWikiMaintenance = snapshotProtectedProjectState(project, {
+    includeRuntimeState: false,
+    includeGraphIndex: true,
+    includeWikiIndex: false,
+  });
+  if (JSON.stringify(afterWikiMaintenance) !== JSON.stringify(beforeWikiMaintenance)) {
+    throw new Error("Packaged Wiki maintenance mutated canonical Wiki, Graph, Activity, members, source, or Git state.");
+  }
+
   child.kill("SIGTERM");
   const exit = await waitForExit(child, 8_000);
   child = undefined;
@@ -307,7 +561,107 @@ function writeActivityFixture(project) {
   })}\n`);
 }
 
-function snapshotProtectedProjectState(project, { includeRuntimeState = true } = {}) {
+function writeWikiFixture(project, grounding) {
+  const topicId = "mx_01J00000000000000000000001";
+  const decisionId = "mx_01J00000000000000000000002";
+  const patternId = "mx_01J00000000000000000000003";
+  const topics = join(project, ".mex", "topics");
+  const context = join(project, ".mex", "context");
+  const excluded = join(project, ".mex", "excluded");
+  mkdirSync(topics, { recursive: true });
+  mkdirSync(context, { recursive: true });
+  mkdirSync(excluded, { recursive: true });
+  writeFileSync(join(topics, "payments.md"), [
+    "<!-- mex:entity",
+    `id: ${topicId}`,
+    "type: topic",
+    "status: promoted",
+    "revision: 1",
+    "summary: Reliable payment processing knowledge.",
+    "metadata:",
+    "  aliases: [payments, checkout]",
+    "  private_note: packed-topic-private-metadata",
+    "-->",
+    "## Payments",
+    "",
+    "Payment processing must remain recoverable and idempotent.",
+    "",
+  ].join("\n"));
+  writeFileSync(join(context, "packed-knowledge.md"), [
+    "<!-- mex:entity",
+    `id: ${decisionId}`,
+    "type: decision",
+    "status: promoted",
+    "revision: 2",
+    "summary: Retry packed service calls with the original request key.",
+    `topics: [${topicId}]`,
+    "relations:",
+    "  - type: implements",
+    `    target: ${patternId}`,
+    "sources:",
+    "  - type: symbol",
+    `    ref: ${JSON.stringify(grounding.nodeId)}`,
+    "    note: Exact packed service declaration.",
+    "    metadata:",
+    "      private_source_note: packed-source-private-metadata",
+    "grounds_to:",
+    `  - node: ${JSON.stringify(grounding.nodeId)}`,
+    `    fingerprint: ${JSON.stringify(grounding.fingerprint)}`,
+    `    bodyHash: ${JSON.stringify(grounding.bodyHash)}`,
+    "    reason: Exact packed service grounding.",
+    "provenance:",
+    "  createdBy: { kind: agent, id: packed-fixture-agent }",
+    "  createdAt: 2026-08-23T00:00:00.000Z",
+    "  agentSessionId: packed-private-session",
+    "metadata:",
+    "  private_note: packed-entity-private-metadata",
+    "-->",
+    "## Preserve packed retries",
+    "",
+    "The packed service retries only with the original stable request key.",
+    "",
+    "<!-- mex:entity",
+    `id: ${patternId}`,
+    "type: pattern",
+    "status: in_flight",
+    "revision: 1",
+    "summary: Wrap packed calls in a bounded retry envelope.",
+    `topics: [${topicId}]`,
+    "relations:",
+    "  - type: depends_on",
+    `    target: ${decisionId}`,
+    "sources:",
+    "  - type: manual",
+    "    note: Maintainer reviewed.",
+    "-->",
+    "## Packed retry envelope",
+    "",
+    "Retry transient failures without duplicating the underlying operation.",
+    "",
+  ].join("\n"));
+  writeFileSync(join(excluded, "private.md"), [
+    "<!-- mex:entity",
+    "id: mx_01J00000000000000000000004",
+    "type: fact",
+    "status: promoted",
+    "revision: 1",
+    "summary: excluded-only-sentinel",
+    "-->",
+    "## Configured exclusion",
+    "",
+    "excluded-only-private-body",
+    "",
+  ].join("\n"));
+}
+
+function snapshotProtectedProjectState(
+  project,
+  {
+    includeRuntimeState = true,
+    includeGraphIndex = includeRuntimeState,
+    includeWikiIndex = true,
+  } = {},
+) {
   const status = run("git", [
     "--no-optional-locks",
     "status",
@@ -318,6 +672,11 @@ function snapshotProtectedProjectState(project, { includeRuntimeState = true } =
   const candidates = [
     join(project, ".mex", "events"),
     join(project, ".mex", "team"),
+    join(project, ".mex", "context"),
+    join(project, ".mex", "excluded"),
+    join(project, ".mex", "topics"),
+    join(project, ".mex", "ROUTER.md"),
+    join(project, ".mex", "config.json"),
     join(project, "src"),
   ];
   if (includeRuntimeState) {
@@ -329,7 +688,10 @@ function snapshotProtectedProjectState(project, { includeRuntimeState = true } =
     }
   }
   for (const name of readdirSync(join(project, ".mex"))) {
-    if (name.startsWith("wiki.db") || (includeRuntimeState && name.startsWith("graph.db"))) {
+    if (
+      (includeWikiIndex && name.startsWith("wiki.db"))
+      || (includeGraphIndex && name.startsWith("graph.db"))
+    ) {
       candidates.push(join(project, ".mex", name));
     }
   }
@@ -440,4 +802,40 @@ async function waitForJob(origin, cookie, id) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
   }
   throw new Error(`Packaged Hub job ${id} did not finish before the deadline.`);
+}
+
+async function startJob(origin, cookie, csrfToken, kind, forbiddenValues = []) {
+  const response = await fetch(`${origin}/api/v1/jobs`, {
+    method: "POST",
+    headers: {
+      cookie,
+      origin,
+      "content-type": "application/json",
+      "x-mex-csrf": csrfToken,
+    },
+    body: JSON.stringify({ kind }),
+    redirect: "error",
+  });
+  const body = await response.json();
+  if (response.status !== 202 || typeof body.id !== "string") {
+    throw new Error(`The packaged Hub could not start ${kind}.`);
+  }
+  const terminal = await waitForJob(origin, cookie, body.id);
+  const events = await fetch(`${origin}/api/v1/jobs/${encodeURIComponent(body.id)}/events`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const stream = await events.text();
+  if (
+    !events.ok
+    || !events.headers.get("content-type")?.startsWith("text/event-stream")
+    || !stream.includes("event: terminal")
+    || !stream.includes(`\"kind\":\"${kind}\"`)
+    || stream.includes("packed-private-session")
+    || stream.includes("excluded-only-private-body")
+    || forbiddenValues.some((value) => stream.includes(value))
+  ) {
+    throw new Error(`The packaged Hub did not replay a safe terminal SSE event for ${kind}.`);
+  }
+  return terminal;
 }
