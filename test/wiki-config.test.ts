@@ -47,7 +47,14 @@ describe("wiki config", () => {
     // The defaults are the real ones, not an empty list that would exclude and
     // reserve nothing while looking populated.
     expect(config.wiki?.exclude).toEqual(["**/node_modules/**"]);
-    expect(config.wiki?.readOnly).toEqual(["team/**", "workstreams/**", "inbox/**", "relays/**"]);
+    expect(config.wiki?.readOnly).toEqual([
+      "team/**",
+      "workstreams/**",
+      "inbox/**",
+      "relays/**",
+      "playbooks/**",
+      "events/activity/**",
+    ]);
   });
 
   it("reads both lists when they are present", () => {
