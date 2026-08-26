@@ -294,7 +294,12 @@ async function stageCorpus(
   const compilerByPath = new Map(compiler.files.map((file) => [file.filePath, file]));
   const treeLanguages = [...new Set(discovered.map((file) => detectLanguage(file.relPath))
     .filter((language) => !COMPILER_LANGUAGES.has(language)))];
-  await loadGrammars(treeLanguages);
+  // Compiler-language files the compiler could not stage (e.g. a project whose
+  // program creation crashed) fall back to tree-sitter — load their grammars too.
+  const fallbackLanguages = [...new Set(discovered
+    .filter((file) => COMPILER_LANGUAGES.has(detectLanguage(file.relPath)) && !compilerByPath.has(file.relPath))
+    .map((file) => detectLanguage(file.relPath)))];
+  await loadGrammars([...treeLanguages, ...fallbackLanguages]);
 
   const files = discovered.map((file) => {
     const compilerFile = compilerByPath.get(file.relPath);
