@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentCommandDeps } from "../src/graph/cli-agent.js";
+import { GRAPH_CORPUS_LIMITS } from "../src/graph/corpus-policy.js";
 import {
   runGraphGet,
   runGraphQuery,
@@ -171,6 +172,30 @@ describe("agent graph freshness-bound readers", () => {
     expectUnavailableOnly(records, "GRAPH_SOURCE_CORPUS_MISMATCH");
     expect(JSON.stringify(records)).not.toContain("return \\\"old\\\"");
     expect(JSON.stringify(records)).not.toContain("return \\\"new\\\"");
+  });
+
+  it("rejects a source that crosses the per-file ceiling before the read-session buffer is allocated", async () => {
+    const built = await fixture("mex-cli-source-growth-bound-");
+    const output: string[] = [];
+    const deps = internalDeps(output, {
+      freshRead: {
+        hooks: {
+          beforeIndexedSourceRead() {
+            writeFileSync(
+              built.sourcePath,
+              "x".repeat(GRAPH_CORPUS_LIMITS.maxSourceFileBytes + 1),
+            );
+          },
+        },
+      },
+    });
+
+    await runGraphGet([built.nodeId], built.root, deps);
+
+    const records = output.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expectUnavailableOnly(records, "GRAPH_INDEX_READER_SOURCE_READ_FAILED");
+    expect(statSync(built.sourcePath).size).toBe(GRAPH_CORPUS_LIMITS.maxSourceFileBytes + 1);
+    expect(JSON.stringify(records)).not.toContain("return \\\"old\\\"");
   });
 
   it("refuses an immutable reader when WAL activity begins after the fresh observation", async () => {

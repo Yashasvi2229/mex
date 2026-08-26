@@ -9,7 +9,7 @@
 
 import type { Language } from "../types.js";
 import type { ExtractedEdge, ExtractedNode, TSNode } from "./types.js";
-import { detectLanguage, parse } from "./grammars.js";
+import { detectLanguage, disposeTree, parse } from "./grammars.js";
 import { getExtractor } from "./languages/index.js";
 
 export {
@@ -79,19 +79,23 @@ export function extractFile(
   if (!extractor) return null;
   const tree = parse(source, language);
   if (!tree) return null;
-  const health = treeHealth(tree.rootNode, source);
-  if (health.status === "failed") return { language, nodes: [], edges: [], health };
-  const extracted = extractor.extract(tree, filePath, source);
-  if (health.status === "partial" && extracted.nodes.every((node) => node.kind === "file")) {
-    return { language, nodes: [], edges: [], health: { ...health, status: "failed" } };
+  try {
+    const health = treeHealth(tree.rootNode, source);
+    if (health.status === "failed") return { language, nodes: [], edges: [], health };
+    const extracted = extractor.extract(tree, filePath, source);
+    if (health.status === "partial" && extracted.nodes.every((node) => node.kind === "file")) {
+      return { language, nodes: [], edges: [], health: { ...health, status: "failed" } };
+    }
+    const excluded = new Set(extracted.nodes.filter((node) => node.kind !== "file" && health.diagnostics.some((diagnostic) =>
+      diagnostic.startLine <= node.endLine && diagnostic.endLine >= node.startLine,
+    )).map((node) => node.id));
+    const nodes = extracted.nodes.filter((node) => !excluded.has(node.id));
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    const edges = extracted.edges.filter((edge) => nodeIds.has(edge.source) && (!edge.target || nodeIds.has(edge.target)));
+    return { language, nodes, edges, health };
+  } finally {
+    disposeTree(tree);
   }
-  const excluded = new Set(extracted.nodes.filter((node) => node.kind !== "file" && health.diagnostics.some((diagnostic) =>
-    diagnostic.startLine <= node.endLine && diagnostic.endLine >= node.startLine,
-  )).map((node) => node.id));
-  const nodes = extracted.nodes.filter((node) => !excluded.has(node.id));
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const edges = extracted.edges.filter((edge) => nodeIds.has(edge.source) && (!edge.target || nodeIds.has(edge.target)));
-  return { language, nodes, edges, health };
 }
 
 function treeHealth(root: TSNode, source: string): FileExtraction["health"] {
@@ -144,19 +148,23 @@ export function normalizedAstTokens(
 ): Map<string, string[]> {
   const tree = parse(source, detectLanguage(filePath));
   if (!tree) return new Map();
-  const leaves: Array<{ line: number; endLine: number; type: string }> = [];
-  const visit = (node: TSNode): void => {
-    if (node.childCount === 0) {
-      leaves.push({ line: node.startPosition.row + 1, endLine: node.endPosition.row + 1, type: node.type });
-      return;
-    }
-    for (const child of node.children) visit(child);
-  };
-  visit(tree.rootNode);
-  return new Map(ranges.map((range) => [
-    range.id,
-    leaves
-      .filter((leaf) => leaf.line >= range.startLine && leaf.endLine <= range.endLine)
-      .map((leaf) => leaf.type),
-  ]));
+  try {
+    const leaves: Array<{ line: number; endLine: number; type: string }> = [];
+    const visit = (node: TSNode): void => {
+      if (node.childCount === 0) {
+        leaves.push({ line: node.startPosition.row + 1, endLine: node.endPosition.row + 1, type: node.type });
+        return;
+      }
+      for (const child of node.children) visit(child);
+    };
+    visit(tree.rootNode);
+    return new Map(ranges.map((range) => [
+      range.id,
+      leaves
+        .filter((leaf) => leaf.line >= range.startLine && leaf.endLine <= range.endLine)
+        .map((leaf) => leaf.type),
+    ]));
+  } finally {
+    disposeTree(tree);
+  }
 }

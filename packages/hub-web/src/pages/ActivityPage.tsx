@@ -37,8 +37,12 @@ import {
 import { Badge } from "../components/primitives/badge";
 import { Button } from "../components/primitives/button";
 import { Card } from "../components/primitives/card";
+import {
+  boundedNextCursor,
+  MAX_ACCUMULATED_WORKBENCH_ITEMS,
+  MAX_WORKBENCH_PAGES,
+} from "../lib/bounds";
 import styles from "../styles/activity.module.css";
-import hubStyles from "../styles/hub.module.css";
 
 type ActivityFilter = "all" | ActivitySource;
 
@@ -347,7 +351,7 @@ export function ActivityPage() {
       ...(pageParam ? { cursor: pageParam } : {}),
     }),
     initialPageParam: undefined as string | undefined,
-    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    getNextPageParam: (lastPage, allPages) => boundedNextCursor(lastPage.nextCursor, allPages.length),
     enabled: activityAvailable,
     retry: false,
   });
@@ -355,6 +359,8 @@ export function ActivityPage() {
   const firstRevision = timeline.data?.pages[0]?.deterministicRevision;
   const revisionMismatch = timeline.data?.pages.some((page) => page.deterministicRevision !== firstRevision) ?? false;
   const trustedPages = revisionMismatch ? (timeline.data?.pages.slice(0, 1) ?? []) : (timeline.data?.pages ?? []);
+  const pageBoundReached = trustedPages.length >= MAX_WORKBENCH_PAGES
+    && trustedPages.at(-1)?.nextCursor !== null;
   const items = useMemo(() => {
     const unique = new Map<string, ActivityItem>();
     for (const page of trustedPages) {
@@ -417,7 +423,7 @@ export function ActivityPage() {
   };
 
   return (
-    <div className={hubStyles.page}>
+    <div className={styles.page}>
       <PageHeader
         title="Activity"
         actions={<Badge className={styles.readOnlyBadge} variant="outline"><ShieldCheck aria-hidden="true" /> Read only</Badge>}
@@ -548,7 +554,9 @@ export function ActivityPage() {
                       {timeline.isFetchingNextPage ? "Loading older activity…" : "Load older activity"}
                     </Button>
                   ) : (
-                    <p><CircleDot aria-hidden="true" /> {sourceTruncated ? "End of available history" : "End of trustworthy history"}</p>
+                    <p><CircleDot aria-hidden="true" /> {pageBoundReached
+                      ? `Browser safety limit reached at ${MAX_ACCUMULATED_WORKBENCH_ITEMS} events`
+                      : sourceTruncated ? "End of available history" : "End of trustworthy history"}</p>
                   )}
                 </div>
               </>

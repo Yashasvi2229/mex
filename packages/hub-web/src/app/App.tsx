@@ -1,18 +1,23 @@
+import { lazy } from "react";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { HubApiError, type HubApi } from "../api/client";
 import { HubApiProvider, useCapabilities, useSession } from "../api/context";
 import { StatePanel } from "../components/ui";
 import { Button } from "../components/primitives/button";
-import { CapabilityPage, NotFoundPage } from "../pages/CapabilityPage";
-import { ActivityPage } from "../pages/ActivityPage";
-import { HealthPage } from "../pages/HealthPage";
-import { HomePage } from "../pages/HomePage";
-import { JobsPage } from "../pages/JobsPage";
-import { KnowledgeDetailPage, KnowledgePage } from "../pages/KnowledgePage";
-import { CodePage, SearchPage } from "../pages/SearchPage";
-import { SymbolPage } from "../pages/SymbolPage";
-import styles from "../styles/hub.module.css";
+import styles from "../styles/app.module.css";
 import { DesktopRequired, HubLayout } from "./HubLayout";
+
+const HomePage = lazy(async () => ({ default: (await import("../pages/HomePage")).HomePage }));
+const SearchPage = lazy(async () => ({ default: (await import("../pages/SearchPage")).SearchPage }));
+const CodePage = lazy(async () => ({ default: (await import("../pages/SearchPage")).CodePage }));
+const KnowledgePage = lazy(async () => ({ default: (await import("../pages/KnowledgePage")).KnowledgePage }));
+const KnowledgeDetailPage = lazy(async () => ({ default: (await import("../pages/KnowledgePage")).KnowledgeDetailPage }));
+const SymbolPage = lazy(async () => ({ default: (await import("../pages/SymbolPage")).SymbolPage }));
+const CapabilityPage = lazy(async () => ({ default: (await import("../pages/CapabilityPage")).CapabilityPage }));
+const NotFoundPage = lazy(async () => ({ default: (await import("../pages/CapabilityPage")).NotFoundPage }));
+const ActivityPage = lazy(async () => ({ default: (await import("../pages/ActivityPage")).ActivityPage }));
+const JobsPage = lazy(async () => ({ default: (await import("../pages/JobsPage")).JobsPage }));
+const HealthPage = lazy(async () => ({ default: (await import("../pages/HealthPage")).HealthPage }));
 
 function SessionBoundary() {
   const session = useSession();
@@ -56,7 +61,6 @@ function SessionBoundary() {
           detail="The Hub could not safely verify which local workbenches are available. Try the check again before continuing."
           action={(
             <Button
-              className={styles.secondaryButton}
               size="sm"
               type="button"
               variant="outline"

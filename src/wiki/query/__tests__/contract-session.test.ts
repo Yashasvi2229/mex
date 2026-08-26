@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { copyFileSync, readdirSync, renameSync, symlinkSync } from "node:fs";
+import { copyFileSync, readdirSync, renameSync, symlinkSync, truncateSync } from "node:fs";
 import { join } from "node:path";
 import { rebuildWikiIndex } from "../../index/rebuild.js";
 import { openWikiIndex } from "../../index/open.js";
+import { WIKI_CORPUS_LIMITS } from "../../index/corpus-policy.js";
 import { WIKI_META_KEYS } from "../../index/schema.js";
 import { createScaffold, steppingClock, type Scaffold } from "../../index/__tests__/harness.js";
 import {
@@ -534,6 +535,35 @@ describe("Wiki contract read session", () => {
     future.index.db.pragma("wal_checkpoint(TRUNCATE)");
     future.index.close();
     expect(inspectWikiContractIndex({ scaffoldRoot: scaffold.root, indexPath }).state).toBe("migration_required");
+  });
+
+  it("refuses an oversized disposable index before hashing or SQLite materialization", () => {
+    const { scaffold: target, indexPath } = setup();
+    truncateSync(indexPath, WIKI_CORPUS_LIMITS.maxIndexBytes + 1);
+
+    const inspected = inspectWikiContractIndex({ scaffoldRoot: target.root, indexPath });
+
+    expect(inspected.state).toBe("degraded");
+    expect(inspected.diagnostics).toContainEqual(expect.objectContaining({
+      code: "WIKI_PARSE_ERROR",
+      message: "The disposable Wiki index corpus exceeds MEX's bounded inspection policy.",
+    }));
+  });
+
+  it("does not classify a missing index as initializable when legacy inspection exceeds its corpus bound", () => {
+    scaffold = createScaffold();
+    scaffold.write("ROUTER.md", "x".repeat(WIKI_CORPUS_LIMITS.maxFileBytes + 1));
+
+    const inspected = inspectWikiContractIndex({
+      scaffoldRoot: scaffold.root,
+      indexPath: join(scaffold.root, "wiki.db"),
+    });
+
+    expect(inspected.state).toBe("degraded");
+    expect(inspected.diagnostics).toContainEqual(expect.objectContaining({
+      code: "WIKI_PARSE_ERROR",
+      message: "The canonical Wiki corpus exceeds MEX's bounded inspection policy.",
+    }));
   });
 
   it("uses the same no-follow source set for rebuild and corpus inspection", () => {

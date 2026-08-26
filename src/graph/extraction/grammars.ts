@@ -151,6 +151,11 @@ export function parse(source: string, language: Language): TSTree | null {
   return tree as unknown as TSTree;
 }
 
+/** Release one native tree as soon as its single-file extraction completes. */
+export function disposeTree(tree: TSTree): void {
+  (tree as TSTree & { delete?: () => void }).delete?.();
+}
+
 /** Free all cached parsers + reset the runtime flag (tests / teardown). */
 export function disposeParsers(): void {
   for (const parser of parserCache.values()) parser.delete();

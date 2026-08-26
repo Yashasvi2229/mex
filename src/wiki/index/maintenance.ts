@@ -48,7 +48,6 @@ interface ObservedWikiFile {
   path: string;
   absolutePath: string;
   hash: string | "absent" | "unreadable";
-  text: string | null;
 }
 
 export interface WikiCorpusFastBinding {
@@ -73,13 +72,18 @@ export interface WikiCorpusObservationOptions {
 
 /**
  * Read every discovered canonical file once and bind path set + exact bytes to
- * one digest. Candidate builders consume these captured bytes; commit performs
- * a fresh observation and requires the same digest before publication.
+ * one digest. Candidate builders re-read one file at a time and require its
+ * exact hash to match this observation, so a maintenance handle never retains
+ * the repository's source bodies in memory. Commit performs a fresh observation
+ * and requires the same digest before publication.
  */
 export function observeWikiCorpus(options: WikiCorpusObservationOptions): WikiCorpusObservation {
   const scaffoldRoot = resolve(options.scaffoldRoot);
   const discovery = discoverMarkdownFiles({ root: scaffoldRoot, exclude: options.exclude });
   const discoveredByPath = new Map(discovery.files.map((file) => [file.path, file]));
+  if (options.paths !== undefined && options.paths.length > WIKI_CORPUS_LIMITS.maxMaintenancePaths) {
+    throw new WikiCorpusLimitError("maxMaintenancePaths");
+  }
   const selected = options.paths === undefined
     ? discovery.files
     : [...new Set(options.paths)].sort().map((path) => discoveredByPath.get(path) ?? {
@@ -87,9 +91,10 @@ export function observeWikiCorpus(options: WikiCorpusObservationOptions): WikiCo
       absolutePath: resolve(scaffoldRoot, path),
     });
   const observed: ObservedWikiFile[] = [];
+  let corpusBytes = 0;
   for (const file of selected) {
     if (!discoveredByPath.has(file.path)) {
-      observed.push({ path: file.path, absolutePath: file.absolutePath, hash: "absent", text: null });
+      observed.push({ path: file.path, absolutePath: file.absolutePath, hash: "absent" });
       continue;
     }
     try {
@@ -98,12 +103,14 @@ export function observeWikiCorpus(options: WikiCorpusObservationOptions): WikiCo
         file.absolutePath,
         options.readFile === undefined ? {} : { readFile: options.readFile },
       );
-      observed.push({ path: file.path, absolutePath: file.absolutePath, hash: exactFileContentHash(text), text });
+      corpusBytes = addWikiCorpusBytes(corpusBytes, Buffer.byteLength(text, "utf8"));
+      observed.push({ path: file.path, absolutePath: file.absolutePath, hash: exactFileContentHash(text) });
     } catch (error) {
+      if (error instanceof WikiCorpusLimitError) throw error;
       const unreadableHash = error instanceof WikiSourceReadError && error.exactByteHash !== undefined
         ? `unreadable:${error.exactByteHash}`
         : "unreadable";
-      observed.push({ path: file.path, absolutePath: file.absolutePath, hash: unreadableHash, text: null });
+      observed.push({ path: file.path, absolutePath: file.absolutePath, hash: unreadableHash });
     }
   }
   const hash = createHash("sha256");
@@ -117,8 +124,24 @@ export function observeWikiCorpus(options: WikiCorpusObservationOptions): WikiCo
     diagnostics: discovery.diagnostics,
     readFile: (absolutePath: string): string => {
       const file = byAbsolutePath.get(resolve(absolutePath));
-      if (file?.text === null || file === undefined) throw new Error("The observed Wiki file was unreadable.");
-      return file.text;
+      if (file === undefined || file.hash === "absent" || file.hash.startsWith("unreadable")) {
+        throw new Error("The observed Wiki file was unreadable.");
+      }
+      let text: string;
+      try {
+        text = readContainedSource(
+          scaffoldRoot,
+          file.absolutePath,
+          options.readFile === undefined ? {} : { readFile: options.readFile },
+        );
+      } catch (error) {
+        if (error instanceof WikiCorpusLimitError) throw error;
+        throw new WikiMaintenanceInterruptedError("parse");
+      }
+      if (exactFileContentHash(text) !== file.hash) {
+        throw new WikiMaintenanceInterruptedError("parse");
+      }
+      return text;
     },
   };
 }
@@ -141,6 +164,9 @@ export function bindWikiCorpusFast(options: WikiCorpusObservationOptions): WikiC
   const scaffoldRoot = resolve(options.scaffoldRoot);
   const discovery = discoverMarkdownFiles({ root: scaffoldRoot, exclude: options.exclude });
   const byPath = new Map(discovery.files.map((file) => [file.path, file]));
+  if (options.paths !== undefined && options.paths.length > WIKI_CORPUS_LIMITS.maxMaintenancePaths) {
+    throw new WikiCorpusLimitError("maxMaintenancePaths");
+  }
   const paths = options.paths === undefined
     ? discovery.files.map((file) => file.path)
     : [...new Set(options.paths)].sort();
@@ -194,4 +220,9 @@ import { resolve } from "node:path";
 import type { WikiDiagnostic } from "../model/diagnostic.js";
 import { exactFileContentHash } from "../model/hash.js";
 import { discoverMarkdownFiles, type DiscoveredFile } from "./discover.js";
+import {
+  WIKI_CORPUS_LIMITS,
+  WikiCorpusLimitError,
+  addWikiCorpusBytes,
+} from "./corpus-policy.js";
 import { readContainedSource, WikiSourceReadError } from "./source-read.js";

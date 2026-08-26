@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { GRAPH_CORPUS_LIMITS } from "./corpus-policy.js";
 
 export const GRAPH_SNAPSHOT_METADATA_KEY = "graph_snapshot_v1" as const;
 export const GRAPH_SNAPSHOT_VERSION = 1 as const;
-export const GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUTS = 1_024 as const;
+export const GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUTS = GRAPH_CORPUS_LIMITS.maxSemanticInputFiles;
 export const GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUT_PATH_LENGTH = 4_096 as const;
 
 export type GraphSnapshotParseStatus = "ok" | "partial" | "failed";

@@ -47,6 +47,10 @@ import {
   ItemTitle,
 } from "../components/primitives/item";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/primitives/tabs";
+import {
+  appendBoundedUnique,
+  MAX_ACCUMULATED_WORKBENCH_ITEMS,
+} from "../lib/bounds";
 import { cn } from "../lib/utils";
 import styles from "../styles/symbol.module.css";
 import knowledgeStyles from "../styles/knowledge.module.css";
@@ -244,9 +248,12 @@ function RelatedKnowledge({ symbolId, available, reason }: { symbolId: string; a
         setRevisionConflict(true);
         return;
       }
-      setItems((current) => [...current, ...next.items.filter((item) => !current.some((loaded) => loaded.entity.id === item.entity.id))]);
-      setCursor(next.nextCursor);
-      setTruncated(next.truncated);
+      const accumulated = appendBoundedUnique(items, next.items, (item) => item.entity.id);
+      const boundReached = accumulated.omitted
+        || (accumulated.items.length >= MAX_ACCUMULATED_WORKBENCH_ITEMS && next.nextCursor !== null);
+      setItems(accumulated.items);
+      setCursor(boundReached ? null : next.nextCursor);
+      setTruncated(next.truncated || boundReached);
     },
     onError: (error, started) => {
       if (started.symbolId === symbolId && started.indexedRevision === revision && error instanceof HubApiError && error.problem.code === "REVISION_CONFLICT") setRevisionConflict(true);
@@ -382,9 +389,16 @@ export function SymbolPage() {
         setRevisionConflict(true);
         return;
       }
-      setSources((current) => [...current, ...next.source.items.filter((item) => !current.some((loaded) => loaded.contentHash === item.contentHash && loaded.startLine === item.startLine))]);
-      setSourceCursor(next.source.nextCursor);
-      setSourceTruncated(next.source.truncated);
+      const accumulated = appendBoundedUnique(
+        sources,
+        next.source.items,
+        (item) => `${item.contentHash}\0${item.startLine}`,
+      );
+      const boundReached = accumulated.omitted
+        || (accumulated.items.length >= MAX_ACCUMULATED_WORKBENCH_ITEMS && next.source.nextCursor !== null);
+      setSources(accumulated.items);
+      setSourceCursor(boundReached ? null : next.source.nextCursor);
+      setSourceTruncated(next.source.truncated || boundReached);
     },
     onError: (error) => {
       if (error instanceof HubApiError && error.problem.code === "REVISION_CONFLICT") setRevisionConflict(true);
@@ -400,9 +414,16 @@ export function SymbolPage() {
       }
       const traversal = next.traversal;
       if (traversal.view !== "callers" && traversal.view !== "callees") return;
-      setRelations((current) => [...current, ...traversal.items]);
-      setRelationCursor(traversal.nextCursor);
-      setRelationTruncated(traversal.truncated);
+      const accumulated = appendBoundedUnique(
+        relations,
+        traversal.items,
+        (item) => `${item.kind}\0${item.sourceId}\0${item.targetId}\0${item.path ?? ""}\0${item.line ?? ""}\0${item.column ?? ""}`,
+      );
+      const boundReached = accumulated.omitted
+        || (accumulated.items.length >= MAX_ACCUMULATED_WORKBENCH_ITEMS && traversal.nextCursor !== null);
+      setRelations(accumulated.items);
+      setRelationCursor(boundReached ? null : traversal.nextCursor);
+      setRelationTruncated(traversal.truncated || boundReached);
     },
     onError: (error) => {
       if (error instanceof HubApiError && error.problem.code === "REVISION_CONFLICT") setRevisionConflict(true);

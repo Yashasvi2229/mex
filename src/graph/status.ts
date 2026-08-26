@@ -13,7 +13,6 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import { globSync } from "glob";
 import type {
   GraphParseHealth,
   GraphSourceChanges,
@@ -27,7 +26,13 @@ import { BANDS, K } from "./config.js";
 import {
   GRAPH_CORPUS_GLOB_OPTIONS,
   GRAPH_CORPUS_IGNORE_GLOBS,
+  GRAPH_CORPUS_LIMITS,
   GRAPH_SUPPORTED_SOURCE_GLOB,
+  GraphCorpusLimitError,
+  addGraphCorpusBytes,
+  addGraphSemanticInput,
+  createGraphSemanticInputLedger,
+  discoverBoundedGraphPaths,
 } from "./corpus-policy.js";
 import { graphManifest } from "./engine-impl.js";
 import { isSupportedSourceFile } from "./extraction/grammars.js";
@@ -44,6 +49,19 @@ import {
 const execFileAsync = promisify(execFile);
 const DEFAULT_MAX_CHANGED_PATHS = 100;
 const MAX_FRESH_OBSERVATION_ATTEMPTS = 2;
+const MAX_SCHEMA_OBJECTS = 1_000;
+const MAX_METADATA_VALUE_BYTES = 4_096;
+const STATUS_METADATA_KEYS = Object.freeze([
+  GRAPH_SNAPSHOT_METADATA_KEY,
+  "compiler_version",
+  "config_hash",
+  "extractor_version",
+  "grammar_hash",
+  "manifest_hash",
+  "rebuild_reason",
+  "rebuild_required",
+  "resolver_version",
+] as const);
 const REQUIRED_SCHEMA_OBJECTS = {
   table: [
     "_mex_grounded_source",
@@ -455,6 +473,26 @@ async function inspectGraphStatusAttempt(
       }),
     };
   }
+  if (!Number.isSafeInteger(fileStat.size)
+    || fileStat.size < 0
+    || fileStat.size > GRAPH_CORPUS_LIMITS.maxIndexBytes) {
+    diagnostics.push({
+      code: "GRAPH_INDEX_CORPUS_LIMIT_EXCEEDED",
+      severity: "warning",
+      message: "The disposable graph index exceeds MEX's bounded inspection policy.",
+    });
+    return {
+      retry: false,
+      status: graphStatus({
+        status: "degraded",
+        observedAt,
+        currentRepo,
+        parseHealth: emptyParseHealth(),
+        changes: changesWithoutIndex(live, currentRepo, maxChangedPaths),
+        diagnostics,
+      }),
+    };
+  }
 
   const initialSidecars = inspectGraphSidecars(database.canonicalPath);
   if (initialSidecars.state !== "clear") {
@@ -502,9 +540,22 @@ async function inspectGraphStatusAttempt(
   try {
     db = openSqlite(database.canonicalPath, { readOnly: true, immutable: true });
     if (!tableExists(db, "schema_versions")) {
+      const oversizedSchemaName = db.prepare(
+        `SELECT 1 FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%'
+           AND (typeof(name) <> 'text' OR length(CAST(name AS BLOB)) > 4096)
+         LIMIT 1`,
+      ).get();
+      if (oversizedSchemaName) {
+        throw new CorruptGraphIndexError("The graph schema contains an oversized object name.");
+      }
       const existingObjects = db.prepare(
-        "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
+        `SELECT name FROM sqlite_master
+         WHERE name NOT LIKE 'sqlite_%' ORDER BY name LIMIT ${MAX_SCHEMA_OBJECTS + 1}`,
       ).all() as Array<{ name?: unknown }>;
+      if (existingObjects.length > MAX_SCHEMA_OBJECTS) {
+        throw new CorruptGraphIndexError("The graph schema object inventory exceeds its safety bound.");
+      }
       const partialSchema = existingObjects.some((row) => typeof row.name === "string");
       diagnostics.push(partialSchema
         ? {
@@ -1265,18 +1316,33 @@ async function validateFreshObservation(
 
 function readSnapshotIdentity(dbPath: string): { snapshotRaw: string; databaseIdentity: string } {
   const before = statSync(dbPath);
+  if (!before.isFile()
+    || !Number.isSafeInteger(before.size)
+    || before.size < 0
+    || before.size > GRAPH_CORPUS_LIMITS.maxIndexBytes) {
+    throw new GraphCorpusLimitError("maxIndexBytes");
+  }
   const db = openSqlite(dbPath, { readOnly: true, immutable: true });
   let snapshotRaw: string;
   try {
     const row = db.prepare(
-      "SELECT value FROM project_metadata WHERE key = ?",
-    ).get(GRAPH_SNAPSHOT_METADATA_KEY) as { value?: unknown } | undefined;
+      `SELECT CASE
+         WHEN typeof(value) = 'text' AND length(CAST(value AS BLOB)) <= ? THEN value
+         ELSE NULL END AS value
+       FROM project_metadata WHERE key = ?`,
+    ).get(GRAPH_CORPUS_LIMITS.maxSnapshotMetadataBytes, GRAPH_SNAPSHOT_METADATA_KEY) as { value?: unknown } | undefined;
     if (typeof row?.value !== "string") throw new Error("Missing graph snapshot identity");
     snapshotRaw = row.value;
   } finally {
     db.close();
   }
   const after = statSync(dbPath);
+  if (!after.isFile()
+    || !Number.isSafeInteger(after.size)
+    || after.size < 0
+    || after.size > GRAPH_CORPUS_LIMITS.maxIndexBytes) {
+    throw new GraphCorpusLimitError("maxIndexBytes");
+  }
   if (databaseFileIdentity(before) !== databaseFileIdentity(after)) {
     throw new Error("The graph database changed while its snapshot identity was read.");
   }
@@ -1351,10 +1417,20 @@ function inspectSemanticInputs(
   const unavailablePaths: string[] = [];
   const diagnostics: Diagnostic[] = [];
   let complete = true;
+  const semanticInputLedger = createGraphSemanticInputLedger();
   let omittedDiagnostics = 0;
   const report = (diagnostic: Diagnostic): void => {
     if (diagnostics.length < diagnosticLimit) diagnostics.push(diagnostic);
     else omittedDiagnostics += 1;
+  };
+  const reportCorpusLimit = (): void => {
+    if (diagnostics.some((diagnostic) =>
+      diagnostic.code === "GRAPH_SEMANTIC_INPUT_CORPUS_LIMIT_EXCEEDED")) return;
+    diagnostics.push({
+      code: "GRAPH_SEMANTIC_INPUT_CORPUS_LIMIT_EXCEEDED",
+      severity: "warning",
+      message: "The compiler semantic-input corpus exceeds MEX's bounded inspection policy.",
+    });
   };
 
   for (const input of expected) {
@@ -1366,11 +1442,17 @@ function inspectSemanticInputs(
         input.path,
         () => afterRead?.(input.path),
       );
+      addGraphSemanticInput(
+        semanticInputLedger,
+        input.path,
+        Buffer.byteLength(content, "utf8"),
+      );
       contentHash = sha256(content);
     } catch (error) {
       if (errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR") {
         try {
           assertSecurelyContainedMissingPath(projectRoot, projectRootRealPath, input.path);
+          addGraphSemanticInput(semanticInputLedger, input.path, null);
           contentHash = null;
         } catch (containmentError) {
           error = containmentError;
@@ -1380,7 +1462,9 @@ function inspectSemanticInputs(
         complete = false;
         unavailablePaths.push(input.path);
         const outsideProject = errorCode(error) === "GRAPH_CONTAINED_FILE_OUTSIDE_PROJECT";
-        report({
+        const corpusLimit = error instanceof GraphCorpusLimitError;
+        if (corpusLimit) reportCorpusLimit();
+        else report({
           code: outsideProject
             ? "GRAPH_SEMANTIC_INPUT_PATH_OUTSIDE_PROJECT"
             : "GRAPH_SEMANTIC_INPUT_READ_FAILED",
@@ -1390,6 +1474,7 @@ function inspectSemanticInputs(
             : `Could not hash compiler semantic input ${input.path} safely.`,
           path: input.path,
         });
+        if (corpusLimit) break;
         continue;
       }
     }
@@ -1455,6 +1540,11 @@ function readStableContainedUtf8File(
         "GRAPH_CONTAINED_FILE_CHANGED",
         "The resolved file changed before it could be read.",
       );
+    }
+    if (!Number.isSafeInteger(opened.size)
+      || opened.size < 0
+      || opened.size > GRAPH_CORPUS_LIMITS.maxSourceFileBytes) {
+      throw new GraphCorpusLimitError("maxSourceFileBytes");
     }
     const content = readFileSync(fd, "utf8");
     afterRead?.();
@@ -1556,23 +1646,40 @@ function inspectLiveSources(
     if (diagnostics.length < diagnosticLimit) diagnostics.push(diagnostic);
     else omittedDiagnostics++;
   };
+  const reportCorpusLimit = (): void => {
+    if (diagnostics.some((diagnostic) =>
+      diagnostic.code === "GRAPH_SOURCE_CORPUS_LIMIT_EXCEEDED")) return;
+    diagnostics.push({
+      code: "GRAPH_SOURCE_CORPUS_LIMIT_EXCEEDED",
+      severity: "warning",
+      message: "The supported source corpus exceeds MEX's bounded inspection policy.",
+    });
+  };
   let matches: string[];
   try {
-    matches = globSync(GRAPH_SUPPORTED_SOURCE_GLOB, {
+    matches = discoverBoundedGraphPaths(GRAPH_SUPPORTED_SOURCE_GLOB, {
       ...GRAPH_CORPUS_GLOB_OPTIONS,
       cwd: projectRoot,
       ignore: [...GRAPH_CORPUS_IGNORE_GLOBS],
-    }).map(toPosix).filter(isSupportedSourceFile).sort(compareCodePoints);
+    }, GRAPH_CORPUS_LIMITS.maxSourceFiles)
+      .map(toPosix)
+      .filter(isSupportedSourceFile)
+      .sort(compareCodePoints);
   } catch (error) {
     diagnostics.push({
-      code: "GRAPH_SOURCE_DISCOVERY_FAILED",
+      code: error instanceof GraphCorpusLimitError
+        ? "GRAPH_SOURCE_CORPUS_LIMIT_EXCEEDED"
+        : "GRAPH_SOURCE_DISCOVERY_FAILED",
       severity: "warning",
-      message: `Could not discover supported source files: ${errorMessage(error)}`,
+      message: error instanceof GraphCorpusLimitError
+        ? "The supported source corpus exceeds MEX's bounded inspection policy."
+        : `Could not discover supported source files: ${errorMessage(error)}`,
     });
     return { hashes, discoveredPaths, complete: false, diagnostics };
   }
 
   let complete = true;
+  let sourceBytes = 0;
   for (const path of matches) {
     discoveredPaths.add(path);
     try {
@@ -1582,26 +1689,34 @@ function inspectLiveSources(
         path,
         () => afterSourceRead?.(path),
       );
+      sourceBytes = addGraphCorpusBytes(
+        sourceBytes,
+        Buffer.byteLength(content, "utf8"),
+        "source",
+      );
       hashes.set(path, sha256(content));
     } catch (error) {
       complete = false;
       const code = errorCode(error);
       const outsideProject = code === "GRAPH_CONTAINED_FILE_OUTSIDE_PROJECT";
       const invalidPath = code === "GRAPH_CONTAINED_FILE_INVALID";
-      reportPathDiagnostic({
+      const corpusLimit = error instanceof GraphCorpusLimitError;
+      if (corpusLimit) reportCorpusLimit();
+      else reportPathDiagnostic({
         code: outsideProject
-          ? "GRAPH_SOURCE_PATH_OUTSIDE_PROJECT"
-          : invalidPath
-            ? "GRAPH_SOURCE_PATH_INVALID"
-            : "GRAPH_SOURCE_READ_FAILED",
+            ? "GRAPH_SOURCE_PATH_OUTSIDE_PROJECT"
+            : invalidPath
+              ? "GRAPH_SOURCE_PATH_INVALID"
+              : "GRAPH_SOURCE_READ_FAILED",
         severity: "warning",
         message: outsideProject
-          ? `Refused to inspect supported source path ${path} because its resolved target escapes the project root.`
-          : invalidPath
-            ? `Refused to inspect supported source path ${path} because it is not a regular file.`
-            : `Could not hash supported source file ${path}: ${errorMessage(error)}`,
+            ? `Refused to inspect supported source path ${path} because its resolved target escapes the project root.`
+            : invalidPath
+              ? `Refused to inspect supported source path ${path} because it is not a regular file.`
+              : `Could not hash supported source file ${path}: ${errorMessage(error)}`,
         path,
       });
+      if (corpusLimit) break;
     }
   }
   if (omittedDiagnostics > 0) {
@@ -1735,11 +1850,31 @@ function emptyParseHealth(): GraphParseHealth {
 }
 
 function readFiles(db: SqliteDatabase): FileRow[] {
+  const oversized = db.prepare(
+    `SELECT 1 FROM files
+     WHERE typeof(path) <> 'text'
+        OR length(CAST(path AS BLOB)) > 4096
+        OR typeof(content_hash) <> 'text'
+        OR length(CAST(content_hash AS BLOB)) <> 64
+        OR typeof(parse_status) <> 'text'
+        OR length(CAST(parse_status AS BLOB)) > 7
+     LIMIT 1`,
+  ).get();
+  if (oversized) {
+    throw new CorruptGraphIndexError("The graph files table contains an oversized or malformed field.");
+  }
   const rows = db.prepare(
-    "SELECT path, content_hash, parse_status, indexed_at FROM files ORDER BY path",
+    `SELECT path, content_hash, parse_status, indexed_at FROM files
+     ORDER BY path LIMIT ${GRAPH_CORPUS_LIMITS.maxSourceFiles + 1}`,
   ).all() as FileRow[];
+  if (rows.length > GRAPH_CORPUS_LIMITS.maxSourceFiles) {
+    throw new GraphCorpusLimitError("maxSourceFiles");
+  }
   for (const row of rows) {
-    if (!row.path || !row.content_hash || !["ok", "partial", "failed"].includes(row.parse_status)) {
+    if (!row.path
+      || !/^[a-f0-9]{64}$/u.test(row.content_hash)
+      || !["ok", "partial", "failed"].includes(row.parse_status)
+      || !Number.isFinite(row.indexed_at)) {
       throw new CorruptGraphIndexError("The graph files table contains an invalid row.");
     }
   }
@@ -1913,6 +2048,27 @@ interface StoredLshBucketRow {
  * repository's full fingerprint or LSH corpus in memory.
  */
 function inspectFingerprintInvariants(db: SqliteDatabase): string[] {
+  const oversizedFingerprint = db.prepare(
+    `SELECT 1 FROM node_fingerprints
+     WHERE typeof(node_id) <> 'text'
+        OR length(CAST(node_id AS BLOB)) > 4096
+        OR typeof(minhash) <> 'text'
+        OR length(CAST(minhash AS BLOB)) > 4096
+        OR typeof(neighbors) <> 'text'
+        OR length(CAST(neighbors AS BLOB)) > ${GRAPH_CORPUS_LIMITS.maxSnapshotMetadataBytes}
+     LIMIT 1`,
+  ).get();
+  const oversizedBucket = db.prepare(
+    `SELECT 1 FROM lsh_buckets
+     WHERE typeof(node_id) <> 'text'
+        OR length(CAST(node_id AS BLOB)) > 4096
+        OR typeof(band_hash) <> 'text'
+        OR length(CAST(band_hash AS BLOB)) > 128
+     LIMIT 1`,
+  ).get();
+  if (oversizedFingerprint || oversizedBucket) {
+    throw new CorruptGraphIndexError("Graph fingerprint state contains an oversized persisted value.");
+  }
   let malformedFingerprints = 0;
   let malformedBucketOwners = 0;
   let missingBands = 0;
@@ -2038,9 +2194,35 @@ function readCount(db: SqliteDatabase, sql: string): number {
 }
 
 function readMetadata(db: SqliteDatabase): Map<string, MetadataValue> {
+  const placeholders = STATUS_METADATA_KEYS.map(() => "?").join(", ");
+  const oversized = db.prepare(
+    `SELECT 1 FROM project_metadata
+     WHERE key IN (${placeholders})
+       AND (
+         typeof(value) <> 'text'
+         OR length(CAST(value AS BLOB)) > CASE
+           WHEN key = ? THEN ? ELSE ? END
+       )
+     LIMIT 1`,
+  ).get(
+    ...STATUS_METADATA_KEYS,
+    GRAPH_SNAPSHOT_METADATA_KEY,
+    GRAPH_CORPUS_LIMITS.maxSnapshotMetadataBytes,
+    MAX_METADATA_VALUE_BYTES,
+  );
+  if (oversized) {
+    throw new CorruptGraphIndexError("Graph status metadata exceeds its bounded value policy.");
+  }
   const rows = db.prepare(
-    "SELECT key, value, updated_at FROM project_metadata ORDER BY key",
-  ).all() as Array<{ key: string; value: string; updated_at: number }>;
+    `SELECT key, value, updated_at FROM project_metadata
+     WHERE key IN (${placeholders}) ORDER BY key LIMIT ${STATUS_METADATA_KEYS.length}`,
+  ).all(...STATUS_METADATA_KEYS) as Array<{ key: string; value: string; updated_at: number }>;
+  if (rows.some((row) => typeof row.key !== "string"
+    || typeof row.value !== "string"
+    || !Number.isSafeInteger(row.updated_at)
+    || row.updated_at < 0)) {
+    throw new CorruptGraphIndexError("Graph status metadata contains an invalid field.");
+  }
   return new Map(rows.map((row) => [row.key, { value: row.value, updatedAt: row.updated_at }]));
 }
 
@@ -2053,7 +2235,7 @@ function readSnapshot(raw: string | undefined): { snapshot?: GraphSnapshot; erro
 }
 
 function quickCheck(db: SqliteDatabase): string[] {
-  const rows = db.prepare("PRAGMA quick_check").all() as Array<Record<string, unknown>>;
+  const rows = db.prepare("PRAGMA quick_check(100)").all() as Array<Record<string, unknown>>;
   return rows.map((row) => String(row.quick_check ?? Object.values(row)[0] ?? ""))
     .filter((result) => result.toLowerCase() !== "ok");
 }
@@ -2088,10 +2270,15 @@ function inspectCurrentManifest(
   try {
     return graphManifest(projectRoot);
   } catch (error) {
+    const corpusLimit = isGraphCorpusLimitError(error);
     diagnostics.push({
-      code: "GRAPH_MANIFEST_INSPECTION_FAILED",
+      code: corpusLimit
+        ? "GRAPH_MANIFEST_CORPUS_LIMIT_EXCEEDED"
+        : "GRAPH_MANIFEST_INSPECTION_FAILED",
       severity: "warning",
-      message: `Could not inspect the current graph build manifest: ${errorMessage(error)}`,
+      message: corpusLimit
+        ? "The graph configuration corpus exceeds MEX's bounded inspection policy."
+        : `Could not inspect the current graph build manifest: ${errorMessage(error)}`,
     });
     return null;
   }
@@ -2105,6 +2292,10 @@ async function inspectRepoState(
   try {
     const result = await execFileAsync("git", [
       "--no-optional-locks",
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "core.untrackedCache=false",
       "-C",
       projectRoot,
       "status",
@@ -2157,6 +2348,16 @@ async function inspectRepoState(
 function classifyDatabaseError(error: unknown, operation: string): ClassifiedError {
   const message = errorMessage(error);
   const code = errorCode(error);
+  if (error instanceof GraphCorpusLimitError) {
+    return {
+      status: "degraded",
+      diagnostic: {
+        code: "GRAPH_INDEX_CORPUS_LIMIT_EXCEEDED",
+        severity: "warning",
+        message: "The disposable graph index exceeds MEX's bounded inspection policy.",
+      },
+    };
+  }
   const corrupt = error instanceof CorruptGraphIndexError
     || /corrupt|malformed|not a database|file is encrypted|no such (?:table|column)/i.test(message)
     || /CORRUPT|NOTADB/.test(code);
@@ -2231,6 +2432,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isGraphCorpusLimitError(error: unknown): boolean {
+  if (error instanceof GraphCorpusLimitError || errorCode(error) === "GRAPH_CORPUS_LIMIT_EXCEEDED") {
+    return true;
+  }
+  if (!isRecord(error) || !Array.isArray(error.failures)) return false;
+  return error.failures.some((failure) =>
+    isRecord(failure) && failure.code === "GRAPH_CORPUS_LIMIT_EXCEEDED");
 }
 
 function errorCode(error: unknown): string {

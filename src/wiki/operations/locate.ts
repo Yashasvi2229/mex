@@ -35,6 +35,15 @@ import { entityKeyOf } from "../index/write.js";
 import { openWikiIndex } from "../index/open.js";
 import { defaultIndexPath } from "../index/rebuild.js";
 import { readContainedSource } from "../index/source-read.js";
+import {
+  WikiCorpusLimitError,
+  addWikiCorpusBytes,
+} from "../index/corpus-policy.js";
+
+export const WIKI_PARSE_CACHE_LIMITS = Object.freeze({
+  maxEntries: 256,
+  maxSourceBytes: 32 * 1024 * 1024,
+} as const);
 
 export interface LocatedEntity {
   /** Scaffold-relative POSIX path. */
@@ -89,11 +98,27 @@ export interface ParseCache {
   hits: number;
   /** Parses performed through this cache. */
   misses: number;
+  /** @internal Combined FIFO bound across semantic and raw-document parses. */
+  order: Array<{
+    kind: "entry" | "document";
+    key: string;
+    text: string;
+    bytes: number;
+  }>;
+  /** @internal UTF-8 source bytes currently retained as cache keys. */
+  sourceBytes: number;
 }
 
 /** A fresh cache. One per run; never shared between runs, and never global. */
 export function createParseCache(): ParseCache {
-  return { entries: new Map(), documents: new Map(), hits: 0, misses: 0 };
+  return {
+    entries: new Map(),
+    documents: new Map(),
+    hits: 0,
+    misses: 0,
+    order: [],
+    sourceBytes: 0,
+  };
 }
 
 export interface LocateOptions {
@@ -137,7 +162,8 @@ export function readParsed(
       absolutePath,
       options.readFile === undefined ? {} : { readFile: options.readFile },
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof WikiCorpusLimitError) throw error;
     return null;
   }
   return { text, parsed: parseCached(options, path, absolutePath, text) };
@@ -181,7 +207,7 @@ export function parseCached(
   );
   if (byText !== undefined && cache !== undefined) {
     cache.misses += 1;
-    byText.set(text, parsed);
+    rememberParse(cache, "entry", cacheKey(absolutePath, path, options.registry), text, parsed);
   }
   return parsed;
 }
@@ -279,11 +305,19 @@ function candidateFromIndex(options: LocateOptions, id: string): string | null {
  */
 export function locateEntity(id: string, options: LocateOptions): LocatedEntity | null {
   const root = resolve(options.scaffoldRoot);
+  let corpusBytes = 0;
+  const countedPaths = new Set<string>();
+  const account = (path: string, text: string): void => {
+    if (countedPaths.has(path)) return;
+    corpusBytes = addWikiCorpusBytes(corpusBytes, Buffer.byteLength(text, "utf8"));
+    countedPaths.add(path);
+  };
 
   const hint = options.preferFile ?? candidateFromIndex(options, id);
   if (hint !== null) {
     const absolute = resolve(root, hint);
     const read = readParsed(options, hint, absolute);
+    if (read !== null) account(hint, read.text);
     const claimants = read === null ? [] : claimantsIn(read.parsed, id);
     if (read !== null && claimants.length > 0) {
       return located(hint, absolute, read.text, read.parsed, claimants[0]!);
@@ -297,6 +331,7 @@ export function locateEntity(id: string, options: LocateOptions): LocatedEntity 
   for (const file of discovery.files) {
     const read = readParsed(options, file.path, file.absolutePath);
     if (read === null) continue;
+    account(file.path, read.text);
     for (const claimant of claimantsIn(read.parsed, id)) {
       const candidate = located(file.path, file.absolutePath, read.text, read.parsed, claimant);
       if (best === null || candidate.entityKey < best.entityKey) best = candidate;
@@ -349,7 +384,33 @@ export function parseDocumentCached(cache: ParseCache | undefined, absolutePath:
   const document = parseDocument(text);
   if (byText !== undefined && cache !== undefined) {
     cache.misses += 1;
-    byText.set(text, document);
+    rememberParse(cache, "document", absolutePath, text, document);
   }
   return document;
+}
+
+function rememberParse<T extends ParsedFile | RawDocument>(
+  cache: ParseCache,
+  kind: "entry" | "document",
+  key: string,
+  text: string,
+  value: T,
+): void {
+  const target = kind === "entry" ? cache.entries : cache.documents;
+  const byText = target.get(key) as Map<string, T> | undefined;
+  if (byText === undefined) throw new Error("The Wiki parse cache key was not initialized.");
+  byText.set(text, value);
+  const bytes = Buffer.byteLength(text, "utf8");
+  cache.order.push({ kind, key, text, bytes });
+  cache.sourceBytes += bytes;
+
+  while (cache.order.length > WIKI_PARSE_CACHE_LIMITS.maxEntries
+    || cache.sourceBytes > WIKI_PARSE_CACHE_LIMITS.maxSourceBytes) {
+    const oldest = cache.order.shift();
+    if (!oldest) break;
+    const collection = oldest.kind === "entry" ? cache.entries : cache.documents;
+    const values = collection.get(oldest.key);
+    if (values?.delete(oldest.text)) cache.sourceBytes -= oldest.bytes;
+    if (values?.size === 0) collection.delete(oldest.key);
+  }
 }

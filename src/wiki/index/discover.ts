@@ -14,10 +14,11 @@
  * than on Linux, and every join against it silently returns nothing.
  */
 
-import { readdirSync, lstatSync, realpathSync } from "node:fs";
+import { lstatSync, opendirSync, realpathSync, type Dirent } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { toPosix } from "../../paths.js";
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
+import { WIKI_CORPUS_LIMITS, WikiCorpusLimitError } from "./corpus-policy.js";
 
 export interface DiscoveredFile {
   /** Scaffold-relative, POSIX separators. The database key. */
@@ -136,15 +137,43 @@ export function discoverMarkdownFiles(options: DiscoverOptions): DiscoveryResult
   const exclude = options.exclude ?? [];
   const files: DiscoveredFile[] = [];
   const diagnostics: WikiDiagnostic[] = [];
+  let directoryEntries = 0;
+  let omittedDiagnostics = 0;
+
+  const report = (entry: WikiDiagnostic): void => {
+    if (diagnostics.length < WIKI_CORPUS_LIMITS.maxDiagnostics - 1) diagnostics.push(entry);
+    else omittedDiagnostics += 1;
+  };
 
   const relativeToRoot = (absolute: string): string => toPosix(relative(root, absolute));
 
-  const walk = (directory: string): void => {
-    let entries;
+  const walk = (directory: string, depth: number): void => {
+    if (depth > WIKI_CORPUS_LIMITS.maxDirectoryDepth) {
+      throw new WikiCorpusLimitError("maxDirectoryDepth");
+    }
+    const entries: Dirent[] = [];
     try {
-      entries = readdirSync(directory, { withFileTypes: true });
+      const handle = opendirSync(directory);
+      try {
+        for (;;) {
+          const entry = handle.readSync();
+          if (entry === null) break;
+          directoryEntries += 1;
+          if (directoryEntries > WIKI_CORPUS_LIMITS.maxDirectoryEntries) {
+            throw new WikiCorpusLimitError("maxDirectoryEntries");
+          }
+          entries.push(entry);
+        }
+      } finally {
+        try {
+          handle.closeSync();
+        } catch {
+          // A completed Dir read may already have closed the descriptor.
+        }
+      }
     } catch (error) {
-      diagnostics.push(
+      if (error instanceof WikiCorpusLimitError) throw error;
+      report(
         diagnostic("WIKI_PARSE_ERROR", `Could not read directory ${relativeToRoot(directory) || "."}: ${message(error)}`, {
           file: relativeToRoot(directory),
         }),
@@ -161,38 +190,54 @@ export function discoverMarkdownFiles(options: DiscoverOptions): DiscoveryResult
       if (entry.isSymbolicLink()) {
         const target = resolveSymlink(absolute);
         if (target === null) {
-          diagnostics.push(
-            diagnostic("WIKI_PARSE_ERROR", `Broken symlink at ${rel}.`, { file: rel }),
+            report(
+              diagnostic("WIKI_PARSE_ERROR", `Broken symlink at ${rel}.`, { file: rel }),
           );
           continue;
         }
         if (!insideRoot(root, target)) {
-          diagnostics.push(escapedSymlinkDiagnostic(rel, target));
+          report(escapedSymlinkDiagnostic(rel, target));
           continue;
         }
         if (lstatSync(target).isDirectory()) continue;
         if (!MARKDOWN.test(entry.name) || matchesAnyGlob(rel, exclude)) continue;
         files.push({ path: rel, absolutePath: absolute });
+        if (files.length > WIKI_CORPUS_LIMITS.maxMarkdownFiles) {
+          throw new WikiCorpusLimitError("maxMarkdownFiles");
+        }
         continue;
       }
 
       if (entry.isDirectory()) {
         if (prunes(rel, exclude)) continue;
-        walk(absolute);
+        walk(absolute, depth + 1);
         continue;
       }
 
       if (!entry.isFile() || !MARKDOWN.test(entry.name)) continue;
       if (matchesAnyGlob(rel, exclude)) continue;
       files.push({ path: rel, absolutePath: absolute });
+      if (files.length > WIKI_CORPUS_LIMITS.maxMarkdownFiles) {
+        throw new WikiCorpusLimitError("maxMarkdownFiles");
+      }
     }
   };
 
-  walk(root);
+  walk(root, 0);
 
   // The walk is depth-first and already ordered, but sorting the result makes
   // the guarantee a property of the return value rather than of the traversal.
   files.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  if (omittedDiagnostics > 0) {
+    diagnostics.push(diagnostic(
+      "WIKI_PARSE_ERROR",
+      `${omittedDiagnostics} additional Wiki discovery diagnostic(s) were omitted.`,
+      {
+        severity: "info",
+        remediation: "Resolve the visible diagnostics, then inspect again for any remaining issues.",
+      },
+    ));
+  }
   return { files, diagnostics };
 }
 

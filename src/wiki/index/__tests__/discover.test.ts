@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { discoverMarkdownFiles, escapedSymlinkDiagnostic, globToRegExp, matchesAnyGlob } from "../discover.js";
+import { WIKI_CORPUS_LIMITS, WikiCorpusLimitError } from "../corpus-policy.js";
 import { DEFAULT_WIKI_EXCLUDE, DEFAULT_WIKI_READ_ONLY } from "../../../config.js";
 import { createScaffold, type Scaffold } from "./harness.js";
 
@@ -110,5 +111,17 @@ describe("discovery", () => {
     const result = discoverMarkdownFiles({ root: join(scaffold.root, "never-existed") });
     expect(result.files).toEqual([]);
     expect(result.diagnostics.map((entry) => entry.code)).toEqual(["WIKI_PARSE_ERROR"]);
+  });
+
+  it("fails closed when directory depth exceeds the corpus ceiling", () => {
+    scaffold = createScaffold();
+    const path = `${Array.from(
+      { length: WIKI_CORPUS_LIMITS.maxDirectoryDepth + 1 },
+      (_, index) => `d${index}`,
+    ).join("/")}/too-deep.md`;
+    scaffold.write(path, "# Too deep\n");
+
+    expect(() => discoverMarkdownFiles({ root: scaffold!.root }))
+      .toThrow(WikiCorpusLimitError);
   });
 });

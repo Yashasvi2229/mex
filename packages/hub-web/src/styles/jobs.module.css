@@ -365,6 +365,13 @@
   margin: 12px;
 }
 
+.boundNote {
+  margin: 12px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-align: center;
+}
+
 .jobDetail {
   position: sticky;
   top: 72px;
@@ -376,7 +383,8 @@
 }
 
 .jobDetail:focus-visible {
-  outline: 0;
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
   box-shadow: inset 2px 0 var(--primary), 0 0 0 1px var(--border-strong);
 }
 

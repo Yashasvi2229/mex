@@ -18,6 +18,11 @@ import { discoverMarkdownFiles } from "../index/discover.js";
 import { parseCached, parseDocumentCached, type ParseCache } from "../operations/locate.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 import { readContainedSource } from "../index/source-read.js";
+import {
+  WIKI_CORPUS_LIMITS,
+  WikiCorpusLimitError,
+  addWikiCorpusBytes,
+} from "../index/corpus-policy.js";
 
 /** One scaffold file, read and parsed. */
 export interface InventoryFile {
@@ -77,7 +82,10 @@ export function inventoryScaffold(options: InventoryOptions): ScaffoldInventory 
   );
 
   const files: InventoryFile[] = [];
-  const diagnostics: WikiDiagnostic[] = [...discovered.diagnostics];
+  const diagnostics: WikiDiagnostic[] = [...discovered.diagnostics]
+    .slice(0, WIKI_CORPUS_LIMITS.maxDiagnostics);
+  let omittedDiagnostics = Math.max(0, discovered.diagnostics.length - diagnostics.length);
+  let corpusBytes = 0;
 
   for (const entry of discovered.files) {
     const absolutePath = entry.absolutePath;
@@ -89,11 +97,15 @@ export function inventoryScaffold(options: InventoryOptions): ScaffoldInventory 
         options.readFile === undefined ? {} : { readFile: options.readFile },
       );
     } catch (error) {
-      diagnostics.push(
-        diagnostic("WIKI_PARSE_ERROR", `Could not read ${entry.path}: ${message(error)}`, { file: entry.path }),
-      );
+      if (error instanceof WikiCorpusLimitError) throw error;
+      if (diagnostics.length < WIKI_CORPUS_LIMITS.maxDiagnostics - 1) {
+        diagnostics.push(
+          diagnostic("WIKI_PARSE_ERROR", `Could not read ${entry.path}: ${message(error)}`, { file: entry.path }),
+        );
+      } else omittedDiagnostics += 1;
       continue;
     }
+    corpusBytes = addWikiCorpusBytes(corpusBytes, Buffer.byteLength(text, "utf8"));
     const parsed = parseCached(
       { scaffoldRoot: root, ...(options.registry === undefined ? {} : { registry: options.registry }), ...(options.parseCache === undefined ? {} : { parseCache: options.parseCache }) },
       entry.path,
@@ -102,6 +114,21 @@ export function inventoryScaffold(options: InventoryOptions): ScaffoldInventory 
     );
     const headings = parseDocumentCached(options.parseCache, absolutePath, text).headings;
     files.push({ path: entry.path, absolutePath, text, parsed, headings });
+  }
+
+  if (omittedDiagnostics > 0) {
+    if (diagnostics.length === WIKI_CORPUS_LIMITS.maxDiagnostics) {
+      diagnostics.pop();
+      omittedDiagnostics += 1;
+    }
+    diagnostics.push(diagnostic(
+      "WIKI_PARSE_ERROR",
+      `${omittedDiagnostics} additional Wiki inventory diagnostic(s) were omitted.`,
+      {
+        severity: "info",
+        remediation: "Resolve the visible diagnostics, then inspect again for any remaining issues.",
+      },
+    ));
   }
 
   return { root, files, diagnostics };

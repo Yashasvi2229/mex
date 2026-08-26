@@ -41,6 +41,11 @@ import {
   isGraphJob,
   isWikiJob,
 } from "../app/JobLifecycleObserver";
+import {
+  boundedNextCursor,
+  MAX_ACCUMULATED_WORKBENCH_ITEMS,
+  MAX_WORKBENCH_PAGES,
+} from "../lib/bounds";
 import styles from "../styles/jobs.module.css";
 
 const operations: Array<{ kind: JobKind; label: string; detail: string }> = [
@@ -250,7 +255,7 @@ export function JobsPage() {
     queryKey: ["jobs"],
     queryFn: ({ pageParam }) => api.getJobs(pageParam),
     initialPageParam: undefined as string | undefined,
-    getNextPageParam: (lastPage) => lastPage.nextCursor || undefined,
+    getNextPageParam: (lastPage, allPages) => boundedNextCursor(lastPage.nextCursor, allPages.length),
     retry: false,
   });
   const start = useMutation({
@@ -271,6 +276,8 @@ export function JobsPage() {
   });
 
   const allJobs = useMemo(() => jobs.data?.pages.flatMap((page) => page.items) ?? [], [jobs.data]);
+  const pageBoundReached = (jobs.data?.pages.length ?? 0) >= MAX_WORKBENCH_PAGES
+    && jobs.data?.pages.at(-1)?.nextCursor !== null;
   const visibleJobs = allJobs.filter((job) => filter === "all" || (filter === "active" ? isActiveJob(job) : !isActiveJob(job)));
   const graphHealth = health.data?.components.find((component) => component.id === "graph")?.graph;
   const wikiHealth = health.data?.components.find((component) => component.id === "wiki")?.wiki;
@@ -377,6 +384,10 @@ export function JobsPage() {
                   <Button className={styles.loadMore} disabled={jobs.isFetchingNextPage} onClick={() => void jobs.fetchNextPage()} type="button" variant="outline">
                     {jobs.isFetchingNextPage ? "Loading…" : "Load older jobs"}
                   </Button>
+                ) : pageBoundReached ? (
+                  <p className={styles.boundNote} role="status">
+                    Browser safety limit reached at {MAX_ACCUMULATED_WORKBENCH_ITEMS} jobs.
+                  </p>
                 ) : null}
               </div>
             ) : (

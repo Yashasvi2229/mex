@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, appendFileSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { dirname, resolve, relative } from "node:path";
 import chalk from "chalk";
 import { toPosix } from "./paths.js";
@@ -57,6 +65,8 @@ export interface TimelineOpts {
 
 const VALID_KINDS = new Set<EventKind>(EVENT_KINDS);
 const EVENT_FILE = "events/decisions.jsonl";
+const MAX_EVENT_LOG_READ_BYTES = 8 * 1024 * 1024;
+const MAX_EVENT_LOG_ENTRIES = 10_000;
 
 export function eventLogPath(config: MexConfig): string {
   return resolve(config.scaffoldRoot, EVENT_FILE);
@@ -117,7 +127,7 @@ export async function runTimeline(config: MexConfig, opts: TimelineOpts = {}): P
 export function readEvents(config: MexConfig): EventEntry[] {
   const file = eventLogPath(config);
   if (!existsSync(file)) return [];
-  const lines = readFileSync(file, "utf-8").split("\n").filter(Boolean);
+  const lines = readBoundedEventLog(file).split("\n").filter(Boolean).slice(-MAX_EVENT_LOG_ENTRIES);
   const entries: EventEntry[] = [];
   for (const line of lines) {
     try {
@@ -145,6 +155,35 @@ export function readEvents(config: MexConfig): EventEntry[] {
     }
   }
   return entries;
+}
+
+function readBoundedEventLog(file: string): string {
+  const size = statSync(file, { bigint: true }).size;
+  if (size > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("The legacy event log is too large to inspect safely.");
+  }
+  const byteCount = Number(size > BigInt(MAX_EVENT_LOG_READ_BYTES)
+    ? BigInt(MAX_EVENT_LOG_READ_BYTES)
+    : size);
+  const start = Number(size) - byteCount;
+  const buffer = Buffer.alloc(byteCount);
+  const descriptor = openSync(file, "r");
+  try {
+    let offset = 0;
+    while (offset < byteCount) {
+      const read = readSync(descriptor, buffer, offset, byteCount - offset, start + offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    let text = buffer.subarray(0, offset).toString("utf8");
+    if (start > 0) {
+      const firstCompleteLine = text.indexOf("\n");
+      text = firstCompleteLine === -1 ? "" : text.slice(firstCompleteLine + 1);
+    }
+    return text;
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function normalizeKind(raw: string | undefined): EventKind {

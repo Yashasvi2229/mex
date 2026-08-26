@@ -24,11 +24,12 @@
 import { existsSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { toPosix } from "../../paths.js";
-import type { WikiDiagnostic } from "../model/diagnostic.js";
+import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import { exactFileContentHash } from "../model/hash.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
 import { parseWikiMarkdown } from "../markdown/codec.js";
 import type { DiscoveredFile } from "./discover.js";
+import { WIKI_CORPUS_LIMITS, WikiCorpusLimitError } from "./corpus-policy.js";
 import { openWikiIndex } from "./open.js";
 import { defaultIndexPath, unreadableFileDiagnostic } from "./rebuild.js";
 import {
@@ -66,6 +67,7 @@ import {
   type WikiMaintenanceContext,
   WikiPreparedMaintenanceNotPreflightedError,
   WikiPreparedMaintenanceSettledError,
+  WikiMaintenanceInterruptedError,
 } from "./maintenance.js";
 
 export interface RefreshOptions {
@@ -155,6 +157,9 @@ export function prepareWikiRefresh(options: RefreshOptions): PrepareWikiRefreshR
 
   // Strictly reject direct API path injection before acquiring a writer lease
   // or constructing a candidate.
+  if (options.changed.length > WIKI_CORPUS_LIMITS.maxMaintenancePaths) {
+    throw new WikiCorpusLimitError("maxMaintenancePaths");
+  }
   const targets = [...new Set(options.changed.map((path) => toScaffoldPath(scaffoldRoot, path)))].sort();
 
   const ownedLease = options.maintenanceLease === undefined;
@@ -186,6 +191,7 @@ export function prepareWikiRefresh(options: RefreshOptions): PrepareWikiRefreshR
     const removed: string[] = [];
     const unchanged: string[] = [];
     const unreadable: WikiDiagnostic[] = [];
+    let omittedUnreadable = 0;
 
     maintenanceBoundary(options.maintenance, "stage");
     let pending: ReturnType<typeof clonePendingIndex>;
@@ -225,6 +231,7 @@ export function prepareWikiRefresh(options: RefreshOptions): PrepareWikiRefreshR
           try {
             text = observation.readFile(file.absolutePath);
           } catch (error) {
+            if (error instanceof WikiCorpusLimitError || error instanceof WikiMaintenanceInterruptedError) throw error;
             // The rows go, and the report stays — attached to this file, so it
             // survives a later refresh of an unrelated one and is cleared by the
             // refresh that finally reads this file successfully. A rebuild
@@ -232,7 +239,8 @@ export function prepareWikiRefresh(options: RefreshOptions): PrepareWikiRefreshR
             deleteFileRows(candidate.db, path);
             const entry = unreadableFileDiagnostic(path, error);
             writeFileDiagnostics(candidate.db, path, [entry]);
-            unreadable.push(entry);
+            if (unreadable.length < WIKI_CORPUS_LIMITS.maxDiagnostics) unreadable.push(entry);
+            else omittedUnreadable += 1;
             removed.push(path);
             continue;
           }
@@ -267,6 +275,19 @@ export function prepareWikiRefresh(options: RefreshOptions): PrepareWikiRefreshR
       });
 
       const sealed = sealPendingIndex(candidate, tempPath, lease.binding);
+      const diagnostics = [...observation.diagnostics, ...unreadable]
+        .slice(0, WIKI_CORPUS_LIMITS.maxDiagnostics);
+      const diagnosticCount = observation.diagnostics.length + unreadable.length + omittedUnreadable;
+      if (diagnosticCount > diagnostics.length) {
+        diagnostics[diagnostics.length - 1] = diagnostic(
+          "WIKI_PARSE_ERROR",
+          `${diagnosticCount - diagnostics.length + 1} additional Wiki refresh diagnostic(s) were omitted.`,
+          {
+            severity: "info",
+            remediation: "Resolve the visible diagnostics, then refresh again for any remaining issues.",
+          },
+        );
+      }
       return {
         ok: true,
         prepared: preparedRefreshHandle({
@@ -285,7 +306,7 @@ export function prepareWikiRefresh(options: RefreshOptions): PrepareWikiRefreshR
             reparsed,
             removed,
             unchanged,
-            diagnostics: [...observation.diagnostics, ...unreadable],
+            diagnostics,
           },
         }),
       };

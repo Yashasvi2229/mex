@@ -15,7 +15,7 @@ import {
   fstatSync,
   lstatSync,
   openSync,
-  readFileSync,
+  readSync,
   realpathSync,
   statSync,
 } from "node:fs";
@@ -29,6 +29,11 @@ import {
 import { indexedCorpusRevision, exactFileContentHash, isContentHash } from "../model/hash.js";
 import type { GroundingHealth } from "../model/grounding.js";
 import { discoverMarkdownFiles, insideRoot } from "../index/discover.js";
+import {
+  WIKI_CORPUS_LIMITS,
+  WikiCorpusLimitError,
+  addWikiCorpusBytes,
+} from "../index/corpus-policy.js";
 import { readContainedSource } from "../index/source-read.js";
 import { WIKI_META_KEYS, WIKI_SCHEMA_VERSION, WIKI_TABLES } from "../index/schema.js";
 import { estimateTokens } from "./budget.js";
@@ -357,8 +362,33 @@ export function inspectWikiContractIndex(options: InspectWikiIndexOptions): Cont
   try {
     bound = bindIndex(indexPath, options.hooks?.afterIndexDescriptorClose);
   } catch (error) {
+    if (error instanceof WikiCorpusLimitError) {
+      return status("degraded", observedAt, null, null, null, [
+        diagnostic(
+          "WIKI_PARSE_ERROR",
+          "The disposable Wiki index corpus exceeds MEX's bounded inspection policy.",
+          { remediation: "Narrow the canonical Wiki corpus before rebuilding the index." },
+        ),
+      ]);
+    }
     const missing = isMissing(error);
-    const legacy = missing && hasLegacyInventory(scaffoldRoot, options.exclude);
+    let legacy = false;
+    if (missing) {
+      try {
+        legacy = hasLegacyInventory(scaffoldRoot, options.exclude);
+      } catch (legacyError) {
+        if (legacyError instanceof WikiCorpusLimitError) {
+          return status("degraded", observedAt, null, null, null, [
+            diagnostic(
+              "WIKI_PARSE_ERROR",
+              "The canonical Wiki corpus exceeds MEX's bounded inspection policy.",
+              { remediation: "Narrow wiki.exclude or the canonical Wiki corpus before retrying inspection." },
+            ),
+          ]);
+        }
+        throw legacyError;
+      }
+    }
     return status(legacy ? "migration_required" : missing ? "missing" : "corrupt", observedAt, null, null, null, [
       diagnostic(
         legacy || !missing ? "WIKI_INDEX_REBUILD_REQUIRED" : "WIKI_INDEX_MISSING",
@@ -410,13 +440,16 @@ export function inspectWikiContractIndex(options: InspectWikiIndexOptions): Cont
     const indexedRevision = readMeta(db, WIKI_META_KEYS.indexedRevision);
     const indexedAt = readMeta(db, WIKI_META_KEYS.builtAt);
     const files = db.prepare(
-      `SELECT path, content_hash FROM wiki_files ORDER BY path LIMIT 100001`,
+      `SELECT path, content_hash FROM wiki_files
+       ORDER BY path LIMIT ${WIKI_CORPUS_LIMITS.maxMarkdownFiles + 1}`,
     ).all() as { path: string; content_hash: string }[];
     const recomputed = indexedCorpusRevision(files.map((file) => ({
       path: file.path,
       contentHash: file.content_hash,
     })));
-    if (indexedRevision === null || files.length > 100_000 || recomputed !== indexedRevision) {
+    if (indexedRevision === null
+      || files.length > WIKI_CORPUS_LIMITS.maxMarkdownFiles
+      || recomputed !== indexedRevision) {
       return revalidateObservedStatus(indexPath, bound, status("corrupt", observedAt, schemaVersion, indexedRevision, indexedAt, [
         diagnostic("WIKI_INDEX_REBUILD_REQUIRED", "The wiki index corpus revision is invalid."),
       ]));
@@ -447,7 +480,16 @@ export function inspectWikiContractIndex(options: InspectWikiIndexOptions): Cont
       bound,
       status("fresh", observedAt, schemaVersion, indexedRevision, indexedAt, diagnostics),
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof WikiCorpusLimitError) {
+      return status("degraded", observedAt, null, null, null, [
+        diagnostic(
+          "WIKI_PARSE_ERROR",
+          "The canonical Wiki corpus exceeds MEX's bounded inspection policy.",
+          { remediation: "Narrow wiki.exclude or the canonical Wiki corpus before retrying inspection." },
+        ),
+      ]);
+    }
     return status("corrupt", observedAt, null, null, null, [
       diagnostic("WIKI_INDEX_REBUILD_REQUIRED", "The wiki index could not be inspected safely."),
     ]);
@@ -1389,6 +1431,7 @@ function resolveIndexPath(scaffoldRoot: string, configured: string | undefined, 
 function bindIndex(indexPath: string, afterClose?: () => void): BoundIndex {
   const before = lstatSync(indexPath);
   if (!before.isFile() || before.isSymbolicLink()) throw new Error("not-file");
+  assertBoundedIndexSize(before.size);
   const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
   const fd = openSync(indexPath, constants.O_RDONLY | noFollow);
   let open = true;
@@ -1409,16 +1452,41 @@ function bindIndex(indexPath: string, afterClose?: () => void): BoundIndex {
     const opened = fstatSync(fd);
     const after = lstatSync(indexPath);
     if (!opened.isFile() || !sameIdentity(before, opened) || !sameIdentity(opened, after)) throw new Error("changed");
+    assertBoundedIndexSize(opened.size);
+    const digest = hashBoundedIndex(fd, opened.size);
+    const readAfter = fstatSync(fd);
+    const pathAfter = lstatSync(indexPath);
+    if (!sameIdentity(opened, readAfter) || !sameIdentity(readAfter, pathAfter)) throw new Error("changed");
     return {
       path: descriptorPath(fd, indexPath),
-      identity: fileIdentity(opened),
-      digest: exactFileContentHash(readFileSync(fd)),
+      identity: fileIdentity(readAfter),
+      digest,
       close,
     };
   } catch (error) {
     close();
     throw error;
   }
+}
+
+function assertBoundedIndexSize(size: number): void {
+  if (!Number.isSafeInteger(size) || size < 0 || size > WIKI_CORPUS_LIMITS.maxIndexBytes) {
+    throw new WikiCorpusLimitError("maxIndexBytes");
+  }
+}
+
+/** Hash one bound descriptor with fixed working memory and positional reads. */
+function hashBoundedIndex(fd: number, size: number): string {
+  const hash = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let offset = 0;
+  while (offset < size) {
+    const bytesRead = readSync(fd, buffer, 0, Math.min(buffer.byteLength, size - offset), offset);
+    if (bytesRead <= 0) throw new Error("short-read");
+    hash.update(buffer.subarray(0, bytesRead));
+    offset += bytesRead;
+  }
+  return hash.digest("hex");
 }
 
 function descriptorPath(fd: number, fallback: string): string {
@@ -1438,15 +1506,49 @@ function descriptorPath(fd: number, fallback: string): string {
 function observeCorpus(scaffoldRoot: string, exclude: readonly string[] | undefined): CorpusObservation {
   const discovery = discoverMarkdownFiles({ root: scaffoldRoot, exclude });
   const files: { path: string; contentHash: string }[] = [];
-  const diagnostics = discovery.diagnostics.map(safeDiagnostic);
+  const diagnostics = discovery.diagnostics
+    .map(safeDiagnostic)
+    .slice(0, WIKI_CORPUS_LIMITS.maxDiagnostics);
+  let omittedDiagnostics = Math.max(0, discovery.diagnostics.length - diagnostics.length);
   let stable = diagnostics.every((entry) => entry.severity !== "error");
+  let corpusBytes = 0;
+  const report = (entry: WikiDiagnostic): void => {
+    if (diagnostics.length < WIKI_CORPUS_LIMITS.maxDiagnostics - 1) diagnostics.push(entry);
+    else omittedDiagnostics += 1;
+  };
   for (const file of discovery.files) {
     try {
-      files.push({ path: file.path, contentHash: exactFileContentHash(readContainedFile(scaffoldRoot, file.absolutePath)) });
-    } catch {
+      const bytes = readContainedFile(scaffoldRoot, file.absolutePath);
+      corpusBytes = addWikiCorpusBytes(corpusBytes, bytes.byteLength);
+      files.push({ path: file.path, contentHash: exactFileContentHash(bytes) });
+    } catch (error) {
       stable = false;
-      diagnostics.push(diagnostic("WIKI_PARSE_ERROR", `Could not inspect ${file.path} safely.`, { file: file.path }));
+      if (error instanceof WikiCorpusLimitError) {
+        report(diagnostic(
+          "WIKI_PARSE_ERROR",
+          "The canonical Wiki corpus exceeds MEX's bounded inspection policy.",
+          {
+            remediation: "Narrow the configured Wiki corpus before retrying inspection.",
+          },
+        ));
+        break;
+      }
+      report(diagnostic("WIKI_PARSE_ERROR", `Could not inspect ${file.path} safely.`, { file: file.path }));
     }
+  }
+  if (omittedDiagnostics > 0) {
+    if (diagnostics.length === WIKI_CORPUS_LIMITS.maxDiagnostics) {
+      diagnostics.pop();
+      omittedDiagnostics += 1;
+    }
+    diagnostics.push(diagnostic(
+      "WIKI_PARSE_ERROR",
+      `${omittedDiagnostics} additional Wiki corpus diagnostic(s) were omitted.`,
+      {
+        severity: "info",
+        remediation: "Resolve the visible diagnostics, then inspect again for any remaining issues.",
+      },
+    ));
   }
   files.sort((left, right) => compareString(left.path, right.path));
   return { revision: indexedCorpusRevision(files), files, diagnostics, stable };
@@ -1457,19 +1559,23 @@ function hasLegacyInventory(scaffoldRoot: string, exclude: readonly string[] | u
     const files = discoverMarkdownFiles({ root: scaffoldRoot, exclude }).files;
     if (files.length === 0 || files.length > 10_000) return false;
     let sawLegacyShape = false;
+    let sawCanonicalShape = false;
+    let corpusBytes = 0;
     for (const file of files) {
       const bytes = readContainedFile(scaffoldRoot, file.absolutePath);
-      if (bytes.byteLength > 8 * 1024 * 1024) return false;
+      corpusBytes = addWikiCorpusBytes(corpusBytes, bytes.byteLength);
       const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      if (/(?:^|\n)[ \t]*mex:[ \t]*(?:\r?\n|$)|<!--[ \t]*mex:entity\b/u.test(text)) return false;
-      if (/^(?:ROUTER|AGENTS|SETUP|SYNC)\.md$/i.test(file.path)
+      if (/(?:^|\n)[ \t]*mex:[ \t]*(?:\r?\n|$)|<!--[ \t]*mex:entity\b/u.test(text)) {
+        sawCanonicalShape = true;
+      } else if (/^(?:ROUTER|AGENTS|SETUP|SYNC)\.md$/i.test(file.path)
         || /^(?:context|patterns)\//i.test(file.path)
         || /(?:^|\n)(?:name|description|last_updated|edges|grounds_to):/u.test(text)) {
         sawLegacyShape = true;
       }
     }
-    return sawLegacyShape;
-  } catch {
+    return !sawCanonicalShape && sawLegacyShape;
+  } catch (error) {
+    if (error instanceof WikiCorpusLimitError) throw error;
     return false;
   }
 }
@@ -1520,13 +1626,76 @@ const REQUIRED_INDEXES = [
   "wiki_relations_target",
 ] as const;
 
+type StoredTextField = readonly [name: string, maxBytes: number, nullable?: boolean];
+type StoredIntegerField = readonly [name: string, nullable?: boolean];
+
+const INDEX_TEXT_FIELDS: Readonly<Record<string, readonly StoredTextField[]>> = {
+  wiki_meta: [["key", 256], ["value", 4_096]],
+  wiki_files: [
+    ["path", 4_096], ["content_hash", 64], ["parse_status", 32], ["indexed_at", 256],
+  ],
+  wiki_entities: [
+    ["entity_key", 4_128], ["id", 256], ["file", 4_096], ["type", 256], ["title", 4_096],
+    ["summary", 65_536, true], ["body", 8 * 1024 * 1024], ["status", 32],
+    ["file_content_hash", 64], ["entity_content_hash", 64],
+    ["provenance", 65_536, true], ["metadata", 65_536, true],
+  ],
+  wiki_relations: [
+    ["source_key", 4_128], ["type", 256], ["target_id", 256],
+    ["note", 65_536, true], ["metadata", 65_536, true],
+  ],
+  wiki_entity_topics: [["entity_key", 4_128], ["topic_entity_id", 256]],
+  wiki_sources: [
+    ["entity_key", 4_128], ["type", 256], ["ref", 4_096, true], ["note", 65_536, true],
+    ["repository", 4_096, true], ["commit_sha", 256, true], ["captured_at", 256, true],
+    ["identity", 8_192], ["metadata", 65_536, true],
+  ],
+  wiki_groundings: [
+    ["entity_key", 4_128], ["node_id", 4_096], ["fingerprint", 4_096], ["body_hash", 256, true],
+    ["file", 4_096, true], ["commit_sha", 256, true], ["verified_at", 256, true],
+    ["reason", 65_536, true], ["state", 32, true], ["resolved_node", 4_096, true],
+    ["health", 32, true], ["resolution", 65_536, true],
+  ],
+  wiki_diagnostics: [
+    ["scope", 32], ["code", 256], ["severity", 32], ["message", 65_536], ["file", 4_096, true],
+    ["entity_id", 256, true], ["path", 4_096, true], ["remediation", 65_536, true],
+  ],
+  wiki_fts: [
+    ["entity_key", 4_128], ["title", 4_096, true], ["summary", 65_536, true],
+    ["body", 8 * 1024 * 1024, true], ["aliases", 65_536, true], ["meta", 65_536, true],
+  ],
+};
+
+const INDEX_INTEGER_FIELDS: Readonly<Record<string, readonly StoredIntegerField[]>> = {
+  wiki_files: [["entity_count"], ["text_length"]],
+  wiki_entities: [
+    ["shadowed"], ["revision"], ["metadata_start"], ["metadata_end"], ["heading_start"],
+    ["heading_end"], ["body_start"], ["body_end"], ["start_line"], ["end_line"], ["heading_depth"],
+  ],
+  wiki_relations: [["ordinal"], ["target_resolved"]],
+  wiki_entity_topics: [["ordinal"]],
+  wiki_sources: [["ordinal"]],
+  wiki_groundings: [["ordinal"]],
+  wiki_diagnostics: [
+    ["start_offset", true], ["end_offset", true], ["start_line", true], ["end_line", true],
+  ],
+};
+
 /** Full v3 structural and row-safety validation before any projection runs. */
 function validateIndexStructure(db: SqliteDatabase): string | null {
   try {
-    const quick = db.prepare(`PRAGMA quick_check`).all() as Array<Record<string, unknown>>;
+    const quick = db.prepare(`PRAGMA quick_check(100)`).all() as Array<Record<string, unknown>>;
     if (quick.length !== 1 || String(quick[0]?.["quick_check"] ?? "") !== "ok") {
       return "The wiki index failed SQLite integrity validation.";
     }
+
+    const oversizedSchema = db.prepare(
+      `SELECT 1 FROM sqlite_master
+       WHERE (typeof(name) <> 'text' OR length(CAST(name AS BLOB)) > 4096
+          OR (sql IS NOT NULL AND (typeof(sql) <> 'text' OR length(CAST(sql AS BLOB)) > 1048576)))
+       LIMIT 1`,
+    ).get();
+    if (oversizedSchema) return "The wiki index contains oversized schema metadata.";
 
     const declaredTables = db.prepare(
       `SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name LIMIT 100`,
@@ -1543,6 +1712,12 @@ function validateIndexStructure(db: SqliteDatabase): string | null {
       `SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 100`,
     ).all() as { name: string }[]).map((row) => row.name));
     if (REQUIRED_INDEXES.some((name) => !indexes.has(name))) return "The wiki index is missing a required schema-v3 index.";
+    if (Object.entries(INDEX_TEXT_FIELDS).some(([table, fields]) => (
+      hasUnsafeStoredText(db, table, fields)
+    ))) return "The wiki index contains an oversized or mistyped persisted text value.";
+    if (Object.entries(INDEX_INTEGER_FIELDS).some(([table, fields]) => (
+      hasUnsafeStoredInteger(db, table, fields)
+    ))) return "The wiki index contains a mistyped persisted integer value.";
 
     const metaRows = db.prepare(`SELECT key, value FROM wiki_meta ORDER BY key LIMIT 100`).all() as Array<{ key: string; value: string }>;
     const meta = new Map(metaRows.map((row) => [row.key, row.value]));
@@ -1559,13 +1734,20 @@ function validateIndexStructure(db: SqliteDatabase): string | null {
     }
     const expectedFileCount = strictStoredCount(meta.get(WIKI_META_KEYS.fileCount));
     const expectedEntityCount = strictStoredCount(meta.get(WIKI_META_KEYS.entityCount));
-    if (expectedFileCount === null || expectedEntityCount === null) return "The wiki index metadata counts are invalid.";
+    if (expectedFileCount === null
+      || expectedFileCount > WIKI_CORPUS_LIMITS.maxMarkdownFiles
+      || expectedEntityCount === null) return "The wiki index metadata counts are invalid.";
 
+    let fileRowCount = 0;
     const fileRows = db.prepare(
-      `SELECT path, content_hash, parse_status, entity_count, text_length, indexed_at FROM wiki_files ORDER BY path LIMIT 100001`,
-    ).all() as Array<Record<string, unknown>>;
-    if (fileRows.length > 100_000 || fileRows.length !== expectedFileCount) return "The wiki index file inventory is invalid.";
+      `SELECT path, content_hash, parse_status, entity_count, text_length, indexed_at
+       FROM wiki_files ORDER BY path LIMIT ${WIKI_CORPUS_LIMITS.maxMarkdownFiles + 1}`,
+    ).iterate() as IterableIterator<Record<string, unknown>>;
     for (const row of fileRows) {
+      fileRowCount += 1;
+      if (fileRowCount > WIKI_CORPUS_LIMITS.maxMarkdownFiles) {
+        return "The wiki index file inventory exceeds its safety bound.";
+      }
       if (!isSafeRepoPath(row["path"]) || !isContentHash(String(row["content_hash"] ?? ""))
         || !["ok", "diagnostics"].includes(String(row["parse_status"] ?? ""))
         || !isStoredInteger(row["entity_count"], 0) || !isStoredInteger(row["text_length"], 0)
@@ -1573,17 +1755,20 @@ function validateIndexStructure(db: SqliteDatabase): string | null {
         return "The wiki index contains an unsafe file row.";
       }
     }
+    if (fileRowCount !== expectedFileCount) return "The wiki index file inventory is invalid.";
 
+    let entityRowCount = 0;
+    let activeEntityCount = 0;
     const entityRows = db.prepare(
       `SELECT id, file, type, title, summary, body, status, revision, file_content_hash, entity_content_hash,
               provenance, metadata, metadata_start, metadata_end, heading_start, heading_end, body_start, body_end,
               start_line, end_line, heading_depth, shadowed
          FROM wiki_entities ORDER BY entity_key LIMIT 100001`,
-    ).all() as Array<Record<string, unknown>>;
-    if (entityRows.length > 100_000 || entityRows.filter((row) => Number(row["shadowed"]) === 0).length !== expectedEntityCount) {
-      return "The wiki index entity inventory is invalid.";
-    }
+    ).iterate() as IterableIterator<Record<string, unknown>>;
     for (const row of entityRows) {
+      entityRowCount += 1;
+      if (entityRowCount > 100_000) return "The wiki index entity inventory exceeds its safety bound.";
+      if (Number(row["shadowed"]) === 0) activeEntityCount += 1;
       if (!isEntityId(row["id"]) || !isSafeRepoPath(row["file"])
         || !isBoundedString(row["type"], 256, 1) || !isBoundedString(row["title"], 4096, 1)
         || (row["summary"] !== null && !isBoundedString(row["summary"], 65_536))
@@ -1596,29 +1781,38 @@ function validateIndexStructure(db: SqliteDatabase): string | null {
         return "The wiki index contains an unsafe entity row.";
       }
     }
+    if (activeEntityCount !== expectedEntityCount) return "The wiki index entity inventory is invalid.";
 
+    let relationRowCount = 0;
     const relationRows = db.prepare(
       `SELECT type, target_id, note, metadata FROM wiki_relations ORDER BY source_key, ordinal LIMIT 100001`,
-    ).all() as Array<Record<string, unknown>>;
-    if (relationRows.length > 100_000) return "The wiki index relation inventory exceeds its safety bound.";
+    ).iterate() as IterableIterator<Record<string, unknown>>;
     for (const row of relationRows) {
+      relationRowCount += 1;
+      if (relationRowCount > 100_000) return "The wiki index relation inventory exceeds its safety bound.";
       if (!isBoundedString(row["type"], 256, 1) || !isEntityId(row["target_id"])
         || (row["note"] !== null && !isBoundedString(row["note"], 65_536)) || !validBoundedJson(row["metadata"])) {
         return "The wiki index contains an unsafe relation row.";
       }
     }
+    let topicRowCount = 0;
     const topicRows = db.prepare(
       `SELECT topic_entity_id FROM wiki_entity_topics ORDER BY entity_key, ordinal LIMIT 100001`,
-    ).all() as Array<Record<string, unknown>>;
-    if (topicRows.length > 100_000) return "The wiki index topic inventory exceeds its safety bound.";
-    if (topicRows.some((row) => !isEntityId(row["topic_entity_id"]))) return "The wiki index contains an unsafe topic row.";
+    ).iterate() as IterableIterator<Record<string, unknown>>;
+    for (const row of topicRows) {
+      topicRowCount += 1;
+      if (topicRowCount > 100_000) return "The wiki index topic inventory exceeds its safety bound.";
+      if (!isEntityId(row["topic_entity_id"])) return "The wiki index contains an unsafe topic row.";
+    }
 
+    let sourceRowCount = 0;
     const sourceRows = db.prepare(
       `SELECT type, ref, note, repository, commit_sha, captured_at, identity, metadata
          FROM wiki_sources ORDER BY entity_key, ordinal LIMIT 100001`,
-    ).all() as Array<Record<string, unknown>>;
-    if (sourceRows.length > 100_000) return "The wiki index source inventory exceeds its safety bound.";
+    ).iterate() as IterableIterator<Record<string, unknown>>;
     for (const row of sourceRows) {
+      sourceRowCount += 1;
+      if (sourceRowCount > 100_000) return "The wiki index source inventory exceeds its safety bound.";
       if (!isBoundedString(row["type"], 256, 1) || !isBoundedNullableString(row["ref"], 4096)
         || !isBoundedNullableString(row["note"], 65_536) || !isBoundedNullableString(row["repository"], 4096)
         || !isBoundedNullableString(row["commit_sha"], 256) || !isBoundedNullableString(row["captured_at"], 256)
@@ -1628,12 +1822,14 @@ function validateIndexStructure(db: SqliteDatabase): string | null {
       }
     }
 
+    let groundingRowCount = 0;
     const groundingRows = db.prepare(
       `SELECT node_id, fingerprint, body_hash, file, commit_sha, verified_at, reason, state, resolved_node, health, resolution
          FROM wiki_groundings ORDER BY entity_key, ordinal LIMIT 100001`,
-    ).all() as Array<Record<string, unknown>>;
-    if (groundingRows.length > 100_000) return "The wiki index grounding inventory exceeds its safety bound.";
+    ).iterate() as IterableIterator<Record<string, unknown>>;
     for (const row of groundingRows) {
+      groundingRowCount += 1;
+      if (groundingRowCount > 100_000) return "The wiki index grounding inventory exceeds its safety bound.";
       if (!isBoundedString(row["node_id"], 4096, 1) || !isBoundedString(row["fingerprint"], 4096, 1)
         || !isBoundedNullableString(row["body_hash"], 256) || (row["file"] !== null && !isSafeRepoPath(row["file"]))
         || !isBoundedNullableString(row["commit_sha"], 256) || !isBoundedNullableString(row["verified_at"], 256)
@@ -1649,14 +1845,16 @@ function validateIndexStructure(db: SqliteDatabase): string | null {
       }
     }
 
+    let diagnosticRowCount = 0;
     const diagnosticRows = db.prepare(
       `SELECT code, severity, message, file, entity_id, path, start_offset, end_offset,
               start_line, end_line, remediation
          FROM wiki_diagnostics
         ORDER BY scope, code, file, entity_id, path, start_offset, message LIMIT 100001`,
-    ).all() as Array<Record<string, unknown>>;
-    if (diagnosticRows.length > 100_000) return "The wiki index diagnostic inventory exceeds its safety bound.";
+    ).iterate() as IterableIterator<Record<string, unknown>>;
     for (const row of diagnosticRows) {
+      diagnosticRowCount += 1;
+      if (diagnosticRowCount > 100_000) return "The wiki index diagnostic inventory exceeds its safety bound.";
       if (!isWikiDiagnosticCode(row["code"])
         || !["error", "warning", "info"].includes(String(row["severity"] ?? ""))
         || !isBoundedString(row["message"], 65_536, 1)
@@ -1677,6 +1875,36 @@ function validateIndexStructure(db: SqliteDatabase): string | null {
   } catch {
     return "The wiki index schema or rows could not be validated safely.";
   }
+}
+
+function hasUnsafeStoredText(
+  db: SqliteDatabase,
+  table: string,
+  fields: readonly StoredTextField[],
+): boolean {
+  if (!/^[a-z_]+$/u.test(table)
+    || fields.some(([field]) => !/^[a-z_]+$/u.test(field))) {
+    throw new Error("Unsafe internal Wiki schema identifier.");
+  }
+  const checks = fields.map(([field, maxBytes, nullable]) => nullable
+    ? `(${field} IS NOT NULL AND (typeof(${field}) <> 'text' OR length(CAST(${field} AS BLOB)) > ${maxBytes}))`
+    : `(typeof(${field}) <> 'text' OR length(CAST(${field} AS BLOB)) > ${maxBytes})`);
+  return db.prepare(`SELECT 1 FROM ${table} WHERE ${checks.join(" OR ")} LIMIT 1`).get() !== undefined;
+}
+
+function hasUnsafeStoredInteger(
+  db: SqliteDatabase,
+  table: string,
+  fields: readonly StoredIntegerField[],
+): boolean {
+  if (!/^[a-z_]+$/u.test(table)
+    || fields.some(([field]) => !/^[a-z_]+$/u.test(field))) {
+    throw new Error("Unsafe internal Wiki schema identifier.");
+  }
+  const checks = fields.map(([field, nullable]) => nullable
+    ? `(${field} IS NOT NULL AND typeof(${field}) <> 'integer')`
+    : `(typeof(${field}) <> 'integer')`);
+  return db.prepare(`SELECT 1 FROM ${table} WHERE ${checks.join(" OR ")} LIMIT 1`).get() !== undefined;
 }
 
 function strictStoredCount(value: string | undefined): number | null {
