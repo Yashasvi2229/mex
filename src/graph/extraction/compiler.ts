@@ -21,7 +21,7 @@ import {
 } from "node:path";
 import ts from "typescript";
 
-export const TYPESCRIPT_COMPILER_EXTRACTOR_VERSION = "typescript-5.9-v1";
+export const TYPESCRIPT_COMPILER_EXTRACTOR_VERSION = "typescript-5.9-v2";
 export const TYPESCRIPT_COMPILER_VERSION = ts.version;
 
 export type CompilerSourceLanguage =
@@ -184,6 +184,16 @@ export interface CompilerExtractionResult {
 export interface CompilerExtractionOptions {
   /** Additional options used only by the inferred program. */
   inferredCompilerOptions?: ts.CompilerOptions;
+  /**
+   * Run the full per-file semantic type-check and record its diagnostics.
+   * Off by default: `parse_status` derives from syntactic diagnostics alone,
+   * and reference/signature extraction uses the checker lazily, so the full
+   * semantic pass only adds diagnostics detail — at a wall-clock/RSS cost that
+   * scales with the resolvable dependency surface (issue #140 observation 1/2).
+   */
+  semanticDiagnostics?: boolean;
+  /** Test seam: replaces `ts.createProgram` to exercise program-crash isolation. */
+  programFactory?: (options: ts.CreateProgramOptions) => ts.Program;
 }
 
 interface ParsedProject {
@@ -311,19 +321,36 @@ export function buildTypeScriptExtraction(
   const root = resolve(rootDir);
   const candidates = collectCandidates(root, candidateFiles);
   const parsedProjects = parseProjects(root, new Set(candidates));
-  const runtimeProjects: RuntimeProject[] = parsedProjects.map((project) => {
-    const program = ts.createProgram({
-      rootNames: project.parsed.fileNames,
-      options: project.parsed.options,
-      projectReferences: project.parsed.projectReferences,
-    });
-    return { ...project, program, checker: program.getTypeChecker() };
-  });
+  const createProgram = options.programFactory ?? ts.createProgram;
+  const runtimeProjects: RuntimeProject[] = [];
+  const poisonedFiles = new Set<string>();
+  for (const project of parsedProjects) {
+    // Program creation parses every root file; a single malformed source (e.g.
+    // a hostile test fixture) can hit a TS-internal assertion. Isolate the
+    // failure to this project so its files fall back to tree-sitter extraction
+    // instead of aborting the whole corpus (issue #140 follow-up finding).
+    try {
+      const program = createProgram({
+        rootNames: project.parsed.fileNames,
+        // Never type-check library .d.ts or emit: extraction only needs the
+        // checker's lazy symbol/type queries, not a full compile.
+        options: { ...project.parsed.options, skipLibCheck: true, noEmit: true },
+        projectReferences: project.parsed.projectReferences,
+      });
+      runtimeProjects.push({ ...project, program, checker: program.getTypeChecker() });
+    } catch {
+      for (const file of project.parsed.fileNames) poisonedFiles.add(normalizedAbsolute(file));
+    }
+  }
 
   const ownership = new Map<string, RuntimeProject>();
   for (const file of candidates) {
+    if (poisonedFiles.has(file)) continue;
     const owners = runtimeProjects
-      .filter((project) => project.program.getSourceFile(file) !== undefined)
+      .filter((project) => {
+        try { return project.program.getSourceFile(file) !== undefined; }
+        catch { return false; }
+      })
       .sort((left, right) => {
         const specificity = dirname(right.configPath).length - dirname(left.configPath).length;
         return specificity || left.configPath.localeCompare(right.configPath);
@@ -331,7 +358,9 @@ export function buildTypeScriptExtraction(
     if (owners[0]) ownership.set(file, owners[0]);
   }
 
-  const uncovered = candidates.filter((file) => !ownership.has(file));
+  // Files from a crashed project stay out of the inferred program too — the
+  // poison root file would crash it as well. They fall back to tree-sitter.
+  const uncovered = candidates.filter((file) => !ownership.has(file) && !poisonedFiles.has(file));
   let inferred: RuntimeProject | undefined;
   if (uncovered.length > 0) {
     const inferredOptions: ts.CompilerOptions = {
@@ -345,21 +374,25 @@ export function buildTypeScriptExtraction(
       target: ts.ScriptTarget.ES2022,
       ...options.inferredCompilerOptions,
     };
-    const program = ts.createProgram({ rootNames: uncovered, options: inferredOptions });
-    inferred = {
-      id: "inferred",
-      configPath: "",
-      parsed: {
-        options: inferredOptions,
-        fileNames: uncovered,
-        errors: [],
-      },
-      diagnostics: [],
-      program,
-      checker: program.getTypeChecker(),
-    };
-    runtimeProjects.push(inferred);
-    for (const file of uncovered) ownership.set(file, inferred);
+    try {
+      const program = createProgram({ rootNames: uncovered, options: inferredOptions });
+      inferred = {
+        id: "inferred",
+        configPath: "",
+        parsed: {
+          options: inferredOptions,
+          fileNames: uncovered,
+          errors: [],
+        },
+        diagnostics: [],
+        program,
+        checker: program.getTypeChecker(),
+      };
+      runtimeProjects.push(inferred);
+      for (const file of uncovered) ownership.set(file, inferred);
+    } catch {
+      // Poison among the uncovered roots: leave them all to tree-sitter.
+    }
   }
 
   const contexts: FileContext[] = [];
@@ -368,7 +401,7 @@ export function buildTypeScriptExtraction(
     const sourceFile = project?.program.getSourceFile(absoluteFile);
     if (!project || !sourceFile) continue;
     const filePath = relativePath(root, absoluteFile);
-    const { health, ranges } = sourceHealth(project.program, sourceFile);
+    const { health, ranges } = sourceHealth(project.program, sourceFile, options.semanticDiagnostics ?? false);
     const context: FileContext = {
       filePath,
       sourceFile,
@@ -1239,9 +1272,15 @@ function parameterIsInvoked(
   return invoked;
 }
 
-function sourceHealth(program: ts.Program, sourceFile: ts.SourceFile): { health: CompilerSourceHealth; ranges: ErrorRange[] } {
+function sourceHealth(
+  program: ts.Program,
+  sourceFile: ts.SourceFile,
+  semanticDiagnostics: boolean,
+): { health: CompilerSourceHealth; ranges: ErrorRange[] } {
   const syntactic = program.getSyntacticDiagnostics(sourceFile);
-  const semantic = program.getSemanticDiagnostics(sourceFile);
+  // The full semantic pass type-checks the whole file (and everything it can
+  // resolve). `status` never depends on it, so it is opt-in (issue #140).
+  const semantic = semanticDiagnostics ? program.getSemanticDiagnostics(sourceFile) : [];
   const ranges = diagnosticRanges(sourceFile.text, syntactic);
   const coveredBytes = ranges.reduce((total, range) => total + Buffer.byteLength(sourceFile.text.slice(range.start, range.end), "utf8"), 0);
   const totalBytes = Math.max(1, Buffer.byteLength(sourceFile.text, "utf8"));
