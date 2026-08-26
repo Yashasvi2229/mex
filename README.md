@@ -282,10 +282,13 @@ to request a specific loopback port.
 The Hub displays repository context, locally persisted job history, and the
 read-only Activity timeline. Its real Code workspace searches symbols and
 source, inspects callers/callees/impact, reports graph Health, and lets you
-explicitly refresh or rebuild the local graph. Reads never maintain the graph
-automatically and preserve the graph engine's result order. Wiki actions remain
-visibly unavailable until the real Wiki adapter is integrated; the packaged UI
-never substitutes development fixtures for project data.
+explicitly refresh or rebuild the local graph. Its read-only Knowledge workspace
+browses and searches canonical Wiki entries, shows bounded evidence, provenance,
+relations, backlinks, and current grounding, and links Code to Knowledge only
+through explicit groundings. Wiki Health offers explicit refresh/rebuild jobs
+only when a stable status makes them safe. Reads never maintain either index
+automatically, rankings remain domain-local, and the packaged UI never
+substitutes development fixtures for project data.
 
 ## Existing mex projects
 

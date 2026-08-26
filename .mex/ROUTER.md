@@ -57,20 +57,25 @@ Then read this file fully before doing anything else in this session.
   cursors, complete entity/relationship/grounding projections, pinned operation
   and migration plans, and explicit cancellable maintenance. The real adapter
   passes the consumer-owned conformance suite without skips.
+- The Wiki half of Checkpoint 2 is working in the Project Hub: independent Wiki
+  Search, read-only Knowledge browse/detail, explicit Code-to-Knowledge links,
+  structured Wiki Health, and explicit refresh/rebuild jobs all use the real
+  repository adapter. Ordinary Hub reads never repair either local index.
 
 **Not Built:**
-- Real Wiki Hub search, Knowledge pages, health, and maintenance;
-  Workstream/Inbox/Relay/Playbook
-  persistence; Catch Up actions; activity creation; and later delivery
-  checkpoints from the human-team program.
+- Wiki creation/editing, migration and synthesis UI, grounding-drift/review
+  workbenches, Workstream/Inbox/Relay/Playbook persistence, Catch Up actions,
+  activity creation, and later delivery checkpoints from the human-team
+  program.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
 - The current scaffold architecture, conventions, decisions, stack, and setup
   context files are still largely unpopulated placeholders.
-- Hub Wiki controls remain unavailable until the real adapter is integrated;
-  development fixtures are never production data. Graph repair controls appear
-  only when a fresh status or executable Lane A remediation makes them safe.
+- Development fixtures are never production data. Graph and Wiki repair controls
+  appear only when a stable status observation makes the requested operation
+  safe; migration-required or unstable Wiki observations never fabricate a
+  repair action.
 
 ## Routing Table
 
