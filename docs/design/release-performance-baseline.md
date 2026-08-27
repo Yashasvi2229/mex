@@ -16,6 +16,19 @@ zero outbound requests for every fixture. The exact asset candidates and the
 Home, Members, and Activity heap candidates were copied; unrelated runtime
 budgets remain calibrated from the original pinned run.
 
+Checkpoint D's Workstreams and Specs list/detail routes were characterized by
+pinned CI run
+[`33117048710`](https://github.com/mex-memory/mex/actions/runs/33117048710).
+The retained `release-performance-1` artifact (ID `9665147644`, report SHA-256
+`edb9f14f73f8de8ebda15407362fe57e591075b4dd93686d6a273089d280e997`)
+measured PR head `fa2cc3b95242063ac76e0241a2ca72bd098ee302` through GitHub's
+synthetic merge commit `4d78fbc141c4a79ee4f076283eb5865b22954ee7`. The
+report was produced on Ubuntu 24.04 with Node 22.22.0, validated against the
+versioned report schema, and recorded zero outbound browser requests for all
+three fixtures. Only the exact Workstreams and Specs list/detail asset
+candidates and their per-profile browser-heap candidates were copied; every
+pre-Checkpoint-D budget remains frozen.
+
 ## Runner contract
 
 `npm run benchmark:release` builds the package and writes the bounded JSON
@@ -25,11 +38,13 @@ contracts are versioned by
 `scripts/release-benchmark/budgets.schema.json`.
 
 The benchmark generates three fixed Git repositories. Small contains four
-source files, four Wiki entities, and four canonical Activity events; medium
-contains sixteen of each; large contains forty-eight of each. IDs, contents,
-timestamps, Git identity, commit timestamp, and repository shape are
-deterministic. Graph and Wiki indexes are built only by explicit setup in the
-benchmark. Reads never initialize storage or maintain either index.
+source files, four Wiki entities, one Workstream, and four canonical Activity
+events; medium contains sixteen source files, Wiki entities, and Activity
+events plus one Workstream; large contains forty-eight source files, Wiki
+entities, and Activity events plus one Workstream. IDs, contents, timestamps,
+Git identity, commit timestamp, and repository shape are deterministic. Graph
+and Wiki indexes are built only by explicit setup in the benchmark. Reads never
+initialize storage or maintain either index.
 
 Each profile records:
 
@@ -42,17 +57,18 @@ Each profile records:
 
 Every profile additionally records five Chromium heap samples after every
 registered Hub route: Home, Search, Knowledge browse/detail, Code search/symbol,
-the five honest unavailable capability routes, Members, Activity, Jobs, Health,
-and the wildcard not-found route. Every browser context begins empty. Its request audit
-fails if a route contacts any origin other than the exact loopback Hub origin.
+Workstreams, Specs browse/detail, the three honest unavailable capability
+routes, Members, Activity, Jobs, Health, and the wildcard not-found route.
+Every browser context begins empty. Its request audit fails if a route contacts
+any origin other than the exact loopback Hub origin.
 
 Production asset accounting starts from Vite's manifest. It records the
 initial static import closure and the incremental JavaScript, CSS, and font
 bytes for every registered route. Fonts referenced from global CSS are counted
 as initial assets even when Vite does not attach them to a manifest entry.
-Home must not statically close over Code, Knowledge, Members, Activity, its
-nested recorder, or setup code, and the largest JavaScript chunk is checked
-explicitly.
+Home must not statically close over Code, Knowledge, Workstreams, Specs,
+Members, Activity, its nested recorder, or setup code, and the largest
+JavaScript chunk is checked explicitly.
 
 ## Enforcement
 

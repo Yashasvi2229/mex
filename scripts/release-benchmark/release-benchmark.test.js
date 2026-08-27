@@ -68,7 +68,7 @@ describe("release benchmark contract", () => {
     expect(budgets.assets.routes.code).toEqual(budgets.assets.routes.search);
     expect(budgets.provisional).toBe(false);
     expect(budgets.calibration).toEqual({
-      status: "calibrated-from-pinned-runs-33005876613-and-33083122092",
+      status: "calibrated-from-pinned-runs-33005876613-33083122092-and-33117048710",
       runtimeFormula: "ceil(measured p95 * 1.15)",
       assetFormula: "ceil(built bytes * 1.05)",
     });
