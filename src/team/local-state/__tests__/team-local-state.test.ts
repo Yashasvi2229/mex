@@ -281,6 +281,32 @@ describe("TeamLocalState", () => {
     expect(store.getConfiguredMember()).toBeNull();
   });
 
+  it("previews configured-member selection revisions without initializing storage", () => {
+    const root = tempProject();
+    const store = state(root);
+
+    const preview = store.previewConfigureMember({
+      memberId: MEMBER_A,
+      expectedRevision: null,
+    });
+    expect(preview).toMatchObject({
+      scaffoldId: "scaffold-a",
+      memberId: MEMBER_A,
+      updatedAt: NOW,
+    });
+    expect(existsSync(join(root, ".mex"))).toBe(false);
+
+    const applied = store.configureMember({
+      memberId: MEMBER_A,
+      expectedRevision: null,
+    });
+    expect(applied).toEqual(preview);
+    expect(store.previewClearConfiguredMember({
+      expectedRevision: applied.revision,
+    })).toEqual(applied);
+    expect(store.getConfiguredMember()).toEqual(applied);
+  });
+
   it("isolates configured members and cursors by scaffold ID", () => {
     const root = tempProject();
     const first = state(root, "scaffold-a");

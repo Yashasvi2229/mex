@@ -24,6 +24,16 @@ export const TEAM_READ_LIMITS = {
   maxActivityMetadataBytes: 8 * 1024,
 } as const;
 
+export const TEAM_IDENTITY_ACTIVITY_LIMITS = {
+  maxEnvelopeBytes: 64 * 1024,
+  maxReceiptBytes: 8 * 1024,
+  maxReceiptDepth: 8,
+  maxReceiptNodes: 128,
+  maxPurposeIds: 2,
+  maxPreviewAgeMs: 30 * 60 * 1_000,
+  maxFutureClockSkewMs: 5_000,
+} as const;
+
 export const WORKSTREAM_STATES = [
   "planned",
   "active",
@@ -254,7 +264,7 @@ export interface LocalDraftListRequest extends PageRequest {
 }
 
 export interface LocalStateChange {
-  namespace: "inbox-draft" | "relay-draft" | "cursor";
+  namespace: "inbox-draft" | "relay-draft" | "cursor" | "member-selection";
   id: string;
   beforeRevision: Revision | null;
   afterRevision: Revision | null;
@@ -284,6 +294,33 @@ export interface ActivityEvent {
 export interface StoredActivityEvent extends ActivityEvent {
   sourcePath: RepoRelativePath;
   revision: Revision;
+}
+
+export interface TeamMemberListRequest extends PageRequest {
+  active?: boolean;
+}
+
+export interface TeamActivityListRequest extends PageRequest {
+  since?: string;
+}
+
+export type TeamActorResolutionSource =
+  | "configured-member"
+  | "git-alias"
+  | "git-fallback"
+  | "unknown";
+
+export interface TeamMemberSelection {
+  memberId: string;
+  updatedAt: string;
+  revision: Revision;
+}
+
+export interface TeamCurrentActor {
+  actor: ActorRef;
+  source: TeamActorResolutionSource;
+  selection: TeamMemberSelection | null;
+  diagnostics: readonly Diagnostic[];
 }
 
 export interface WorkstreamCreateInput {
@@ -358,6 +395,14 @@ export type TeamWorkflowCreateAction<TWikiOperationPlan> =
         Playbook,
         keyof TeamArtifactBase<"playbook"> | "state" | "entityRevision"
       >;
+    }
+  | {
+      kind: "activity.record";
+      activity: {
+        action: string;
+        subjects: readonly ActivitySubjectRef[];
+        workstream?: EntityRef;
+      };
     };
 
 /** Actions that mutate or depend on an existing revisioned target. */
@@ -371,8 +416,11 @@ export type TeamWorkflowRevisionBoundAction<TWikiOperationPlan> =
   | {
       kind: "member.update";
       memberId: string;
-      patch: { displayName?: string; gitAliases?: readonly MemberGitAlias[]; active?: boolean };
+      patch: { displayName?: string; gitAliases?: readonly MemberGitAlias[] };
     }
+  | { kind: "member.deactivate"; memberId: string }
+  | { kind: "member.select"; memberId: string }
+  | { kind: "member.clear" }
   | { kind: "workstream.update"; workstreamId: string; patch: WorkstreamUpdatePatch }
   | { kind: "workstream.archive"; workstreamId: string }
   | { kind: "inbox.draft.delete"; draftId: string }
@@ -440,6 +488,30 @@ export type TeamWorkflowCommand<TWikiOperationPlan> =
       expectedRevisions: NonEmptyRevisionExpectations;
     });
 
+export type TeamIdentityActivityCreateAction = Extract<
+  TeamWorkflowCreateAction<never>,
+  { kind: "member.add" | "activity.record" }
+>;
+
+export type TeamIdentityActivityRevisionBoundAction = Extract<
+  TeamWorkflowRevisionBoundAction<never>,
+  { kind: "member.update" | "member.deactivate" | "member.select" | "member.clear" }
+>;
+
+export type TeamIdentityActivityAction =
+  | TeamIdentityActivityCreateAction
+  | TeamIdentityActivityRevisionBoundAction;
+
+export type TeamIdentityActivityCommand =
+  | (TeamWorkflowCommandBase & {
+      action: TeamIdentityActivityCreateAction;
+      expectedRevisions: readonly RevisionExpectation[];
+    })
+  | (TeamWorkflowCommandBase & {
+      action: TeamIdentityActivityRevisionBoundAction;
+      expectedRevisions: NonEmptyRevisionExpectations;
+    });
+
 /** Authority captured by the service while preparing an exact preview. */
 export interface TeamWorkflowAuthority {
   actor: ActorRef;
@@ -463,6 +535,36 @@ export interface TeamWorkflowPreview<TWikiOperationPlan> {
   diagnostics: readonly Diagnostic[];
   /** Exact prepared command that apply must bind and revalidate. */
   command: PreparedTeamWorkflowCommand<TWikiOperationPlan>;
+}
+
+export interface TeamIdentityActivityPublicPreview {
+  valid: boolean;
+  scope: "canonical" | "local" | "mixed";
+  changes: readonly FileChange[];
+  localChanges: readonly LocalStateChange[];
+  diagnostics: readonly Diagnostic[];
+}
+
+export interface TeamIdentityActivityPurposeId {
+  purpose: "activity" | "member";
+  id: string;
+}
+
+export interface TeamIdentityActivityReceipt {
+  schemaVersion: 1;
+  authority: TeamWorkflowAuthority;
+  purposeIds: readonly TeamIdentityActivityPurposeId[];
+  requestRevision: Revision;
+  presentationRevision: Revision;
+  previewRevision: Revision;
+}
+
+/** One portable, human-readable preview and the metadata that binds it. */
+export interface TeamIdentityActivityPreviewEnvelope {
+  schemaVersion: 1;
+  request: TeamIdentityActivityCommand;
+  preview: TeamIdentityActivityPublicPreview;
+  receipt: TeamIdentityActivityReceipt;
 }
 
 export interface TeamWorkflowApplyRequest<TWikiOperationPlan> {

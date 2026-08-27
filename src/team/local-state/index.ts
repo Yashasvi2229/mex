@@ -729,6 +729,22 @@ export class TeamLocalState {
     });
   }
 
+  /** Pure projection used by workflow preview; never creates or migrates storage. */
+  previewConfigureMember(request: ConfigureMemberRequest): ConfiguredMemberSelection {
+    const memberId = validateMemberId(request.memberId);
+    const expectedRevision = validateExpectedRevision(request.expectedRevision);
+    const updatedAt = validateTimestamp(request.updatedAt ?? this.now(), "updatedAt");
+    this.assertExistingRevisionCanMatch(expectedRevision, "configured member");
+    const current = this.getConfiguredMember();
+    assertExpectedRevision(current?.revision ?? null, expectedRevision, "configured member");
+    return {
+      scaffoldId: this.scaffoldId,
+      memberId,
+      updatedAt,
+      revision: configuredMemberRevision(this.scaffoldId, memberId, updatedAt),
+    };
+  }
+
   configureMember(request: ConfigureMemberRequest): ConfiguredMemberSelection {
     const memberId = validateMemberId(request.memberId);
     const expectedRevision = validateExpectedRevision(request.expectedRevision);
@@ -777,6 +793,23 @@ export class TeamLocalState {
         "DELETE FROM configured_member_selections WHERE scaffold_id = ?",
       ).run(this.scaffoldId);
     });
+  }
+
+  /** Pure validation used by workflow preview; never creates or migrates storage. */
+  previewClearConfiguredMember(
+    request: ClearConfiguredMemberRequest,
+  ): ConfiguredMemberSelection {
+    const expectedRevision = validateExpectedRevision(request.expectedRevision);
+    if (expectedRevision === null) {
+      throw validationError("Clearing a configured member requires its current revision.");
+    }
+    this.assertExistingRevisionCanMatch(expectedRevision, "configured member");
+    const current = this.getConfiguredMember();
+    assertExpectedRevision(current?.revision ?? null, expectedRevision, "configured member");
+    if (current === null) {
+      throw revisionConflict("The configured member no longer exists.");
+    }
+    return current;
   }
 
   getCatchUpCursor(actor: ActorRef): StoredCatchUpCursor | null {
