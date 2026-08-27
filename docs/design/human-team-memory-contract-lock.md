@@ -1,6 +1,6 @@
 # Human-Team Memory Contract Lock
 
-Status: Checkpoint C identity and canonical Activity surfaces verified
+Status: Checkpoint D Workstream and read-only Spec surfaces implemented
 
 This brief records the application boundary for the MEX OSS human-team memory
 program. The contract remains an internal, provisional API until a separate
@@ -212,6 +212,36 @@ the package root:
   No Workstream, Inbox, Relay, Playbook, Catch Up, or Wiki editing route is made
   available.
 
+## Workstream and read-only Spec product boundary
+
+Checkpoint D adds only the next two product surfaces while retaining the
+internal package boundary:
+
+- `mex workstream list|show` and the private Hub Workstreams page expose bounded
+  canonical reads with revision-bound cursors and honest source diagnostics;
+- create, update, and dedicated one-way archive operations use strict 64 KiB
+  request files and the same repository-bound signed preview/apply receipt used
+  by Checkpoint C. Apply revalidates exact revisions and publishes exactly one
+  immutable Activity event;
+- legal Workstream transitions permit planned work to activate or archive,
+  active work to block, complete, or archive, blocked work to resume, complete,
+  or archive, and completed work to archive. Archival retires blocker state;
+  archived records are immutable and cannot be reached through an ordinary
+  update patch;
+- `mex spec list|show` and the private Hub Specs workspace are read-only aliases
+  over canonical Wiki schema-v1 entities. Lists contain only root `spec`
+  entities; detail projects only explicit requirement, constraint,
+  acceptance-criterion, and refinement relations;
+- a Spec detail and its hierarchy are read under one immutable Wiki session and
+  one grounding snapshot. Non-fresh index states return typed availability with
+  no data and never trigger refresh, rebuild, synthesis, or Graph mutation;
+- Workstream and Spec commands are advertised through the versioned capability
+  manifest only after their concrete services and root CLI registrations exist.
+  No package-root export is added.
+
+Checkpoint D does not add Spec authoring. Spec writes remain Inbox-governed and
+belong to Checkpoint E.
+
 ## Explicit exclusions
 
 Do not implement as part of this program:
@@ -266,8 +296,10 @@ portability, real Wiki approval, and interrupted Wiki batch recovery. Product
 Checkpoint C adds a second consumer-owned conformance suite for member and
 Activity reads, signed cross-process preview/apply, v1-v4 apply-side migration,
 actor fallback, local-selection privacy, immutable recorded actors, exact
-replay, contention, two-clone convergence, and source truncation. Workstream,
-Inbox, Relay, Playbook, and Catch Up product surfaces remain assigned to later
+replay, contention, two-clone convergence, and source truncation. Checkpoint D
+adds bounded Workstream lifecycle and cross-process preview/apply coverage plus
+fresh-only Spec projection tests against the real Wiki adapter. Inbox, Relay,
+Playbook, Catch Up, and governed Spec mutation remain assigned to later
 checkpoints.
 
 ## Verification commands
@@ -277,6 +309,8 @@ npx vitest run test/wiki-port-mock.contract.test.ts
 npx vitest run test/wiki-port-real.contract.test.ts
 npx vitest run test/team-workflow-port-real.contract.test.ts
 npx vitest run test/team-identity-activity-real.contract.test.ts
+npx vitest run src/team/workflow/__tests__/repository-team-workstreams.test.ts
+npx vitest run src/team/specs
 npx vitest run src/graph/__tests__/protocol-v3-golden.test.ts
 npm run typecheck
 npm test

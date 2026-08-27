@@ -19,6 +19,8 @@ const lazyWorkbenchSources = [
   "src/pages/KnowledgePage.tsx",
   "src/pages/SymbolPage.tsx",
   "src/pages/CapabilityPage.tsx",
+  "src/pages/WorkstreamsPage.tsx",
+  "src/pages/SpecsPage.tsx",
   "src/pages/MembersPage.tsx",
   "src/pages/ActivityPage.tsx",
   "src/pages/JobsPage.tsx",

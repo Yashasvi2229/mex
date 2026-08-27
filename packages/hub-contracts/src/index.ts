@@ -150,6 +150,13 @@ export const HubCapabilitiesSchema = z.object({
     canonicalMutation: CapabilityStatusSchema,
     localSelection: CapabilityStatusSchema,
   }).strict(),
+  workstreams: z.object({
+    read: CapabilityStatusSchema,
+    canonicalMutation: CapabilityStatusSchema,
+  }).strict(),
+  specs: z.object({
+    read: CapabilityStatusSchema,
+  }).strict(),
   jobs: CapabilityStatusSchema,
   graph: z.object({
     read: CapabilityStatusSchema,
@@ -276,6 +283,7 @@ const teamRepositoryPath = utf8Text(4_096).refine((value) => {
 }, "Path must be a safe repository-relative POSIX path.");
 
 export const TeamMemberIdSchema = teamMemberId;
+export const TeamWorkstreamIdSchema = teamWorkstreamId;
 
 export const TeamGitAliasSchema = z.object({
   name: teamText(200).nullable(),
@@ -380,27 +388,120 @@ export const TeamCurrentActorResponseSchema = z.object({
 const teamEntityRef = z.object({
   id: teamText(256),
   kind: teamText(64),
-  title: teamText(256).optional(),
+  title: teamText(512).optional(),
 }).strict();
 
 const teamWorkstreamRef = z.object({
   id: teamWorkstreamId,
   kind: z.literal("workstream"),
-  title: teamText(256).optional(),
+  title: teamText(512).optional(),
 }).strict();
 
 const teamCodeRef = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("symbol"),
-    symbolId: teamText(512),
-    fingerprint: teamText(512).optional(),
+    symbolId: teamText(1_024),
+    fingerprint: teamText(1_024).optional(),
   }).strict(),
   z.object({
     kind: z.literal("file"),
     path: teamRepositoryPath,
-    fingerprint: teamText(512).optional(),
+    fingerprint: teamText(1_024).optional(),
   }).strict(),
 ]);
+
+export const TeamWorkstreamStateSchema = z.enum([
+  "planned",
+  "active",
+  "blocked",
+  "done",
+  "archived",
+]);
+
+const teamActorSet = z.array(TeamActorRefSchema).max(64);
+const teamEntitySet = z.array(teamEntityRef).max(64);
+const teamCodeSet = z.array(teamCodeRef).max(64);
+const teamPathSet = z.array(teamRepositoryPath).max(64);
+const teamTextSet = z.array(teamText(4 * 1024)).max(64);
+
+export const TeamWorkstreamSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: teamWorkstreamId,
+  entityRevision: z.number().int().positive(),
+  title: teamText(512),
+  goal: teamText(4 * 1024),
+  summary: teamText(4 * 1024),
+  state: TeamWorkstreamStateSchema,
+  owners: teamActorSet.min(1),
+  contributors: teamActorSet,
+  paths: teamPathSet,
+  code: teamCodeSet,
+  topics: teamEntitySet,
+  components: teamEntitySet,
+  related: teamEntitySet,
+  blockers: teamTextSet,
+  currentState: teamText(8 * 1024),
+  nextMilestone: teamText(4 * 1024),
+  createdBy: TeamActorRefSchema,
+  createdAt: isoTimestamp,
+  updatedBy: TeamActorRefSchema,
+  updatedAt: isoTimestamp,
+  sourcePath: teamRepositoryPath,
+  revision,
+}).strict().superRefine((value, context) => {
+  if (value.sourcePath !== `.mex/workstreams/${value.id}.md`) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sourcePath"],
+      message: "Workstream source path must match its ID.",
+    });
+  }
+  if ((value.state === "blocked") !== (value.blockers.length > 0)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["blockers"],
+      message: "Blocked Workstreams require blockers, and other states cannot retain them.",
+    });
+  }
+  if (value.createdAt > value.updatedAt) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["updatedAt"],
+      message: "Workstream update time cannot precede its creation time.",
+    });
+  }
+});
+
+const teamBooleanFilter = z.union([
+  z.boolean(),
+  z.enum(["true", "false"]).transform((value) => value === "true"),
+]);
+
+export const TeamWorkstreamListRequestSchema = z.object({
+  state: TeamWorkstreamStateSchema.optional(),
+  includeArchived: teamBooleanFilter.optional(),
+  cursor: cursor.optional(),
+  limit: z.coerce.number().int().min(1).max(HUB_LIMITS.maxPageSize)
+    .default(HUB_LIMITS.defaultPageSize),
+}).strict();
+
+export const TeamWorkstreamListResponseSchema = z.object({
+  items: z.array(TeamWorkstreamSchema).max(HUB_LIMITS.maxPageSize),
+  nextCursor: cursor.nullable(),
+  truncated: z.boolean(),
+  sourceTruncated: z.boolean(),
+  deterministicRevision: revision,
+  diagnostics: z.array(HubDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
+  diagnosticsTruncated: z.boolean(),
+}).strict().superRefine((value, context) => {
+  if (value.truncated !== (value.nextCursor !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["truncated"],
+      message: "Workstream page truncation must match cursor presence.",
+    });
+  }
+});
 
 export const TeamActivitySubjectInputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("entity"), entity: teamEntityRef }).strict(),
@@ -429,12 +530,59 @@ const teamMemberUpdateAction = z.object({
   ),
 }).strict();
 
+const teamWorkstreamCreateInput = z.object({
+  title: teamText(512),
+  goal: teamText(4 * 1024),
+  summary: teamText(4 * 1024),
+  owners: teamActorSet.min(1),
+  contributors: teamActorSet.optional(),
+  paths: teamPathSet.optional(),
+  code: teamCodeSet.optional(),
+  topics: teamEntitySet.optional(),
+  components: teamEntitySet.optional(),
+  related: teamEntitySet.optional(),
+  nextMilestone: teamText(4 * 1024),
+}).strict();
+
+const teamWorkstreamUpdatePatch = z.object({
+  title: teamText(512).optional(),
+  goal: teamText(4 * 1024).optional(),
+  summary: teamText(4 * 1024).optional(),
+  state: z.enum(["planned", "active", "blocked", "done"]).optional(),
+  owners: teamActorSet.min(1).optional(),
+  contributors: teamActorSet.optional(),
+  paths: teamPathSet.optional(),
+  code: teamCodeSet.optional(),
+  topics: teamEntitySet.optional(),
+  components: teamEntitySet.optional(),
+  related: teamEntitySet.optional(),
+  blockers: teamTextSet.optional(),
+  currentState: teamText(8 * 1024).optional(),
+  nextMilestone: teamText(4 * 1024).optional(),
+}).strict().refine(
+  (value) => Object.values(value).some((item) => item !== undefined),
+  "A Workstream update requires at least one supported field.",
+);
+
 const teamIdentityActivityAction = z.discriminatedUnion("kind", [
   teamMemberAddAction,
   teamMemberUpdateAction,
   z.object({ kind: z.literal("member.deactivate"), memberId: teamMemberId }).strict(),
   z.object({ kind: z.literal("member.select"), memberId: teamMemberId }).strict(),
   z.object({ kind: z.literal("member.clear") }).strict(),
+  z.object({
+    kind: z.literal("workstream.create"),
+    workstream: teamWorkstreamCreateInput,
+  }).strict(),
+  z.object({
+    kind: z.literal("workstream.update"),
+    workstreamId: teamWorkstreamId,
+    patch: teamWorkstreamUpdatePatch,
+  }).strict(),
+  z.object({
+    kind: z.literal("workstream.archive"),
+    workstreamId: teamWorkstreamId,
+  }).strict(),
   z.object({
     kind: z.literal("activity.record"),
     activity: z.object({
@@ -468,6 +616,7 @@ export const TeamOperationPreviewRequestSchema = z.object({
   if (
     value.action.kind !== "member.add"
     && value.action.kind !== "activity.record"
+    && value.action.kind !== "workstream.create"
     && value.expectedRevisions.length === 0
   ) {
     context.addIssue({
@@ -537,6 +686,7 @@ const teamRepositoryState = z.object({
 const teamPurposeId = z.discriminatedUnion("purpose", [
   z.object({ purpose: z.literal("activity"), id: teamEventId }).strict(),
   z.object({ purpose: z.literal("member"), id: teamMemberId }).strict(),
+  z.object({ purpose: z.literal("workstream"), id: teamWorkstreamId }).strict(),
 ]);
 
 export const TeamOperationReceiptSchema = z.object({
@@ -604,6 +754,7 @@ export const TeamOperationApplyResponseSchema = z.object({
   changes: z.array(TeamFileChangeSchema).max(16),
   localChanges: z.array(TeamLocalChangeSchema).max(16),
   members: z.array(TeamMemberSchema).max(1),
+  workstreams: z.array(TeamWorkstreamSchema).max(1),
   events: z.array(TeamActivityEventSchema).max(1),
 }).strict();
 
@@ -1035,6 +1186,225 @@ export const WikiEntityDetailResponseSchema = z.object({
   }
 });
 
+export const SpecEntityKindSchema = z.enum([
+  "spec",
+  "requirement",
+  "constraint",
+  "acceptance_criterion",
+]);
+
+export const SpecIndexStateSchema = z.enum([
+  "missing",
+  "fresh",
+  "stale",
+  "degraded",
+  "rebuild_required",
+  "corrupt",
+  "migration_required",
+]);
+
+const specListFilter = <T extends z.ZodTypeAny>(schema: T, maximum: number) => z.array(schema)
+  .min(1)
+  .max(maximum)
+  .refine(
+    (values) => new Set(values as unknown[]).size === values.length,
+    "Spec list filters must not contain duplicates.",
+  );
+
+export const SpecListRequestSchema = z.object({
+  cursor: cursor.optional(),
+  limit: z.coerce.number().int().min(1).max(HUB_LIMITS.maxPageSize)
+    .default(HUB_LIMITS.defaultPageSize),
+  includeArchived: teamBooleanFilter.optional(),
+  lifecycleStates: specListFilter(WikiLifecycleStateSchema, 4).optional(),
+  groundingHealth: specListFilter(WikiGroundingHealthSchema, 5).optional(),
+  topics: specListFilter(WikiEntityIdSchema, 50).optional(),
+}).strict();
+
+export const SpecIndexProjectionSchema = z.object({
+  state: SpecIndexStateSchema,
+  observedAt: isoTimestamp,
+  indexedRevision: revision.nullable(),
+  indexedAt: isoTimestamp.nullable(),
+  diagnostics: z.array(HubDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
+  diagnosticsTruncated: z.boolean(),
+}).strict().superRefine((value, context) => {
+  if (value.state === "fresh" && (value.indexedRevision === null || value.indexedAt === null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "A fresh Spec index requires its indexed revision and timestamp.",
+    });
+  }
+});
+
+export const SpecSummaryProjectionSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: WikiEntityIdSchema,
+  kind: SpecEntityKindSchema,
+  title: wikiDisplayText(512),
+  summary: wikiDisplayText(2_048, 0).nullable(),
+  lifecycleState: WikiLifecycleStateSchema,
+  groundingHealth: WikiGroundingHealthSchema,
+  sourcePath: repositoryDisplayPath,
+  version: z.object({
+    semanticRevision: z.number().int().nonnegative(),
+    contentHash: revision,
+  }).strict(),
+  topics: z.array(WikiEntityIdSchema).max(50),
+  sourceTypes: z.array(wikiSourceType).max(50),
+  diagnostics: z.array(HubDiagnosticSchema).max(10),
+  diagnosticsTruncated: z.boolean(),
+}).strict();
+
+export const SpecListPageProjectionSchema = z.object({
+  schemaVersion: z.literal(1),
+  items: z.array(SpecSummaryProjectionSchema).max(HUB_LIMITS.maxPageSize),
+  nextCursor: cursor.nullable(),
+  truncated: z.boolean(),
+  estimatedTokens: z.number().int().nonnegative(),
+  deterministicRevision: revision,
+}).strict().superRefine((value, context) => {
+  if (value.items.some((item) => item.kind !== "spec")) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["items"],
+      message: "The Spec list can contain only root Spec entities.",
+    });
+  }
+  if (value.nextCursor !== null && !value.truncated) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["truncated"],
+      message: "A paginated Spec response must report truncation.",
+    });
+  }
+});
+
+const specNonReadyIndex = SpecIndexProjectionSchema.refine(
+  (value) => value.state !== "fresh",
+  "A non-ready Spec response cannot report a fresh index.",
+);
+
+export const SpecListResponseSchema = z.discriminatedUnion("availability", [
+  z.object({
+    availability: z.literal("ready"),
+    index: SpecIndexProjectionSchema.refine(
+      (value) => value.state === "fresh",
+      "A ready Spec response requires a fresh index.",
+    ),
+    page: SpecListPageProjectionSchema,
+  }).strict(),
+  z.object({
+    availability: z.enum(["stale", "unavailable"]),
+    index: specNonReadyIndex,
+    page: z.null(),
+  }).strict(),
+]).superRefine((value, context) => {
+  const staleState = value.index.state === "stale" || value.index.state === "rebuild_required";
+  if (value.availability === "stale" && !staleState) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["availability"],
+      message: "Only stale or rebuild-required indexes can return stale Spec availability.",
+    });
+  }
+  if (value.availability === "unavailable" && staleState) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["availability"],
+      message: "A stale Spec index must use stale availability.",
+    });
+  }
+});
+
+export const SpecHierarchyRelationSchema = z.object({
+  type: z.enum(["derived_from", "verified_by", "constrained_by", "refines"]),
+  source: z.object({ id: WikiEntityIdSchema, kind: SpecEntityKindSchema }).strict(),
+  target: z.object({ id: WikiEntityIdSchema, kind: SpecEntityKindSchema }).strict(),
+  note: wikiDisplayText(2_048, 0).nullable(),
+}).strict();
+
+export const SpecDetailProjectionSchema = z.object({
+  schemaVersion: z.literal(1),
+  spec: SpecSummaryProjectionSchema.refine(
+    (value) => value.kind === "spec",
+    "A Spec detail root must be a Spec entity.",
+  ),
+  body: utf8Text(64 * 1_024, 0),
+  bodyTruncated: z.boolean(),
+  provenance: WikiProvenanceSchema.nullable(),
+  sources: z.array(WikiSourceSchema).max(HUB_LIMITS.maxPageSize),
+  sourcesTruncated: z.boolean(),
+  groundings: z.array(WikiGroundingSchema).max(HUB_LIMITS.maxPageSize),
+  groundingsTruncated: z.boolean(),
+  hierarchy: z.object({
+    requirements: z.array(SpecSummaryProjectionSchema).max(HUB_LIMITS.maxPageSize),
+    acceptanceCriteria: z.array(SpecSummaryProjectionSchema).max(HUB_LIMITS.maxPageSize),
+    constraints: z.array(SpecSummaryProjectionSchema).max(HUB_LIMITS.maxPageSize),
+    relations: z.array(SpecHierarchyRelationSchema).max(HUB_LIMITS.maxPageSize),
+    estimatedTokens: z.number().int().nonnegative(),
+  }).strict(),
+  deterministicRevision: revision,
+}).strict().superRefine((value, context) => {
+  const groups = [
+    ["requirements", "requirement"],
+    ["acceptanceCriteria", "acceptance_criterion"],
+    ["constraints", "constraint"],
+  ] as const;
+  for (const [group, expectedKind] of groups) {
+    if (value.hierarchy[group].some((item) => item.kind !== expectedKind)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["hierarchy", group],
+        message: `Spec ${group} must contain only ${expectedKind} entities.`,
+      });
+    }
+  }
+  const hierarchyEntries = value.hierarchy.requirements.length
+    + value.hierarchy.acceptanceCriteria.length
+    + value.hierarchy.constraints.length
+    + value.hierarchy.relations.length;
+  if (hierarchyEntries > HUB_LIMITS.maxPageSize) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["hierarchy"],
+      message: "The bounded Spec hierarchy cannot exceed 100 entries.",
+    });
+  }
+});
+
+export const SpecDetailResponseSchema = z.discriminatedUnion("availability", [
+  z.object({
+    availability: z.literal("ready"),
+    index: SpecIndexProjectionSchema.refine(
+      (value) => value.state === "fresh",
+      "A ready Spec response requires a fresh index.",
+    ),
+    detail: SpecDetailProjectionSchema,
+  }).strict(),
+  z.object({
+    availability: z.enum(["stale", "unavailable"]),
+    index: specNonReadyIndex,
+    detail: z.null(),
+  }).strict(),
+]).superRefine((value, context) => {
+  const staleState = value.index.state === "stale" || value.index.state === "rebuild_required";
+  if (value.availability === "stale" && !staleState) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["availability"],
+      message: "Only stale or rebuild-required indexes can return stale Spec availability.",
+    });
+  }
+  if (value.availability === "unavailable" && staleState) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["availability"],
+      message: "A stale Spec index must use stale availability.",
+    });
+  }
+});
+
 export const WikiRelationSchema = z.object({
   type: wikiDisplayText(128),
   source: WikiEntityRefSchema,
@@ -1445,6 +1815,11 @@ export type TeamMemberListRequest = z.infer<typeof TeamMemberListRequestSchema>;
 export type TeamMemberListResponse = z.infer<typeof TeamMemberListResponseSchema>;
 export type TeamActorRef = z.infer<typeof TeamActorRefSchema>;
 export type TeamCurrentActorResponse = z.infer<typeof TeamCurrentActorResponseSchema>;
+export type TeamWorkstreamId = z.infer<typeof TeamWorkstreamIdSchema>;
+export type TeamWorkstreamState = z.infer<typeof TeamWorkstreamStateSchema>;
+export type TeamWorkstream = z.infer<typeof TeamWorkstreamSchema>;
+export type TeamWorkstreamListRequest = z.infer<typeof TeamWorkstreamListRequestSchema>;
+export type TeamWorkstreamListResponse = z.infer<typeof TeamWorkstreamListResponseSchema>;
 export type TeamActivitySubjectInput = z.infer<typeof TeamActivitySubjectInputSchema>;
 export type TeamOperationPreviewRequest = z.infer<typeof TeamOperationPreviewRequestSchema>;
 export type TeamFileChange = z.infer<typeof TeamFileChangeSchema>;
@@ -1481,6 +1856,16 @@ export type WikiSource = z.infer<typeof WikiSourceSchema>;
 export type WikiGroundingCandidate = z.infer<typeof WikiGroundingCandidateSchema>;
 export type WikiGrounding = z.infer<typeof WikiGroundingSchema>;
 export type WikiEntityDetailResponse = z.infer<typeof WikiEntityDetailResponseSchema>;
+export type SpecEntityKind = z.infer<typeof SpecEntityKindSchema>;
+export type SpecIndexState = z.infer<typeof SpecIndexStateSchema>;
+export type SpecListRequest = z.infer<typeof SpecListRequestSchema>;
+export type SpecIndexProjection = z.infer<typeof SpecIndexProjectionSchema>;
+export type SpecSummaryProjection = z.infer<typeof SpecSummaryProjectionSchema>;
+export type SpecListPageProjection = z.infer<typeof SpecListPageProjectionSchema>;
+export type SpecListResponse = z.infer<typeof SpecListResponseSchema>;
+export type SpecHierarchyRelation = z.infer<typeof SpecHierarchyRelationSchema>;
+export type SpecDetailProjection = z.infer<typeof SpecDetailProjectionSchema>;
+export type SpecDetailResponse = z.infer<typeof SpecDetailResponseSchema>;
 export type WikiRelation = z.infer<typeof WikiRelationSchema>;
 export type WikiRelationHit = z.infer<typeof WikiRelationHitSchema>;
 export type WikiRelationsRequest = z.infer<typeof WikiRelationsRequestSchema>;

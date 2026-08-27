@@ -141,16 +141,17 @@ exit 2.
 
 The installed-capability inventory includes the secure Project Hub, Team
 identity, canonical Activity read/record, Graph, and Wiki surfaces. Checkpoint C
-adds registered structured Member and Activity commands to the existing Graph
-and Wiki catalog. Every Team mutation advertises distinct preview and apply
-invocations plus a bounded machine-readable request schema, complete examples,
-the exact preview-envelope apply rule, and the typed process-exit table. Read,
-preview, and apply invocations remain separate fixed arrays, Graph's existing
-protocol-v3 commands remain JSONL byte-compatible, and unavailable states carry
-static safe reasons plus the next initialization action. Writable legacy Wiki
-synthesis commands remain omitted from the governed agent surface. Workstreams,
-Inbox, Relays, Playbooks, Catch Up, and future team actions remain absent until
-their application services and structured CLI contracts exist.
+adds registered structured Member and Activity commands; Checkpoint D adds
+registered Workstream reads/mutations and read-only Spec reads. Every Team
+mutation advertises distinct preview and apply invocations plus a bounded
+machine-readable request schema, complete examples, the exact preview-envelope
+apply rule, and the typed process-exit table. Read, preview, and apply
+invocations remain separate fixed arrays, Graph's existing protocol-v3 commands
+remain JSONL byte-compatible, and unavailable states carry static safe reasons
+plus the next initialization action. Writable legacy Wiki synthesis commands
+remain omitted from the governed agent surface. Inbox, Relays, Playbooks, Catch
+Up, governed Spec writes, and future team actions remain absent until their
+application services and structured CLI contracts exist.
 
 Generated agent anchors direct supported tools to discover this manifest,
 prefer its structured reads, preview mutations, and wait for explicit human

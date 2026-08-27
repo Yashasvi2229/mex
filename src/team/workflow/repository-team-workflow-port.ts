@@ -45,13 +45,16 @@ import type {
   TeamIdentityActivityPurposeId,
   TeamMember,
   TeamMemberListRequest,
-  TeamWorkflowAction,
   TeamWorkflowApplyRequest,
   TeamWorkflowCommand,
   TeamWorkflowPort,
   TeamWorkflowPreview,
   TeamWorkflowResult,
   Workstream,
+  TeamWorkstreamCommand,
+  TeamWorkstreamListRequest,
+  TeamWorkstreamPreviewEnvelope,
+  TeamWorkstreamPurposeId,
 } from "../contracts/workflow.js";
 import {
   TEAM_IDENTITY_ACTIVITY_LIMITS,
@@ -204,6 +207,10 @@ interface PrimaryResult<TWikiPayload extends JsonValue> {
   localChanges: readonly LocalStateChange[];
   wikiResult?: WikiOperationResult;
 }
+
+type PortableWorkflowPurposeId =
+  | TeamIdentityActivityPurposeId
+  | TeamWorkstreamPurposeId;
 
 interface RecoverableWikiPort<TWikiPayload extends JsonValue, TWikiPlan>
   extends WikiPort<unknown, TWikiPayload, TWikiPlan, unknown> {
@@ -418,6 +425,18 @@ export class RepositoryTeamWorkflowPort<
     return page;
   }
 
+  async getWorkstream(workstreamId: string): Promise<Workstream | null> {
+    this.#root.assertCurrent();
+    return this.#workstreams.get(workstreamId);
+  }
+
+  async listWorkstreams(
+    request: TeamWorkstreamListRequest = {},
+  ): Promise<TeamPage<Workstream>> {
+    this.#root.assertCurrent();
+    return this.#workstreams.list(request);
+  }
+
   async previewIdentityActivity(
     command: TeamIdentityActivityCommand,
   ): Promise<TeamIdentityActivityPreviewEnvelope> {
@@ -533,6 +552,129 @@ export class RepositoryTeamWorkflowPort<
       replanned,
       envelope.receipt.previewRevision,
       identityActivityEnvelopeRevision(envelope),
+    );
+    this.#rememberIssued(envelope.receipt.previewRevision, portable, false);
+    return this.apply({
+      command,
+      expectedPreviewRevision: envelope.receipt.previewRevision,
+    });
+  }
+
+  async previewWorkstream(
+    command: TeamWorkstreamCommand,
+  ): Promise<TeamWorkstreamPreviewEnvelope> {
+    this.#root.assertCurrent();
+    assertWorkstreamCommand(command);
+    let internal = await this.preview(
+      command as TeamWorkflowCommand<TWikiPayload>,
+    );
+    if (!this.#portablePreviewIsFresh(internal.command.authority.occurredAt)) {
+      this.#evictIssuedCommand(internal);
+      internal = await this.preview(command as TeamWorkflowCommand<TWikiPayload>);
+    }
+    const prepared = this.#issued.get(internal.previewRevision);
+    if (prepared === undefined) throw previewConflict();
+    const request = commandFromPrepared(internal.command) as TeamWorkstreamCommand;
+    const publicPreview = publicPreviewFrom(internal);
+    const purposeIds = workstreamPurposeIdsFromEffects(
+      command.action.kind,
+      prepared.effects,
+    );
+    const requestRevision = hashText(boundedWorkstreamEnvelopeJson(request));
+    const presentationRevision = hashText(
+      boundedWorkstreamEnvelopeJson(publicPreview),
+    );
+    const receiptBase = {
+      schemaVersion: 1 as const,
+      authority: internal.command.authority,
+      purposeIds,
+      requestRevision,
+      presentationRevision,
+    };
+    const signingPayload = receiptSigningPayload(receiptBase);
+    assertWorkstreamEnvelope({
+      schemaVersion: 1,
+      request,
+      preview: publicPreview,
+      receipt: { ...receiptBase, previewRevision: "0".repeat(64) },
+    });
+    this.#receiptSigner.initialize();
+    const previewRevision = this.#receiptSigner.sign(signingPayload);
+    const envelope = deepFreeze({
+      schemaVersion: 1 as const,
+      request,
+      preview: publicPreview,
+      receipt: { ...receiptBase, previewRevision },
+    });
+    assertWorkstreamEnvelope(envelope);
+    const portable = withPortableEnvelopeAttestation(
+      prepared,
+      previewRevision,
+      workstreamEnvelopeRevision(envelope),
+    );
+    this.#rememberIssued(previewRevision, portable, false);
+    return envelope;
+  }
+
+  async applyWorkstream(
+    envelopeValue: TeamWorkstreamPreviewEnvelope,
+  ): Promise<TeamWorkflowResult<TWikiPayload>> {
+    this.#root.assertCurrent();
+    const envelope = parseWorkstreamEnvelope(envelopeValue);
+    const command = deepFreeze({
+      ...envelope.request,
+      authority: envelope.receipt.authority,
+    }) as PreparedTeamWorkflowCommand<TWikiPayload>;
+
+    let existing: TeamWorkflowJournalEntry | null = null;
+    try {
+      existing = this.#local.getWorkflowOperation(command.operationId);
+    } catch (error) {
+      if (!(error instanceof MexPortError)) throw error;
+      if (error.problem.code === "MIGRATION_REQUIRED") {
+        existing = null;
+      } else if (error.problem.code === "OPERATION_INTERRUPTED") {
+        this.#local.initializeForMutation();
+        existing = this.#local.getWorkflowOperation(command.operationId);
+      } else {
+        throw error;
+      }
+    }
+    if (existing !== null) {
+      assertJournalEnvelopeAttestation(existing.effects, envelope);
+      return this.apply({
+        command,
+        expectedPreviewRevision: envelope.receipt.previewRevision,
+      });
+    }
+
+    this.#receiptSigner.verify(
+      receiptSigningPayload(envelope.receipt),
+      envelope.receipt.previewRevision,
+    );
+    this.#assertPortablePreviewFresh(envelope.receipt.authority.occurredAt);
+    await this.#assertAuthorityCurrent(envelope.receipt.authority);
+    const replanned = await this.#plan(
+      command,
+      envelope.receipt.requestRevision,
+      envelope.receipt.purposeIds,
+    );
+    if (
+      boundedWorkstreamEnvelopeJson(publicPreviewFrom(replanned.preview))
+        !== boundedWorkstreamEnvelopeJson(envelope.preview)
+      || boundedWorkstreamEnvelopeJson(
+        workstreamPurposeIdsFromEffects(
+          envelope.request.action.kind,
+          replanned.effects,
+        ),
+      ) !== boundedWorkstreamEnvelopeJson(envelope.receipt.purposeIds)
+    ) {
+      throw previewConflict();
+    }
+    const portable = withPortableEnvelopeAttestation(
+      replanned,
+      envelope.receipt.previewRevision,
+      workstreamEnvelopeRevision(envelope),
     );
     this.#rememberIssued(envelope.receipt.previewRevision, portable, false);
     return this.apply({
@@ -863,7 +1005,7 @@ export class RepositoryTeamWorkflowPort<
   async #plan(
     command: PreparedTeamWorkflowCommand<TWikiPayload>,
     callerCommandRevision: Revision,
-    purposeIds?: readonly TeamIdentityActivityPurposeId[],
+    purposeIds?: readonly PortableWorkflowPurposeId[],
   ): Promise<PreparedOperation<TWikiPayload, TWikiPlan>> {
     const planned = await this.#planPrimary(command, undefined, purposeIds);
     if (planned.wiki?.preview.recoveryManifest !== undefined) {
@@ -945,7 +1087,7 @@ export class RepositoryTeamWorkflowPort<
   async #planPrimary(
     command: PreparedTeamWorkflowCommand<TWikiPayload>,
     recoveryEffects?: readonly TeamWorkflowJournalEffect[],
-    purposeIds?: readonly TeamIdentityActivityPurposeId[],
+    purposeIds?: readonly PortableWorkflowPurposeId[],
   ): Promise<{
     changes: readonly FileChange[];
     localChanges: readonly LocalStateChange[];
@@ -1119,9 +1261,12 @@ export class RepositoryTeamWorkflowPort<
           applyPrimary: async () => primary([], []),
         };
       case "workstream.create": {
-        const recoveryId = recoveryCanonicalId(recoveryEffects, "workstream");
+        const recoveryId = recoveryCanonicalId(recoveryEffects, "workstream")
+          ?? purposeId(purposeIds, "workstream");
         const plan = await this.#workstreams.previewCreate({
-          ...(recoveryId === null ? {} : { id: recoveryId }),
+          ...(recoveryId === null || recoveryId === undefined
+            ? {}
+            : { id: recoveryId }),
           ...action.workstream,
           contributors: action.workstream.contributors ?? [],
           paths: action.workstream.paths ?? [],
@@ -1144,15 +1289,40 @@ export class RepositoryTeamWorkflowPort<
       }
       case "workstream.update":
       case "workstream.archive": {
+        if (
+          action.kind === "workstream.update"
+          && (Object.keys(action.patch).length === 0
+            || action.patch.state === "archived")
+        ) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Invalid Workstream update",
+            action.patch.state === "archived"
+              ? "Use the dedicated Workstream archive action to preserve archival history."
+              : "A Workstream update must change at least one caller-owned field.",
+          );
+        }
         const current = await required(this.#workstreams.get(action.workstreamId), "Workstream");
         requireArtifactExpectation(expectedRevisions, current.sourcePath, current.revision);
-        const patch = action.kind === "workstream.archive" ? { state: "archived" as const } : action.patch;
+        const patch = action.kind === "workstream.archive"
+          ? { state: "archived" as const, blockers: [] }
+          : action.patch;
         const plan = await this.#workstreams.previewUpdate(action.workstreamId, {
           ...withoutStored(current),
           ...patch,
           updatedBy: authority.actor,
           updatedAt: authority.occurredAt,
         }, current.revision);
+        if (
+          action.kind === "workstream.update"
+          && workstreamCallerProjectionIsEqual(current, plan.artifact)
+        ) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Invalid Workstream update",
+            "A Workstream update must change at least one caller-owned field.",
+          );
+        }
         return canonicalWorkflowPlan(plan, "workstream", action.workstreamId, {
           action: action.kind === "workstream.archive" ? "workstream.archived" : "workstream.updated",
           subjects: [entitySubject(plan.artifact.ref)],
@@ -2640,9 +2810,15 @@ function identityActivityEnvelopeRevision(
   return hashText(boundedIdentityEnvelopeJson(envelope));
 }
 
+function workstreamEnvelopeRevision(
+  envelope: TeamWorkstreamPreviewEnvelope,
+): Revision {
+  return hashText(boundedWorkstreamEnvelopeJson(envelope));
+}
+
 function assertJournalEnvelopeAttestation(
   effects: readonly TeamWorkflowJournalEffect[],
-  envelope: TeamIdentityActivityPreviewEnvelope,
+  envelope: TeamIdentityActivityPreviewEnvelope | TeamWorkstreamPreviewEnvelope,
 ): void {
   const receipts = effects.filter(
     (effect): effect is IdentityActivityReceiptWorkflowEffect =>
@@ -2650,10 +2826,20 @@ function assertJournalEnvelopeAttestation(
   );
   if (
     receipts.length !== 1
-    || receipts[0]!.envelopeRevision !== identityActivityEnvelopeRevision(envelope)
+    || receipts[0]!.envelopeRevision !== portableEnvelopeRevision(envelope)
   ) {
     throw previewConflict();
   }
+}
+
+function portableEnvelopeRevision(
+  envelope: TeamIdentityActivityPreviewEnvelope | TeamWorkstreamPreviewEnvelope,
+): Revision {
+  return envelope.request.action.kind.startsWith("workstream.")
+    ? workstreamEnvelopeRevision(envelope as TeamWorkstreamPreviewEnvelope)
+    : identityActivityEnvelopeRevision(
+        envelope as TeamIdentityActivityPreviewEnvelope,
+      );
 }
 
 function isAuditOnlyEffects(effects: readonly TeamWorkflowJournalEffect[]): boolean {
@@ -2692,9 +2878,31 @@ function purposeIdsFromEffects(
   return deepFreeze(purposes);
 }
 
+function workstreamPurposeIdsFromEffects(
+  action: TeamWorkstreamCommand["action"]["kind"],
+  effects: readonly TeamWorkflowJournalEffect[],
+): readonly TeamWorkstreamPurposeId[] {
+  const purposes: TeamWorkstreamPurposeId[] = [];
+  if (action === "workstream.create") {
+    const workstreams = effects.filter(
+      (effect): effect is CanonicalWorkflowEffect =>
+        effect.kind === "canonical" && effect.namespace === "workstream",
+    );
+    if (workstreams.length !== 1) throw previewConflict();
+    purposes.push({ purpose: "workstream", id: workstreams[0]!.id });
+  }
+  const activities = effects.filter(
+    (effect): effect is ActivityWorkflowEffect => effect.kind === "activity",
+  );
+  if (activities.length !== 1) throw previewConflict();
+  purposes.push({ purpose: "activity", id: activities[0]!.id });
+  purposes.sort((left, right) => compareCodePoints(left.purpose, right.purpose));
+  return deepFreeze(purposes);
+}
+
 function purposeId(
-  purposes: readonly TeamIdentityActivityPurposeId[] | undefined,
-  purpose: TeamIdentityActivityPurposeId["purpose"],
+  purposes: readonly PortableWorkflowPurposeId[] | undefined,
+  purpose: PortableWorkflowPurposeId["purpose"],
 ): string | undefined {
   if (purposes === undefined) return undefined;
   return purposes.find((item) => item.purpose === purpose)?.id;
@@ -2740,6 +2948,55 @@ function assertIdentityActivityCommand(
   boundedIdentityEnvelopeJson(value);
 }
 
+function assertWorkstreamCommand(
+  value: unknown,
+): asserts value is TeamWorkstreamCommand {
+  assertCommandShape(value);
+  assertOperationId(value.operationId);
+  assertNoCallerAuthority(value);
+  const expectations = normalizeWorkflowRevisionExpectations(
+    value.expectedRevisions,
+  );
+  if (
+    value.action.kind !== "workstream.create"
+    && value.action.kind !== "workstream.update"
+    && value.action.kind !== "workstream.archive"
+  ) {
+    invalidWorkstreamCommand();
+  }
+  if (
+    value.action.kind !== "workstream.create"
+    && expectations.length === 0
+  ) {
+    invalidWorkstreamCommand();
+  }
+  if (value.action.kind === "workstream.create") {
+    if (!isPlainObject(value.action.workstream)) invalidWorkstreamCommand();
+    exactWorkstreamCommandKeys(
+      value.action.workstream,
+      ["title", "goal", "summary", "owners", "nextMilestone"],
+      [
+        "contributors", "paths", "code", "topics", "components", "related",
+      ],
+    );
+  }
+  if (value.action.kind === "workstream.update") {
+    if (!isPlainObject(value.action.patch)) invalidWorkstreamCommand();
+    exactWorkstreamCommandKeys(value.action.patch, [], [
+      "title", "goal", "summary", "state", "owners", "contributors",
+      "paths", "code", "topics", "components", "related", "blockers",
+      "currentState", "nextMilestone",
+    ]);
+    if (
+      Object.keys(value.action.patch).length === 0
+      || value.action.patch.state === "archived"
+    ) {
+      invalidWorkstreamCommand();
+    }
+  }
+  boundedWorkstreamEnvelopeJson(value);
+}
+
 function assertIdentityActivityEnvelope(
   value: unknown,
 ): asserts value is TeamIdentityActivityPreviewEnvelope {
@@ -2758,6 +3015,84 @@ function parseIdentityActivityEnvelope(
   assertPublicIdentityPreview(envelope.preview);
   assertIdentityReceipt(envelope.receipt, envelope.request, envelope.preview);
   return deepFreeze(envelope as unknown as TeamIdentityActivityPreviewEnvelope);
+}
+
+function assertWorkstreamEnvelope(
+  value: unknown,
+): asserts value is TeamWorkstreamPreviewEnvelope {
+  parseWorkstreamEnvelope(value);
+}
+
+function parseWorkstreamEnvelope(
+  value: unknown,
+): TeamWorkstreamPreviewEnvelope {
+  const serialized = boundedWorkstreamEnvelopeJson(value);
+  const envelope = JSON.parse(serialized) as unknown;
+  if (!isPlainObject(envelope)) throw invalidWorkstreamEnvelope();
+  exactWorkstreamKeys(envelope, [
+    "schemaVersion", "request", "preview", "receipt",
+  ]);
+  if (envelope.schemaVersion !== 1) throw invalidWorkstreamEnvelope();
+  assertWorkstreamCommand(envelope.request);
+  assertPublicWorkstreamPreview(envelope.preview);
+  assertWorkstreamReceipt(envelope.receipt, envelope.request, envelope.preview);
+  return deepFreeze(envelope as unknown as TeamWorkstreamPreviewEnvelope);
+}
+
+function assertPublicWorkstreamPreview(
+  value: unknown,
+): asserts value is TeamIdentityActivityPublicPreview {
+  if (!isPlainObject(value)) throw invalidWorkstreamEnvelope();
+  exactWorkstreamKeys(
+    value,
+    ["valid", "scope", "changes", "localChanges", "diagnostics"],
+  );
+  if (
+    typeof value.valid !== "boolean"
+    || (value.scope !== "canonical"
+      && value.scope !== "local"
+      && value.scope !== "mixed")
+    || !Array.isArray(value.changes)
+    || !Array.isArray(value.localChanges)
+    || !Array.isArray(value.diagnostics)
+  ) {
+    throw invalidWorkstreamEnvelope();
+  }
+}
+
+function assertWorkstreamReceipt(
+  value: unknown,
+  request: TeamWorkstreamCommand,
+  preview: TeamIdentityActivityPublicPreview,
+): void {
+  boundedWorkstreamReceiptJson(value);
+  if (!isPlainObject(value)) throw invalidWorkstreamEnvelope();
+  exactWorkstreamKeys(value, [
+    "schemaVersion",
+    "authority",
+    "purposeIds",
+    "requestRevision",
+    "presentationRevision",
+    "previewRevision",
+  ]);
+  if (
+    value.schemaVersion !== 1
+    || !isRevisionValue(value.requestRevision)
+    || !isRevisionValue(value.presentationRevision)
+    || !isRevisionValue(value.previewRevision)
+  ) {
+    throw invalidWorkstreamEnvelope();
+  }
+  assertReceiptAuthority(value.authority, invalidWorkstreamEnvelope);
+  normalizeWorkstreamReceiptPurposeIds(value.purposeIds, request.action.kind);
+  if (
+    value.requestRevision
+      !== hashText(boundedWorkstreamEnvelopeJson(request))
+    || value.presentationRevision
+      !== hashText(boundedWorkstreamEnvelopeJson(preview))
+  ) {
+    throw previewConflict();
+  }
 }
 
 function assertPublicIdentityPreview(
@@ -2818,66 +3153,82 @@ function assertIdentityReceipt(
   void purposeIds;
 }
 
-function assertReceiptAuthority(value: unknown): void {
-  if (!isPlainObject(value)) throw invalidIdentityActivityEnvelope();
-  exactIdentityKeys(value, ["actor", "occurredAt", "repoState"]);
-  if (typeof value.occurredAt !== "string") throw invalidIdentityActivityEnvelope();
+function assertReceiptAuthority(
+  value: unknown,
+  invalid: () => MexPortError = invalidIdentityActivityEnvelope,
+): void {
+  if (!isPlainObject(value)) throw invalid();
+  exactEnvelopeKeys(value, ["actor", "occurredAt", "repoState"], [], invalid);
+  if (typeof value.occurredAt !== "string") throw invalid();
   const occurredAt = new Date(value.occurredAt);
   if (
     Number.isNaN(occurredAt.getTime())
     || occurredAt.toISOString() !== value.occurredAt
   ) {
-    throw invalidIdentityActivityEnvelope();
+    throw invalid();
   }
-  assertReceiptActor(value.actor);
-  if (!isPlainObject(value.repoState)) throw invalidIdentityActivityEnvelope();
-  exactIdentityKeys(value.repoState, ["branch", "head", "dirty", "observedAt"]);
+  assertReceiptActor(value.actor, invalid);
+  if (!isPlainObject(value.repoState)) throw invalid();
+  exactEnvelopeKeys(
+    value.repoState,
+    ["branch", "head", "dirty", "observedAt"],
+    [],
+    invalid,
+  );
   if (
     (value.repoState.branch !== null && typeof value.repoState.branch !== "string")
     || (value.repoState.head !== null && typeof value.repoState.head !== "string")
     || typeof value.repoState.dirty !== "boolean"
     || typeof value.repoState.observedAt !== "string"
   ) {
-    throw invalidIdentityActivityEnvelope();
+    throw invalid();
   }
   const observedAt = new Date(value.repoState.observedAt);
   if (
     Number.isNaN(observedAt.getTime())
     || observedAt.toISOString() !== value.repoState.observedAt
   ) {
-    throw invalidIdentityActivityEnvelope();
+    throw invalid();
   }
 }
 
-function assertReceiptActor(value: unknown): void {
+function assertReceiptActor(
+  value: unknown,
+  invalid: () => MexPortError = invalidIdentityActivityEnvelope,
+): void {
   if (!isPlainObject(value) || typeof value.kind !== "string") {
-    throw invalidIdentityActivityEnvelope();
+    throw invalid();
   }
   if (value.kind === "unknown") {
-    exactIdentityKeys(value, ["kind"]);
+    exactEnvelopeKeys(value, ["kind"], [], invalid);
     return;
   }
   if (value.kind === "member") {
-    exactIdentityKeys(value, ["kind", "memberId"], ["displayName"]);
+    exactEnvelopeKeys(
+      value,
+      ["kind", "memberId"],
+      ["displayName"],
+      invalid,
+    );
     if (
       typeof value.memberId !== "string"
       || (value.displayName !== undefined && typeof value.displayName !== "string")
     ) {
-      throw invalidIdentityActivityEnvelope();
+      throw invalid();
     }
     return;
   }
   if (value.kind === "git") {
-    exactIdentityKeys(value, ["kind", "name", "email"]);
+    exactEnvelopeKeys(value, ["kind", "name", "email"], [], invalid);
     if (
       (value.name !== null && typeof value.name !== "string")
       || (value.email !== null && typeof value.email !== "string")
     ) {
-      throw invalidIdentityActivityEnvelope();
+      throw invalid();
     }
     return;
   }
-  throw invalidIdentityActivityEnvelope();
+  throw invalid();
 }
 
 function normalizeReceiptPurposeIds(
@@ -2920,7 +3271,74 @@ function normalizeReceiptPurposeIds(
   return purposes;
 }
 
+function normalizeWorkstreamReceiptPurposeIds(
+  value: unknown,
+  action: TeamWorkstreamCommand["action"]["kind"],
+): readonly TeamWorkstreamPurposeId[] {
+  if (
+    !Array.isArray(value)
+    || value.length > TEAM_IDENTITY_ACTIVITY_LIMITS.maxPurposeIds
+  ) {
+    throw invalidWorkstreamEnvelope();
+  }
+  const purposes = value.map((item): TeamWorkstreamPurposeId => {
+    if (!isPlainObject(item)) throw invalidWorkstreamEnvelope();
+    exactWorkstreamKeys(item, ["purpose", "id"]);
+    if (item.purpose !== "activity" && item.purpose !== "workstream") {
+      throw invalidWorkstreamEnvelope();
+    }
+    if (
+      typeof item.id !== "string"
+      || !isArtifactId(
+        item.id,
+        item.purpose === "activity" ? "event" : "ws",
+      )
+    ) {
+      throw invalidWorkstreamEnvelope();
+    }
+    return { purpose: item.purpose, id: item.id };
+  });
+  const expected = action === "workstream.create"
+    ? ["activity", "workstream"]
+    : ["activity"];
+  if (
+    purposes.some((item, index) => item.purpose !== expected[index])
+    || purposes.length !== expected.length
+  ) {
+    throw invalidWorkstreamEnvelope();
+  }
+  return purposes;
+}
+
 function exactIdentityKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): void {
+  exactEnvelopeKeys(
+    value,
+    required,
+    optional,
+    invalidIdentityActivityEnvelope,
+  );
+}
+
+function exactEnvelopeKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+  invalid: () => MexPortError,
+): void {
+  const keys = Object.keys(value);
+  if (
+    required.some((key) => !Object.hasOwn(value, key))
+    || keys.some((key) => !required.includes(key) && !optional.includes(key))
+  ) {
+    throw invalid();
+  }
+}
+
+function exactWorkstreamKeys(
   value: Record<string, unknown>,
   required: readonly string[],
   optional: readonly string[] = [],
@@ -2930,7 +3348,21 @@ function exactIdentityKeys(
     required.some((key) => !Object.hasOwn(value, key))
     || keys.some((key) => !required.includes(key) && !optional.includes(key))
   ) {
-    throw invalidIdentityActivityEnvelope();
+    throw invalidWorkstreamEnvelope();
+  }
+}
+
+function exactWorkstreamCommandKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): void {
+  const keys = Object.keys(value);
+  if (
+    required.some((key) => !Object.hasOwn(value, key))
+    || keys.some((key) => !required.includes(key) && !optional.includes(key))
+  ) {
+    invalidWorkstreamCommand();
   }
 }
 
@@ -2943,7 +3375,15 @@ function boundedIdentityEnvelopeJson(value: unknown): string {
     maxBytes: TEAM_IDENTITY_ACTIVITY_LIMITS.maxEnvelopeBytes,
     maxDepth: MAX_PREPARED_COMMAND_DEPTH,
     maxNodes: MAX_PREPARED_COMMAND_NODES,
-  });
+  }, invalidIdentityActivityEnvelope);
+}
+
+function boundedWorkstreamEnvelopeJson(value: unknown): string {
+  return boundedCanonicalJson(value, {
+    maxBytes: TEAM_IDENTITY_ACTIVITY_LIMITS.maxEnvelopeBytes,
+    maxDepth: MAX_PREPARED_COMMAND_DEPTH,
+    maxNodes: MAX_PREPARED_COMMAND_NODES,
+  }, invalidWorkstreamEnvelope);
 }
 
 function boundedReceiptJson(value: unknown): string {
@@ -2951,12 +3391,22 @@ function boundedReceiptJson(value: unknown): string {
     maxBytes: TEAM_IDENTITY_ACTIVITY_LIMITS.maxReceiptBytes,
     maxDepth: TEAM_IDENTITY_ACTIVITY_LIMITS.maxReceiptDepth,
     maxNodes: TEAM_IDENTITY_ACTIVITY_LIMITS.maxReceiptNodes,
-  });
+  }, invalidIdentityActivityEnvelope);
+}
+
+function boundedWorkstreamReceiptJson(value: unknown): string {
+  return boundedCanonicalJson(value, {
+    maxBytes: TEAM_IDENTITY_ACTIVITY_LIMITS.maxReceiptBytes,
+    maxDepth: TEAM_IDENTITY_ACTIVITY_LIMITS.maxReceiptDepth,
+    maxNodes: TEAM_IDENTITY_ACTIVITY_LIMITS.maxReceiptNodes,
+  }, invalidWorkstreamEnvelope);
 }
 
 function receiptSigningPayload(
   receipt: Omit<TeamIdentityActivityPreviewEnvelope["receipt"], "previewRevision">
-    | TeamIdentityActivityPreviewEnvelope["receipt"],
+    | TeamIdentityActivityPreviewEnvelope["receipt"]
+    | Omit<TeamWorkstreamPreviewEnvelope["receipt"], "previewRevision">
+    | TeamWorkstreamPreviewEnvelope["receipt"],
 ): string {
   return boundedReceiptJson({
     schemaVersion: receipt.schemaVersion,
@@ -2970,13 +3420,14 @@ function receiptSigningPayload(
 function boundedCanonicalJson(
   value: unknown,
   limits: { maxBytes: number; maxDepth: number; maxNodes: number },
+  invalid: () => MexPortError,
 ): string {
   const active = new Set<object>();
   let nodes = 0;
   const visit = (current: unknown, depth: number): unknown => {
     nodes += 1;
     if (nodes > limits.maxNodes || depth > limits.maxDepth) {
-      throw invalidIdentityActivityEnvelope();
+      throw invalid();
     }
     if (
       current === null
@@ -2984,21 +3435,21 @@ function boundedCanonicalJson(
       || typeof current === "boolean"
     ) return current;
     if (typeof current === "number") {
-      if (!Number.isFinite(current)) throw invalidIdentityActivityEnvelope();
+      if (!Number.isFinite(current)) throw invalid();
       return current;
     }
     if (typeof current !== "object" || active.has(current)) {
-      throw invalidIdentityActivityEnvelope();
+      throw invalid();
     }
     active.add(current);
     let normalized: unknown;
     if (Array.isArray(current)) {
       normalized = current.map((item) => visit(item, depth + 1));
     } else {
-      if (!isPlainObject(current)) throw invalidIdentityActivityEnvelope();
+      if (!isPlainObject(current)) throw invalid();
       const record: Record<string, unknown> = {};
       for (const key of Object.keys(current).sort()) {
-        if (current[key] === undefined) throw invalidIdentityActivityEnvelope();
+        if (current[key] === undefined) throw invalid();
         record[key] = visit(current[key], depth + 1);
       }
       normalized = record;
@@ -3008,7 +3459,7 @@ function boundedCanonicalJson(
   };
   const serialized = JSON.stringify(visit(value, 0));
   if (Buffer.byteLength(serialized, "utf8") > limits.maxBytes) {
-    throw invalidIdentityActivityEnvelope();
+    throw invalid();
   }
   return serialized;
 }
@@ -3026,6 +3477,22 @@ function invalidIdentityActivityEnvelope(): MexPortError {
     "INVALID_REQUEST",
     "Invalid identity or Activity preview",
     "The portable preview envelope is malformed or exceeds its bounded contract.",
+  );
+}
+
+function invalidWorkstreamCommand(): never {
+  throw artifactError(
+    "VALIDATION_FAILED",
+    "Invalid Workstream command",
+    "Only bounded create, update, and archive Workstream fields are accepted.",
+  );
+}
+
+function invalidWorkstreamEnvelope(): MexPortError {
+  return artifactError(
+    "INVALID_REQUEST",
+    "Invalid Workstream preview",
+    "The portable Workstream preview envelope is malformed or exceeds its bounded contract.",
   );
 }
 
@@ -3413,6 +3880,33 @@ function requiredDraft<TWikiPayload extends JsonValue>(value: StoredLocalDraft |
 function withoutStored<T extends { schemaVersion: 1; ref: EntityRef; kind: string; sourcePath: RepoRelativePath; revision: Revision; entityRevision?: number }>(value: T): Omit<T, "schemaVersion" | "ref" | "kind" | "sourcePath" | "revision" | "entityRevision"> {
   const { schemaVersion: _schema, ref: _ref, kind: _kind, sourcePath: _path, revision: _revision, entityRevision: _entityRevision, ...rest } = value;
   return rest;
+}
+
+function workstreamCallerProjectionIsEqual(
+  current: Workstream,
+  candidate: Workstream,
+): boolean {
+  return stableJson(workstreamCallerProjection(current))
+    === stableJson(workstreamCallerProjection(candidate));
+}
+
+function workstreamCallerProjection(workstream: Workstream) {
+  return {
+    title: workstream.title,
+    goal: workstream.goal,
+    summary: workstream.summary,
+    state: workstream.state,
+    owners: workstream.owners,
+    contributors: workstream.contributors,
+    paths: workstream.paths,
+    code: workstream.code,
+    topics: workstream.topics,
+    components: workstream.components,
+    related: workstream.related,
+    blockers: workstream.blockers,
+    currentState: workstream.currentState,
+    nextMilestone: workstream.nextMilestone,
+  };
 }
 
 function assertNoCallerAuthority(command: TeamWorkflowCommand<JsonValue>): void {

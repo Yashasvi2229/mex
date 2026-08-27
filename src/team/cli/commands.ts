@@ -21,21 +21,31 @@ import {
   projectMember,
   projectMemberPage,
   projectPreview,
+  projectWorkstream,
+  projectWorkstreamApply,
+  projectWorkstreamPage,
+  projectWorkstreamPreview,
   type TeamActivityProjection,
   type TeamApplyProjection,
   type TeamCurrentActorProjection,
   type TeamMemberProjection,
   type TeamPageProjection,
+  type TeamWorkstreamApplyProjection,
+  type TeamWorkstreamProjection,
 } from "./projections.js";
 import {
   readTeamCommandFile,
   readTeamPreviewFile,
-  type TeamMutationCommandName,
+  type TeamIdentityActivityMutationCommandName,
+  type TeamWorkstreamMutationCommandName,
 } from "./request-file.js";
 import type {
   TeamIdentityActivityCliService,
   TeamIdentityActivityCliServiceFactory,
+  TeamWorkstreamCliService,
+  TeamWorkstreamCliServiceFactory,
 } from "./service.js";
+import { WORKSTREAM_STATES, type WorkstreamState } from "../contracts/workflow.js";
 
 const MAX_CURSOR_BYTES = 4 * 1024;
 
@@ -62,6 +72,11 @@ export interface ActivityListFlags extends TeamPageFlags {
   since?: string;
 }
 
+export interface WorkstreamListFlags extends TeamPageFlags {
+  state?: string | readonly string[];
+  includeArchived?: boolean;
+}
+
 export interface TeamMutationFlags extends TeamOutputFlags {
   apply?: string;
 }
@@ -69,6 +84,10 @@ export interface TeamMutationFlags extends TeamOutputFlags {
 export type TeamCliServiceSource =
   | TeamIdentityActivityCliService
   | TeamIdentityActivityCliServiceFactory;
+
+export type TeamWorkstreamCliServiceSource =
+  | TeamWorkstreamCliService
+  | TeamWorkstreamCliServiceFactory;
 
 export async function runMemberList(
   source: TeamCliServiceSource,
@@ -167,9 +186,91 @@ export async function runActivityShow(
   }, renderActivity);
 }
 
+export async function runWorkstreamList(
+  source: TeamWorkstreamCliServiceSource,
+  flags: WorkstreamListFlags,
+  io: TeamCommandIo,
+): Promise<void> {
+  await execute("workstream.list", "read", flags, io, async () => {
+    const states = workstreamStates(flags.state);
+    const projected = projectWorkstreamPage(
+      await (await resolveWorkstreamService(source)).listWorkstreams({
+        ...(states.length === 0 ? {} : { states }),
+        ...(flags.includeArchived === true ? { includeArchived: true } : {}),
+        ...pageRequest(flags),
+      }),
+    );
+    return teamEnvelope({
+      command: "workstream.list",
+      mode: "read",
+      data: projected.data,
+      diagnostics: projected.diagnostics,
+    });
+  }, renderWorkstreamList);
+}
+
+export async function runWorkstreamShow(
+  source: TeamWorkstreamCliServiceSource,
+  id: string,
+  flags: TeamOutputFlags,
+  io: TeamCommandIo,
+): Promise<void> {
+  await execute("workstream.show", "read", flags, io, async () => {
+    assertArtifactId(id, "ws");
+    const workstream = await (await resolveWorkstreamService(source)).getWorkstream(id);
+    if (workstream === null) throw new MexPortError(notFoundProblem("workstream", id));
+    return teamEnvelope({
+      command: "workstream.show",
+      mode: "read",
+      data: projectWorkstream(workstream),
+    });
+  }, renderWorkstream);
+}
+
+export async function runWorkstreamMutation(
+  source: TeamWorkstreamCliServiceSource,
+  command: TeamWorkstreamMutationCommandName,
+  requestFile: string | undefined,
+  flags: TeamMutationFlags,
+  io: TeamCommandIo,
+): Promise<void> {
+  if (flags.apply === undefined) {
+    await execute(command, "preview", flags, io, async () => {
+      if (requestFile === undefined) {
+        throw new TeamCliUsageError("A mutation request JSON file is required for preview.");
+      }
+      const request = readTeamCommandFile(requestFile, command);
+      const preview = projectWorkstreamPreview(
+        await (await resolveWorkstreamService(source)).previewWorkstream(request),
+      );
+      return teamEnvelope({
+        command,
+        mode: "preview",
+        data: preview,
+        diagnostics: preview.preview.diagnostics,
+        valid: preview.preview.valid,
+      });
+    }, renderWorkstreamPreview);
+    return;
+  }
+
+  await execute(command, "apply", flags, io, async () => {
+    if (requestFile !== undefined) {
+      throw new TeamCliUsageError(
+        "Apply accepts only --apply <preview-envelope.json>; do not also pass a request file.",
+      );
+    }
+    const preview = readTeamPreviewFile(flags.apply!, command);
+    const result = projectWorkstreamApply(
+      await (await resolveWorkstreamService(source)).applyWorkstream(preview),
+    );
+    return teamEnvelope({ command, mode: "apply", data: result });
+  }, renderWorkstreamApply);
+}
+
 export async function runTeamMutation(
   source: TeamCliServiceSource,
-  command: TeamMutationCommandName,
+  command: TeamIdentityActivityMutationCommandName,
   requestFile: string | undefined,
   flags: TeamMutationFlags,
   io: TeamCommandIo,
@@ -264,10 +365,32 @@ async function resolveService(
   return typeof source === "function" ? source() : source;
 }
 
-function assertArtifactId(id: string, prefix: "member" | "event"): void {
+async function resolveWorkstreamService(
+  source: TeamWorkstreamCliServiceSource,
+): Promise<TeamWorkstreamCliService> {
+  return typeof source === "function" ? source() : source;
+}
+
+function assertArtifactId(id: string, prefix: "member" | "event" | "ws"): void {
   if (!isArtifactId(id, prefix)) {
     throw new TeamCliUsageError(`${prefix} ID must be a ${prefix}_ prefixed ULID.`);
   }
+}
+
+function workstreamStates(value: string | readonly string[] | undefined): readonly WorkstreamState[] {
+  if (value === undefined) return [];
+  const entries = Array.isArray(value) ? value : [value];
+  const states: WorkstreamState[] = [];
+  for (const entry of entries) {
+    if (!(WORKSTREAM_STATES as readonly string[]).includes(entry)) {
+      throw new TeamCliUsageError(
+        `--state must be one of ${WORKSTREAM_STATES.join(", ")}.`,
+      );
+    }
+    const state = entry as WorkstreamState;
+    if (!states.includes(state)) states.push(state);
+  }
+  return states.sort();
 }
 
 function assertIsoTimestamp(value: string, label: string): void {
@@ -345,9 +468,45 @@ function renderActivity(
   io.write(`Repository: ${activity.repoState.branch ?? "detached"} @ ${activity.repoState.head ?? "unborn"}${activity.repoState.dirty ? " (dirty)" : ""}`);
 }
 
+function renderWorkstreamList(
+  page: TeamPageProjection<TeamWorkstreamProjection>,
+  _envelope: TeamCliEnvelope<TeamPageProjection<TeamWorkstreamProjection>>,
+  io: TeamCommandIo,
+): void {
+  if (page.items.length === 0) io.write("No Workstreams found.");
+  for (const workstream of page.items) {
+    io.write(`${workstream.id}\t${workstream.state}\t${workstream.title}`);
+  }
+  renderContinuation(page, io);
+}
+
+function renderWorkstream(
+  workstream: TeamWorkstreamProjection,
+  _envelope: TeamCliEnvelope<TeamWorkstreamProjection>,
+  io: TeamCommandIo,
+): void {
+  io.write(`${workstream.title} (${workstream.id})`);
+  io.write(`State: ${workstream.state}`);
+  io.write(`Current: ${workstream.currentState}`);
+  io.write(`Next milestone: ${workstream.nextMilestone}`);
+  io.write(`Revision: ${workstream.revision}`);
+}
+
 function renderPreview(
   preview: ReturnType<typeof projectPreview>,
   envelope: TeamCliEnvelope<ReturnType<typeof projectPreview>>,
+  io: TeamCommandIo,
+): void {
+  io.write(`${envelope.ok ? "Valid" : "Invalid"} ${preview.preview.scope} preview for ${preview.request.operationId}`);
+  io.write(`Canonical changes: ${preview.preview.changes.length}`);
+  io.write(`Local changes: ${preview.preview.localChanges.length}`);
+  io.write(`Preview revision: ${preview.receipt.previewRevision}`);
+  io.write("Use --json to save this complete approval envelope before apply.");
+}
+
+function renderWorkstreamPreview(
+  preview: ReturnType<typeof projectWorkstreamPreview>,
+  envelope: TeamCliEnvelope<ReturnType<typeof projectWorkstreamPreview>>,
   io: TeamCommandIo,
 ): void {
   io.write(`${envelope.ok ? "Valid" : "Invalid"} ${preview.preview.scope} preview for ${preview.request.operationId}`);
@@ -365,6 +524,17 @@ function renderApply(
   io.write(`${result.idempotentReplay ? "Replayed" : "Applied"} ${result.operationId}`);
   io.write(`Canonical changes: ${result.changes.length}`);
   io.write(`Local changes: ${result.localChanges.length}`);
+  io.write(`Activity events: ${result.events.length}`);
+}
+
+function renderWorkstreamApply(
+  result: TeamWorkstreamApplyProjection,
+  _envelope: TeamCliEnvelope<TeamWorkstreamApplyProjection>,
+  io: TeamCommandIo,
+): void {
+  io.write(`${result.idempotentReplay ? "Replayed" : "Applied"} ${result.operationId}`);
+  io.write(`Canonical changes: ${result.changes.length}`);
+  io.write(`Workstreams: ${result.workstreams.length}`);
   io.write(`Activity events: ${result.events.length}`);
 }
 

@@ -42,8 +42,8 @@ export const navigation: NavigationGroup[] = [
     items: [
       { label: "Knowledge", path: "/knowledge", icon: BookOpenText, capability: "wiki" },
       { label: "Code", path: "/code", icon: Code2, capability: "graph" },
-      { label: "Workstreams", path: "/workstreams", icon: Workflow, structuralUnavailable: true },
-      { label: "Specs", path: "/specs", icon: FileCheck2, structuralUnavailable: true },
+      { label: "Workstreams", path: "/workstreams", icon: Workflow, capability: "workstreams" },
+      { label: "Specs", path: "/specs", icon: FileCheck2, capability: "specs" },
       { label: "Playbooks", path: "/playbooks", icon: ListChecks, structuralUnavailable: true },
     ],
   },

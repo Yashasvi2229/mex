@@ -272,6 +272,18 @@ export interface WikiEntityNeighborhood {
   truncated: boolean;
 }
 
+/**
+ * One entity detail and neighborhood projected under the same immutable Wiki
+ * session and, when available, the same fresh Graph-grounding lease.
+ */
+export interface WikiEntityNeighborhoodSnapshot<TEntityExtension = never> {
+  indexedRevision: Revision;
+  projectionRevision: Revision;
+  observedAt: IsoTimestamp;
+  entity: WikiEntity<TEntityExtension>;
+  neighborhood: WikiEntityNeighborhood;
+}
+
 export interface WikiValidationRequest {
   entityIds?: readonly EntityId[];
   paths?: readonly RepoRelativePath[];
@@ -515,6 +527,9 @@ export interface WikiPort<
   traverseRelations(request: WikiTraverseRequest): Promise<WikiPage<WikiRelationHit>>;
   getBacklinks(request: WikiBacklinksRequest): Promise<WikiPage<WikiRelation>>;
   getNeighborhood(request: WikiNeighborhoodRequest): Promise<WikiEntityNeighborhood>;
+  getEntityNeighborhood(
+    request: WikiNeighborhoodRequest,
+  ): Promise<WikiEntityNeighborhoodSnapshot<TEntityExtension> | null>;
   getGroundingStatus(id: EntityId): Promise<readonly WikiGroundingResolution[]>;
   validate(request?: WikiValidationRequest): Promise<WikiValidationReport>;
   /**

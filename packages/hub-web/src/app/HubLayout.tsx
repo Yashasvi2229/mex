@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Circle, FolderGit2, GitBranch, GitCommitHorizontal, Menu, ShieldCheck, X } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import type { CapabilitiesResponse, HomeResponse, SessionResponse } from "../api/types";
+import type { CapabilityName } from "../api/types";
 import { useHubApi } from "../api/context";
 import { navigation } from "./navigation";
 import { formatTime, StatePanel, StatusPill } from "../components/ui";
@@ -15,7 +16,7 @@ import { JobLifecycleObserver } from "./JobLifecycleObserver";
 
 function capabilityAvailable(
   capabilities: CapabilitiesResponse | undefined,
-  name: "graph" | "wiki" | "jobs" | "activity" | "members" | "team" | undefined,
+  name: CapabilityName | undefined,
 ): boolean | undefined {
   if (!name || !capabilities) return undefined;
   if (name === "graph") return capabilities.graph.read.availability === "available";
@@ -23,6 +24,8 @@ function capabilityAvailable(
   if (name === "jobs") return capabilities.jobs.availability === "available";
   if (name === "activity") return capabilities.activity.availability === "available";
   if (name === "members") return capabilities.members.read.availability === "available";
+  if (name === "workstreams") return capabilities.workstreams.read.availability === "available";
+  if (name === "specs") return capabilities.specs.read.availability === "available";
   return false;
 }
 
@@ -139,7 +142,7 @@ export function HubLayout({
 
 export function DesktopRequired() {
   return (
-    <div className={styles.desktopRequired}>
+    <main className={styles.desktopRequired}>
       <div className={styles.desktopWindow} aria-hidden="true">
         <span /><span /><span />
         <div><X /><Menu /></div>
@@ -147,6 +150,6 @@ export function DesktopRequired() {
       <p className={styles.eyebrow}>Project Hub</p>
       <h1>A wider workbench is required</h1>
       <p>MEX Hub is designed for desktop workflows at 1024 pixels and above. Widen this window to continue.</p>
-    </div>
+    </main>
   );
 }

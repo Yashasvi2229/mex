@@ -17,6 +17,10 @@ import type {
   SearchRequest,
   SearchResponse,
   SessionResponse,
+  SpecDetailResponse,
+  SpecListRequest,
+  SpecListResponse,
+  SpecSummaryProjection,
   StartJobRequest,
   TeamActivityEvent,
   TeamActivitySubjectInput,
@@ -28,6 +32,9 @@ import type {
   TeamOperationApplyResponse,
   TeamOperationPreviewRequest,
   TeamOperationPreviewResponse,
+  TeamWorkstream,
+  TeamWorkstreamListRequest,
+  TeamWorkstreamListResponse,
   WikiBacklinksRequest,
   WikiBacklinksResponse,
   WikiEntityDetailResponse,
@@ -74,6 +81,100 @@ const fixtureMembers: TeamMember[] = [
     active: false,
     sourcePath: `.mex/team/members/${fixtureMemberIds[2]}.md`,
     revision: revision("c"),
+  },
+];
+
+const fixtureWorkstreamIds = [
+  "ws_01K37WVM6H7JK8M9NPQRSTVVW0",
+  "ws_01K37R3X4A5BC6DE7FGHJKMNPQ",
+  "ws_01K36Z2A3B4C5D6E7FGHJKMNPQ",
+] as const;
+
+const fixtureWorkstreamActor = {
+  kind: "member" as const,
+  memberId: fixtureMemberIds[0],
+  displayName: "Ada Lovelace",
+};
+
+const fixtureWorkstreams: TeamWorkstream[] = [
+  {
+    schemaVersion: 1,
+    id: fixtureWorkstreamIds[0],
+    entityRevision: 4,
+    title: "Human-team memory",
+    goal: "Make repository memory reliable and useful for a collaborating engineering team.",
+    summary: "Identity and Activity are live; Workstreams are the next canonical planning layer.",
+    state: "active",
+    owners: [fixtureWorkstreamActor],
+    contributors: [{
+      kind: "member",
+      memberId: fixtureMemberIds[1],
+      displayName: "Grace Hopper",
+    }],
+    paths: ["packages/hub-web", "src/team"],
+    code: [],
+    topics: [],
+    components: [],
+    related: [],
+    blockers: [],
+    currentState: "Checkpoint C is merged and the D workbench is under review.",
+    nextMilestone: "Merge Workstreams and read-only Specs.",
+    createdBy: fixtureWorkstreamActor,
+    createdAt: timestamp(4_320),
+    updatedBy: fixtureWorkstreamActor,
+    updatedAt: timestamp(18),
+    sourcePath: `.mex/workstreams/${fixtureWorkstreamIds[0]}.md`,
+    revision: revision("4"),
+  },
+  {
+    schemaVersion: 1,
+    id: fixtureWorkstreamIds[1],
+    entityRevision: 2,
+    title: "Release evidence",
+    goal: "Keep every checkpoint merge backed by reproducible evidence.",
+    summary: "Performance confirmation and post-merge checks are recorded at the exact SHA.",
+    state: "blocked",
+    owners: [fixtureWorkstreamActor],
+    contributors: [],
+    paths: ["scripts/release-benchmark"],
+    code: [],
+    topics: [],
+    components: [],
+    related: [],
+    blockers: ["Pinned cross-platform evidence is collected only at release hardening."],
+    currentState: "Linux enforcement is active; the release matrix remains later scope.",
+    nextMilestone: "Run the full release matrix in Checkpoint I.",
+    createdBy: fixtureWorkstreamActor,
+    createdAt: timestamp(2_880),
+    updatedBy: fixtureWorkstreamActor,
+    updatedAt: timestamp(95),
+    sourcePath: `.mex/workstreams/${fixtureWorkstreamIds[1]}.md`,
+    revision: revision("5"),
+  },
+  {
+    schemaVersion: 1,
+    id: fixtureWorkstreamIds[2],
+    entityRevision: 3,
+    title: "Hub foundations",
+    goal: "Provide a bounded local operational view of the repository.",
+    summary: "The authenticated local Hub and its read-only foundations are complete.",
+    state: "done",
+    owners: [fixtureWorkstreamActor],
+    contributors: [],
+    paths: ["src/hub", "packages/hub-contracts"],
+    code: [],
+    topics: [],
+    components: [],
+    related: [],
+    blockers: [],
+    currentState: "Complete and retained as canonical history.",
+    nextMilestone: "Archive after the human-team release.",
+    createdBy: fixtureWorkstreamActor,
+    createdAt: timestamp(8_640),
+    updatedBy: fixtureWorkstreamActor,
+    updatedAt: timestamp(2_000),
+    sourcePath: `.mex/workstreams/${fixtureWorkstreamIds[2]}.md`,
+    revision: revision("6"),
   },
 ];
 
@@ -295,6 +396,8 @@ const capabilities: CapabilitiesResponse = {
     canonicalMutation: available,
     localSelection: available,
   },
+  workstreams: { read: available, canonicalMutation: available },
+  specs: { read: available },
   jobs: available,
   graph: { read: available, refresh: available, rebuild: available },
   wiki: {
@@ -320,7 +423,7 @@ const home: HomeResponse = {
   },
   actor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
   sections: {
-    workstreams: { availability: "unavailable", count: null, reason: "Workstreams wait for the real Wiki integration." },
+    workstreams: { availability: "available", count: fixtureWorkstreams.length },
     relays: { availability: "unavailable", count: null, reason: "Relay workflows are not part of this read-only slice." },
     inbox: { availability: "unavailable", count: null, reason: "Inbox workflows are not part of this read-only slice." },
     activity: { availability: "available", count: 4 },
@@ -525,6 +628,151 @@ function wikiBacklinks(id: string): WikiBacklinksResponse {
   };
 }
 
+const fixtureSpecIds = {
+  root: "mx_01K38WVM6H7JK8M9NPQRSTVVWX",
+  requirement: "mx_01K38R3X4A5BC6DE7FGHJKMNPQ",
+  criterion: "mx_01K38Z2A3B4C5D6E7FGHJKMNPQ",
+  constraint: "mx_01K38P2A3B4C5D6E7FGHJKMNPQ",
+} as const;
+
+const fixtureSpecSummaries: SpecSummaryProjection[] = [
+  {
+    schemaVersion: 1,
+    id: fixtureSpecIds.root,
+    kind: "spec",
+    title: "Human-team memory release",
+    summary: "Ship a Git-authoritative workflow for identity, Workstreams, reviewed knowledge, and release memory.",
+    lifecycleState: "in_flight",
+    groundingHealth: "fresh",
+    sourcePath: ".mex/wiki/specs/human-team-memory.md",
+    version: { semanticRevision: 5, contentHash: revision("a") },
+    topics: [],
+    sourceTypes: ["manual", "file"],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+  },
+  {
+    schemaVersion: 1,
+    id: fixtureSpecIds.requirement,
+    kind: "requirement",
+    title: "Canonical Workstream review",
+    summary: "Every Workstream mutation must preview and apply one exact revision-bound envelope.",
+    lifecycleState: "promoted",
+    groundingHealth: "fresh",
+    sourcePath: ".mex/wiki/specs/human-team-memory.md",
+    version: { semanticRevision: 2, contentHash: revision("b") },
+    topics: [],
+    sourceTypes: ["manual"],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+  },
+  {
+    schemaVersion: 1,
+    id: fixtureSpecIds.criterion,
+    kind: "acceptance_criterion",
+    title: "Stale previews never apply",
+    summary: "Editing a form after preview forces a new preview before apply.",
+    lifecycleState: "promoted",
+    groundingHealth: "unverified",
+    sourcePath: ".mex/wiki/specs/human-team-memory.md",
+    version: { semanticRevision: 1, contentHash: revision("c") },
+    topics: [],
+    sourceTypes: ["manual"],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+  },
+  {
+    schemaVersion: 1,
+    id: fixtureSpecIds.constraint,
+    kind: "constraint",
+    title: "No inferred satisfaction",
+    summary: "The Spec reader reports only explicit Wiki relationships and evidence.",
+    lifecycleState: "promoted",
+    groundingHealth: "unverified",
+    sourcePath: ".mex/wiki/specs/human-team-memory.md",
+    version: { semanticRevision: 1, contentHash: revision("d") },
+    topics: [],
+    sourceTypes: ["manual"],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+  },
+];
+
+const fixtureSpecIndex = {
+  state: "fresh" as const,
+  observedAt: timestamp(0),
+  indexedRevision: wikiRevision,
+  indexedAt: timestamp(61),
+  diagnostics: [],
+  diagnosticsTruncated: false,
+};
+
+function fixtureSpecDetail(id: string): SpecDetailResponse {
+  const spec = fixtureSpecSummaries.find((item) => item.id === id && item.kind === "spec");
+  if (spec === undefined) throw new Error("Fixture Spec not found.");
+  return {
+    availability: "ready",
+    index: fixtureSpecIndex,
+    detail: {
+      schemaVersion: 1,
+      spec,
+      body: "# Human-team memory release\n\nThis specification binds repository-owned team workflows to exact, reviewable evidence.\n",
+      bodyTruncated: false,
+      provenance: { kind: "human", id: "daksh", capturedAt: timestamp(4_320) },
+      sources: [{
+        type: "file",
+        ref: spec.sourcePath,
+        note: "Canonical specification source",
+        repository: "mex",
+        commit: "b46209e",
+        capturedAt: timestamp(61),
+      }],
+      sourcesTruncated: false,
+      groundings: [{
+        state: "fresh",
+        health: "fresh",
+        requestedNode: "TeamWorkflowPort",
+        resolvedNode: "TeamWorkflowPort",
+        fingerprint: revision("e"),
+        file: "src/team/contracts/workflow.ts",
+        commit: "b46209e",
+        verifiedAt: timestamp(61),
+        reason: null,
+        candidates: [],
+        candidatesTruncated: false,
+      }],
+      groundingsTruncated: false,
+      hierarchy: {
+        requirements: [fixtureSpecSummaries[1]!],
+        acceptanceCriteria: [fixtureSpecSummaries[2]!],
+        constraints: [fixtureSpecSummaries[3]!],
+        relations: [
+          {
+            type: "derived_from",
+            source: { id: fixtureSpecIds.requirement, kind: "requirement" },
+            target: { id: fixtureSpecIds.root, kind: "spec" },
+            note: null,
+          },
+          {
+            type: "verified_by",
+            source: { id: fixtureSpecIds.requirement, kind: "requirement" },
+            target: { id: fixtureSpecIds.criterion, kind: "acceptance_criterion" },
+            note: "The criterion records the explicit review invariant.",
+          },
+          {
+            type: "constrained_by",
+            source: { id: fixtureSpecIds.root, kind: "spec" },
+            target: { id: fixtureSpecIds.constraint, kind: "constraint" },
+            note: null,
+          },
+        ],
+        estimatedTokens: 360,
+      },
+      deterministicRevision: revision("f"),
+    },
+  };
+}
+
 const graphSymbols: GraphSymbol[] = [
   {
     id: "sym.createHubServer",
@@ -667,7 +915,7 @@ function codeWorkspace(id: string, request: CodeWorkspaceRequest): CodeWorkspace
   };
 }
 
-function fixtureOperationId(prefix: "event" | "member", sequence: number): string {
+function fixtureOperationId(prefix: "event" | "member" | "ws", sequence: number): string {
   const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
   return `${prefix}_01K37WVM6H7JK8M9NPQRSTVVW${alphabet[sequence % alphabet.length]}`;
 }
@@ -757,6 +1005,7 @@ function fixtureTimelineEvent(event: TeamActivityEvent): ActivityItem {
 class FixtureHubApi implements HubApi {
   readonly #jobs = structuredClone(jobs);
   readonly #members = structuredClone(fixtureMembers);
+  readonly #workstreams = structuredClone(fixtureWorkstreams);
   readonly #activityItems = structuredClone(activityItems);
   #selection: TeamCurrentActorResponse["selection"] = {
     memberId: fixtureMemberIds[0],
@@ -777,6 +1026,10 @@ class FixtureHubApi implements HubApi {
         : actor,
       sections: {
         ...home.sections,
+        workstreams: {
+          availability: "available" as const,
+          count: this.#workstreams.filter((item) => item.state !== "archived").length,
+        },
         activity: {
           availability: "available" as const,
           count: this.#activityItems.filter((item) => item.source === "activity").length,
@@ -810,6 +1063,32 @@ class FixtureHubApi implements HubApi {
   getCurrentActor(): Promise<TeamCurrentActorResponse> {
     return Promise.resolve(fixtureCurrentActor(this.#members, this.#selection));
   }
+  getWorkstreams(request: TeamWorkstreamListRequest): Promise<TeamWorkstreamListResponse> {
+    const filtered = this.#workstreams.filter((workstream) => (
+      (request.state === undefined || workstream.state === request.state)
+      && (request.includeArchived === true || workstream.state !== "archived")
+    ));
+    const parsedOffset = request.cursor?.match(/^fixture_workstreams_(\d+)$/)?.[1];
+    const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
+    const items = filtered.slice(offset, offset + request.limit);
+    const nextOffset = offset + items.length;
+    const nextCursor = nextOffset < filtered.length ? `fixture_workstreams_${nextOffset}` : null;
+    return Promise.resolve({
+      items: structuredClone(items),
+      nextCursor,
+      truncated: nextCursor !== null,
+      sourceTruncated: false,
+      deterministicRevision: revision("3"),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    });
+  }
+  getWorkstream(id: string): Promise<TeamWorkstream> {
+    const workstream = this.#workstreams.find((candidate) => candidate.id === id);
+    return workstream === undefined
+      ? Promise.reject(new Error("Fixture Workstream not found."))
+      : Promise.resolve(structuredClone(workstream));
+  }
   previewTeamOperation(
     request: TeamOperationPreviewRequest,
   ): Promise<TeamOperationPreviewResponse> {
@@ -822,23 +1101,41 @@ class FixtureHubApi implements HubApi {
         || request.action.kind === "member.select"
         ? request.action.memberId
         : null;
+    const workstreamId = request.action.kind === "workstream.create"
+      ? fixtureOperationId("ws", sequence)
+      : request.action.kind === "workstream.update" || request.action.kind === "workstream.archive"
+        ? request.action.workstreamId
+        : null;
     const currentMember = memberId === null
       ? null
       : this.#members.find((member) => member.id === memberId) ?? null;
+    const currentWorkstream = workstreamId === null
+      ? null
+      : this.#workstreams.find((workstream) => workstream.id === workstreamId) ?? null;
     const canonical = request.action.kind === "member.add"
       || request.action.kind === "member.update"
       || request.action.kind === "member.deactivate"
+      || request.action.kind === "workstream.create"
+      || request.action.kind === "workstream.update"
+      || request.action.kind === "workstream.archive"
       || request.action.kind === "activity.record";
     const sourcePath = request.action.kind === "activity.record"
       ? `.mex/events/activity/${timestamp(0).slice(0, 7)}/${eventId}.md`
+      : workstreamId !== null ? `.mex/workstreams/${workstreamId}.md`
       : memberId === null ? null : `.mex/team/members/${memberId}.md`;
-    const afterRevision = request.action.kind === "member.add" ? revision("e")
+    const afterRevision = request.action.kind === "member.add" || request.action.kind === "workstream.create"
+      ? revision("e")
       : request.action.kind === "member.update" || request.action.kind === "member.deactivate"
-        ? revision("f") : revision("9");
+        || request.action.kind === "workstream.update" || request.action.kind === "workstream.archive"
+        ? revision("f")
+        : revision("9");
     const createsArtifact = request.action.kind === "member.add"
+      || request.action.kind === "workstream.create"
       || request.action.kind === "activity.record";
     const diff = request.action.kind === "activity.record"
       ? `--- /dev/null\n+++ b/${sourcePath}\n+action: ${request.action.activity.action}\n`
+      : workstreamId !== null
+        ? `--- a/${sourcePath}\n+++ b/${sourcePath}\n+reviewed Workstream change\n`
       : `--- a/${sourcePath}\n+++ b/${sourcePath}\n+reviewed member change\n`;
     const changes: TeamOperationPreviewResponse["preview"]["changes"] = !canonical || sourcePath === null
       ? []
@@ -847,7 +1144,7 @@ class FixtureHubApi implements HubApi {
         : [{
           kind: "update",
           path: sourcePath,
-          beforeRevision: currentMember?.revision ?? revision("0"),
+          beforeRevision: currentWorkstream?.revision ?? currentMember?.revision ?? revision("0"),
           afterRevision,
           diff,
         }];
@@ -868,6 +1165,8 @@ class FixtureHubApi implements HubApi {
       ...(canonical ? [{ purpose: "activity" as const, id: eventId }] : []),
       ...(request.action.kind === "member.add" && memberId !== null
         ? [{ purpose: "member" as const, id: memberId }] : []),
+      ...(request.action.kind === "workstream.create" && workstreamId !== null
+        ? [{ purpose: "workstream" as const, id: workstreamId }] : []),
     ];
     return Promise.resolve({
       schemaVersion: 1,
@@ -903,8 +1202,10 @@ class FixtureHubApi implements HubApi {
   ): Promise<TeamOperationApplyResponse> {
     const { action } = envelope.request;
     const memberPurpose = envelope.receipt.purposeIds.find((item) => item.purpose === "member");
+    const workstreamPurpose = envelope.receipt.purposeIds.find((item) => item.purpose === "workstream");
     const eventPurpose = envelope.receipt.purposeIds.find((item) => item.purpose === "activity");
     let member: TeamMember | null = null;
+    let workstream: TeamWorkstream | null = null;
     if (action.kind === "member.add" && memberPurpose?.purpose === "member") {
       member = {
         schemaVersion: 1,
@@ -935,6 +1236,50 @@ class FixtureHubApi implements HubApi {
       };
     } else if (action.kind === "member.clear") {
       this.#selection = null;
+    } else if (action.kind === "workstream.create" && workstreamPurpose?.purpose === "workstream") {
+      workstream = {
+        schemaVersion: 1,
+        id: workstreamPurpose.id,
+        entityRevision: 1,
+        title: action.workstream.title,
+        goal: action.workstream.goal,
+        summary: action.workstream.summary,
+        state: "planned",
+        owners: action.workstream.owners,
+        contributors: action.workstream.contributors ?? [],
+        paths: action.workstream.paths ?? [],
+        code: action.workstream.code ?? [],
+        topics: action.workstream.topics ?? [],
+        components: action.workstream.components ?? [],
+        related: action.workstream.related ?? [],
+        blockers: [],
+        currentState: "Planned",
+        nextMilestone: action.workstream.nextMilestone,
+        createdBy: envelope.receipt.authority.actor,
+        createdAt: envelope.receipt.authority.occurredAt,
+        updatedBy: envelope.receipt.authority.actor,
+        updatedAt: envelope.receipt.authority.occurredAt,
+        sourcePath: `.mex/workstreams/${workstreamPurpose.id}.md`,
+        revision: envelope.preview.changes[0]?.afterRevision ?? revision("e"),
+      };
+      this.#workstreams.unshift(workstream);
+    } else if (action.kind === "workstream.update" || action.kind === "workstream.archive") {
+      const index = this.#workstreams.findIndex((candidate) => candidate.id === action.workstreamId);
+      const current = this.#workstreams[index];
+      if (current !== undefined) {
+        const patch = action.kind === "workstream.update"
+          ? action.patch
+          : { state: "archived" as const, blockers: [] };
+        workstream = {
+          ...current,
+          ...patch,
+          entityRevision: current.entityRevision + 1,
+          updatedBy: envelope.receipt.authority.actor,
+          updatedAt: envelope.receipt.authority.occurredAt,
+          revision: envelope.preview.changes[0]?.afterRevision ?? revision("f"),
+        };
+        this.#workstreams[index] = workstream;
+      }
     }
 
     let event: TeamActivityEvent | null = null;
@@ -948,9 +1293,15 @@ class FixtureHubApi implements HubApi {
       const eventAction = action.kind === "member.add" ? "member.added"
         : action.kind === "member.update" ? "member.updated"
           : action.kind === "member.deactivate" ? "member.deactivated"
+            : action.kind === "workstream.create" ? "workstream.created"
+              : action.kind === "workstream.update" ? "workstream.updated"
+                : action.kind === "workstream.archive" ? "workstream.archived"
             : direct?.action ?? "activity.recorded";
       const eventSubjects: TeamActivitySubjectInput[] = direct?.subjects ?? (
-        eventMember === null ? [] : [{
+        workstream !== null ? [{
+          kind: "entity",
+          entity: { id: workstream.id, kind: "workstream", title: workstream.title },
+        }] : eventMember === null ? [] : [{
           kind: "entity",
           entity: { id: eventMember.id, kind: "member", title: eventMember.displayName },
         }]
@@ -962,7 +1313,9 @@ class FixtureHubApi implements HubApi {
         actor: envelope.receipt.authority.actor,
         action: eventAction,
         subjects: eventSubjects,
-        workstream: direct?.workstream ?? null,
+        workstream: direct?.workstream ?? (workstream === null
+          ? null
+          : { id: workstream.id, kind: "workstream", title: workstream.title }),
         repoState: envelope.receipt.authority.repoState,
       };
       this.#activityItems.unshift(fixtureTimelineEvent(event));
@@ -975,6 +1328,7 @@ class FixtureHubApi implements HubApi {
       changes: envelope.preview.changes,
       localChanges: envelope.preview.localChanges,
       members: member === null ? [] : [member],
+      workstreams: workstream === null ? [] : [workstream],
       events: event === null ? [] : [event],
     });
   }
@@ -1007,6 +1361,39 @@ class FixtureHubApi implements HubApi {
   }
   search(request: SearchRequest) { return Promise.resolve(searchResponse(request)); }
   getCodeSymbol(id: string, request: CodeWorkspaceRequest) { return Promise.resolve(codeWorkspace(id, request)); }
+  listSpecs(request: SpecListRequest): Promise<SpecListResponse> {
+    const roots = fixtureSpecSummaries.filter((item) => (
+      item.kind === "spec"
+      && (request.includeArchived === true || item.lifecycleState !== "archived")
+      && (request.lifecycleStates === undefined || request.lifecycleStates.includes(item.lifecycleState))
+      && (request.groundingHealth === undefined || request.groundingHealth.includes(item.groundingHealth))
+      && (request.topics === undefined || request.topics.every((topic) => item.topics.includes(topic)))
+    ));
+    const parsedOffset = request.cursor?.match(/^fixture_specs_(\d+)$/)?.[1];
+    const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
+    const items = roots.slice(offset, offset + request.limit);
+    const nextOffset = offset + items.length;
+    const nextCursor = nextOffset < roots.length ? `fixture_specs_${nextOffset}` : null;
+    return Promise.resolve({
+      availability: "ready",
+      index: fixtureSpecIndex,
+      page: {
+        schemaVersion: 1,
+        items: structuredClone(items),
+        nextCursor,
+        truncated: nextCursor !== null,
+        estimatedTokens: 180 * items.length,
+        deterministicRevision: revision("f"),
+      },
+    });
+  }
+  getSpec(id: string): Promise<SpecDetailResponse> {
+    try {
+      return Promise.resolve(fixtureSpecDetail(id));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
   listWikiEntities(request: WikiEntityListRequest): Promise<WikiEntityListResponse> {
     const filtered = wikiEntities.filter((entity) => (
       (!request.kind || entity.kind === request.kind)

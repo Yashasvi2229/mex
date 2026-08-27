@@ -8,7 +8,11 @@ import type {
   TeamMember,
   TeamMemberListRequest,
   TeamPage,
+  TeamWorkstreamCommand,
+  TeamWorkstreamListRequest,
+  TeamWorkstreamPreviewEnvelope,
   TeamWorkflowResult,
+  Workstream,
 } from "../contracts/workflow.js";
 
 /** Small structural seam used by command tests and by later root registration. */
@@ -33,6 +37,24 @@ export type TeamIdentityActivityCliServiceFactory<
 > = () =>
   | TeamIdentityActivityCliService<TWikiPayload>
   | Promise<TeamIdentityActivityCliService<TWikiPayload>>;
+
+/** Checkpoint D's internal Workstream application seam. */
+export interface TeamWorkstreamCliService<
+  TWikiPayload extends JsonValue = JsonValue,
+> {
+  getWorkstream(id: string): Promise<Workstream | null>;
+  listWorkstreams(request?: TeamWorkstreamListRequest): Promise<TeamPage<Workstream>>;
+  previewWorkstream(command: TeamWorkstreamCommand): Promise<TeamWorkstreamPreviewEnvelope>;
+  applyWorkstream(
+    envelope: TeamWorkstreamPreviewEnvelope,
+  ): Promise<TeamWorkflowResult<TWikiPayload>>;
+}
+
+export type TeamWorkstreamCliServiceFactory<
+  TWikiPayload extends JsonValue = JsonValue,
+> = () =>
+  | TeamWorkstreamCliService<TWikiPayload>
+  | Promise<TeamWorkstreamCliService<TWikiPayload>>;
 
 /**
  * Make the integration dependency explicit without importing the concrete

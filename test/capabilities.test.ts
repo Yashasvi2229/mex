@@ -112,6 +112,8 @@ describe("mex capabilities manifest", () => {
           entityKind: 64,
           entityTitle: 512,
           activityAction: 128,
+          workstreamTitle: 512,
+          workstreamText: 8_192,
           codeIdentifierOrFingerprint: 1_024,
           repositoryPath: 4_096,
         },
@@ -152,7 +154,20 @@ describe("mex capabilities manifest", () => {
       "member.select",
       "member.clear",
       "activity.record",
+      "workstream.create",
+      "workstream.update",
+      "workstream.archive",
     ]);
+    const createExample = structuredClone(
+      contract.requestFile.examples.find((entry) => entry.command === "workstream.create")!.request,
+    ) as any;
+    createExample.action.workstream.owners = [{ kind: "git", name: null, email: null }];
+    expect(validate(createExample)).toBe(false);
+    const updateExample = structuredClone(
+      contract.requestFile.examples.find((entry) => entry.command === "workstream.update")!.request,
+    ) as any;
+    updateExample.action.patch = { state: "archived" };
+    expect(validate(updateExample)).toBe(false);
 
     const teamPreviewIds = [
       "member.add.preview",
@@ -160,6 +175,9 @@ describe("mex capabilities manifest", () => {
       "member.deactivate.preview",
       "member.select.preview",
       "activity.record.preview",
+      "workstream.create.preview",
+      "workstream.update.preview",
+      "workstream.archive.preview",
     ];
     const teamApplyIds = teamPreviewIds.map((id) => id.replace(/\.preview$/u, ".apply"));
     for (const descriptor of envelope.data.commands.preview.filter((entry) => teamPreviewIds.includes(entry.id))) {
@@ -168,8 +186,8 @@ describe("mex capabilities manifest", () => {
     for (const descriptor of envelope.data.commands.apply.filter((entry) => teamApplyIds.includes(entry.id))) {
       expect(descriptor.inputContract).toMatch(/^team\.identity_activity\.preview-envelope\.v1#/u);
     }
-    expect(envelope.data.commands.preview.filter((entry) => teamPreviewIds.includes(entry.id))).toHaveLength(5);
-    expect(envelope.data.commands.apply.filter((entry) => teamApplyIds.includes(entry.id))).toHaveLength(5);
+    expect(envelope.data.commands.preview.filter((entry) => teamPreviewIds.includes(entry.id))).toHaveLength(8);
+    expect(envelope.data.commands.apply.filter((entry) => teamApplyIds.includes(entry.id))).toHaveLength(8);
     expect(Buffer.byteLength(JSON.stringify(envelope), "utf8")).toBeLessThanOrEqual(CAPABILITIES_MAX_BYTES);
   });
 
@@ -497,13 +515,15 @@ describe("mex capabilities manifest", () => {
     expect(envelope.data.capabilities.map((entry) => entry.id)).toEqual([
       "project_hub",
       "team_identity",
+      "team_workstreams",
       "activity_read",
       "activity_record",
+      "spec_read",
       "code_graph",
       "wiki",
     ]);
     const serializedCommands = JSON.stringify(envelope.data.commands);
-    expect(serializedCommands).not.toMatch(/workstream|inbox|relay|playbook|catch[-_ ]?up/i);
+    expect(serializedCommands).not.toMatch(/inbox|relay|playbook|catch[-_ ]?up/i);
     expect(serializedCommands).not.toMatch(/activity\.(?:create|update|delete)/i);
     expect(serializedCommands).not.toMatch(/wiki\.(?:build|prepare|propose)/i);
   });
@@ -514,9 +534,13 @@ describe("mex capabilities manifest", () => {
     expect(isTelemetryExemptCommand("capabilities", "mex")).toBe(true);
     expect(isTelemetryExemptCommand("list", "member")).toBe(true);
     expect(isTelemetryExemptCommand("record", "activity")).toBe(true);
+    expect(isTelemetryExemptCommand("list", "workstream")).toBe(true);
+    expect(isTelemetryExemptCommand("list", "spec")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("capabilities")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("member")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("activity")).toBe(true);
+    expect(isFirstRunNoticeExemptCommand("workstream")).toBe(true);
+    expect(isFirstRunNoticeExemptCommand("spec")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("check")).toBe(false);
   });
 });

@@ -190,8 +190,8 @@ describe("Read-only Knowledge browse", () => {
     expect(await screen.findByRole("heading", { name: "Knowledge unavailable" })).toBeVisible();
     expect(screen.getByText("Wiki migration must be reviewed manually.")).toBeVisible();
 
-    renderRoute("/workstreams");
-    expect(await screen.findByRole("heading", { name: "Workstreams" })).toBeVisible();
+    renderRoute("/playbooks");
+    expect(await screen.findByRole("heading", { name: "Playbooks" })).toBeVisible();
     expect(screen.getByText("This read-only checkpoint does not mount this product surface.")).toBeVisible();
   });
 });

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { runLog, runTimeline } from "../src/events.js";
+import { createRepositoryGraphPort } from "../src/graph/application-adapter.js";
 import type { MexConfig } from "../src/types.js";
 
 vi.mock("../src/events.js", () => ({
@@ -408,6 +409,132 @@ describe("built CLI main-module guard", () => {
       expect(readFileSync(operationPath, "utf8")).toBe(operationBytes);
       expect(readdirSync(mexPath).sort()).toEqual(mexEntriesBefore);
       expect(readdirSync(userHome).sort()).toEqual(homeEntriesBefore);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  it("keeps advertised grounded Spec reads available when only Team config attestation changes", async () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-spec-cli-config-drift-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-spec-cli-config-home-"));
+    try {
+      const mexPath = join(fixture, ".mex");
+      mkdirSync(join(mexPath, "context"), { recursive: true });
+      mkdirSync(join(fixture, "src"), { recursive: true });
+      writeFileSync(join(fixture, ".gitignore"), ".mex/*.db*\n.mex/local/\n");
+      writeFileSync(
+        join(fixture, "src", "release-spec.ts"),
+        "export function releaseSpecTarget(): string { return 'ready'; }\n",
+      );
+      writeFileSync(join(mexPath, "ROUTER.md"), "# Router\n");
+      const configPath = join(mexPath, "config.json");
+      writeFileSync(configPath, `${JSON.stringify({
+        scaffold_id: "scaffold-spec-config-drift-001",
+        scaffold_name: "Spec fixture",
+      })}\n`);
+      const specId = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
+      writeFileSync(join(mexPath, "context", "release-spec.md"), `<!-- mex:entity
+id: ${specId}
+type: spec
+status: promoted
+revision: 1
+title: Release Spec
+-->
+# Release Spec
+
+Canonical read-only release requirements.
+`);
+      execFileSync("git", ["init", "--quiet"], { cwd: fixture });
+      execFileSync("git", ["config", "user.email", "spec-cli@example.invalid"], { cwd: fixture });
+      execFileSync("git", ["config", "user.name", "Spec CLI Contract"], { cwd: fixture });
+      execFileSync("git", ["add", ".gitignore", ".mex", "src"], { cwd: fixture });
+      execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: fixture });
+
+      const graph = createRepositoryGraphPort(fixture);
+      await graph.rebuild();
+      const symbol = (await graph.searchNodes({ query: "releaseSpecTarget", limit: 10 }))
+        .items.find((item) => item.name === "releaseSpecTarget");
+      if (symbol === undefined) throw new Error("Expected the Spec CLI fixture symbol.");
+      const grounding = await graph.withFreshGroundingSnapshot((snapshot) => ({
+        node: snapshot.getNode(symbol.ref.symbolId),
+        fingerprint: snapshot.getFingerprint(symbol.ref.symbolId),
+      }));
+      if (grounding.node == null || grounding.fingerprint == null) {
+        throw new Error("Expected exact grounding facts for the Spec CLI fixture.");
+      }
+      writeFileSync(join(mexPath, "context", "release-spec.md"), `<!-- mex:entity
+id: ${specId}
+type: spec
+status: promoted
+revision: 1
+title: Release Spec
+grounds_to:
+  - node: ${JSON.stringify(symbol.ref.symbolId)}
+    fingerprint: ${JSON.stringify(grounding.fingerprint)}
+    bodyHash: ${JSON.stringify(grounding.node.bodyHash)}
+    reason: Exact Spec CLI grounding.
+-->
+# Release Spec
+
+Canonical read-only release requirements.
+`);
+      execFileSync("git", ["add", ".mex/context/release-spec.md"], { cwd: fixture });
+      execFileSync("git", ["commit", "--quiet", "-m", "ground spec fixture"], { cwd: fixture });
+      await graph.rebuild();
+
+      const rebuilt = spawnSync(
+        process.execPath,
+        [cliPath, "wiki", "rebuild-index", "--json"],
+        {
+          cwd: fixture,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "0", NO_COLOR: "1" },
+        },
+      );
+      expect(rebuilt.status, rebuilt.stderr).toBe(0);
+      writeFileSync(configPath, `${JSON.stringify({
+        scaffold_id: "scaffold-spec-config-drift-001",
+        scaffold_name: "Locally renamed Spec fixture",
+      })}\n`);
+
+      const capabilityResult = spawnSync(
+        process.execPath,
+        [cliPath, "capabilities", "--json"],
+        {
+          cwd: fixture,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "0", NO_COLOR: "1" },
+        },
+      );
+      expect(capabilityResult.status, capabilityResult.stderr).toBe(0);
+      const capabilities = JSON.parse(capabilityResult.stdout) as {
+        data: { capabilities: Array<{ id: string; availability: string }> };
+      };
+      expect(capabilities.data.capabilities.find((entry) => entry.id === "spec_read"))
+        .toMatchObject({ availability: "available" });
+      expect(capabilities.data.capabilities.find((entry) => entry.id === "team_workstreams"))
+        .toMatchObject({ availability: "unavailable" });
+
+      const listed = spawnSync(
+        process.execPath,
+        [cliPath, "spec", "list", "--grounding", "fresh", "--json"],
+        {
+          cwd: fixture,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "0", NO_COLOR: "1" },
+        },
+      );
+      expect(listed.status, listed.stderr).toBe(0);
+      expect(JSON.parse(listed.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "spec.list",
+        ok: true,
+        data: {
+          availability: "ready",
+          page: { items: [{ id: specId, groundingHealth: "fresh" }] },
+        },
+      });
     } finally {
       rmSync(fixture, { recursive: true, force: true });
       rmSync(userHome, { recursive: true, force: true });

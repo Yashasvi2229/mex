@@ -45,13 +45,14 @@ describe("release benchmark contract", () => {
     expect(budgets.schemaVersion).toBe(1);
     expect(budgets.samples).toEqual({ timing: 10, idleMemory: 5 });
     expect(RELEASE_FIXTURE_PROFILES).toEqual({
-      small: { sourceFiles: 4, wikiEntities: 4, activityEvents: 4 },
-      medium: { sourceFiles: 16, wikiEntities: 16, activityEvents: 16 },
-      large: { sourceFiles: 48, wikiEntities: 48, activityEvents: 48 },
+      small: { sourceFiles: 4, wikiEntities: 4, workstreams: 1, activityEvents: 4 },
+      medium: { sourceFiles: 16, wikiEntities: 16, workstreams: 1, activityEvents: 16 },
+      large: { sourceFiles: 48, wikiEntities: 48, workstreams: 1, activityEvents: 48 },
     });
     expect(Object.keys(budgets.assets.routes)).toEqual(RELEASE_ROUTE_KEYS);
     expect(Object.keys(releaseWorkbenchPaths({
       knowledgeEntityId: "mx_knowledge",
+      specEntityId: "mx_spec",
       codeSymbolId: "symbol/release",
     }))).toEqual(RELEASE_ROUTE_KEYS);
     const appRoutes = readFileSync(
@@ -381,7 +382,7 @@ describe("release benchmark contract", () => {
     }
 
     const exactMetrics = committedConfirmableRuntimeMetrics();
-    expect(exactMetrics).toHaveLength(93);
+    expect(exactMetrics).toHaveLength(96);
     for (const metric of exactMetrics) {
       expect(runtimeMaterialityPolicy(metric)).not.toBeNull();
       const violation = runtimeViolation(metric);

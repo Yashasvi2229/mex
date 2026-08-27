@@ -36,6 +36,15 @@ export type {
   SearchResult,
   SearchResponse,
   SourceSearchResult,
+  SpecDetailProjection,
+  SpecDetailResponse,
+  SpecEntityKind,
+  SpecHierarchyRelation,
+  SpecIndexProjection,
+  SpecListPageProjection,
+  SpecListRequest,
+  SpecListResponse,
+  SpecSummaryProjection,
   SymbolSearchResult,
   SessionResponse,
   TeamActivityEvent,
@@ -50,6 +59,10 @@ export type {
   TeamOperationApplyResponse,
   TeamOperationPreviewRequest,
   TeamOperationPreviewResponse,
+  TeamWorkstream,
+  TeamWorkstreamListRequest,
+  TeamWorkstreamListResponse,
+  TeamWorkstreamState,
   WikiSearchResult,
   WikiBacklinksRequest,
   WikiBacklinksResponse,
@@ -71,5 +84,5 @@ export type {
   WikiSource,
 } from "@mex/hub-contracts";
 
-export type CapabilityName = "graph" | "wiki" | "jobs" | "activity" | "members" | "team";
+export type CapabilityName = "graph" | "wiki" | "jobs" | "activity" | "members" | "workstreams" | "specs" | "team";
 export type Tone = "neutral" | "info" | "success" | "warning" | "danger";

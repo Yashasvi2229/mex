@@ -34,7 +34,16 @@ export type TeamCliCommandName =
   | "activity"
   | "activity.list"
   | "activity.show"
-  | "activity.record";
+  | "activity.record"
+  | "workstream"
+  | "workstream.list"
+  | "workstream.show"
+  | "workstream.create"
+  | "workstream.update"
+  | "workstream.archive"
+  | "spec"
+  | "spec.list"
+  | "spec.show";
 
 /**
  * One bounded machine envelope for Team reads, previews, and applies.
@@ -139,12 +148,18 @@ export function invalidRequestProblem(detail: string): ProblemDetails {
   };
 }
 
-export function notFoundProblem(label: "member" | "activity", id: string): ProblemDetails {
+export function notFoundProblem(
+  label: "member" | "activity" | "workstream" | "spec",
+  id: string,
+): ProblemDetails {
+  const display = label === "activity"
+    ? "Activity event"
+    : `${label[0]!.toUpperCase()}${label.slice(1)}`;
   return {
-    title: `${label === "member" ? "Member" : "Activity"} not found`,
+    title: `${display} not found`,
     status: 404,
     code: "NOT_FOUND",
-    detail: `${label === "member" ? "Member" : "Activity event"} ${id} does not exist.`,
+    detail: `${display} ${id} does not exist.`,
   };
 }
 

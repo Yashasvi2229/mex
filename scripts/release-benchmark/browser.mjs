@@ -13,11 +13,16 @@ export async function measureWorkbenchHeap({
   auth,
   samples,
   knowledgeEntityId,
+  specEntityId,
   codeSymbolId,
 }) {
   const { chromium } = await import("@playwright/test");
   const browser = await chromium.launch({ headless: true });
-  const workbenchPaths = releaseWorkbenchPaths({ knowledgeEntityId, codeSymbolId });
+  const workbenchPaths = releaseWorkbenchPaths({
+    knowledgeEntityId,
+    specEntityId,
+    codeSymbolId,
+  });
   const measurements = Object.fromEntries(
     Object.keys(workbenchPaths).map((route) => [route, []]),
   );
@@ -46,6 +51,7 @@ export async function measureWorkbenchHeap({
           if (!response?.ok()) {
             throw new Error(`${route} returned HTTP ${String(response?.status() ?? "none")}.`);
           }
+          await assertCheckpointDRouteReady(page, route);
           // Give React one task turn to commit route content after network idle.
           await page.waitForTimeout(50);
           if (outbound.size > 0) {
@@ -74,6 +80,19 @@ export async function measureWorkbenchHeap({
     outboundRequestCount: 0,
     observedLoopbackRequests: [...observedRequests].sort().slice(0, 100),
   };
+}
+
+async function assertCheckpointDRouteReady(page, route) {
+  if (route === "workstreams") {
+    await page.getByRole("heading", { name: "Release benchmark Workstream", exact: true })
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+  }
+  if (route === "specs" || route === "specsDetail") {
+    await page.getByRole("heading", { name: "Release benchmark knowledge 0000", exact: true })
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    await page.getByText("Release benchmark knowledge 0001", { exact: true })
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+  }
 }
 
 async function addApiCookie(context, origin, serializedCookie) {

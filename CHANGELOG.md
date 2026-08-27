@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Bounded canonical Workstream CLI and private Hub surfaces with signed
+  preview/apply for create, update, and one-way archive; each successful
+  canonical mutation emits exactly one immutable Activity event.
+- Fresh-index, read-only Spec CLI and Hub views over explicit Wiki hierarchy,
+  provenance, sources, and grounding without implicit index maintenance.
+
 ## [0.7.2] - 2026-08-20
 
 ### Added

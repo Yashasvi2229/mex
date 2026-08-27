@@ -9,11 +9,15 @@ import {
   JobPageResponseSchema,
   SearchResponseSchema,
   SessionResponseSchema,
+  SpecDetailResponseSchema,
+  SpecListResponseSchema,
   TeamCurrentActorResponseSchema,
   TeamMemberListResponseSchema,
   TeamMemberSchema,
   TeamOperationApplyResponseSchema,
   TeamOperationPreviewResponseSchema,
+  TeamWorkstreamListResponseSchema,
+  TeamWorkstreamSchema,
   WikiBacklinksResponseSchema,
   WikiEntityDetailResponseSchema,
   WikiEntityListResponseSchema,
@@ -25,7 +29,7 @@ import { createFixtureApi } from "./fixture-api";
 describe("development-only populated fixture", () => {
   it("stays inside every shared wire contract", async () => {
     const api = createFixtureApi();
-    const [session, capabilities, home, activity, search, code, health, jobs, entities, detail, relations, backlinks, codeKnowledge] = await Promise.all([
+    const [session, capabilities, home, activity, search, code, health, jobs, entities, detail, relations, backlinks, codeKnowledge, workstreams, specs] = await Promise.all([
       api.getSession(),
       api.getCapabilities(),
       api.getHome(),
@@ -39,6 +43,8 @@ describe("development-only populated fixture", () => {
       api.getWikiRelations("mx_01K36WVM6H7JK8M9NPQRSTVVWX", { direction: "both", limit: 25 }),
       api.getWikiBacklinks("mx_01K36WVM6H7JK8M9NPQRSTVVWX", { limit: 25 }),
       api.getCodeKnowledge("sym.createHubServer", { limit: 25 }),
+      api.getWorkstreams({ limit: 25 }),
+      api.listSpecs({ limit: 25 }),
     ]);
 
     expect(SessionResponseSchema.safeParse(session).success).toBe(true);
@@ -61,6 +67,14 @@ describe("development-only populated fixture", () => {
     expect(WikiRelationsResponseSchema.safeParse(relations).success).toBe(true);
     expect(WikiBacklinksResponseSchema.safeParse(backlinks).success).toBe(true);
     expect(CodeKnowledgeResponseSchema.safeParse(codeKnowledge).success).toBe(true);
+    expect(TeamWorkstreamListResponseSchema.safeParse(workstreams).success).toBe(true);
+    expect(TeamWorkstreamSchema.safeParse(workstreams.items[0]).success).toBe(true);
+    expect(SpecListResponseSchema.safeParse(specs).success).toBe(true);
+    expect(specs.availability).toBe("ready");
+    if (specs.availability !== "ready") throw new Error("Fixture Spec list must be ready.");
+    const specDetail = await api.getSpec(specs.page.items[0]!.id);
+    expect(SpecDetailResponseSchema.safeParse(specDetail).success).toBe(true);
+    expect(specDetail.availability).toBe("ready");
 
     const members = await api.getMembers({ limit: 25 });
     const member = await api.getMember(members.items[0]!.id);
@@ -87,6 +101,27 @@ describe("development-only populated fixture", () => {
     expect(TeamOperationPreviewResponseSchema.safeParse(preview).success).toBe(true);
     expect(TeamOperationApplyResponseSchema.safeParse(applied).success).toBe(true);
     expect(applied.events).toEqual([]);
+    expect(applied.workstreams).toEqual([]);
     expect((await api.getCurrentActor()).selection?.memberId).toBe(members.items[1]!.id);
+
+    const workstreamPreview = await api.previewTeamOperation({
+      operationId: "fixture_workstream_create_contract",
+      action: {
+        kind: "workstream.create",
+        workstream: {
+          title: "Spec review",
+          goal: "Keep hierarchy explicit.",
+          summary: "Use the dedicated fresh-index reader.",
+          owners: [currentActor.actor],
+          nextMilestone: "Review the Hub surface.",
+        },
+      },
+      expectedRevisions: [],
+    });
+    const workstreamApplied = await api.applyTeamOperation(workstreamPreview);
+    expect(TeamOperationPreviewResponseSchema.safeParse(workstreamPreview).success).toBe(true);
+    expect(TeamOperationApplyResponseSchema.safeParse(workstreamApplied).success).toBe(true);
+    expect(workstreamApplied.workstreams).toHaveLength(1);
+    expect(workstreamApplied.events).toHaveLength(1);
   });
 });

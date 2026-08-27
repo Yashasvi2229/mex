@@ -15,10 +15,14 @@ import { join, relative } from "node:path";
 import {
   ActivityResponseSchema,
   HubCapabilitiesSchema,
+  SpecDetailResponseSchema,
+  SpecListResponseSchema,
   TeamCurrentActorResponseSchema,
   TeamMemberListResponseSchema,
   TeamOperationApplyResponseSchema,
   TeamOperationPreviewResponseSchema,
+  TeamWorkstreamListResponseSchema,
+  TeamWorkstreamSchema,
 } from "@mex/hub-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHubApp } from "../src/hub/app.js";
@@ -30,6 +34,10 @@ import {
 } from "../src/hub/services.js";
 import { TEAM_RECEIPT_SIGNER_RELATIVE_PATH } from "../src/team/local-state/receipt-signer.js";
 import { createRepositoryTeamWorkflowPort } from "../src/team/workflow/repository-team-workflow-port.js";
+import type { SpecReadService } from "../src/team/specs/service.js";
+import { createSpecReadService } from "../src/team/specs/service.js";
+import { createRepositoryWikiPort } from "../src/wiki/application-adapter.js";
+import { rebuildWikiIndex } from "../src/wiki/index/rebuild.js";
 
 const ORIGIN = "http://127.0.0.1:43147";
 const HOST = "127.0.0.1:43147";
@@ -232,6 +240,117 @@ describe("real Project Hub Team identity integration", () => {
     expect(adapters.wikiCalls).toHaveBeenCalledTimes(0);
   });
 
+  it("serves canonical Workstreams and read-only Specs without Graph or Wiki maintenance", async () => {
+    const root = prepareProject();
+    const specId = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
+    const requirementId = "mx_01BX5ZZKBKACTAV9WEVGEMMVRZ";
+    write(root, ".mex/specs/release.md", `<!-- mex:entity
+id: ${specId}
+type: spec
+status: promoted
+revision: 1
+title: Human-team release
+-->
+# Human-team release
+
+The reviewed release is coordinated through canonical memory.
+
+<!-- mex:entity
+id: ${requirementId}
+type: requirement
+status: promoted
+revision: 1
+title: Workstreams are explicit
+relations:
+  - type: derived_from
+    target: ${specId}
+-->
+## Workstreams are explicit
+
+Every active release has one bounded Workstream.
+`);
+    git(root, "add", ".mex/specs/release.md");
+    git(root, "commit", "-qm", "fixture: add release Spec");
+    rmSync(join(root, ".mex/wiki.db"), { force: true });
+    rebuildWikiIndex({ scaffoldRoot: join(root, ".mex") });
+
+    const team = await createRepositoryTeamWorkflowPort(root);
+    team.initializeIdentityActivitySigner();
+    const adapters = unusedIndexAdapters();
+    const specs = createSpecReadService(createRepositoryWikiPort(root));
+    const hub = await createHarness(root, team, adapters, specs);
+
+    const beforeReads = snapshotIndexAndGitInternals(root);
+    const specList = SpecListResponseSchema.parse(
+      await (await hub.get("/api/v1/specs?limit=10")).json(),
+    );
+    expect(specList).toMatchObject({
+      availability: "ready",
+      page: { items: [{ id: specId, kind: "spec" }] },
+    });
+    const specDetail = SpecDetailResponseSchema.parse(
+      await (await hub.get(`/api/v1/specs/${specId}`)).json(),
+    );
+    expect(specDetail).toMatchObject({
+      availability: "ready",
+      detail: {
+        spec: { id: specId, kind: "spec" },
+        hierarchy: {
+          requirements: [{ id: requirementId, kind: "requirement" }],
+          relations: [{
+            type: "derived_from",
+            source: { id: requirementId },
+            target: { id: specId },
+          }],
+        },
+      },
+    });
+    expect(snapshotIndexAndGitInternals(root)).toEqual(beforeReads);
+
+    const createPreview = TeamOperationPreviewResponseSchema.parse(
+      await (await hub.post("/api/v1/team/operations/preview", {
+        operationId: "hub_workstream_create",
+        action: {
+          kind: "workstream.create",
+          workstream: {
+            title: "Checkpoint D",
+            goal: "Ship Workstreams and read-only Specs",
+            summary: "Canonical checkpoint coordination.",
+            owners: [{ kind: "unknown" }],
+            nextMilestone: "Finish independent review",
+          },
+        },
+        expectedRevisions: [],
+      })).json(),
+    );
+    expect(createPreview.receipt.purposeIds.map((entry) => entry.purpose)).toEqual([
+      "activity",
+      "workstream",
+    ]);
+    const applied = TeamOperationApplyResponseSchema.parse(
+      await (await hub.post("/api/v1/team/operations/apply", createPreview)).json(),
+    );
+    expect(applied).toMatchObject({
+      members: [],
+      workstreams: [{ title: "Checkpoint D", state: "planned" }],
+      events: [{ action: "workstream.created" }],
+    });
+    expect(applied.events).toHaveLength(1);
+    const created = applied.workstreams[0]!;
+    expect(TeamWorkstreamSchema.parse(
+      await (await hub.get(`/api/v1/workstreams/${created.id}`)).json(),
+    )).toEqual(created);
+    expect(TeamWorkstreamListResponseSchema.parse(
+      await (await hub.get("/api/v1/workstreams?state=planned&limit=10")).json(),
+    ).items).toEqual([created]);
+    expect(await (await hub.get("/api/v1/home")).json()).toMatchObject({
+      sections: { workstreams: { availability: "available", count: 1 } },
+    });
+    expect(snapshotIndexAndGitInternals(root)).toEqual(beforeReads);
+    expect(adapters.graphCalls).not.toHaveBeenCalled();
+    expect(adapters.wikiCalls).not.toHaveBeenCalled();
+  });
+
   it("rejects an untracked working scaffold identity before Hub composition", async () => {
     const root = prepareProject();
     const config = join(root, ".mex", "config.json");
@@ -249,12 +368,15 @@ async function createHarness(
   root: string,
   team: TeamService,
   adapters: ReturnType<typeof unusedIndexAdapters>,
+  specs?: SpecReadService,
 ) {
   const services = createLocalHubReadServices({
     projectRoot: root,
     scaffoldId: "hub-team-identity",
     jobs: { list: () => ({ items: [] }) },
     team,
+    workstreams: team,
+    ...(specs === undefined ? {} : { specs }),
     graph: adapters.graph,
     wiki: adapters.wiki,
   });

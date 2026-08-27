@@ -1069,6 +1069,72 @@ New bounded Wiki content.
     }), "INVALID_REQUEST");
   });
 
+  it("projects entity detail and neighborhood grounding under one exact Graph lease", async () => {
+    const target = project(true);
+    const node = "function:1111111111111111";
+    const fingerprint = "mh:4:11111111";
+    writeFileSync(
+      target.firstPath,
+      readFileSync(target.firstPath, "utf8").replace(
+        "revision: 1\nrelations:",
+        `revision: 1\ngrounds_to:\n  - node: ${node}\n    fingerprint: ${fingerprint}\nrelations:`,
+      ),
+      "utf8",
+    );
+    await createRepositoryWikiPort(target.root).rebuildIndex();
+
+    let leases = 0;
+    const port = createRepositoryWikiPort(target.root, {
+      groundingBridge: {
+        async withFreshGroundingSnapshot<T>(callback: (snapshot: never) => T | Promise<T>): Promise<T> {
+          const lease = ++leases;
+          return callback({
+            revision: `graph-composite-${lease}`,
+            getNode: (id: string) => id === node
+              ? { id: node, bodyHash: "b".repeat(64), filePath: "src/queue.ts", startLine: 1, endLine: 5 }
+              : null,
+            getFingerprint: (id: string) => id === node
+              ? (lease === 1 ? fingerprint : "mh:4:22222222")
+              : null,
+            reconcile: () => null,
+            getBaselineSource: () => null,
+          } as never);
+        },
+      },
+    });
+    const request = {
+      entityId: ENTITY,
+      direction: "both" as const,
+      depth: 1,
+      maxEntities: 10,
+      maxTokens: 4_000,
+      includeArchived: true,
+    };
+
+    const first = await port.getEntityNeighborhood(request);
+    expect(first).not.toBeNull();
+    expect(leases).toBe(1);
+    expect(first?.entity).toMatchObject({
+      groundingHealth: "fresh",
+      groundings: [{ health: "fresh", state: "fresh" }],
+    });
+    expect(first?.neighborhood.root.groundingHealth).toBe("fresh");
+    expect(first?.neighborhood.entities.find((entity) => entity.ref.id === TARGET)?.groundingHealth)
+      .toBe("fresh");
+
+    const second = await port.getEntityNeighborhood(request);
+    expect(second).not.toBeNull();
+    expect(leases).toBe(2);
+    expect(second?.entity).toMatchObject({
+      groundingHealth: "changed",
+      groundings: [{ health: "changed", state: "stale" }],
+    });
+    expect(second?.neighborhood.root.groundingHealth).toBe("changed");
+    expect(second?.neighborhood.entities.find((entity) => entity.ref.id === TARGET)?.groundingHealth)
+      .toBe("changed");
+    expect(second?.projectionRevision).not.toBe(first?.projectionRevision);
+  });
+
   it("degrades current grounding reads to unverified when the fresh Graph bridge is unavailable", async () => {
     const target = project(true);
     let bridgeCalls = 0;

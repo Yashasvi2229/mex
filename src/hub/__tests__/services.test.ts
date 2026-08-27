@@ -2,17 +2,23 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HUB_LIMITS } from "@mex/hub-contracts";
+import {
+  HUB_LIMITS,
+  SpecDetailResponseSchema,
+  SpecListResponseSchema,
+} from "@mex/hub-contracts";
 import type { GitPort } from "../../team/contracts/git.js";
-import type { Revision } from "../../team/contracts/shared.js";
+import type { Diagnostic, Revision } from "../../team/contracts/shared.js";
 import type {
   TeamMember,
   TeamMemberListRequest,
   TeamPage,
+  Workstream,
 } from "../../team/contracts/workflow.js";
 import {
   createLocalHubReadServices as createLocalHubReadServicesBase,
   type HubTeamIdentityActivityService,
+  type HubTeamWorkstreamService,
   type HubGraphReadService,
   type HubWikiReadService,
   type LocalHubReadServicesOptions,
@@ -22,6 +28,10 @@ import type { WikiIndexStatus } from "../../team/contracts/wiki.js";
 import { createRepositoryTeamWorkflowPortWithDependencies } from "../../team/workflow/repository-team-workflow-port.js";
 import { ActivityRepository } from "../../team/activity/repository.js";
 import { MemberRepository } from "../../team/identity/member-repository.js";
+import type {
+  SpecReadService,
+  SpecSummaryProjection,
+} from "../../team/specs/service.js";
 
 const EVENT = "event_01ARZ3NDEKTSV4RRFFQ69G5FAB";
 const MEMBER = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -58,7 +68,7 @@ function wikiWithStatus(state: WikiIndexStatus["state"]): HubWikiReadService {
         ? null
         : "f".repeat(64),
       indexedAt: state === "missing" ? null : NOW.toISOString(),
-      diagnostics: [],
+      diagnostics: [] as Diagnostic[],
     }),
     listBundle: unused,
     searchBundle: unused,
@@ -79,6 +89,35 @@ function createLocalHubReadServices(
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   return createLocalHubReadServicesBase({ ...options, team });
+}
+
+function identityService(): HubTeamIdentityActivityService {
+  const unused = async (): Promise<never> => { throw new Error("unused"); };
+  return {
+    getMember: unused,
+    listMembers: unused,
+    getCurrentActor: async () => ({
+      actor: { kind: "unknown" },
+      source: "unknown",
+      selection: null,
+      diagnostics: [] as Diagnostic[],
+    }),
+    getActivity: unused,
+    listActivity: unused,
+    previewIdentityActivity: unused,
+    applyIdentityActivity: unused,
+  };
+}
+
+function specIndexProjection() {
+  return {
+    state: "fresh" as const,
+    observedAt: NOW.toISOString(),
+    indexedRevision: "5".repeat(64) as Revision,
+    indexedAt: NOW.toISOString(),
+    diagnostics: [],
+    diagnosticsTruncated: false,
+  };
 }
 
 describe("createLocalHubReadServices", () => {
@@ -143,6 +182,218 @@ describe("createLocalHubReadServices", () => {
     expect(Buffer.byteLength(JSON.stringify(response), "utf8"))
       .toBeLessThanOrEqual(HUB_LIMITS.maxJsonResponseBytes);
     expect(listMembers.mock.calls.map(([request]) => request?.limit)).toEqual([50, 25]);
+  });
+
+  it("projects bounded Workstream reads and a truthful Home summary", async () => {
+    const id = "ws_01ARZ3NDEKTSV4RRFFQ69G5FAC";
+    const workstream: Workstream = {
+      schemaVersion: 1,
+      ref: { id, kind: "workstream", title: "Checkpoint D" },
+      kind: "workstream",
+      sourcePath: `.mex/workstreams/${id}.md`,
+      revision: "4".repeat(64) as Revision,
+      entityRevision: 2,
+      title: "Checkpoint D",
+      goal: "Ship bounded Workstreams",
+      summary: "Canonical coordination.",
+      state: "active",
+      owners: [{ kind: "unknown" }],
+      contributors: [],
+      paths: ["src/team"],
+      code: [],
+      topics: [],
+      components: [],
+      related: [],
+      blockers: [],
+      currentState: "Integration",
+      nextMilestone: "Review",
+      createdBy: { kind: "unknown" },
+      createdAt: NOW.toISOString(),
+      updatedBy: { kind: "unknown" },
+      updatedAt: NOW.toISOString(),
+    };
+    const listWorkstreams = vi.fn(async () => ({
+      items: [workstream],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "5".repeat(64) as Revision,
+      diagnostics: [] as Diagnostic[],
+    }));
+    const unused = async (): Promise<never> => { throw new Error("unused"); };
+    const workstreams = {
+      listWorkstreams,
+      getWorkstream: async (workstreamId: string) => workstreamId === id ? workstream : null,
+      previewWorkstream: unused,
+      applyWorkstream: unused,
+    } satisfies HubTeamWorkstreamService;
+    const services = createLocalHubReadServicesBase({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      team: identityService(),
+      workstreams,
+      git,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+
+    await expect(services.capabilities()).resolves.toMatchObject({
+      workstreams: {
+        read: { availability: "available" },
+        canonicalMutation: { availability: "available" },
+      },
+    });
+    await expect(services.workstreams?.({ state: "active", limit: 25 })).resolves.toMatchObject({
+      items: [{ id, state: "active", sourcePath: `.mex/workstreams/${id}.md` }],
+    });
+    await expect(services.workstream?.(id)).resolves.toMatchObject({ id, entityRevision: 2 });
+    await expect(services.home()).resolves.toMatchObject({
+      sections: { workstreams: { availability: "available", count: 1 } },
+    });
+    listWorkstreams.mockResolvedValueOnce({
+      items: [workstream],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "5".repeat(64) as Revision,
+      diagnostics: [{
+        code: "WORKSTREAM_SOURCE_WARNING",
+        severity: "warning",
+        message: "A bounded canonical source diagnostic was retained.",
+      }],
+    });
+    await expect(services.home()).resolves.toMatchObject({
+      sections: {
+        workstreams: {
+          availability: "unavailable",
+          count: null,
+          reason: "The Workstream summary could not establish one complete diagnostic-free page.",
+        },
+      },
+    });
+    expect(listWorkstreams).toHaveBeenCalledWith({ states: ["active"], limit: 25 });
+    expect(listWorkstreams).toHaveBeenCalledWith({ includeArchived: false, limit: 100 });
+  });
+
+  it("shrinks Spec pages coherently and projects strict safe detail evidence", async () => {
+    const specId = "mx_01ARZ3NDEKTSV4RRFFQ69G5FAD";
+    const sourceType = "a".repeat(128);
+    const summary: SpecSummaryProjection = {
+      schemaVersion: 1,
+      id: specId,
+      kind: "spec",
+      title: "T".repeat(512),
+      summary: "S".repeat(2_048),
+      lifecycleState: "promoted",
+      groundingHealth: "fresh",
+      sourcePath: ".mex/wiki/checkpoint-d.md",
+      version: { semanticRevision: 1, contentHash: "6".repeat(64) as Revision },
+      topics: Array.from({ length: 50 }, () => specId),
+      sourceTypes: Array.from({ length: 50 }, () => sourceType),
+      diagnostics: [{
+        code: "WIKI_PARSE_ERROR",
+        severity: "warning",
+        message: "secret /Users/alice/private",
+        path: "/Users/alice/private",
+        detail: { secret: true },
+      }],
+      diagnosticsTruncated: false,
+    };
+    const list = vi.fn(async (request = {}) => {
+      const limit = request.limit ?? 25;
+      const items = Array.from({ length: Math.min(limit, 100) }, () => structuredClone(summary));
+      return {
+        availability: "ready" as const,
+        index: specIndexProjection(),
+        page: {
+          schemaVersion: 1 as const,
+          items,
+          nextCursor: limit < 100 ? `cursor-${limit}` : null,
+          truncated: limit < 100,
+          estimatedTokens: items.length * 32,
+          deterministicRevision: "7".repeat(64) as Revision,
+        },
+      };
+    });
+    const specs = {
+      list,
+      show: async () => ({
+        availability: "ready" as const,
+        index: specIndexProjection(),
+        detail: {
+          schemaVersion: 1 as const,
+          spec: summary,
+          body: "# Checkpoint D\n",
+          bodyTruncated: false,
+          provenance: {
+            kind: "agent" as const,
+            id: "/Users/alice/private-agent",
+            sessionId: "session-private",
+            metadata: { secret: true },
+          },
+          sources: [{
+            type: "agent_session",
+            ref: "/Users/alice/private-session",
+            note: "/Users/alice/private-note",
+            metadata: { secret: true },
+          }],
+          sourcesTruncated: false,
+          groundings: [{
+            state: "fresh" as const,
+            health: "fresh" as const,
+            requestedNode: "function:router",
+            resolvedNode: "function:router",
+            observedAt: NOW.toISOString(),
+            reason: "/Users/alice/private-grounding",
+            grounding: {
+              node: "function:router",
+              fingerprint: "mh:4:11111111",
+              file: "src/router.ts",
+              commit: "a".repeat(40),
+              verifiedAt: NOW.toISOString(),
+            },
+          }],
+          groundingsTruncated: false,
+          hierarchy: {
+            requirements: [],
+            acceptanceCriteria: [],
+            constraints: [],
+            relations: [],
+            estimatedTokens: 8,
+          },
+          deterministicRevision: "8".repeat(64) as Revision,
+        },
+      }),
+    } satisfies SpecReadService;
+    const services = createLocalHubReadServicesBase({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      team: identityService(),
+      specs,
+      git,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+
+    const page = await services.specs?.({ limit: 100 });
+    expect(SpecListResponseSchema.safeParse(page).success).toBe(true);
+    expect(page?.availability === "ready" ? page.page.items.length : 0).toBe(50);
+    expect(Buffer.byteLength(JSON.stringify(page), "utf8"))
+      .toBeLessThanOrEqual(HUB_LIMITS.maxJsonResponseBytes);
+    expect(list.mock.calls.map(([request]) => request.limit)).toEqual([100, 50]);
+
+    const detail = await services.spec?.(specId);
+    expect(SpecDetailResponseSchema.safeParse(detail).success).toBe(true);
+    expect(detail).toMatchObject({
+      availability: "ready",
+      detail: {
+        provenance: { id: null },
+        sources: [{ ref: null, note: null }],
+        groundings: [{ requestedNode: "function:router", reason: null }],
+      },
+    });
+    expect(JSON.stringify(detail)).not.toContain("/Users/alice");
+    expect(JSON.stringify(detail)).not.toContain("session-private");
   });
 
   it("projects real bounded Wiki browse, detail, relations, search, Code links, and health", async () => {

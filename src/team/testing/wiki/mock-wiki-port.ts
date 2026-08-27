@@ -19,6 +19,7 @@ import type {
   WikiBacklinksRequest,
   WikiEntity,
   WikiEntityNeighborhood,
+  WikiEntityNeighborhoodSnapshot,
   WikiEntitySummary,
   WikiGroundingResolution,
   WikiIndexState,
@@ -220,6 +221,26 @@ export class MockWikiPort implements WikiPort<
     return entity ? toEntity(entity, this.index, this.now()) : null;
   }
 
+  async getEntityNeighborhood(
+    request: WikiNeighborhoodRequest,
+  ): Promise<WikiEntityNeighborhoodSnapshot<MockWikiPayload> | null> {
+    this.requireReadableIndex();
+    const root = this.index.entities.get(request.entityId);
+    if (root === undefined) return null;
+    const observedAt = this.now();
+    const indexedRevision = digestState(this.index);
+    return {
+      indexedRevision,
+      projectionRevision: hash(stableStringify({
+        graph: "unavailable",
+        wiki: indexedRevision,
+      })),
+      observedAt,
+      entity: toEntity(root, this.index, observedAt),
+      neighborhood: this.projectNeighborhood(request),
+    };
+  }
+
   async listEntities(request: WikiListRequest = {}): Promise<WikiPage<WikiEntitySummary>> {
     this.requireReadableIndex();
     const entities = [...this.index.entities.values()]
@@ -317,6 +338,10 @@ export class MockWikiPort implements WikiPort<
 
   async getNeighborhood(request: WikiNeighborhoodRequest): Promise<WikiEntityNeighborhood> {
     this.requireReadableIndex();
+    return this.projectNeighborhood(request);
+  }
+
+  private projectNeighborhood(request: WikiNeighborhoodRequest): WikiEntityNeighborhood {
     const rootEntity = this.requireIndexedEntity(request.entityId);
     if (!Number.isSafeInteger(request.depth) || request.depth < 0) {
       throw problem("INVALID_REQUEST", 400, "Neighborhood depth must be a non-negative integer.");

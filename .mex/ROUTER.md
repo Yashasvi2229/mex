@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-08-27
+last_updated: 2026-08-28
 ---
 
 # Session Bootstrap
@@ -96,13 +96,21 @@ Then read this file fully before doing anything else in this session.
   repository-local HMAC key. Only the first explicit C preview or Hub startup
   provisions it; pure reads remain noninitializing. Activity corpus, page, and
   diagnostic bounds fail closed.
+- Checkpoint D exposes bounded `mex workstream` reads and exact signed
+  create/update/archive preview/apply. The private Hub adds a lazy Workstreams
+  workbench and Home summary; every canonical mutation emits exactly one
+  Activity and archive is one-way.
+- `mex spec list|show --json` and the lazy Hub Specs workspace project only
+  fresh canonical Wiki Spec roots and their explicit bounded hierarchy. These
+  reads share one immutable Wiki/grounding snapshot, never refresh or rebuild an
+  index, and provide no Spec mutation surface.
 
 **Not Built:**
 - Wiki creation/editing, migration and synthesis UI, grounding-drift/review
-  workbenches, product Workstream/Inbox/Relay/Playbook commands and Hub routes,
+  workbenches, product Inbox/Relay/Playbook commands and Hub routes,
   Catch Up actions, and later delivery checkpoints from the human-team program.
-  The workflow port remains internal while Checkpoint C exposes only member and
-  Activity product surfaces.
+  The workflow port remains internal; Checkpoint D adds Workstreams and
+  read-only Spec projection without adding Spec writes.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**

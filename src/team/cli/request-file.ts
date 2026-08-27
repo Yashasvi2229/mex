@@ -17,8 +17,12 @@ import {
   type MemberGitAlias,
   type TeamIdentityActivityCommand,
   type TeamIdentityActivityPreviewEnvelope,
+  type TeamWorkstreamCommand,
+  type TeamWorkstreamPreviewEnvelope,
+  WORKSTREAM_STATES,
 } from "../contracts/workflow.js";
 import { ACTIVITY_SUBJECT_LIMIT, MEMBER_GIT_ALIAS_LIMIT } from "../artifacts/codecs.js";
+import { WORKFLOW_ARTIFACT_MAX_COLLECTION_ENTRIES } from "../artifacts/workflow-codecs.js";
 import { isArtifactId } from "../artifacts/ulid.js";
 import {
   TeamCliUsageError,
@@ -33,7 +37,7 @@ const ACTION = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const GIT_OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 
-export type TeamMutationCommandName = Extract<
+export type TeamIdentityActivityMutationCommandName = Extract<
   TeamCliCommandName,
   | "member.add"
   | "member.update"
@@ -42,15 +46,36 @@ export type TeamMutationCommandName = Extract<
   | "activity.record"
 >;
 
+export type TeamWorkstreamMutationCommandName = Extract<
+  TeamCliCommandName,
+  "workstream.create" | "workstream.update" | "workstream.archive"
+>;
+
+export type TeamMutationCommandName =
+  | TeamIdentityActivityMutationCommandName
+  | TeamWorkstreamMutationCommandName;
+
 type TeamMutationActionName = TeamMutationCommandName | "member.clear";
 
 /** Read and validate one caller-authored preview request. */
 export function readTeamCommandFile(
   path: string,
+  expectedCommand: TeamIdentityActivityMutationCommandName,
+): TeamIdentityActivityCommand;
+export function readTeamCommandFile(
+  path: string,
+  expectedCommand: TeamWorkstreamMutationCommandName,
+): TeamWorkstreamCommand;
+export function readTeamCommandFile(
+  path: string,
   expectedCommand: TeamMutationCommandName,
-): TeamIdentityActivityCommand {
+): TeamIdentityActivityCommand | TeamWorkstreamCommand {
   const value = readBoundedJsonFile(path);
-  assertIdentityActivityCommand(value, expectedCommand);
+  if (isWorkstreamCommandName(expectedCommand)) {
+    assertWorkstreamCommand(value, expectedCommand);
+  } else {
+    assertIdentityActivityCommand(value, expectedCommand);
+  }
   return value;
 }
 
@@ -63,8 +88,16 @@ export function readTeamCommandFile(
  */
 export function readTeamPreviewFile(
   path: string,
+  expectedCommand: TeamIdentityActivityMutationCommandName,
+): TeamIdentityActivityPreviewEnvelope;
+export function readTeamPreviewFile(
+  path: string,
+  expectedCommand: TeamWorkstreamMutationCommandName,
+): TeamWorkstreamPreviewEnvelope;
+export function readTeamPreviewFile(
+  path: string,
   expectedCommand: TeamMutationCommandName,
-): TeamIdentityActivityPreviewEnvelope {
+): TeamIdentityActivityPreviewEnvelope | TeamWorkstreamPreviewEnvelope {
   const value = readBoundedJsonFile(path);
   const envelope = record(value, "Team preview envelope");
   exactKeys(
@@ -86,7 +119,11 @@ export function readTeamPreviewFile(
     fail("The Team preview envelope diagnostics must be an array.");
   }
   const data = record(envelope.data, "Team service preview");
-  assertIdentityActivityPreview(data, expectedCommand);
+  if (isWorkstreamCommandName(expectedCommand)) {
+    assertWorkstreamPreview(data, expectedCommand);
+  } else {
+    assertIdentityActivityPreview(data, expectedCommand);
+  }
   if (!sameDiagnostics(envelope.diagnostics, data.preview.diagnostics)) {
     fail("The Team preview envelope diagnostics do not match its service preview.");
   }
@@ -154,7 +191,7 @@ export function readBoundedJsonFile(path: string): unknown {
 
 function assertIdentityActivityCommand(
   value: unknown,
-  expectedCommand: TeamMutationCommandName,
+  expectedCommand: TeamIdentityActivityMutationCommandName,
 ): asserts value is TeamIdentityActivityCommand {
   const command = record(value, "Team mutation request");
   exactKeys(command, ["operationId", "action", "expectedRevisions"], [], "Team mutation request");
@@ -181,9 +218,29 @@ function assertIdentityActivityCommand(
   }
 }
 
+function assertWorkstreamCommand(
+  value: unknown,
+  expectedCommand: TeamWorkstreamMutationCommandName,
+): asserts value is TeamWorkstreamCommand {
+  const command = record(value, "Workstream mutation request");
+  exactKeys(command, ["operationId", "action", "expectedRevisions"], [], "Workstream mutation request");
+  if (typeof command.operationId !== "string" || !OPERATION_ID.test(command.operationId)) {
+    fail("operationId must be bounded ASCII without paths or whitespace.");
+  }
+  const action = record(command.action, "Workstream mutation action");
+  if (action.kind !== expectedCommand) {
+    fail(`The request action must be ${expectedCommand}.`);
+  }
+  assertAction(action, expectedCommand);
+  const expectations = assertRevisionExpectations(command.expectedRevisions);
+  if (expectedCommand !== "workstream.create" && expectations.length === 0) {
+    fail(`${expectedCommand} requires at least one exact revision expectation.`);
+  }
+}
+
 function isExpectedAction(
   value: unknown,
-  expectedCommand: TeamMutationCommandName,
+  expectedCommand: TeamIdentityActivityMutationCommandName,
 ): value is TeamMutationActionName {
   return value === expectedCommand
     || (expectedCommand === "member.select" && value === "member.clear");
@@ -230,7 +287,118 @@ function assertAction(
       }
       return;
     }
+    case "workstream.create": {
+      exactKeys(action, ["kind", "workstream"], [], kind);
+      assertWorkstreamCreate(action.workstream);
+      return;
+    }
+    case "workstream.update": {
+      exactKeys(action, ["kind", "workstreamId", "patch"], [], kind);
+      workstreamId(action.workstreamId);
+      assertWorkstreamUpdatePatch(action.patch);
+      return;
+    }
+    case "workstream.archive":
+      exactKeys(action, ["kind", "workstreamId"], [], kind);
+      workstreamId(action.workstreamId);
+      return;
   }
+}
+
+function assertWorkstreamCreate(value: unknown): void {
+  const input = record(value, "workstream create input");
+  exactKeys(
+    input,
+    ["title", "goal", "summary", "owners", "nextMilestone"],
+    ["contributors", "paths", "code", "topics", "components", "related"],
+    "workstream create input",
+  );
+  canonicalText(input.title, "workstream title", 512);
+  canonicalText(input.goal, "workstream goal", 4 * 1024);
+  canonicalText(input.summary, "workstream summary", 4 * 1024);
+  assertActorSet(input.owners, "workstream owners", true);
+  if (input.contributors !== undefined) assertActorSet(input.contributors, "workstream contributors");
+  if (input.paths !== undefined) assertPathSet(input.paths, "workstream paths");
+  if (input.code !== undefined) assertCodeSet(input.code, "workstream code references");
+  if (input.topics !== undefined) assertEntitySet(input.topics, "workstream topics");
+  if (input.components !== undefined) assertEntitySet(input.components, "workstream components");
+  if (input.related !== undefined) assertEntitySet(input.related, "workstream related entities");
+  canonicalText(input.nextMilestone, "workstream next milestone", 4 * 1024);
+}
+
+function assertWorkstreamUpdatePatch(value: unknown): void {
+  const patch = record(value, "workstream update patch");
+  exactKeys(patch, [], [
+    "title", "goal", "summary", "state", "owners", "contributors", "paths",
+    "code", "topics", "components", "related", "blockers", "currentState",
+    "nextMilestone",
+  ], "workstream update patch");
+  if (Object.keys(patch).length === 0) fail("workstream.update patch must not be empty.");
+  if (patch.title !== undefined) canonicalText(patch.title, "workstream title", 512);
+  if (patch.goal !== undefined) canonicalText(patch.goal, "workstream goal", 4 * 1024);
+  if (patch.summary !== undefined) canonicalText(patch.summary, "workstream summary", 4 * 1024);
+  if (patch.state !== undefined && (
+    !(WORKSTREAM_STATES as readonly unknown[]).includes(patch.state)
+    || patch.state === "archived"
+  )) {
+    fail("workstream state is invalid.");
+  }
+  if (patch.owners !== undefined) assertActorSet(patch.owners, "workstream owners", true);
+  if (patch.contributors !== undefined) assertActorSet(patch.contributors, "workstream contributors");
+  if (patch.paths !== undefined) assertPathSet(patch.paths, "workstream paths");
+  if (patch.code !== undefined) assertCodeSet(patch.code, "workstream code references");
+  if (patch.topics !== undefined) assertEntitySet(patch.topics, "workstream topics");
+  if (patch.components !== undefined) assertEntitySet(patch.components, "workstream components");
+  if (patch.related !== undefined) assertEntitySet(patch.related, "workstream related entities");
+  if (patch.blockers !== undefined) assertTextSet(patch.blockers, "workstream blockers", 4 * 1024);
+  if (patch.currentState !== undefined) canonicalText(patch.currentState, "workstream current state", 8 * 1024);
+  if (patch.nextMilestone !== undefined) canonicalText(patch.nextMilestone, "workstream next milestone", 4 * 1024);
+}
+
+function assertActorSet(value: unknown, label: string, requireOne = false): void {
+  const entries = boundedArray(value, label, requireOne);
+  for (const [index, entry] of entries.entries()) assertActor(entry, `${label} ${index}`);
+  assertUnique(entries, label);
+}
+
+function assertPathSet(value: unknown, label: string): void {
+  const entries = boundedArray(value, label);
+  for (const [index, entry] of entries.entries()) repoPath(entry, `${label} ${index}`);
+  assertUnique(entries, label);
+}
+
+function assertCodeSet(value: unknown, label: string): void {
+  const entries = boundedArray(value, label);
+  for (const [index, entry] of entries.entries()) assertCodeRef(entry, `${label} ${index}`);
+  assertUnique(entries, label);
+}
+
+function assertEntitySet(value: unknown, label: string): void {
+  const entries = boundedArray(value, label);
+  for (const [index, entry] of entries.entries()) assertEntityRef(entry, `${label} ${index}`);
+  assertUnique(entries, label);
+}
+
+function assertTextSet(value: unknown, label: string, maxBytes: number): void {
+  const entries = boundedArray(value, label);
+  for (const [index, entry] of entries.entries()) canonicalText(entry, `${label} ${index}`, maxBytes);
+  assertUnique(entries, label);
+}
+
+function boundedArray(value: unknown, label: string, requireOne = false): readonly unknown[] {
+  if (
+    !Array.isArray(value)
+    || value.length > WORKFLOW_ARTIFACT_MAX_COLLECTION_ENTRIES
+    || (requireOne && value.length === 0)
+  ) {
+    fail(`${label} must contain ${requireOne ? "1-" : "at most "}${WORKFLOW_ARTIFACT_MAX_COLLECTION_ENTRIES} entries.`);
+  }
+  return value;
+}
+
+function assertUnique(value: readonly unknown[], label: string): void {
+  const keys = value.map(stableJson);
+  if (new Set(keys).size !== keys.length) fail(`${label} must be unique.`);
 }
 
 function assertMemberInput(value: unknown): void {
@@ -359,7 +527,7 @@ function assertRevisionExpectations(value: unknown): readonly RevisionExpectatio
 
 function assertIdentityActivityPreview(
   envelope: Record<string, unknown>,
-  expectedCommand: TeamMutationCommandName,
+  expectedCommand: TeamIdentityActivityMutationCommandName,
 ): asserts envelope is Record<string, unknown> & TeamIdentityActivityPreviewEnvelope {
   exactKeys(envelope, ["schemaVersion", "request", "preview", "receipt"], [], "Team service preview");
   if (envelope.schemaVersion !== 1) fail("The Team service preview schemaVersion must be 1.");
@@ -399,6 +567,47 @@ function assertIdentityActivityPreview(
     const purpose = record(candidate, `Team preview purpose ${index}`);
     exactKeys(purpose, ["purpose", "id"], [], `Team preview purpose ${index}`);
     if (!(purpose.purpose === "activity" || purpose.purpose === "member")) fail(`Team preview purpose ${index} is invalid.`);
+    canonicalText(purpose.id, `Team preview purpose ${index} ID`, 256);
+  }
+  for (const key of ["requestRevision", "presentationRevision", "previewRevision"] as const) {
+    if (typeof receipt[key] !== "string" || !isRevision(receipt[key])) fail(`Team preview receipt ${key} is invalid.`);
+  }
+}
+
+function assertWorkstreamPreview(
+  envelope: Record<string, unknown>,
+  expectedCommand: TeamWorkstreamMutationCommandName,
+): asserts envelope is Record<string, unknown> & TeamWorkstreamPreviewEnvelope {
+  exactKeys(envelope, ["schemaVersion", "request", "preview", "receipt"], [], "Team service preview");
+  if (envelope.schemaVersion !== 1) fail("The Team service preview schemaVersion must be 1.");
+  assertWorkstreamCommand(envelope.request, expectedCommand);
+
+  const preview = record(envelope.preview, "Team public preview");
+  exactKeys(preview, ["valid", "scope", "changes", "localChanges", "diagnostics"], [], "Team public preview");
+  if (preview.valid !== true || preview.scope !== "canonical") fail("The Workstream public preview is invalid.");
+  if (!Array.isArray(preview.changes) || preview.changes.length > 16) fail("The Team preview changes are invalid.");
+  for (const [index, change] of preview.changes.entries()) assertFileChange(change, index);
+  if (!Array.isArray(preview.localChanges) || preview.localChanges.length !== 0) fail("Workstream previews must not contain local changes.");
+  assertDiagnostics(preview.diagnostics);
+
+  const receipt = record(envelope.receipt, "Team preview receipt");
+  exactKeys(receipt, [
+    "schemaVersion", "authority", "purposeIds", "requestRevision",
+    "presentationRevision", "previewRevision",
+  ], [], "Team preview receipt");
+  if (receipt.schemaVersion !== 1) fail("The Team preview receipt schemaVersion must be 1.");
+  const authority = record(receipt.authority, "Team preview authority");
+  exactKeys(authority, ["actor", "occurredAt", "repoState"], [], "Team preview authority");
+  assertActor(authority.actor, "Team preview actor");
+  isoTimestamp(authority.occurredAt, "Team preview occurredAt");
+  assertRepoState(authority.repoState);
+  if (!Array.isArray(receipt.purposeIds) || receipt.purposeIds.length > TEAM_IDENTITY_ACTIVITY_LIMITS.maxPurposeIds) {
+    fail("The Team preview purposeIds are invalid.");
+  }
+  for (const [index, candidate] of receipt.purposeIds.entries()) {
+    const purpose = record(candidate, `Team preview purpose ${index}`);
+    exactKeys(purpose, ["purpose", "id"], [], `Team preview purpose ${index}`);
+    if (!(purpose.purpose === "activity" || purpose.purpose === "workstream")) fail(`Team preview purpose ${index} is invalid.`);
     canonicalText(purpose.id, `Team preview purpose ${index} ID`, 256);
   }
   for (const key of ["requestRevision", "presentationRevision", "previewRevision"] as const) {
@@ -451,6 +660,9 @@ function assertActor(value: unknown, label: string): void {
     exactKeys(actor, ["kind", "name", "email"], [], label);
     if (actor.name !== null) canonicalText(actor.name, `${label} name`, 512);
     if (actor.email !== null) canonicalText(actor.email, `${label} email`, 512);
+    if (actor.name === null && actor.email === null) {
+      fail(`${label} Git identity must contain a name or email.`);
+    }
   } else if (actor.kind === "unknown") {
     exactKeys(actor, ["kind"], [], label);
   } else {
@@ -527,6 +739,21 @@ function memberId(value: unknown): string {
     fail("member ID must be a member_ prefixed ULID.");
   }
   return value;
+}
+
+function workstreamId(value: unknown): string {
+  if (typeof value !== "string" || !isArtifactId(value, "ws")) {
+    fail("workstream ID must be a ws_ prefixed ULID.");
+  }
+  return value;
+}
+
+function isWorkstreamCommandName(
+  value: TeamMutationCommandName,
+): value is TeamWorkstreamMutationCommandName {
+  return value === "workstream.create"
+    || value === "workstream.update"
+    || value === "workstream.archive";
 }
 
 function repoPath(value: unknown, label: string): string {
