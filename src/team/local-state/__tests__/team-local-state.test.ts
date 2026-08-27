@@ -691,6 +691,75 @@ describe("TeamLocalState", () => {
     expect(store.getLocalDraft(DRAFT_A)).toBeNull();
   });
 
+  it("binds versioned draft cursors to the filter and complete bounded corpus", () => {
+    const root = tempProject();
+    const store = state(root);
+    store.saveLocalDraft({
+      id: DRAFT_A,
+      kind: "inbox",
+      payload: { summary: "First" },
+      expectedRevision: null,
+      updatedAt: NOW,
+    });
+    store.saveLocalDraft({
+      id: "draft-second-inbox",
+      kind: "inbox",
+      payload: { summary: "Second" },
+      expectedRevision: null,
+      updatedAt: LATER,
+    });
+
+    const first = store.listLocalDrafts({ kind: "inbox", limit: 1 });
+    const repeated = store.listLocalDrafts({ kind: "inbox", limit: 1 });
+    expect(first.nextCursor).toBe(repeated.nextCursor);
+    expect(Buffer.byteLength(first.nextCursor!, "utf8")).toBeLessThanOrEqual(4 * 1024);
+
+    expectCode(
+      () => store.listLocalDrafts({ kind: "relay", limit: 1, cursor: first.nextCursor! }),
+      "REVISION_CONFLICT",
+    );
+    expectCode(
+      () => state(root, "scaffold-b").listLocalDrafts({
+        kind: "inbox",
+        limit: 1,
+        cursor: first.nextCursor!,
+      }),
+      "REVISION_CONFLICT",
+    );
+
+    // Even a mutation outside the selected filter changes the full corpus generation.
+    store.saveLocalDraft({
+      id: DRAFT_B,
+      kind: "relay",
+      payload: { summary: "Relay" },
+      expectedRevision: null,
+      updatedAt: "2026-08-23T12:00:00.000Z",
+    });
+    expectCode(
+      () => store.listLocalDrafts({ kind: "inbox", limit: 1, cursor: first.nextCursor! }),
+      "REVISION_CONFLICT",
+    );
+  });
+
+  it("returns INVALID_REQUEST for malformed local draft cursors without initializing storage", () => {
+    const root = tempProject();
+    const store = state(root);
+    const unsupported = Buffer.from(JSON.stringify({
+      version: 2,
+      scaffoldId: "scaffold-a",
+      requestedKind: null,
+      corpusRevision: "a".repeat(64),
+      updatedAt: NOW,
+      kind: "inbox",
+      id: DRAFT_A,
+    }), "utf8").toString("base64url");
+
+    for (const cursor of ["%%%", unsupported, "x".repeat(4 * 1024 + 1)]) {
+      expectCode(() => store.listLocalDrafts({ cursor }), "INVALID_REQUEST");
+    }
+    expect(existsSync(join(root, ".mex"))).toBe(false);
+  });
+
   it("enforces local draft byte and per-kind corpus ceilings before writes", () => {
     const oversizedRoot = tempProject();
     expectCode(() => state(oversizedRoot).saveLocalDraft({
@@ -747,18 +816,84 @@ describe("TeamLocalState", () => {
       token: LEASE_B,
       acquiredAt: LATER,
     }), "OPERATION_INTERRUPTED");
+    const otherScaffold = new TeamLocalState({
+      projectRoot: root,
+      scaffoldId: "scaffold-b",
+      processStatus: () => "alive",
+    });
+    expectCode(() => otherScaffold.acquireTeamWorkflowLease({
+      pid: 101,
+      token: LEASE_A,
+      acquiredAt: NOW,
+    }), "OPERATION_INTERRUPTED");
 
     const recovery = new TeamLocalState({
       projectRoot: root,
-      scaffoldId: "scaffold-a",
+      scaffoldId: "scaffold-b",
       processStatus: () => "dead",
     });
     expect(recovery.acquireTeamWorkflowLease({
       pid: 202,
       token: LEASE_B,
       acquiredAt: LATER,
-    }).token).toBe(LEASE_B);
+    })).toEqual({
+      scaffoldId: "scaffold-b",
+      pid: 202,
+      token: LEASE_B,
+      acquiredAt: LATER,
+    });
     recovery.releaseTeamWorkflowLease(LEASE_B);
+  });
+
+  it("never reassigns the repository workflow lease across an incomplete journal", () => {
+    const root = tempProject();
+    const original = new TeamLocalState({
+      projectRoot: root,
+      scaffoldId: "scaffold-a",
+      processStatus: () => "alive",
+      now: () => NOW,
+    });
+    original.acquireTeamWorkflowLease({ pid: 101, token: LEASE_A, acquiredAt: NOW });
+    const intent = original.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-a",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [],
+    }).entry;
+
+    // Exact reacquisition by the attested owner remains idempotent.
+    expect(original.acquireTeamWorkflowLease({
+      pid: 101,
+      token: LEASE_A,
+      acquiredAt: LATER,
+    })).toMatchObject({ scaffoldId: "scaffold-a", pid: 101, token: LEASE_A });
+
+    const drifted = new TeamLocalState({
+      projectRoot: root,
+      scaffoldId: "scaffold-b",
+      processStatus: () => "dead",
+      now: () => LATER,
+    });
+    expectCode(() => drifted.acquireTeamWorkflowLease({
+      pid: 202,
+      token: LEASE_B,
+      acquiredAt: LATER,
+    }), "REVISION_CONFLICT");
+    expect(original.getIncompleteWorkflowOperation()).toEqual(intent);
+    expectCode(() => drifted.releaseTeamWorkflowLease(LEASE_A), "REVISION_CONFLICT");
+
+    const sameScaffoldRecovery = new TeamLocalState({
+      projectRoot: root,
+      scaffoldId: "scaffold-a",
+      processStatus: () => "dead",
+      now: () => LATER,
+    });
+    expect(sameScaffoldRecovery.acquireTeamWorkflowLease({
+      pid: 202,
+      token: LEASE_B,
+      acquiredAt: LATER,
+    })).toMatchObject({ scaffoldId: "scaffold-a", pid: 202, token: LEASE_B });
   });
 
   it("journals immutable recovery effects and atomically finalizes draft cleanup", () => {

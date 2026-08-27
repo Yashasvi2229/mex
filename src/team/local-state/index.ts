@@ -57,6 +57,7 @@ const DEFAULT_JOB_PAGE_SIZE = 25;
 const MAX_JOB_PAGE_SIZE = 100;
 const TERMINAL_JOB_RETENTION = 200;
 const HUB_LEASE_TOKEN = /^[a-f0-9]{64}$/;
+const LOCAL_DRAFT_CURSOR_VERSION = 1 as const;
 
 export const TEAM_LOCAL_STATE_LIMITS = {
   maxDraftBytes: 64 * 1024,
@@ -244,7 +245,8 @@ const V4_SCHEMA_SQL = `
   ) STRICT;
 
   CREATE TABLE team_workflow_lease (
-    scaffold_id TEXT NOT NULL PRIMARY KEY,
+    singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
+    scaffold_id TEXT NOT NULL,
     pid INTEGER NOT NULL CHECK (pid >= 1),
     token TEXT NOT NULL CHECK (length(token) = 64),
     acquired_at TEXT NOT NULL
@@ -273,8 +275,8 @@ const V4_SCHEMA_SQL = `
   CREATE INDEX relay_drafts_scaffold_updated
     ON relay_drafts (scaffold_id, updated_at DESC, id DESC);
 
-  CREATE UNIQUE INDEX team_workflow_one_incomplete_per_scaffold
-    ON team_workflow_operations (scaffold_id)
+  CREATE UNIQUE INDEX team_workflow_one_incomplete_per_repository
+    ON team_workflow_operations ((1))
     WHERE phase <> 'complete';
 
   CREATE INDEX team_workflow_operations_scaffold_updated
@@ -340,7 +342,8 @@ const EXPECTED_DRAFT_COLUMNS = [
 ] as const;
 
 const EXPECTED_WORKFLOW_LEASE_COLUMNS = [
-  { name: "scaffold_id", type: "TEXT", notNull: 1, primaryKeyPosition: 1 },
+  { name: "singleton", type: "INTEGER", notNull: 1, primaryKeyPosition: 1 },
+  { name: "scaffold_id", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
   { name: "pid", type: "INTEGER", notNull: 1, primaryKeyPosition: 0 },
   { name: "token", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
   { name: "acquired_at", type: "TEXT", notNull: 1, primaryKeyPosition: 0 },
@@ -430,6 +433,7 @@ interface LocalDraftRow {
 }
 
 interface TeamWorkflowLeaseRow {
+  singleton: unknown;
   scaffold_id: unknown;
   pid: unknown;
   token: unknown;
@@ -793,23 +797,38 @@ export class TeamLocalState {
     const limit = validateDraftPageLimit(request.limit);
     const cursor = decodeDraftCursor(request.cursor);
     const page = this.read((db) => {
-      const rows = readLocalDraftPageRows(db, this.scaffoldId, kind, cursor, limit + 1);
-      const decoded = rows.map((row) => decodeLocalDraft<TPayload>(
-        row,
-        this.scaffoldId,
-        validateStoredDraftKind(row.kind),
-      ));
+      const corpus = readBoundedLocalDraftCorpus<TPayload>(db, this.scaffoldId);
+      const corpusRevision = localDraftCorpusRevision(this.scaffoldId, corpus);
+      assertDraftCursorAuthority(cursor, this.scaffoldId, kind, corpusRevision);
+
+      const filtered = kind === undefined
+        ? corpus
+        : corpus.filter((draft) => draft.kind === kind);
+      const start = cursor === null
+        ? 0
+        : draftCursorStartIndex(filtered, cursor);
+      const decoded = filtered.slice(start, start + limit + 1);
       const truncated = decoded.length > limit;
       const items = truncated ? decoded.slice(0, limit) : decoded;
       const last = items.at(-1);
       return {
         items,
         nextCursor: truncated && last
-          ? encodeDraftCursor(last.updatedAt, last.kind, last.id)
+          ? encodeDraftCursor({
+              scaffoldId: this.scaffoldId,
+              requestedKind: kind ?? null,
+              corpusRevision,
+              updatedAt: last.updatedAt,
+              kind: last.kind,
+              id: last.id,
+            })
           : null,
         truncated,
       };
     }, 4);
+    if (page === null && cursor !== null) {
+      throw revisionConflict("The local draft corpus no longer exists; restart pagination.");
+    }
     return page ?? { items: [], nextCursor: null, truncated: false };
   }
 
@@ -873,15 +892,27 @@ export class TeamLocalState {
       updatedAt,
       revision: localDraftRevision(this.scaffoldId, id, kind, payloadJson, updatedAt),
     };
-    const observed = this.read((db) => {
-      const current = readLocalDraft<TPayload>(db, this.scaffoldId, id);
-      if (current && current.kind !== kind) {
-        throw revisionConflict(`Draft ID ${id} is already used by a ${current.kind} draft.`);
+    let observed: StoredLocalDraft<TPayload> | null;
+    try {
+      observed = this.read((db) => {
+        const current = readLocalDraft<TPayload>(db, this.scaffoldId, id);
+        if (current && current.kind !== kind) {
+          throw revisionConflict(`Draft ID ${id} is already used by a ${current.kind} draft.`);
+        }
+        assertExpectedRevision(current?.revision ?? null, expectedRevision, `${kind} draft`);
+        if (!current) assertDraftCapacity(db, this.scaffoldId, kind);
+        return prepared;
+      }, 4);
+    } catch (error) {
+      // Schemas v1-v3 predate both draft tables, so an immutable create
+      // preview can prove absence without migrating. The explicit apply is the
+      // first write and performs the transactional v4 migration.
+      if (!(error instanceof MexPortError) || error.problem.code !== "MIGRATION_REQUIRED") {
+        throw error;
       }
-      assertExpectedRevision(current?.revision ?? null, expectedRevision, `${kind} draft`);
-      if (!current) assertDraftCapacity(db, this.scaffoldId, kind);
-      return prepared;
-    }, 4);
+      assertExpectedRevision(null, expectedRevision, `${kind} draft`);
+      observed = null;
+    }
     if (observed !== null) return observed;
     assertExpectedRevision(null, expectedRevision, `${kind} draft`);
     return prepared;
@@ -919,20 +950,38 @@ export class TeamLocalState {
     const token = validateWorkflowLeaseToken(request.token);
     const acquiredAt = validateTimestamp(request.acquiredAt, "workflow lease acquiredAt");
     return this.write((db) => {
-      const current = readTeamWorkflowLease(db, this.scaffoldId);
-      if (current?.pid === pid && current.token === token) return current;
+      const current = readTeamWorkflowLease(db);
+      if (
+        current?.scaffoldId === this.scaffoldId
+        && current.pid === pid
+        && current.token === token
+      ) return current;
       if (current) {
         const status = safeProcessStatus(this.processStatus, current.pid);
         if (status !== "dead") throw workflowLeaseHeldError(current.pid, status);
+        const incomplete = readAnyIncompleteWorkflowOperation(db);
+        if (
+          incomplete
+          && (
+            incomplete.scaffoldId !== current.scaffoldId
+            || current.scaffoldId !== this.scaffoldId
+          )
+        ) {
+          throw revisionConflict(
+            `Workflow operation ${incomplete.operationId} for scaffold ${incomplete.scaffoldId} `
+              + "must be recovered before the repository workflow lease can be reassigned.",
+          );
+        }
         const replaced = db.prepare(`
           UPDATE team_workflow_lease
-          SET pid = ?, token = ?, acquired_at = ?
-          WHERE scaffold_id = ? AND pid = ? AND token = ?
+          SET scaffold_id = ?, pid = ?, token = ?, acquired_at = ?
+          WHERE singleton = 1 AND scaffold_id = ? AND pid = ? AND token = ?
         `).run(
+          this.scaffoldId,
           pid,
           token,
           acquiredAt,
-          this.scaffoldId,
+          current.scaffoldId,
           current.pid,
           current.token,
         );
@@ -940,9 +989,16 @@ export class TeamLocalState {
           throw revisionConflict("The Team workflow lease changed during dead-holder recovery.");
         }
       } else {
+        const incomplete = readAnyIncompleteWorkflowOperation(db);
+        if (incomplete) {
+          throw revisionConflict(
+            `Workflow operation ${incomplete.operationId} for scaffold ${incomplete.scaffoldId} `
+              + "must be recovered before acquiring the repository workflow lease.",
+          );
+        }
         db.prepare(`
-          INSERT INTO team_workflow_lease (scaffold_id, pid, token, acquired_at)
-          VALUES (?, ?, ?, ?)
+          INSERT INTO team_workflow_lease (singleton, scaffold_id, pid, token, acquired_at)
+          VALUES (1, ?, ?, ?, ?)
         `).run(this.scaffoldId, pid, token, acquiredAt);
       }
       return { scaffoldId: this.scaffoldId, pid, token, acquiredAt };
@@ -953,7 +1009,7 @@ export class TeamLocalState {
     const token = validateWorkflowLeaseToken(tokenValue);
     this.write((db) => {
       assertTeamWorkflowLease(db, this.scaffoldId, token);
-      const incomplete = readIncompleteWorkflowOperation(db, this.scaffoldId);
+      const incomplete = readAnyIncompleteWorkflowOperation(db);
       if (incomplete) {
         throw revisionConflict(
           `Workflow operation ${incomplete.operationId} must complete or be abandoned before lease release.`,
@@ -961,7 +1017,7 @@ export class TeamLocalState {
       }
       const deleted = db.prepare(`
         DELETE FROM team_workflow_lease
-        WHERE scaffold_id = ? AND token = ?
+        WHERE singleton = 1 AND scaffold_id = ? AND token = ?
       `).run(this.scaffoldId, token);
       if (Number(deleted.changes) !== 1) {
         throw revisionConflict("The Team workflow lease changed before release.");
@@ -1596,6 +1652,10 @@ export function canonicalActorKey(actor: ActorRef): string | null {
 }
 
 interface DecodedDraftCursor {
+  version: typeof LOCAL_DRAFT_CURSOR_VERSION;
+  scaffoldId: string;
+  requestedKind: TeamLocalDraftKind | null;
+  corpusRevision: Revision;
   updatedAt: string;
   kind: TeamLocalDraftKind;
   id: string;
@@ -1710,48 +1770,96 @@ function readLocalDraft<TPayload>(
   return found ? decodeLocalDraft<TPayload>(found.row, scaffoldId, found.kind) : null;
 }
 
-function readLocalDraftPageRows(
+function readBoundedLocalDraftCorpus<TPayload>(
   db: DatabaseSync,
   scaffoldId: string,
-  kind: TeamLocalDraftKind | undefined,
+): StoredLocalDraft<TPayload>[] {
+  const corpus: StoredLocalDraft<TPayload>[] = [];
+  const ids = new Set<string>();
+  for (const kind of ["inbox", "relay"] as const) {
+    const rows = db.prepare(`
+      SELECT scaffold_id, id, payload_json, updated_at, revision
+      FROM ${draftTable(kind)}
+      WHERE scaffold_id = ?
+      ORDER BY id ASC
+      LIMIT ?
+    `).all(
+      scaffoldId,
+      TEAM_LOCAL_STATE_LIMITS.maxDraftsPerKindPerScaffold + 1,
+    ) as unknown as LocalDraftRow[];
+    if (rows.length > TEAM_LOCAL_STATE_LIMITS.maxDraftsPerKindPerScaffold) {
+      throw corruptError(`The persisted ${kind} draft corpus exceeds its record limit.`);
+    }
+    for (const row of rows) {
+      const draft = decodeLocalDraft<TPayload>(row, scaffoldId, kind);
+      if (ids.has(draft.id)) {
+        throw corruptError(`Local draft ID ${draft.id} is duplicated across draft kinds.`);
+      }
+      ids.add(draft.id);
+      corpus.push(draft);
+    }
+  }
+  return corpus.sort(compareLocalDraftPageOrder);
+}
+
+function compareLocalDraftPageOrder(
+  left: StoredLocalDraft,
+  right: StoredLocalDraft,
+): number {
+  if (left.updatedAt !== right.updatedAt) {
+    return left.updatedAt > right.updatedAt ? -1 : 1;
+  }
+  if (left.kind !== right.kind) return compareCodeUnits(left.kind, right.kind);
+  return -compareCodeUnits(left.id, right.id);
+}
+
+function localDraftCorpusRevision(
+  scaffoldId: string,
+  corpus: readonly StoredLocalDraft[],
+): Revision {
+  return sha256(JSON.stringify({
+    schemaVersion: LOCAL_DRAFT_CURSOR_VERSION,
+    scaffoldId,
+    drafts: corpus.map((draft) => ({
+      kind: draft.kind,
+      id: draft.id,
+      updatedAt: draft.updatedAt,
+      revision: draft.revision,
+    })),
+  }));
+}
+
+function assertDraftCursorAuthority(
   cursor: DecodedDraftCursor | null,
-  limit: number,
-): LocalDraftRow[] {
-  return db.prepare(`
-    SELECT scaffold_id, id, kind, payload_json, updated_at, revision
-    FROM (
-      SELECT scaffold_id, id, 'inbox' AS kind, payload_json, updated_at, revision
-      FROM inbox_drafts
-      WHERE scaffold_id = ?
-      UNION ALL
-      SELECT scaffold_id, id, 'relay' AS kind, payload_json, updated_at, revision
-      FROM relay_drafts
-      WHERE scaffold_id = ?
-    )
-    WHERE (? IS NULL OR kind = ?)
-      AND (
-        ? IS NULL
-        OR updated_at < ?
-        OR (
-          updated_at = ?
-          AND (kind > ? OR (kind = ? AND id < ?))
-        )
-      )
-    ORDER BY updated_at DESC, kind ASC, id DESC
-    LIMIT ?
-  `).all(
-    scaffoldId,
-    scaffoldId,
-    kind ?? null,
-    kind ?? null,
-    cursor?.updatedAt ?? null,
-    cursor?.updatedAt ?? null,
-    cursor?.updatedAt ?? null,
-    cursor?.kind ?? null,
-    cursor?.kind ?? null,
-    cursor?.id ?? null,
-    limit,
-  ) as unknown as LocalDraftRow[];
+  scaffoldId: string,
+  requestedKind: TeamLocalDraftKind | undefined,
+  corpusRevision: Revision,
+): void {
+  if (cursor === null) return;
+  if (cursor.scaffoldId !== scaffoldId) {
+    throw revisionConflict("The draft cursor belongs to a different scaffold; restart pagination.");
+  }
+  if (cursor.requestedKind !== (requestedKind ?? null)) {
+    throw revisionConflict("The draft cursor filter changed; restart pagination.");
+  }
+  if (cursor.corpusRevision !== corpusRevision) {
+    throw revisionConflict("The local draft corpus changed; restart pagination.");
+  }
+}
+
+function draftCursorStartIndex(
+  corpus: readonly StoredLocalDraft[],
+  cursor: DecodedDraftCursor,
+): number {
+  const index = corpus.findIndex((draft) => (
+    draft.updatedAt === cursor.updatedAt
+    && draft.kind === cursor.kind
+    && draft.id === cursor.id
+  ));
+  if (index < 0) {
+    throw revisionConflict("The draft cursor position is no longer present; restart pagination.");
+  }
+  return index + 1;
 }
 
 function decodeLocalDraft<TPayload>(
@@ -1847,12 +1955,21 @@ function validateDraftPageLimit(value: number | undefined): number {
   return value;
 }
 
-function encodeDraftCursor(
-  updatedAt: string,
-  kind: TeamLocalDraftKind,
-  id: string,
-): string {
-  return Buffer.from(`${updatedAt}\n${kind}\n${id}`, "utf8").toString("base64url");
+function encodeDraftCursor(cursor: Omit<DecodedDraftCursor, "version">): string {
+  const json = JSON.stringify({
+    version: LOCAL_DRAFT_CURSOR_VERSION,
+    scaffoldId: cursor.scaffoldId,
+    requestedKind: cursor.requestedKind,
+    corpusRevision: cursor.corpusRevision,
+    updatedAt: cursor.updatedAt,
+    kind: cursor.kind,
+    id: cursor.id,
+  });
+  const encoded = Buffer.from(json, "utf8").toString("base64url");
+  if (Buffer.byteLength(encoded, "utf8") > TEAM_LOCAL_STATE_LIMITS.maxCursorBytes) {
+    throw corruptError("The generated local draft cursor exceeds its byte limit.");
+  }
+  return encoded;
 }
 
 function decodeDraftCursor(value: string | undefined): DecodedDraftCursor | null {
@@ -1862,25 +1979,87 @@ function decodeDraftCursor(value: string | undefined): DecodedDraftCursor | null
     || value.length === 0
     || Buffer.byteLength(value, "utf8") > TEAM_LOCAL_STATE_LIMITS.maxCursorBytes
   ) {
-    throw validationError("Draft cursor is invalid or exceeds the byte limit.");
+    throw invalidDraftCursor("Draft cursor is empty or exceeds the byte limit.");
   }
   let bytes: Buffer;
   try {
     bytes = Buffer.from(value, "base64url");
   } catch {
-    throw validationError("Draft cursor is not valid base64url.");
+    throw invalidDraftCursor("Draft cursor is not valid base64url.");
   }
   if (bytes.toString("base64url") !== value) {
-    throw validationError("Draft cursor is not canonical base64url.");
+    throw invalidDraftCursor("Draft cursor is not canonical base64url.");
   }
-  const parts = bytes.toString("utf8").split("\n");
-  if (parts.length !== 3) throw validationError("Draft cursor has an invalid shape.");
-  const [updatedAtValue, kindValue, idValue] = parts;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw invalidDraftCursor("Draft cursor is not valid JSON.");
+  }
+  if (!isStrictPlainObject(parsed)) {
+    throw invalidDraftCursor("Draft cursor has an invalid shape.");
+  }
+  const keys = Object.keys(parsed);
+  const expectedKeys = [
+    "version",
+    "scaffoldId",
+    "requestedKind",
+    "corpusRevision",
+    "updatedAt",
+    "kind",
+    "id",
+  ];
+  if (
+    keys.length !== expectedKeys.length
+    || keys.some((key, index) => key !== expectedKeys[index])
+    || JSON.stringify(parsed) !== bytes.toString("utf8")
+  ) {
+    throw invalidDraftCursor("Draft cursor is not in its canonical versioned form.");
+  }
+  if (parsed.version !== LOCAL_DRAFT_CURSOR_VERSION) {
+    throw invalidDraftCursor("Draft cursor version is unsupported.");
+  }
+  if (
+    typeof parsed.scaffoldId !== "string"
+    || parsed.scaffoldId.length === 0
+    || parsed.scaffoldId.length > 512
+    || /[\0-\x1f\x7f]/.test(parsed.scaffoldId)
+  ) {
+    throw invalidDraftCursor("Draft cursor scaffold is invalid.");
+  }
+  if (parsed.requestedKind !== null && parsed.requestedKind !== "inbox" && parsed.requestedKind !== "relay") {
+    throw invalidDraftCursor("Draft cursor filter is invalid.");
+  }
+  if (typeof parsed.corpusRevision !== "string" || !isRevision(parsed.corpusRevision)) {
+    throw invalidDraftCursor("Draft cursor corpus revision is invalid.");
+  }
+  if (typeof parsed.updatedAt !== "string" || !isCanonicalTimestamp(parsed.updatedAt)) {
+    throw invalidDraftCursor("Draft cursor timestamp is invalid.");
+  }
+  if (parsed.kind !== "inbox" && parsed.kind !== "relay") {
+    throw invalidDraftCursor("Draft cursor position kind is invalid.");
+  }
+  if (typeof parsed.id !== "string" || !LOCAL_IDENTIFIER.test(parsed.id)) {
+    throw invalidDraftCursor("Draft cursor position ID is invalid.");
+  }
   return {
-    updatedAt: validateTimestamp(updatedAtValue!, "draft cursor timestamp"),
-    kind: validateDraftKind(kindValue),
-    id: validateLocalIdentifier(idValue, "draft cursor ID"),
+    version: LOCAL_DRAFT_CURSOR_VERSION,
+    scaffoldId: parsed.scaffoldId,
+    requestedKind: parsed.requestedKind,
+    corpusRevision: parsed.corpusRevision,
+    updatedAt: parsed.updatedAt,
+    kind: parsed.kind,
+    id: parsed.id,
   };
+}
+
+function invalidDraftCursor(detail: string): MexPortError {
+  return new MexPortError({
+    title: "Invalid local draft cursor",
+    status: 422,
+    code: "INVALID_REQUEST",
+    detail,
+  });
 }
 
 function validateWorkflowLeaseToken(value: unknown): string {
@@ -1890,20 +2069,18 @@ function validateWorkflowLeaseToken(value: unknown): string {
   return value;
 }
 
-function readTeamWorkflowLease(
-  db: DatabaseSync,
-  scaffoldId: string,
-): TeamWorkflowLease | null {
+function readTeamWorkflowLease(db: DatabaseSync): TeamWorkflowLease | null {
   const rows = db.prepare(`
-    SELECT scaffold_id, pid, token, acquired_at
+    SELECT singleton, scaffold_id, pid, token, acquired_at
     FROM team_workflow_lease
-    WHERE scaffold_id = ?
-  `).all(scaffoldId) as unknown as TeamWorkflowLeaseRow[];
+    WHERE singleton = 1
+  `).all() as unknown as TeamWorkflowLeaseRow[];
   if (rows.length === 0) return null;
-  if (rows.length !== 1 || rows[0]?.scaffold_id !== scaffoldId) {
+  if (rows.length !== 1 || sqliteInteger(rows[0]?.singleton) !== 1) {
     throw corruptError("The Team workflow lease row is invalid.");
   }
   const row = rows[0]!;
+  const scaffoldId = validateStoredScaffoldId(row.scaffold_id);
   const pid = sqliteInteger(row.pid);
   if (pid === null || pid < 1) throw corruptError("The Team workflow lease PID is invalid.");
   if (typeof row.token !== "string" || !HUB_LEASE_TOKEN.test(row.token)) {
@@ -1920,8 +2097,8 @@ function assertTeamWorkflowLease(
   scaffoldId: string,
   token: string,
 ): void {
-  const current = readTeamWorkflowLease(db, scaffoldId);
-  if (!current || current.token !== token) {
+  const current = readTeamWorkflowLease(db);
+  if (!current || current.scaffoldId !== scaffoldId || current.token !== token) {
     throw revisionConflict("The Team workflow lease is absent or no longer owned.");
   }
 }
@@ -2357,6 +2534,26 @@ function readIncompleteWorkflowOperation(
     throw corruptError("More than one incomplete Team workflow operation exists for a scaffold.");
   }
   return rows[0] ? decodeWorkflowOperation(rows[0], scaffoldId) : null;
+}
+
+function readAnyIncompleteWorkflowOperation(
+  db: DatabaseSync,
+): TeamWorkflowJournalEntry | null {
+  const rows = db.prepare(`
+    SELECT scaffold_id, operation_id, command_revision, preview_revision, phase, effects_json,
+      created_at, updated_at, revision
+    FROM team_workflow_operations
+    WHERE phase <> 'complete'
+    ORDER BY updated_at ASC, scaffold_id ASC, operation_id ASC
+    LIMIT 2
+  `).all() as unknown as TeamWorkflowOperationRow[];
+  if (rows.length > 1) {
+    throw corruptError("More than one incomplete Team workflow operation exists in the repository.");
+  }
+  const row = rows[0];
+  if (!row) return null;
+  const scaffoldId = validateStoredScaffoldId(row.scaffold_id);
+  return decodeWorkflowOperation(row, scaffoldId);
 }
 
 function decodeWorkflowOperation(
@@ -3808,7 +4005,7 @@ function validateV4Tables(db: DatabaseSync): void {
     "hub_jobs_scaffold_created",
     "inbox_drafts_scaffold_updated",
     "relay_drafts_scaffold_updated",
-    "team_workflow_one_incomplete_per_scaffold",
+    "team_workflow_one_incomplete_per_repository",
     "team_workflow_operations_scaffold_updated",
   ]);
 }
@@ -4019,7 +4216,7 @@ function validateV4SchemaSql(db: DatabaseSync): void {
     "team_workflow_operations",
     "inbox_drafts_scaffold_updated",
     "relay_drafts_scaffold_updated",
-    "team_workflow_one_incomplete_per_scaffold",
+    "team_workflow_one_incomplete_per_repository",
     "team_workflow_operations_scaffold_updated",
   ] as const;
   for (const name of expectedNames) {

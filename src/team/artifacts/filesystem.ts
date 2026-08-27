@@ -32,6 +32,9 @@ import { artifactError } from "./errors.js";
 import { revisionOf } from "./revision.js";
 
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
+const ARTIFACT_LOCK_METADATA_VERSION = 1 as const;
+const MAX_ARTIFACT_LOCK_BYTES = 2 * 1024;
+const ARTIFACT_LOCK_TOKEN = /^[a-f0-9]{64}$/;
 
 export interface ContainedArtifactRead {
   bytes: Uint8Array;
@@ -258,30 +261,86 @@ export async function withContainedArtifactLock<T>(
   const { canonicalRoot } = resolveArtifactPath(projectRoot, directory);
   const directoryPath = ensureSafeDirectory(canonicalRoot, directory);
   const lockPath = resolve(directoryPath, lockName);
+  const recoveryPath = `${lockPath}.recovery`;
+  const owner = artifactLockOwner(canonicalRoot, directoryPath);
   let descriptor: number | undefined;
   let owned = false;
   let lockIdentity: FileIdentity | undefined;
   try {
+    recoverAbandonedArtifactLockMarker(
+      recoveryPath,
+      lockName,
+      canonicalRoot,
+      directoryPath,
+      directory,
+    );
     try {
-      descriptor = openSync(
-        lockPath,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
-        0o600,
-      );
+      const created = createArtifactLockFile(lockPath, owner);
+      descriptor = created.descriptor;
       owned = true;
-      lockIdentity = identityOf(fstatSync(descriptor));
-      writeFileSync(descriptor, `${process.pid}\n`, "utf8");
-      fsyncSync(descriptor);
+      lockIdentity = created.identity;
     } catch (error) {
-      if (isAlreadyExists(error)) {
-        throw artifactError(
-          "REVISION_CONFLICT",
-          "Artifact collection is being updated",
-          `Artifact lock ${lockName} is already held by another writer.`,
+      if (!isAlreadyExists(error)) throw error;
+      const existing = readArtifactLockFile(
+        lockPath,
+        lockName,
+        canonicalRoot,
+        directoryPath,
+        directory,
+      );
+      const status = probeArtifactLockProcess(existing.metadata.pid);
+      if (status !== "dead") throw artifactLockHeld(lockName, directory, existing.metadata.pid, status);
+
+      let recoveryDescriptor: number | undefined;
+      let recoveryIdentity: FileIdentity | undefined;
+      try {
+        let marker;
+        try {
+          marker = createArtifactLockFile(recoveryPath, owner);
+        } catch (recoveryError) {
+          if (isAlreadyExists(recoveryError)) {
+            throw artifactError(
+              "REVISION_CONFLICT",
+              "Artifact lock recovery is in progress",
+              `Artifact lock ${lockName} is already being recovered by another writer.`,
+              directory,
+            );
+          }
+          throw recoveryError;
+        }
+        recoveryDescriptor = marker.descriptor;
+        recoveryIdentity = marker.identity;
+
+        // The recovery marker blocks cooperating writers while the original
+        // path and owner token are revalidated immediately before reclamation.
+        const confirmed = readArtifactLockFile(
+          lockPath,
+          lockName,
+          canonicalRoot,
+          directoryPath,
           directory,
         );
+        if (
+          !sameIdentity(confirmed.identity, existing.identity)
+          || confirmed.metadata.token !== existing.metadata.token
+          || probeArtifactLockProcess(confirmed.metadata.pid) !== "dead"
+        ) {
+          throw artifactError(
+            "REVISION_CONFLICT",
+            "Artifact lock changed during recovery",
+            `Artifact lock ${lockName} changed before its dead owner could be recovered.`,
+            directory,
+          );
+        }
+        unlinkOwnedLock(lockPath, confirmed.identity);
+        const created = createArtifactLockFile(lockPath, owner);
+        descriptor = created.descriptor;
+        owned = true;
+        lockIdentity = created.identity;
+      } finally {
+        if (recoveryDescriptor !== undefined) closeSync(recoveryDescriptor);
+        if (recoveryIdentity !== undefined) unlinkOwnedLock(recoveryPath, recoveryIdentity);
       }
-      throw error;
     }
     assertSafeExistingComponents(canonicalRoot, directory, false);
     return await operation();
@@ -289,6 +348,279 @@ export async function withContainedArtifactLock<T>(
     if (descriptor !== undefined) closeSync(descriptor);
     if (owned && lockIdentity !== undefined) unlinkOwnedLock(lockPath, lockIdentity);
   }
+}
+
+type ArtifactLockProcessStatus = "alive" | "dead" | "ambiguous";
+
+interface ArtifactLockIdentity {
+  dev: string;
+  ino: string;
+}
+
+interface ArtifactLockMetadata {
+  version: typeof ARTIFACT_LOCK_METADATA_VERSION;
+  pid: number;
+  token: string;
+  acquiredAt: string;
+  root: ArtifactLockIdentity;
+  directory: ArtifactLockIdentity;
+}
+
+interface ObservedArtifactLock {
+  metadata: ArtifactLockMetadata;
+  identity: FileIdentity;
+}
+
+function artifactLockOwner(canonicalRoot: string, directoryPath: string): ArtifactLockMetadata {
+  return {
+    version: ARTIFACT_LOCK_METADATA_VERSION,
+    pid: process.pid,
+    token: randomBytes(32).toString("hex"),
+    acquiredAt: new Date().toISOString(),
+    root: persistedFileIdentity(statSync(canonicalRoot)),
+    directory: persistedFileIdentity(lstatSync(directoryPath)),
+  };
+}
+
+function createArtifactLockFile(
+  path: string,
+  metadata: ArtifactLockMetadata,
+): { descriptor: number; identity: FileIdentity } {
+  let descriptor: number | undefined;
+  let identity: FileIdentity | undefined;
+  try {
+    descriptor = openSync(
+      path,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
+      0o600,
+    );
+    identity = identityOf(fstatSync(descriptor));
+    const bytes = `${JSON.stringify(metadata)}\n`;
+    if (Buffer.byteLength(bytes, "utf8") > MAX_ARTIFACT_LOCK_BYTES) {
+      throw new Error("Generated artifact lock metadata exceeds its byte limit.");
+    }
+    writeFileSync(descriptor, bytes, "utf8");
+    fsyncSync(descriptor);
+    fsyncDirectory(dirname(path));
+    return { descriptor, identity };
+  } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor);
+    if (identity !== undefined) unlinkOwnedLock(path, identity);
+    throw error;
+  }
+}
+
+function readArtifactLockFile(
+  path: string,
+  lockName: string,
+  canonicalRoot: string,
+  directoryPath: string,
+  directory: RepoRelativePath,
+): ObservedArtifactLock {
+  let descriptor: number | undefined;
+  try {
+    const pathBefore = lstatSync(path);
+    if (pathBefore.isSymbolicLink() || !pathBefore.isFile()) {
+      throw unsafePath(directory, `Artifact lock ${lockName} is not a regular file.`);
+    }
+    descriptor = openSync(path, constants.O_RDONLY | NO_FOLLOW);
+    const before = fstatSync(descriptor);
+    if (!before.isFile() || !sameIdentity(before, pathBefore)) {
+      throw unsafePath(directory, `Artifact lock ${lockName} changed during inspection.`);
+    }
+    if (before.size < 1 || before.size > MAX_ARTIFACT_LOCK_BYTES) {
+      throw unknownArtifactLock(lockName, directory, "has invalid bounded metadata");
+    }
+    const bytes = readFileSync(descriptor);
+    const after = fstatSync(descriptor);
+    const pathAfter = lstatSync(path);
+    if (
+      !sameIdentity(before, after)
+      || before.size !== after.size
+      || bytes.byteLength !== after.size
+      || pathAfter.isSymbolicLink()
+      || !pathAfter.isFile()
+      || !sameIdentity(after, pathAfter)
+    ) {
+      throw artifactError(
+        "REVISION_CONFLICT",
+        "Artifact lock changed during inspection",
+        `Artifact lock ${lockName} changed while its owner was being verified.`,
+        directory,
+      );
+    }
+    const metadata = parseArtifactLockMetadata(bytes, lockName, directory);
+    const expectedRoot = persistedFileIdentity(statSync(canonicalRoot));
+    const expectedDirectory = persistedFileIdentity(lstatSync(directoryPath));
+    if (
+      !samePersistedIdentity(metadata.root, expectedRoot)
+      || !samePersistedIdentity(metadata.directory, expectedDirectory)
+    ) {
+      throw unknownArtifactLock(lockName, directory, "belongs to a different repository root");
+    }
+    return { metadata, identity: identityOf(after) };
+  } catch (error) {
+    if (isErrno(error, "ELOOP")) {
+      throw unsafePath(directory, `Artifact lock ${lockName} must not be a symbolic link.`);
+    }
+    if (isNotFound(error)) {
+      throw artifactError(
+        "REVISION_CONFLICT",
+        "Artifact lock disappeared",
+        `Artifact lock ${lockName} disappeared while its owner was being verified.`,
+        directory,
+      );
+    }
+    throw error;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function parseArtifactLockMetadata(
+  bytes: Uint8Array,
+  lockName: string,
+  directory: RepoRelativePath,
+): ArtifactLockMetadata {
+  const text = Buffer.from(bytes).toString("utf8");
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw unknownArtifactLock(lockName, directory, "contains malformed metadata");
+  }
+  if (!isRecord(value)) {
+    throw unknownArtifactLock(lockName, directory, "contains malformed metadata");
+  }
+  const expectedKeys = ["version", "pid", "token", "acquiredAt", "root", "directory"];
+  if (!hasExactKeys(value, expectedKeys)) {
+    throw unknownArtifactLock(lockName, directory, "contains unknown metadata fields");
+  }
+  const root = parseArtifactLockIdentity(value.root);
+  const directoryIdentity = parseArtifactLockIdentity(value.directory);
+  if (
+    value.version !== ARTIFACT_LOCK_METADATA_VERSION
+    || !Number.isSafeInteger(value.pid)
+    || (value.pid as number) < 1
+    || typeof value.token !== "string"
+    || !ARTIFACT_LOCK_TOKEN.test(value.token)
+    || typeof value.acquiredAt !== "string"
+    || !isCanonicalIsoTimestamp(value.acquiredAt)
+    || root === null
+    || directoryIdentity === null
+  ) {
+    throw unknownArtifactLock(lockName, directory, "contains invalid owner metadata");
+  }
+  const metadata: ArtifactLockMetadata = {
+    version: ARTIFACT_LOCK_METADATA_VERSION,
+    pid: value.pid as number,
+    token: value.token,
+    acquiredAt: value.acquiredAt,
+    root,
+    directory: directoryIdentity,
+  };
+  if (`${JSON.stringify(metadata)}\n` !== text) {
+    throw unknownArtifactLock(lockName, directory, "contains non-canonical owner metadata");
+  }
+  return metadata;
+}
+
+function parseArtifactLockIdentity(value: unknown): ArtifactLockIdentity | null {
+  if (!isRecord(value) || !hasExactKeys(value, ["dev", "ino"])) return null;
+  if (
+    typeof value.dev !== "string"
+    || typeof value.ino !== "string"
+    || !/^(?:0|[1-9][0-9]*)$/.test(value.dev)
+    || !/^(?:0|[1-9][0-9]*)$/.test(value.ino)
+  ) return null;
+  return { dev: value.dev, ino: value.ino };
+}
+
+function persistedFileIdentity(value: FileIdentity): ArtifactLockIdentity {
+  return { dev: String(value.dev), ino: String(value.ino) };
+}
+
+function samePersistedIdentity(left: ArtifactLockIdentity, right: ArtifactLockIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && keys.every((key) => expected.includes(key));
+}
+
+function isCanonicalIsoTimestamp(value: string): boolean {
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.valueOf()) && parsed.toISOString() === value;
+}
+
+function probeArtifactLockProcess(pid: number): ArtifactLockProcessStatus {
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (error) {
+    return isErrno(error, "ESRCH") ? "dead" : "ambiguous";
+  }
+}
+
+function recoverAbandonedArtifactLockMarker(
+  recoveryPath: string,
+  lockName: string,
+  canonicalRoot: string,
+  directoryPath: string,
+  directory: RepoRelativePath,
+): void {
+  try {
+    lstatSync(recoveryPath);
+  } catch (error) {
+    if (isNotFound(error)) return;
+    throw error;
+  }
+  const marker = readArtifactLockFile(
+    recoveryPath,
+    `${lockName}.recovery`,
+    canonicalRoot,
+    directoryPath,
+    directory,
+  );
+  const status = probeArtifactLockProcess(marker.metadata.pid);
+  if (status !== "dead") {
+    throw artifactLockHeld(`${lockName}.recovery`, directory, marker.metadata.pid, status);
+  }
+  unlinkOwnedLock(recoveryPath, marker.identity);
+}
+
+function artifactLockHeld(
+  lockName: string,
+  directory: RepoRelativePath,
+  pid: number,
+  status: Exclude<ArtifactLockProcessStatus, "dead">,
+): Error {
+  return artifactError(
+    "REVISION_CONFLICT",
+    "Artifact collection is being updated",
+    status === "alive"
+      ? `Artifact lock ${lockName} is held by live process ${pid}.`
+      : `Artifact lock ${lockName} owner ${pid} could not be verified dead; refusing recovery.`,
+    directory,
+  );
+}
+
+function unknownArtifactLock(
+  lockName: string,
+  directory: RepoRelativePath,
+  reason: string,
+): Error {
+  return artifactError(
+    "REVISION_CONFLICT",
+    "Artifact lock owner is unknown",
+    `Artifact lock ${lockName} ${reason}; refusing recovery.`,
+    directory,
+  );
 }
 
 function assertExpectedRevision(
@@ -469,6 +801,7 @@ function unlinkOwnedLock(path: string, expected: FileIdentity): void {
     const current = lstatSync(path);
     if (current.isFile() && !current.isSymbolicLink() && sameIdentity(current, expected)) {
       unlinkSync(path);
+      fsyncDirectory(dirname(path));
     }
   } catch (error) {
     if (!isNotFound(error)) throw error;
