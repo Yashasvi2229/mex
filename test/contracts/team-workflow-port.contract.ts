@@ -246,7 +246,7 @@ export function defineTeamWorkflowPortContract<TWikiOperationPlan>(
           kind: oracle.activeArtifact.kind,
         });
         expect(await port.getArtifact({
-          id: "workstream_00000000000000000000000000",
+          id: "ws_00000000000000000000000000",
           kind: "workstream",
         }))
           .toBeNull();
