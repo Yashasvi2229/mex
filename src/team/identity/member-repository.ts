@@ -327,6 +327,7 @@ export class MemberRepository implements MemberReader {
               candidate.sourcePath,
               plan.beforeRevision,
               plan.document,
+              MEMBER_ARTIFACT_MAX_BYTES,
             );
           }
         }

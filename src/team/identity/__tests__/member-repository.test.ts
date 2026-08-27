@@ -115,7 +115,7 @@ describe("MemberRepository", () => {
       gitAliases: [],
       active: true,
     });
-    atomicReplaceArtifact(root, created.sourcePath, created.revision, concurrent);
+    atomicReplaceArtifact(root, created.sourcePath, created.revision, concurrent, 64 * 1024);
 
     await expect(repository.apply(preview, preview.previewRevision)).rejects.toMatchObject({
       problem: { code: "REVISION_CONFLICT" },

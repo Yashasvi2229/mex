@@ -274,7 +274,13 @@ class CanonicalWorkflowRepository<TArtifact, TStored, TCreate extends { id?: str
         }
         this.#codec.assertTransition(current, verified);
         this.#assertWriteCapacity("update", this.#codec.sourcePathOf(verified), plan.document);
-        atomicReplaceArtifact(this.#projectRoot, this.#codec.sourcePathOf(verified), plan.beforeRevision, plan.document);
+        atomicReplaceArtifact(
+          this.#projectRoot,
+          this.#codec.sourcePathOf(verified),
+          plan.beforeRevision,
+          plan.document,
+          WORKFLOW_ARTIFACT_MAX_BYTES,
+        );
       }
       return { previewRevision: plan.previewRevision, artifact: candidate, change: plan.change };
     });

@@ -44,13 +44,34 @@ describe("contained atomic artifact I/O", () => {
     expect(() => atomicCreateArtifact(root, path, "overwrite\n")).toThrow(/already exists/);
     expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe(first);
 
-    expect(atomicReplaceArtifact(root, path, revisionOf(first), second)).toBe(revisionOf(second));
+    expect(atomicReplaceArtifact(root, path, revisionOf(first), second, 64 * 1024)).toBe(revisionOf(second));
     expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe(second);
-    expect(() => atomicReplaceArtifact(root, path, revisionOf(first), "stale\n")).toThrow(/expected revision/);
+    expect(() => atomicReplaceArtifact(root, path, revisionOf(first), "stale\n", 64 * 1024)).toThrow(/expected revision/);
     expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe(second);
     expect(readdirSync(dirname(join(root, ...path.split("/")))).every(
       (name) => !name.includes("mex-tmp") && !name.includes("mex-lock"),
     )).toBe(true);
+  });
+
+  it("enforces the artifact byte budget during reads and replacement revalidation", () => {
+    const root = temporaryRoot();
+    const path = ".mex/team/members/member_00000000000000000000000000.md" as RepoRelativePath;
+    const oversized = "x".repeat(64 * 1024 + 1);
+    atomicCreateArtifact(root, path, oversized);
+
+    expect(() => readContainedArtifact(root, path, 64 * 1024)).toThrowError(
+      expect.objectContaining({ problem: expect.objectContaining({ code: "VALIDATION_FAILED" }) }),
+    );
+    expect(() => atomicReplaceArtifact(
+      root,
+      path,
+      revisionOf(oversized),
+      "bounded replacement\n",
+      64 * 1024,
+    )).toThrowError(
+      expect.objectContaining({ problem: expect.objectContaining({ code: "VALIDATION_FAILED" }) }),
+    );
+    expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe(oversized);
   });
 
   it("fails closed without removing unknown per-file lock metadata", () => {
@@ -60,7 +81,7 @@ describe("contained atomic artifact I/O", () => {
     const lock = join(root, ".mex/team/members", `.${path.split("/").at(-1)}.mex-lock`);
     writeFileSync(lock, "other writer\n");
 
-    expect(() => atomicReplaceArtifact(root, path, revisionOf("first\n"), "second\n"))
+    expect(() => atomicReplaceArtifact(root, path, revisionOf("first\n"), "second\n", 64 * 1024))
       .toThrowError(expect.objectContaining({
         problem: expect.objectContaining({ code: "REVISION_CONFLICT" }),
       }));
@@ -89,7 +110,7 @@ describe("contained atomic artifact I/O", () => {
       child.kill("SIGKILL");
       await once(child, "exit");
 
-      expect(atomicReplaceArtifact(root, path, revisionOf("first\n"), "second\n"))
+      expect(atomicReplaceArtifact(root, path, revisionOf("first\n"), "second\n", 64 * 1024))
         .toBe(revisionOf("second\n"));
       expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe("second\n");
       expect(existsSync(lock)).toBe(false);

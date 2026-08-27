@@ -8,7 +8,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   statSync,
@@ -77,7 +77,14 @@ export function readContainedArtifact(
         path,
       );
     }
-    const bytes = readFileSync(descriptor);
+    const bytes = readDescriptorBounded(descriptor, maxBytes, () => {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Artifact is too large",
+        `Artifact exceeds ${maxBytes} bytes.`,
+        path,
+      );
+    });
     const after = fstatSync(descriptor);
     if (!sameIdentity(before, after) || before.size !== after.size || bytes.byteLength !== after.size) {
       throw artifactError(
@@ -173,6 +180,7 @@ export function atomicReplaceArtifact(
   path: RepoRelativePath,
   expectedRevision: Revision,
   bytes: string | Uint8Array,
+  maxExistingBytes: number,
 ): Revision {
   const { canonicalRoot, lexicalPath } = resolveArtifactPath(projectRoot, path);
   const parentRelative = dirname(path) as RepoRelativePath;
@@ -199,13 +207,13 @@ export function atomicReplaceArtifact(
     lockOwned = true;
     lockIdentity = lock.identity;
 
-    assertExpectedRevision(projectRoot, path, expectedRevision);
+    assertExpectedRevision(projectRoot, path, expectedRevision, maxExistingBytes);
     const payload = asBytes(bytes);
     temporaryPath = stageFile(parentPath, basename(path), payload);
 
     // Revalidate after all potentially expensive serialization/staging work.
     assertSafeExistingComponents(canonicalRoot, parentRelative, false);
-    assertExpectedRevision(projectRoot, path, expectedRevision);
+    assertExpectedRevision(projectRoot, path, expectedRevision, maxExistingBytes);
     assertTargetAbsentOrRegular(lexicalPath, path, false);
     renameSync(temporaryPath, lexicalPath);
     temporaryPath = undefined;
@@ -444,7 +452,9 @@ function readArtifactLockFile(
     if (before.size < 1 || before.size > MAX_ARTIFACT_LOCK_BYTES) {
       throw unknownArtifactLock(lockName, directory, "has invalid bounded metadata");
     }
-    const bytes = readFileSync(descriptor);
+    const bytes = readDescriptorBounded(descriptor, MAX_ARTIFACT_LOCK_BYTES, () => {
+      throw unknownArtifactLock(lockName, directory, "exceeds the metadata byte limit");
+    });
     const after = fstatSync(descriptor);
     const pathAfter = lstatSync(path);
     if (
@@ -640,10 +650,11 @@ function assertExpectedRevision(
   projectRoot: string,
   path: RepoRelativePath,
   expectedRevision: Revision,
+  maxBytes: number,
 ): void {
   let current: ContainedArtifactRead;
   try {
-    current = readContainedArtifact(projectRoot, path, 64 * 1024 * 1024);
+    current = readContainedArtifact(projectRoot, path, maxBytes);
   } catch (error) {
     if (isMexCode(error, "NOT_FOUND")) {
       throw artifactError(
@@ -663,6 +674,26 @@ function assertExpectedRevision(
       path,
     );
   }
+}
+
+/** Read at most one byte beyond a trusted budget, even if the file grows after fstat. */
+function readDescriptorBounded(
+  descriptor: number,
+  maxBytes: number,
+  tooLarge: () => never,
+): Buffer {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  while (total <= maxBytes) {
+    const remaining = maxBytes + 1 - total;
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+    const bytesRead = readSync(descriptor, chunk, 0, chunk.byteLength, total);
+    if (bytesRead === 0) break;
+    chunks.push(chunk.subarray(0, bytesRead));
+    total += bytesRead;
+  }
+  if (total > maxBytes) tooLarge();
+  return Buffer.concat(chunks, total);
 }
 
 function stageFile(parentPath: string, targetName: string, bytes: Uint8Array): string {
