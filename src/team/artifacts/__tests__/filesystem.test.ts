@@ -53,15 +53,50 @@ describe("contained atomic artifact I/O", () => {
     )).toBe(true);
   });
 
-  it("does not remove another writer's lock", () => {
+  it("fails closed without removing unknown per-file lock metadata", () => {
     const root = temporaryRoot();
     const path = ".mex/team/members/member_00000000000000000000000000.md" as RepoRelativePath;
     atomicCreateArtifact(root, path, "first\n");
     const lock = join(root, ".mex/team/members", `.${path.split("/").at(-1)}.mex-lock`);
     writeFileSync(lock, "other writer\n");
 
-    expect(() => atomicReplaceArtifact(root, path, revisionOf("first\n"), "second\n")).toThrow(/locked/);
+    expect(() => atomicReplaceArtifact(root, path, revisionOf("first\n"), "second\n"))
+      .toThrowError(expect.objectContaining({
+        problem: expect.objectContaining({ code: "REVISION_CONFLICT" }),
+      }));
     expect(readFileSync(lock, "utf8")).toBe("other writer\n");
+  });
+
+  it("recovers a per-file replacement lock after its holder is killed", async () => {
+    const root = temporaryRoot();
+    const path = ".mex/team/members/member_00000000000000000000000000.md" as RepoRelativePath;
+    const directory = ".mex/team/members" as RepoRelativePath;
+    atomicCreateArtifact(root, path, "first\n");
+    const lock = join(root, directory, `.${path.split("/").at(-1)}.mex-lock`);
+    const captureLock = ".capture-owner.mex-lock";
+    let captured = "";
+    await withContainedArtifactLock(root, directory, captureLock, () => {
+      captured = readFileSync(join(root, directory, captureLock), "utf8");
+    });
+    const metadata = JSON.parse(captured) as Record<string, unknown>;
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    try {
+      await once(child, "spawn");
+      metadata.pid = child.pid;
+      writeFileSync(lock, `${JSON.stringify(metadata)}\n`, "utf8");
+      child.kill("SIGKILL");
+      await once(child, "exit");
+
+      expect(atomicReplaceArtifact(root, path, revisionOf("first\n"), "second\n"))
+        .toBe(revisionOf("second\n"));
+      expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe("second\n");
+      expect(existsSync(lock)).toBe(false);
+      expect(existsSync(`${lock}.recovery`)).toBe(false);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
   });
 
   it("rejects a concurrent collection lock without removing the active writer's lock", async () => {

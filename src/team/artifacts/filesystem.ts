@@ -177,34 +177,27 @@ export function atomicReplaceArtifact(
   const { canonicalRoot, lexicalPath } = resolveArtifactPath(projectRoot, path);
   const parentRelative = dirname(path) as RepoRelativePath;
   const parentPath = ensureSafeDirectory(canonicalRoot, parentRelative);
-  const lockPath = resolve(parentPath, `.${basename(path)}.mex-lock`);
+  const lockName = `.${basename(path)}.mex-lock`;
+  const lockPath = resolve(parentPath, lockName);
+  const recoveryPath = `${lockPath}.recovery`;
   let lockDescriptor: number | undefined;
   let lockOwned = false;
   let lockIdentity: FileIdentity | undefined;
   let temporaryPath: string | undefined;
 
   try {
-    try {
-      lockDescriptor = openSync(
-        lockPath,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
-        0o600,
-      );
-      lockOwned = true;
-      lockIdentity = identityOf(fstatSync(lockDescriptor));
-      writeFileSync(lockDescriptor, `${process.pid}\n`, "utf8");
-      fsyncSync(lockDescriptor);
-    } catch (error) {
-      if (isAlreadyExists(error)) {
-        throw artifactError(
-          "REVISION_CONFLICT",
-          "Artifact is being updated",
-          `Artifact ${path} is already locked by another writer.`,
-          path,
-        );
-      }
-      throw error;
-    }
+    const lock = acquireArtifactLock(
+      lockPath,
+      recoveryPath,
+      lockName,
+      artifactLockOwner(canonicalRoot, parentPath),
+      canonicalRoot,
+      parentPath,
+      parentRelative,
+    );
+    lockDescriptor = lock.descriptor;
+    lockOwned = true;
+    lockIdentity = lock.identity;
 
     assertExpectedRevision(projectRoot, path, expectedRevision);
     const payload = asBytes(bytes);
@@ -267,81 +260,18 @@ export async function withContainedArtifactLock<T>(
   let owned = false;
   let lockIdentity: FileIdentity | undefined;
   try {
-    recoverAbandonedArtifactLockMarker(
+    const lock = acquireArtifactLock(
+      lockPath,
       recoveryPath,
       lockName,
+      owner,
       canonicalRoot,
       directoryPath,
       directory,
     );
-    try {
-      const created = createArtifactLockFile(lockPath, owner);
-      descriptor = created.descriptor;
-      owned = true;
-      lockIdentity = created.identity;
-    } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
-      const existing = readArtifactLockFile(
-        lockPath,
-        lockName,
-        canonicalRoot,
-        directoryPath,
-        directory,
-      );
-      const status = probeArtifactLockProcess(existing.metadata.pid);
-      if (status !== "dead") throw artifactLockHeld(lockName, directory, existing.metadata.pid, status);
-
-      let recoveryDescriptor: number | undefined;
-      let recoveryIdentity: FileIdentity | undefined;
-      try {
-        let marker;
-        try {
-          marker = createArtifactLockFile(recoveryPath, owner);
-        } catch (recoveryError) {
-          if (isAlreadyExists(recoveryError)) {
-            throw artifactError(
-              "REVISION_CONFLICT",
-              "Artifact lock recovery is in progress",
-              `Artifact lock ${lockName} is already being recovered by another writer.`,
-              directory,
-            );
-          }
-          throw recoveryError;
-        }
-        recoveryDescriptor = marker.descriptor;
-        recoveryIdentity = marker.identity;
-
-        // The recovery marker blocks cooperating writers while the original
-        // path and owner token are revalidated immediately before reclamation.
-        const confirmed = readArtifactLockFile(
-          lockPath,
-          lockName,
-          canonicalRoot,
-          directoryPath,
-          directory,
-        );
-        if (
-          !sameIdentity(confirmed.identity, existing.identity)
-          || confirmed.metadata.token !== existing.metadata.token
-          || probeArtifactLockProcess(confirmed.metadata.pid) !== "dead"
-        ) {
-          throw artifactError(
-            "REVISION_CONFLICT",
-            "Artifact lock changed during recovery",
-            `Artifact lock ${lockName} changed before its dead owner could be recovered.`,
-            directory,
-          );
-        }
-        unlinkOwnedLock(lockPath, confirmed.identity);
-        const created = createArtifactLockFile(lockPath, owner);
-        descriptor = created.descriptor;
-        owned = true;
-        lockIdentity = created.identity;
-      } finally {
-        if (recoveryDescriptor !== undefined) closeSync(recoveryDescriptor);
-        if (recoveryIdentity !== undefined) unlinkOwnedLock(recoveryPath, recoveryIdentity);
-      }
-    }
+    descriptor = lock.descriptor;
+    owned = true;
+    lockIdentity = lock.identity;
     assertSafeExistingComponents(canonicalRoot, directory, false);
     return await operation();
   } finally {
@@ -380,6 +310,89 @@ function artifactLockOwner(canonicalRoot: string, directoryPath: string): Artifa
     root: persistedFileIdentity(statSync(canonicalRoot)),
     directory: persistedFileIdentity(lstatSync(directoryPath)),
   };
+}
+
+function acquireArtifactLock(
+  lockPath: string,
+  recoveryPath: string,
+  lockName: string,
+  owner: ArtifactLockMetadata,
+  canonicalRoot: string,
+  directoryPath: string,
+  directory: RepoRelativePath,
+): { descriptor: number; identity: FileIdentity } {
+  recoverAbandonedArtifactLockMarker(
+    recoveryPath,
+    lockName,
+    canonicalRoot,
+    directoryPath,
+    directory,
+  );
+  try {
+    return createArtifactLockFile(lockPath, owner);
+  } catch (error) {
+    if (!isAlreadyExists(error)) throw error;
+  }
+
+  const existing = readArtifactLockFile(
+    lockPath,
+    lockName,
+    canonicalRoot,
+    directoryPath,
+    directory,
+  );
+  const status = probeArtifactLockProcess(existing.metadata.pid);
+  if (status !== "dead") {
+    throw artifactLockHeld(lockName, directory, existing.metadata.pid, status);
+  }
+
+  let recoveryDescriptor: number | undefined;
+  let recoveryIdentity: FileIdentity | undefined;
+  try {
+    let marker;
+    try {
+      marker = createArtifactLockFile(recoveryPath, owner);
+    } catch (recoveryError) {
+      if (isAlreadyExists(recoveryError)) {
+        throw artifactError(
+          "REVISION_CONFLICT",
+          "Artifact lock recovery is in progress",
+          `Artifact lock ${lockName} is already being recovered by another writer.`,
+          directory,
+        );
+      }
+      throw recoveryError;
+    }
+    recoveryDescriptor = marker.descriptor;
+    recoveryIdentity = marker.identity;
+
+    // The recovery marker blocks cooperating writers while the original path
+    // and owner token are revalidated immediately before reclamation.
+    const confirmed = readArtifactLockFile(
+      lockPath,
+      lockName,
+      canonicalRoot,
+      directoryPath,
+      directory,
+    );
+    if (
+      !sameIdentity(confirmed.identity, existing.identity)
+      || confirmed.metadata.token !== existing.metadata.token
+      || probeArtifactLockProcess(confirmed.metadata.pid) !== "dead"
+    ) {
+      throw artifactError(
+        "REVISION_CONFLICT",
+        "Artifact lock changed during recovery",
+        `Artifact lock ${lockName} changed before its dead owner could be recovered.`,
+        directory,
+      );
+    }
+    unlinkOwnedLock(lockPath, confirmed.identity);
+    return createArtifactLockFile(lockPath, owner);
+  } finally {
+    if (recoveryDescriptor !== undefined) closeSync(recoveryDescriptor);
+    if (recoveryIdentity !== undefined) unlinkOwnedLock(recoveryPath, recoveryIdentity);
+  }
 }
 
 function createArtifactLockFile(
