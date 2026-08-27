@@ -85,9 +85,11 @@ describe("Project Hub routes", () => {
     expect(screen.getByText("Source matches", { selector: "h2" })).toBeVisible();
   });
 
-  it("links Home to canonical Activity while Inbox and Relays stay unavailable", async () => {
+  it("links Home to canonical Workstreams and Activity while Inbox and Relays stay unavailable", async () => {
     renderRoute("/");
-    const activityMetric = await screen.findByRole("link", { name: /Canonical events/ });
+    const workstreamMetric = await screen.findByRole("link", { name: /Canonical delivery threads/ });
+    expect(workstreamMetric).toHaveAttribute("href", "/workstreams");
+    const activityMetric = screen.getByRole("link", { name: /Canonical events/ });
     expect(activityMetric).toHaveAttribute("href", "/activity");
     expect(screen.getByRole("link", { name: "All jobs" })).toHaveAttribute("href", "/jobs");
     expect(screen.getByRole("link", { name: "Open Graph refresh" })).toHaveAttribute(

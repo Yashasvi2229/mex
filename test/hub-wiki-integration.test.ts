@@ -43,6 +43,11 @@ const TOPIC_ID = "mx_01J00000000000000000000001";
 const DECISION_ID = "mx_01J00000000000000000000002";
 const PATTERN_ID = "mx_01J00000000000000000000003";
 const LARGE_FACT_ID = "mx_01J00000000000000000000004";
+const SPEC_ID = "mx_01J00000000000000000000005";
+const REQUIREMENT_ID = "mx_01J00000000000000000000006";
+const CONSTRAINT_ID = "mx_01J00000000000000000000007";
+const ACCEPTANCE_CRITERION_ID = "mx_01J00000000000000000000008";
+const TEAM_WORKSTREAM_ID = "ws_01J00000000000000000000009";
 const roots = new Set<string>();
 
 afterEach(() => {
@@ -51,6 +56,47 @@ afterEach(() => {
 });
 
 describe("real Project Hub Wiki integration", () => {
+  it("serves engineering-intelligence kinds through the general Knowledge response", async () => {
+    const harness = await createHarness(await prepareProject());
+    try {
+      const response = await parseBounded(
+        await harness.get("/api/v1/wiki/entities?limit=25"),
+        WikiEntityListResponseSchema,
+      );
+      expect(response.items).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: SPEC_ID, kind: "spec", route: `/knowledge/${SPEC_ID}` }),
+        expect.objectContaining({ id: REQUIREMENT_ID, kind: "requirement", route: `/knowledge/${REQUIREMENT_ID}` }),
+        expect.objectContaining({ id: CONSTRAINT_ID, kind: "constraint", route: `/knowledge/${CONSTRAINT_ID}` }),
+        expect.objectContaining({
+          id: ACCEPTANCE_CRITERION_ID,
+          kind: "acceptance_criterion",
+          route: `/knowledge/${ACCEPTANCE_CRITERION_ID}`,
+        }),
+        expect.objectContaining({ id: DECISION_ID, kind: "decision", route: `/knowledge/${DECISION_ID}` }),
+      ]));
+      expect(response.items.some((item) => item.id === TEAM_WORKSTREAM_ID)).toBe(false);
+
+      for (const [kind, id] of [
+        ["spec", SPEC_ID],
+        ["requirement", REQUIREMENT_ID],
+        ["constraint", CONSTRAINT_ID],
+        ["acceptance_criterion", ACCEPTANCE_CRITERION_ID],
+      ] as const) {
+        const filtered = await parseBounded(
+          await harness.get(`/api/v1/wiki/entities?kind=${kind}&limit=25`),
+          WikiEntityListResponseSchema,
+        );
+        expect(filtered.items.map((item) => [item.kind, item.id])).toEqual([[kind, id]]);
+      }
+
+      const teamKind = await harness.get("/api/v1/wiki/entities?kind=workstream&limit=25");
+      expect(teamKind.status).toBe(400);
+      expect(await teamKind.json()).toMatchObject({ code: "INVALID_REQUEST" });
+    } finally {
+      await harness.close();
+    }
+  }, 45_000);
+
   it("serves bounded Knowledge, search, relations, backlinks, and Code links without mutating the repository", async () => {
     const harness = await createHarness(await prepareProject());
     try {
@@ -482,7 +528,7 @@ async function prepareProject(): Promise<PreparedProject> {
     bodyHash: exact.node.bodyHash,
     fingerprint: exact.fingerprint,
   });
-  git(root, "add", ".mex/context", ".mex/topics");
+  git(root, "add", ".mex/context", ".mex/topics", ".mex/workstreams");
   git(root, "commit", "-qm", "Wiki fixture");
   await graph.rebuild();
 
@@ -579,6 +625,86 @@ function writeWikiFixture(
     "## Bounded UTF-8 evidence",
     "",
     largeBody,
+    "",
+  ].join("\n"));
+  write(root, ".mex/context/release-spec.md", [
+    "<!-- mex:entity",
+    `id: ${SPEC_ID}`,
+    "type: spec",
+    "status: promoted",
+    "revision: 1",
+    "summary: Define the release behavior.",
+    "relations:",
+    "  - type: constrained_by",
+    `    target: ${CONSTRAINT_ID}`,
+    "sources:",
+    "  - type: manual",
+    "    note: Maintainer reviewed.",
+    "-->",
+    "## Release behavior",
+    "",
+    "The release behavior is explicit and reviewable.",
+    "",
+    "<!-- mex:entity",
+    `id: ${REQUIREMENT_ID}`,
+    "type: requirement",
+    "status: promoted",
+    "revision: 1",
+    "summary: Preserve the release contract.",
+    "relations:",
+    "  - type: derived_from",
+    `    target: ${SPEC_ID}`,
+    "sources:",
+    "  - type: manual",
+    "    note: Maintainer reviewed.",
+    "-->",
+    "## Preserve the release contract",
+    "",
+    "The implementation preserves the release contract.",
+    "",
+    "<!-- mex:entity",
+    `id: ${CONSTRAINT_ID}`,
+    "type: constraint",
+    "status: promoted",
+    "revision: 1",
+    "summary: Keep release reads local.",
+    "sources:",
+    "  - type: manual",
+    "    note: Maintainer reviewed.",
+    "-->",
+    "## Keep release reads local",
+    "",
+    "All release reads remain repository local.",
+    "",
+    "<!-- mex:entity",
+    `id: ${ACCEPTANCE_CRITERION_ID}`,
+    "type: acceptance_criterion",
+    "status: promoted",
+    "revision: 1",
+    "summary: Prove the release response.",
+    "relations:",
+    "  - type: verified_by",
+    `    target: ${REQUIREMENT_ID}`,
+    "sources:",
+    "  - type: manual",
+    "    note: Maintainer reviewed.",
+    "-->",
+    "## Prove the release response",
+    "",
+    "The response retains every canonical entity kind.",
+    "",
+  ].join("\n"));
+  write(root, ".mex/workstreams/team-workstream.md", [
+    "<!-- mex:entity",
+    `id: ${TEAM_WORKSTREAM_ID}`,
+    "type: workstream",
+    "status: promoted",
+    "revision: 1",
+    "summary: Team-owned work stays in its dedicated workbench.",
+    "-->",
+    "## A team Workstream",
+    "",
+    "This Team entity is Wiki-readable internally but is not general Knowledge.",
     "",
   ].join("\n"));
 }

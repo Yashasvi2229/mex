@@ -258,6 +258,9 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | `mex member add\|update\|deactivate\|select` | Preview a member/selection request; apply only an approved preview envelope |
 | `mex activity list\|show --json` | Read bounded canonical Activity |
 | `mex activity record` | Preview an append-only canonical Activity record |
+| `mex workstream list\|show --json` | Read bounded canonical Workstreams |
+| `mex workstream create\|update\|archive` | Preview a Workstream change; apply only an approved preview envelope |
+| `mex spec list\|show --json` | Read root Specs and their explicit Wiki hierarchy without maintaining indexes |
 | `mex setup` | Create and populate the living wiki |
 | `mex check` | Check wiki health and calculate a drift score |
 | `mex sync` | Repair stale or inconsistent knowledge |
@@ -285,12 +288,17 @@ Use `--no-open` to print the launch URL without opening a browser, or `--port`
 to request a specific loopback port.
 
 The Hub displays repository context, locally persisted job history, canonical
-members, the effective checkout actor, and the Activity timeline. The Members
-workbench uses explicit preview/review/apply for canonical identity changes and
-keeps member selection local. Activity remains immutable and adds only an
-append-only reviewed record flow; the service captures actor, timestamp, branch,
-HEAD, and dirty state. Its real Code workspace searches symbols and
-source, inspects callers/callees/impact, reports graph Health, and lets you
+members and Workstreams, read-only Specs, the effective checkout actor, and the
+Activity timeline. The Members workbench uses explicit preview/review/apply for
+canonical identity changes and keeps member selection local. Activity remains
+immutable and adds only an append-only reviewed record flow; the service
+captures actor, timestamp, branch, HEAD, and dirty state. The Workstreams
+workbench uses the same exact preview/apply boundary for create, update, and
+one-way archive operations; every successful canonical change emits one
+Activity event. Specs are a fresh-index, read-only view of canonical Wiki Spec
+roots and explicit requirement, constraint, acceptance-criterion, and
+refinement relations. The real Code workspace searches symbols and source,
+inspects callers/callees/impact, reports graph Health, and lets you
 explicitly refresh or rebuild the local graph. Its read-only Knowledge workspace
 browses and searches canonical Wiki entries, shows bounded evidence, provenance,
 relations, backlinks, and current grounding, and links Code to Knowledge only

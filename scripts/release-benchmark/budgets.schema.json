@@ -48,7 +48,7 @@
         "routes": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
+          "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "specsDetail", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
           "properties": {
             "home": { "$ref": "#/$defs/assetGroup" },
             "search": { "$ref": "#/$defs/assetGroup" },
@@ -58,6 +58,7 @@
             "codeSymbol": { "$ref": "#/$defs/assetGroup" },
             "workstreams": { "$ref": "#/$defs/assetGroup" },
             "specs": { "$ref": "#/$defs/assetGroup" },
+            "specsDetail": { "$ref": "#/$defs/assetGroup" },
             "playbooks": { "$ref": "#/$defs/assetGroup" },
             "inbox": { "$ref": "#/$defs/assetGroup" },
             "relays": { "$ref": "#/$defs/assetGroup" },
@@ -154,7 +155,7 @@
     "routeBudgets": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
+      "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "specsDetail", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
       "properties": {
         "home": { "$ref": "#/$defs/nonNegativeNumber" },
         "search": { "$ref": "#/$defs/nonNegativeNumber" },
@@ -164,6 +165,7 @@
         "codeSymbol": { "$ref": "#/$defs/nonNegativeNumber" },
         "workstreams": { "$ref": "#/$defs/nonNegativeNumber" },
         "specs": { "$ref": "#/$defs/nonNegativeNumber" },
+        "specsDetail": { "$ref": "#/$defs/nonNegativeNumber" },
         "playbooks": { "$ref": "#/$defs/nonNegativeNumber" },
         "inbox": { "$ref": "#/$defs/nonNegativeNumber" },
         "relays": { "$ref": "#/$defs/nonNegativeNumber" },

@@ -16,7 +16,9 @@ import type {
   TeamIdentityActivityPreviewEnvelope,
   TeamMember,
   TeamPage,
+  TeamWorkstreamPreviewEnvelope,
   TeamWorkflowResult,
+  Workstream,
 } from "../contracts/workflow.js";
 
 export interface TeamMemberProjection {
@@ -43,6 +45,32 @@ export interface TeamActivityProjection {
   revision: Revision | null;
 }
 
+export interface TeamWorkstreamProjection {
+  schemaVersion: 1;
+  id: string;
+  entityRevision: number;
+  title: string;
+  goal: string;
+  summary: string;
+  state: Workstream["state"];
+  owners: Workstream["owners"];
+  contributors: Workstream["contributors"];
+  paths: Workstream["paths"];
+  code: Workstream["code"];
+  topics: Workstream["topics"];
+  components: Workstream["components"];
+  related: Workstream["related"];
+  blockers: Workstream["blockers"];
+  currentState: string;
+  nextMilestone: string;
+  createdBy: ActorRef;
+  createdAt: string;
+  updatedBy: ActorRef;
+  updatedAt: string;
+  sourcePath: string;
+  revision: Revision;
+}
+
 export interface TeamPageProjection<T> {
   items: readonly T[];
   nextCursor: string | null;
@@ -65,6 +93,17 @@ export interface TeamApplyProjection {
   changes: readonly FileChange[];
   localChanges: readonly LocalStateChange[];
   members: readonly TeamMemberProjection[];
+  events: readonly TeamActivityProjection[];
+}
+
+export interface TeamWorkstreamApplyProjection {
+  operationId: string;
+  previewRevision: Revision;
+  applied: true;
+  idempotentReplay: boolean;
+  changes: readonly FileChange[];
+  localChanges: readonly LocalStateChange[];
+  workstreams: readonly TeamWorkstreamProjection[];
   events: readonly TeamActivityProjection[];
 }
 
@@ -117,6 +156,45 @@ export function projectActivityPage(
   };
 }
 
+export function projectWorkstream(
+  workstream: Workstream,
+): TeamWorkstreamProjection {
+  return {
+    schemaVersion: 1,
+    id: workstream.ref.id,
+    entityRevision: workstream.entityRevision,
+    title: workstream.title,
+    goal: workstream.goal,
+    summary: workstream.summary,
+    state: workstream.state,
+    owners: structuredClone(workstream.owners),
+    contributors: structuredClone(workstream.contributors),
+    paths: [...workstream.paths],
+    code: structuredClone(workstream.code),
+    topics: structuredClone(workstream.topics),
+    components: structuredClone(workstream.components),
+    related: structuredClone(workstream.related),
+    blockers: [...workstream.blockers],
+    currentState: workstream.currentState,
+    nextMilestone: workstream.nextMilestone,
+    createdBy: structuredClone(workstream.createdBy),
+    createdAt: workstream.createdAt,
+    updatedBy: structuredClone(workstream.updatedBy),
+    updatedAt: workstream.updatedAt,
+    sourcePath: workstream.sourcePath,
+    revision: workstream.revision,
+  };
+}
+
+export function projectWorkstreamPage(
+  page: TeamPage<Workstream>,
+): { data: TeamPageProjection<TeamWorkstreamProjection>; diagnostics: readonly Diagnostic[] } {
+  return {
+    data: projectPage(page, page.items.map(projectWorkstream)),
+    diagnostics: page.diagnostics,
+  };
+}
+
 export function projectCurrentActor(
   current: TeamCurrentActor,
 ): { data: TeamCurrentActorProjection; diagnostics: readonly Diagnostic[] } {
@@ -137,6 +215,12 @@ export function projectPreview(
   return structuredClone(preview);
 }
 
+export function projectWorkstreamPreview(
+  preview: TeamWorkstreamPreviewEnvelope,
+): TeamWorkstreamPreviewEnvelope {
+  return structuredClone(preview);
+}
+
 export function projectApply<TWikiPayload extends JsonValue>(
   result: TeamWorkflowResult<TWikiPayload>,
 ): TeamApplyProjection {
@@ -150,6 +234,23 @@ export function projectApply<TWikiPayload extends JsonValue>(
     members: result.artifacts
       .filter((artifact): artifact is TeamMember => artifact.kind === "member")
       .map(projectMember),
+    events: result.events.map(projectActivity),
+  };
+}
+
+export function projectWorkstreamApply<TWikiPayload extends JsonValue>(
+  result: TeamWorkflowResult<TWikiPayload>,
+): TeamWorkstreamApplyProjection {
+  return {
+    operationId: result.operationId,
+    previewRevision: result.previewRevision,
+    applied: true,
+    idempotentReplay: result.idempotentReplay,
+    changes: structuredClone(result.changes),
+    localChanges: structuredClone(result.localChanges),
+    workstreams: result.artifacts
+      .filter((artifact): artifact is Workstream => artifact.kind === "workstream")
+      .map(projectWorkstream),
     events: result.events.map(projectActivity),
   };
 }

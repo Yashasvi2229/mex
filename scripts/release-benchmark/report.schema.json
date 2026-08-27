@@ -105,7 +105,7 @@
         "routes": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
+          "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "specsDetail", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
           "properties": {
             "home": { "$ref": "#/$defs/assetGroup" },
             "search": { "$ref": "#/$defs/assetGroup" },
@@ -115,6 +115,7 @@
             "codeSymbol": { "$ref": "#/$defs/assetGroup" },
             "workstreams": { "$ref": "#/$defs/assetGroup" },
             "specs": { "$ref": "#/$defs/assetGroup" },
+            "specsDetail": { "$ref": "#/$defs/assetGroup" },
             "playbooks": { "$ref": "#/$defs/assetGroup" },
             "inbox": { "$ref": "#/$defs/assetGroup" },
             "relays": { "$ref": "#/$defs/assetGroup" },
@@ -138,11 +139,12 @@
         "fixture": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["profile", "sourceFiles", "wikiEntities", "activityEvents", "input"],
+          "required": ["profile", "sourceFiles", "wikiEntities", "workstreams", "activityEvents", "input"],
           "properties": {
             "profile": { "enum": ["small", "medium", "large"] },
             "sourceFiles": { "type": "integer", "minimum": 1 },
             "wikiEntities": { "type": "integer", "minimum": 1 },
+            "workstreams": { "type": "integer", "minimum": 1 },
             "activityEvents": { "type": "integer", "minimum": 1 },
             "input": {
               "type": "object",
@@ -235,7 +237,7 @@
     "routeSummaries": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
+      "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "specsDetail", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
       "properties": {
         "home": { "$ref": "#/$defs/summary5" },
         "search": { "$ref": "#/$defs/summary5" },
@@ -245,6 +247,7 @@
         "codeSymbol": { "$ref": "#/$defs/summary5" },
         "workstreams": { "$ref": "#/$defs/summary5" },
         "specs": { "$ref": "#/$defs/summary5" },
+        "specsDetail": { "$ref": "#/$defs/summary5" },
         "playbooks": { "$ref": "#/$defs/summary5" },
         "inbox": { "$ref": "#/$defs/summary5" },
         "relays": { "$ref": "#/$defs/summary5" },

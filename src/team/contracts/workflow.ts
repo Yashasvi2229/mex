@@ -304,6 +304,11 @@ export interface TeamActivityListRequest extends PageRequest {
   since?: string;
 }
 
+export interface TeamWorkstreamListRequest extends PageRequest {
+  states?: readonly WorkstreamState[];
+  includeArchived?: boolean;
+}
+
 export type TeamActorResolutionSource =
   | "configured-member"
   | "git-alias"
@@ -524,6 +529,39 @@ export type TeamIdentityActivityCommand =
       expectedRevisions: NonEmptyRevisionExpectations;
     });
 
+export type TeamWorkstreamCreateAction = Extract<
+  TeamWorkflowCreateAction<never>,
+  { kind: "workstream.create" }
+>;
+
+export type TeamWorkstreamRevisionBoundAction =
+  | {
+      kind: "workstream.update";
+      workstreamId: string;
+      patch: Omit<WorkstreamUpdatePatch, "state"> & {
+        state?: Exclude<WorkstreamState, "archived">;
+      };
+    }
+  | Extract<
+      TeamWorkflowRevisionBoundAction<never>,
+      { kind: "workstream.archive" }
+    >;
+
+export type TeamWorkstreamAction =
+  | TeamWorkstreamCreateAction
+  | TeamWorkstreamRevisionBoundAction;
+
+/** Portable caller boundary restricted to Checkpoint D Workstream actions. */
+export type TeamWorkstreamCommand =
+  | (TeamWorkflowCommandBase & {
+      action: TeamWorkstreamCreateAction;
+      expectedRevisions: readonly RevisionExpectation[];
+    })
+  | (TeamWorkflowCommandBase & {
+      action: TeamWorkstreamRevisionBoundAction;
+      expectedRevisions: NonEmptyRevisionExpectations;
+    });
+
 /** Authority captured by the service while preparing an exact preview. */
 export interface TeamWorkflowAuthority {
   actor: ActorRef;
@@ -577,6 +615,28 @@ export interface TeamIdentityActivityPreviewEnvelope {
   request: TeamIdentityActivityCommand;
   preview: TeamIdentityActivityPublicPreview;
   receipt: TeamIdentityActivityReceipt;
+}
+
+export interface TeamWorkstreamPurposeId {
+  purpose: "activity" | "workstream";
+  id: string;
+}
+
+export interface TeamWorkstreamReceipt {
+  schemaVersion: 1;
+  authority: TeamWorkflowAuthority;
+  purposeIds: readonly TeamWorkstreamPurposeId[];
+  requestRevision: Revision;
+  presentationRevision: Revision;
+  previewRevision: Revision;
+}
+
+/** Signed exact preview that remains portable across service processes. */
+export interface TeamWorkstreamPreviewEnvelope {
+  schemaVersion: 1;
+  request: TeamWorkstreamCommand;
+  preview: TeamIdentityActivityPublicPreview;
+  receipt: TeamWorkstreamReceipt;
 }
 
 export interface TeamWorkflowApplyRequest<TWikiOperationPlan> {

@@ -13,6 +13,9 @@ import {
   HubJobIdSchema,
   SearchRequestSchema,
   SearchResponseSchema,
+  SpecDetailResponseSchema,
+  SpecListRequestSchema,
+  SpecListResponseSchema,
   TeamCurrentActorResponseSchema,
   TeamMemberListRequestSchema,
   TeamMemberListResponseSchema,
@@ -20,6 +23,9 @@ import {
   TeamOperationApplyResponseSchema,
   TeamOperationPreviewRequestSchema,
   TeamOperationPreviewResponseSchema,
+  TeamWorkstreamListRequestSchema,
+  TeamWorkstreamListResponseSchema,
+  TeamWorkstreamSchema,
   WikiEntityDetailResponseSchema,
   WikiEntityListRequestSchema,
   WikiEntityListResponseSchema,
@@ -44,7 +50,7 @@ describe("Hub API contracts", () => {
     });
   });
 
-  it("locks the Checkpoint C member and capability contract golden", () => {
+  it("locks the team member and capability contract golden", () => {
     const available = { availability: "available" } as const;
     const unavailable = {
       availability: "unavailable",
@@ -60,6 +66,8 @@ describe("Hub API contracts", () => {
         canonicalMutation: available,
         localSelection: available,
       },
+      workstreams: { read: available, canonicalMutation: available },
+      specs: { read: unavailable },
       jobs: available,
       graph: { read: unavailable, refresh: unavailable, rebuild: unavailable },
       wiki: { read: unavailable, refresh: unavailable, rebuild: unavailable },
@@ -67,7 +75,7 @@ describe("Hub API contracts", () => {
     expect(HubCapabilitiesSchema.parse(capabilities)).toEqual(capabilities);
     expect(HubCapabilitiesSchema.safeParse({
       ...capabilities,
-      workstreams: { read: available },
+      playbooks: { read: available },
     }).success).toBe(false);
 
     const member = teamMemberGolden();
@@ -186,6 +194,7 @@ describe("Hub API contracts", () => {
       changes: envelope.preview.changes,
       localChanges: [],
       members: [teamMemberGolden()],
+      workstreams: [],
       events: [{
         schemaVersion: 1,
         id: envelope.receipt.purposeIds[0]!.id,
@@ -201,6 +210,62 @@ describe("Hub API contracts", () => {
     expect(TeamOperationApplyResponseSchema.safeParse({
       ...apply,
       events: [{ ...apply.events[0], metadata: { secret: "must not cross" } }],
+    }).success).toBe(false);
+  });
+
+  it("locks bounded Workstream reads and exact revision-bound mutations", () => {
+    const workstream = teamWorkstreamGolden();
+    expect(TeamWorkstreamSchema.parse(workstream)).toEqual(workstream);
+    expect(TeamWorkstreamListRequestSchema.parse({
+      state: "blocked",
+      includeArchived: "false",
+    })).toEqual({ state: "blocked", includeArchived: false, limit: 25 });
+    expect(TeamWorkstreamListResponseSchema.safeParse({
+      items: [workstream],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "9".repeat(64),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    }).success).toBe(true);
+    expect(TeamWorkstreamSchema.safeParse({
+      ...workstream,
+      state: "blocked",
+      blockers: [],
+    }).success).toBe(false);
+    expect(TeamWorkstreamSchema.safeParse({
+      ...workstream,
+      sourcePath: ".mex/workstreams/ws_other.md",
+    }).success).toBe(false);
+
+    const create = {
+      operationId: "contract_workstream_create",
+      action: {
+        kind: "workstream.create",
+        workstream: {
+          title: "Project Hub",
+          goal: "Make repository memory usable by a team.",
+          summary: "Connect canonical team workflows.",
+          owners: [{ kind: "member", memberId: teamMemberGolden().id }],
+          nextMilestone: "Ship the Workstream workbench.",
+        },
+      },
+      expectedRevisions: [],
+    } as const;
+    expect(TeamOperationPreviewRequestSchema.parse(create)).toEqual(create);
+    expect(TeamOperationPreviewRequestSchema.safeParse({
+      operationId: "contract_workstream_update_without_revision",
+      action: {
+        kind: "workstream.update",
+        workstreamId: workstream.id,
+        patch: { state: "active" },
+      },
+      expectedRevisions: [],
+    }).success).toBe(false);
+    expect(TeamOperationPreviewRequestSchema.safeParse({
+      ...create,
+      actor: { kind: "unknown" },
     }).success).toBe(false);
   });
 
@@ -300,6 +365,90 @@ describe("Hub API contracts", () => {
           status: "unavailable", items: [], nextCursor: null, truncated: false,
           revision: null, code: "CAPABILITY_UNAVAILABLE", detail: "Unavailable.",
         },
+      },
+    }).success).toBe(false);
+  });
+
+  it("keeps dedicated Spec reads fresh, explicit, and independently bounded", () => {
+    const spec = specSummaryGolden();
+    const freshIndex = {
+      state: "fresh" as const,
+      observedAt: "2026-08-28T00:00:00.000Z",
+      indexedRevision: "1".repeat(64),
+      indexedAt: "2026-08-27T23:59:00.000Z",
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    };
+    expect(SpecListRequestSchema.parse({
+      includeArchived: "false",
+      lifecycleStates: ["in_flight", "promoted"],
+    })).toEqual({
+      includeArchived: false,
+      lifecycleStates: ["in_flight", "promoted"],
+      limit: 25,
+    });
+    expect(SpecListRequestSchema.safeParse({
+      lifecycleStates: ["promoted", "promoted"],
+    }).success).toBe(false);
+
+    const list = {
+      availability: "ready" as const,
+      index: freshIndex,
+      page: {
+        schemaVersion: 1 as const,
+        items: [spec],
+        nextCursor: null,
+        truncated: true,
+        estimatedTokens: 180,
+        deterministicRevision: "2".repeat(64),
+      },
+    };
+    expect(SpecListResponseSchema.safeParse(list).success).toBe(true);
+    expect(SpecListResponseSchema.safeParse({
+      ...list,
+      page: { ...list.page, items: [{ ...spec, kind: "requirement" }] },
+    }).success).toBe(false);
+    expect(SpecListResponseSchema.safeParse({
+      ...list,
+      availability: "stale",
+      page: null,
+    }).success).toBe(false);
+
+    const requirement = { ...spec, id: "mx_01K4R3X4A5BC6DE7FGHJKMNPQR", kind: "requirement" as const };
+    const detail = {
+      availability: "ready" as const,
+      index: freshIndex,
+      detail: {
+        schemaVersion: 1 as const,
+        spec,
+        body: "# Human-team memory\n\nExplicit evidence only.\n",
+        bodyTruncated: false,
+        provenance: null,
+        sources: [],
+        sourcesTruncated: false,
+        groundings: [],
+        groundingsTruncated: false,
+        hierarchy: {
+          requirements: [requirement],
+          acceptanceCriteria: [],
+          constraints: [],
+          relations: [{
+            type: "derived_from" as const,
+            source: { id: requirement.id, kind: requirement.kind },
+            target: { id: spec.id, kind: spec.kind },
+            note: null,
+          }],
+          estimatedTokens: 240,
+        },
+        deterministicRevision: "3".repeat(64),
+      },
+    };
+    expect(SpecDetailResponseSchema.safeParse(detail).success).toBe(true);
+    expect(SpecDetailResponseSchema.safeParse({
+      ...detail,
+      detail: {
+        ...detail.detail,
+        hierarchy: { ...detail.detail.hierarchy, constraints: [requirement] },
       },
     }).success).toBe(false);
   });
@@ -616,6 +765,58 @@ function teamMemberGolden() {
     active: true,
     sourcePath: `.mex/team/members/${id}.md`,
     revision: "a".repeat(64),
+  };
+}
+
+function teamWorkstreamGolden() {
+  const id = "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+  const actor = {
+    kind: "member" as const,
+    memberId: teamMemberGolden().id,
+    displayName: "Ada Lovelace",
+  };
+  return {
+    schemaVersion: 1 as const,
+    id,
+    entityRevision: 2,
+    title: "Project Hub",
+    goal: "Make repository memory usable by a team.",
+    summary: "Connect canonical team workflows.",
+    state: "active" as const,
+    owners: [actor],
+    contributors: [],
+    paths: ["packages/hub-web"],
+    code: [],
+    topics: [],
+    components: [],
+    related: [],
+    blockers: [],
+    currentState: "Identity is connected.",
+    nextMilestone: "Ship the Workstream workbench.",
+    createdBy: actor,
+    createdAt: "2026-08-27T04:05:06.000Z",
+    updatedBy: actor,
+    updatedAt: "2026-08-28T04:05:06.000Z",
+    sourcePath: `.mex/workstreams/${id}.md`,
+    revision: "8".repeat(64),
+  };
+}
+
+function specSummaryGolden() {
+  return {
+    schemaVersion: 1 as const,
+    id: "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD",
+    kind: "spec" as const,
+    title: "Human-team memory",
+    summary: "Explicit, repository-owned collaboration memory.",
+    lifecycleState: "in_flight" as const,
+    groundingHealth: "fresh" as const,
+    sourcePath: ".mex/wiki/specs/human-team-memory.md",
+    version: { semanticRevision: 4, contentHash: "4".repeat(64) },
+    topics: [],
+    sourceTypes: ["manual"],
+    diagnostics: [],
+    diagnosticsTruncated: false,
   };
 }
 

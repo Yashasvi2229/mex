@@ -1,11 +1,21 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { Command, InvalidArgumentError } from "commander";
 import { execFileSync, execSync, spawnSync } from "node:child_process";
-import { readFileSync, readdirSync, symlinkSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  symlinkSync,
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { runLog, runTimeline } from "../src/events.js";
+import { createRepositoryGraphPort } from "../src/graph/application-adapter.js";
 import type { MexConfig } from "../src/types.js";
 
 vi.mock("../src/events.js", () => ({
@@ -414,6 +424,132 @@ describe("built CLI main-module guard", () => {
     }
   }, 40_000);
 
+  it("keeps advertised grounded Spec reads available when only Team config attestation changes", async () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-spec-cli-config-drift-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-spec-cli-config-home-"));
+    try {
+      const mexPath = join(fixture, ".mex");
+      mkdirSync(join(mexPath, "context"), { recursive: true });
+      mkdirSync(join(fixture, "src"), { recursive: true });
+      writeFileSync(join(fixture, ".gitignore"), ".mex/*.db*\n.mex/local/\n");
+      writeFileSync(
+        join(fixture, "src", "release-spec.ts"),
+        "export function releaseSpecTarget(): string { return 'ready'; }\n",
+      );
+      writeFileSync(join(mexPath, "ROUTER.md"), "# Router\n");
+      const configPath = join(mexPath, "config.json");
+      writeFileSync(configPath, `${JSON.stringify({
+        scaffold_id: "scaffold-spec-config-drift-001",
+        scaffold_name: "Spec fixture",
+      })}\n`);
+      const specId = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
+      writeFileSync(join(mexPath, "context", "release-spec.md"), `<!-- mex:entity
+id: ${specId}
+type: spec
+status: promoted
+revision: 1
+title: Release Spec
+-->
+# Release Spec
+
+Canonical read-only release requirements.
+`);
+      execFileSync("git", ["init", "--quiet"], { cwd: fixture });
+      execFileSync("git", ["config", "user.email", "spec-cli@example.invalid"], { cwd: fixture });
+      execFileSync("git", ["config", "user.name", "Spec CLI Contract"], { cwd: fixture });
+      execFileSync("git", ["add", ".gitignore", ".mex", "src"], { cwd: fixture });
+      execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: fixture });
+
+      const graph = createRepositoryGraphPort(fixture);
+      await graph.rebuild();
+      const symbol = (await graph.searchNodes({ query: "releaseSpecTarget", limit: 10 }))
+        .items.find((item) => item.name === "releaseSpecTarget");
+      if (symbol === undefined) throw new Error("Expected the Spec CLI fixture symbol.");
+      const grounding = await graph.withFreshGroundingSnapshot((snapshot) => ({
+        node: snapshot.getNode(symbol.ref.symbolId),
+        fingerprint: snapshot.getFingerprint(symbol.ref.symbolId),
+      }));
+      if (grounding.node == null || grounding.fingerprint == null) {
+        throw new Error("Expected exact grounding facts for the Spec CLI fixture.");
+      }
+      writeFileSync(join(mexPath, "context", "release-spec.md"), `<!-- mex:entity
+id: ${specId}
+type: spec
+status: promoted
+revision: 1
+title: Release Spec
+grounds_to:
+  - node: ${JSON.stringify(symbol.ref.symbolId)}
+    fingerprint: ${JSON.stringify(grounding.fingerprint)}
+    bodyHash: ${JSON.stringify(grounding.node.bodyHash)}
+    reason: Exact Spec CLI grounding.
+-->
+# Release Spec
+
+Canonical read-only release requirements.
+`);
+      execFileSync("git", ["add", ".mex/context/release-spec.md"], { cwd: fixture });
+      execFileSync("git", ["commit", "--quiet", "-m", "ground spec fixture"], { cwd: fixture });
+      await graph.rebuild();
+
+      const rebuilt = spawnSync(
+        process.execPath,
+        [cliPath, "wiki", "rebuild-index", "--json"],
+        {
+          cwd: fixture,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "0", NO_COLOR: "1" },
+        },
+      );
+      expect(rebuilt.status, rebuilt.stderr).toBe(0);
+      writeFileSync(configPath, `${JSON.stringify({
+        scaffold_id: "scaffold-spec-config-drift-001",
+        scaffold_name: "Locally renamed Spec fixture",
+      })}\n`);
+
+      const capabilityResult = spawnSync(
+        process.execPath,
+        [cliPath, "capabilities", "--json"],
+        {
+          cwd: fixture,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "0", NO_COLOR: "1" },
+        },
+      );
+      expect(capabilityResult.status, capabilityResult.stderr).toBe(0);
+      const capabilities = JSON.parse(capabilityResult.stdout) as {
+        data: { capabilities: Array<{ id: string; availability: string }> };
+      };
+      expect(capabilities.data.capabilities.find((entry) => entry.id === "spec_read"))
+        .toMatchObject({ availability: "available" });
+      expect(capabilities.data.capabilities.find((entry) => entry.id === "team_workstreams"))
+        .toMatchObject({ availability: "unavailable" });
+
+      const listed = spawnSync(
+        process.execPath,
+        [cliPath, "spec", "list", "--grounding", "fresh", "--json"],
+        {
+          cwd: fixture,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "0", NO_COLOR: "1" },
+        },
+      );
+      expect(listed.status, listed.stderr).toBe(0);
+      expect(JSON.parse(listed.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "spec.list",
+        ok: true,
+        data: {
+          availability: "ready",
+          page: { items: [{ id: specId, groundingHealth: "fresh" }] },
+        },
+      });
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  }, 40_000);
+
   it("keeps Team reads immutable and provisions only the signed preview key", () => {
     const fixture = mkdtempSync(join(tmpdir(), "mex-team-cli-process-"));
     const userHome = mkdtempSync(join(tmpdir(), "mex-team-cli-home-"));
@@ -628,13 +764,81 @@ describe("mex --version", () => {
   });
 });
 
+describe("snapshotProcessTree", () => {
+  it("skips an entry that disappears after listing without hiding a dangling-link error", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-snapshot-race-"));
+    try {
+      const transient = join(fixture, "maintenance.lock");
+      writeFileSync(transient, "locked");
+      expect(readdirSync(fixture)).toContain("maintenance.lock");
+      rmSync(transient);
+
+      expect(readFileOrDirectory(transient)).toBeUndefined();
+
+      const dangling = join(fixture, "dangling");
+      symlinkSync(join(fixture, "missing-target"), dangling);
+      let danglingError: unknown;
+      try {
+        readFileOrDirectory(dangling);
+      } catch (error) {
+        danglingError = error;
+      }
+      expect(danglingError).toMatchObject({ code: "ENOENT" });
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("excludes only Git's transient maintenance lock", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-snapshot-git-lock-"));
+    try {
+      mkdirSync(join(fixture, ".git", "objects"), { recursive: true });
+      writeFileSync(join(fixture, ".git", "objects", "maintenance.lock"), "transient");
+      writeFileSync(join(fixture, ".git", "objects", "other.lock"), "object lock");
+      writeFileSync(join(fixture, ".git", "maintenance.lock"), "different path");
+      writeFileSync(join(fixture, "maintenance.lock"), "project file");
+
+      const snapshot = snapshotProcessTree(fixture);
+
+      expect(snapshot[".git/objects/maintenance.lock"]).toBeUndefined();
+      expect(snapshot[".git/objects/other.lock"]).toBe(
+        Buffer.from("object lock").toString("base64"),
+      );
+      expect(snapshot[".git/maintenance.lock"]).toBe(
+        Buffer.from("different path").toString("base64"),
+      );
+      expect(snapshot["maintenance.lock"]).toBe(
+        Buffer.from("project file").toString("base64"),
+      );
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+});
+
 function snapshotProcessTree(root: string): Record<string, string> {
   const result: Record<string, string> = {};
   const visit = (directory: string, prefix: string): void => {
-    for (const name of readdirSync(directory).sort()) {
+    let names: string[];
+    try {
+      names = readdirSync(directory).sort();
+    } catch (error) {
+      // A child directory can disappear after it was classified below. The root
+      // itself must always remain readable, and no other filesystem error is safe
+      // to interpret as a transient Git-maintenance race.
+      if (prefix.length > 0 && isFileSystemError(error, "ENOENT")) return;
+      throw error;
+    }
+    for (const name of names) {
       const absolute = join(directory, name);
       const relative = prefix.length === 0 ? name : `${prefix}/${name}`;
+      // `git maintenance run --auto --detach` can outlive the fixture's Git
+      // command and create/remove this lock between the before/after snapshots.
+      // Exclude this one Git-owned transient path while retaining every other
+      // project, Git, and lock file in the non-mutation comparison.
+      if (relative === ".git/objects/maintenance.lock") continue;
       const entry = readFileOrDirectory(absolute);
+      if (entry === undefined) continue;
       result[relative] = entry.kind === "file" ? entry.bytes : "directory";
       if (entry.kind === "directory") visit(absolute, relative);
     }
@@ -645,10 +849,35 @@ function snapshotProcessTree(root: string): Record<string, string> {
 
 function readFileOrDirectory(path: string):
   | { kind: "file"; bytes: string }
-  | { kind: "directory" } {
+  | { kind: "directory" }
+  | undefined {
+  let stats: ReturnType<typeof lstatSync>;
+  try {
+    stats = lstatSync(path);
+  } catch (error) {
+    // The parent directory was just listed, so ENOENT here proves that this
+    // entry disappeared during the snapshot (for example Git's maintenance
+    // lock). Permission, I/O, and malformed-path errors must still fail loudly.
+    if (isFileSystemError(error, "ENOENT")) return undefined;
+    throw error;
+  }
+  if (stats.isDirectory()) return { kind: "directory" };
+
   try {
     return { kind: "file", bytes: readFileSync(path).toString("base64") };
-  } catch {
-    return { kind: "directory" };
+  } catch (error) {
+    if (isFileSystemError(error, "ENOENT")) {
+      try {
+        lstatSync(path);
+      } catch (currentError) {
+        if (isFileSystemError(currentError, "ENOENT")) return undefined;
+        throw currentError;
+      }
+    }
+    throw error;
   }
+}
+
+function isFileSystemError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
 }

@@ -28,7 +28,36 @@ async function normalizeEstablishedVisualGolden(
   surface?: "home" | "activity",
 ): Promise<void> {
   await page.getByRole("link", { name: "Members", exact: true }).evaluate((element) => element.remove());
+  const unavailableMarker = await page.getByRole("link", { name: /Playbooks/ }).locator('[aria-label="Unavailable"]')
+    .evaluate((element) => element.outerHTML);
+  for (const label of ["Workstreams", "Specs"] as const) {
+    await page.getByRole("link", { name: label, exact: true }).evaluate((element, marker) => {
+      element.insertAdjacentHTML("beforeend", marker);
+    }, unavailableMarker);
+  }
   if (surface === "home") {
+    const summary = page.getByRole("region", { name: "Project summary" });
+    await summary.getByText("Canonical delivery threads", { exact: true }).evaluate((element) => {
+      element.textContent = "Not connected";
+    });
+    await summary.getByText("3", { exact: true }).evaluate((element) => {
+      element.textContent = "—";
+    });
+    await summary.locator('a[href="/workstreams"]').evaluate((element) => {
+      const card = element.firstElementChild;
+      if (!card) throw new Error("The Workstream visual golden card is unavailable.");
+      element.replaceWith(card);
+    });
+    await page.getByRole("region", { name: "Project sections" }).evaluate((element) => {
+      const rows = [...element.querySelectorAll<HTMLElement>('[role="listitem"]')];
+      const workstreams = rows.find((row) => row.textContent?.includes("Workstreams"));
+      const relays = rows.find((row) => row.textContent?.includes("Relays"));
+      const replacement = relays?.lastElementChild?.cloneNode(true);
+      if (!workstreams?.lastElementChild || !replacement) {
+        throw new Error("The Workstream visual golden status template is unavailable.");
+      }
+      workstreams.lastElementChild.replaceWith(replacement);
+    });
     await page.locator('a[aria-label^="Open member identity for"]').evaluate((element) => {
       const template = document.querySelector<HTMLElement>('[data-slot="badge"][data-variant="outline"]');
       if (!template) throw new Error("The visual golden badge template is unavailable.");
@@ -573,6 +602,44 @@ test.describe("populated development fixture", () => {
       });
       await expectAccessible(page);
     });
+  }
+
+  for (const route of ["workstreams", "specs"] as const) {
+    for (const width of [390, 768, 1440] as const) {
+      test(`keeps ${route} accessible and overflow-free at ${width}px`, async ({ page }) => {
+        await page.emulateMedia({ reducedMotion: "reduce" });
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto(`/${route}?fixture=populated`);
+
+        if (width < 1024) {
+          await expect(page.getByRole("heading", { name: "A wider workbench is required" })).toBeVisible();
+          await expect(page.getByRole("navigation", { name: "Primary" })).toBeHidden();
+        } else {
+          const heading = route === "workstreams" ? "Workstreams" : "Specs";
+          await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
+          if (route === "workstreams") {
+            await expect(page.getByRole("region", { name: "Selected Workstream detail" })).toBeVisible();
+          } else {
+            await expect(page.getByRole("region", { name: "Selected Spec detail" })).toBeVisible();
+            await expect(page.getByText("No inferred coverage.")).toBeVisible();
+          }
+        }
+
+        const geometry = await page.evaluate(() => ({
+          viewportWidth: window.innerWidth,
+          documentClientWidth: document.documentElement.clientWidth,
+          documentScrollWidth: document.documentElement.scrollWidth,
+          bodyScrollWidth: document.body.scrollWidth,
+        }));
+        expect(geometry).toEqual({
+          viewportWidth: width,
+          documentClientWidth: width,
+          documentScrollWidth: width,
+          bodyScrollWidth: width,
+        });
+        await expectAccessible(page);
+      });
+    }
   }
 
   test("supports keyboard routing, focus restoration, every shell, and 404", async ({ page }) => {

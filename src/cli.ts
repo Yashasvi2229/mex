@@ -1,6 +1,7 @@
 import chalk from "chalk";
 import { Command, InvalidArgumentError } from "commander";
 import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { findConfig, getScaffoldIdentity, readScaffoldId } from "./config.js";
 import { reportConsole, reportQuiet, reportJSON, reportVerbose } from "./reporter.js";
@@ -10,9 +11,10 @@ import { readMachineId, setGlobalConfigKey } from "./global-config.js";
 import { runFeedback, maybeShowInvite, dismissInvite, enableInvite } from "./feedback/index.js";
 import type { MexConfig } from "./types.js";
 import type { RunHubCommandOptions } from "./hub/command.js";
-import { capabilitiesInvalidRequestEnvelope } from "./capabilities.js";
+import { capabilitiesInvalidRequestEnvelope, readWikiExclude } from "./capabilities.js";
 import {
   buildTeamIdentityActivityCommands,
+  buildWorkstreamCommand,
   exitCodeForTeamEnvelope,
   locateTeamRepositoryRoot,
   processTeamCommandIo,
@@ -22,7 +24,12 @@ import {
   type TeamCliCommandName,
   type TeamCliMode,
   type TeamIdentityActivityCliServiceFactory,
+  type TeamWorkstreamCliServiceFactory,
 } from "./team/cli/index.js";
+import {
+  buildSpecCommand,
+  type SpecCliServiceFactory,
+} from "./team/specs/cli/index.js";
 
 /**
  * Load config for a CLI command and backfill scaffold identity on the way.
@@ -92,6 +99,8 @@ export function isTelemetryExemptCommand(
     || parentName === "config"
     || parentName === "member"
     || parentName === "activity"
+    || parentName === "workstream"
+    || parentName === "spec"
     || commandName === "hub"
     || commandName === "capabilities";
 }
@@ -101,7 +110,9 @@ export function isFirstRunNoticeExemptCommand(commandName?: string): boolean {
   return commandName === "hub"
     || commandName === "capabilities"
     || commandName === "member"
-    || commandName === "activity";
+    || commandName === "activity"
+    || commandName === "workstream"
+    || commandName === "spec";
 }
 
 async function runTuiCommand(): Promise<void> {
@@ -196,7 +207,7 @@ program
     await runCapabilities();
   });
 
-const teamIdentityActivityService: TeamIdentityActivityCliServiceFactory = async () => {
+const teamWorkflowCliService = async () => {
   // Team reads and previews must not backfill scaffold identity. The concrete
   // repository port independently attests that config.json is tracked at the
   // current HEAD before it exposes any Team surface.
@@ -206,6 +217,29 @@ const teamIdentityActivityService: TeamIdentityActivityCliServiceFactory = async
   );
   return createRepositoryTeamWorkflowPort(projectRoot);
 };
+const teamIdentityActivityService: TeamIdentityActivityCliServiceFactory = teamWorkflowCliService;
+const teamWorkstreamService: TeamWorkstreamCliServiceFactory = teamWorkflowCliService;
+const specReadService: SpecCliServiceFactory = async () => {
+  const projectRoot = locateTeamRepositoryRoot();
+  // Specs are a read-only Wiki projection and do not depend on Team's tracked
+  // scaffold identity or receipt signer. Capability discovery gates this
+  // command on the same immutable Wiki index state used here.
+  const [
+    { createRepositoryGraphPort },
+    { createRepositoryWikiPort },
+    { createSpecReadService },
+  ] = await Promise.all([
+    import("./graph/application-adapter.js"),
+    import("./wiki/application-adapter.js"),
+    import("./team/specs/index.js"),
+  ]);
+  const graph = createRepositoryGraphPort(projectRoot);
+  const wiki = createRepositoryWikiPort(projectRoot, {
+    groundingBridge: graph,
+    exclude: readWikiExclude(resolve(projectRoot, ".mex")),
+  });
+  return createSpecReadService(wiki);
+};
 
 for (const command of buildTeamIdentityActivityCommands({
   service: teamIdentityActivityService,
@@ -213,6 +247,14 @@ for (const command of buildTeamIdentityActivityCommands({
 })) {
   program.addCommand(command);
 }
+program.addCommand(buildWorkstreamCommand({
+  service: teamWorkstreamService,
+  io: processTeamCommandIo(),
+}));
+program.addCommand(buildSpecCommand({
+  service: specReadService,
+  io: processTeamCommandIo(),
+}));
 
 // ── Setup (npx entry point) ──
 program
@@ -943,6 +985,9 @@ program
     console.log("  mex member <add|update|deactivate|select> <request.json> --json  Preview an identity change");
     console.log("  mex activity list --json  Read canonical Activity events");
     console.log("  mex activity record <request.json> --json  Preview canonical Activity recording");
+    console.log("  mex workstream list --json  List canonical team Workstreams");
+    console.log("  mex workstream <create|update|archive> <request.json> --json  Preview a Workstream change");
+    console.log("  mex spec list --json  List read-only Wiki-owned Specs");
     console.log("  mex check              Drift score — are scaffold files still accurate?");
     console.log("  mex check --quiet      One-liner drift score");
     console.log("  mex check --json       Full drift report as JSON");
@@ -1026,7 +1071,7 @@ interface TeamJsonInvocationContext {
 function inspectTeamJsonInvocation(argv: readonly string[]): TeamJsonInvocationContext | null {
   if (!argv.includes("--json") || argv.includes("--help") || argv.includes("-h")) return null;
   const family = argv[0];
-  if (family !== "member" && family !== "activity") return null;
+  if (family !== "member" && family !== "activity" && family !== "workstream" && family !== "spec") return null;
   const leaf = argv[1];
   const applyRequested = argv.some((value) => value === "--apply" || value.startsWith("--apply="));
   if (family === "member") {
@@ -1041,13 +1086,29 @@ function inspectTeamJsonInvocation(argv: readonly string[]): TeamJsonInvocationC
     }
     return { command: "member", mode: "read" };
   }
-  if (leaf === "list" || leaf === "show") {
+  if (family === "activity" && (leaf === "list" || leaf === "show")) {
     return { command: `activity.${leaf}`, mode: "read" };
   }
-  if (leaf === "record") {
+  if (family === "activity" && leaf === "record") {
     return { command: "activity.record", mode: applyRequested ? "apply" : "preview" };
   }
-  return { command: "activity", mode: "read" };
+  if (family === "activity") return { command: "activity", mode: "read" };
+  if (family === "workstream") {
+    if (leaf === "list" || leaf === "show") {
+      return { command: `workstream.${leaf}`, mode: "read" };
+    }
+    if (leaf === "create" || leaf === "update" || leaf === "archive") {
+      return {
+        command: `workstream.${leaf}`,
+        mode: applyRequested ? "apply" : "preview",
+      };
+    }
+    return { command: "workstream", mode: "read" };
+  }
+  if (leaf === "list" || leaf === "show") {
+    return { command: `spec.${leaf}`, mode: "read" };
+  }
+  return { command: "spec", mode: "read" };
 }
 
 function configureTeamJsonParseErrors(root: Command): void {
@@ -1086,7 +1147,7 @@ function isInvalidCapabilitiesJsonInvocation(argv: readonly string[]): boolean {
 
 function buildCompletion(shell: string): string {
   const commands = [
-    "setup", "capabilities", "member", "activity", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
+    "setup", "capabilities", "member", "activity", "workstream", "spec", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
     "heartbeat", "doctor", "watch", "tui", "commands", "completion",
     "telemetry", "config", "feedback", "hub",
   ];

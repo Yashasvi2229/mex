@@ -2,8 +2,10 @@ export {
   buildActivityCommand,
   buildMemberCommand,
   buildTeamIdentityActivityCommands,
+  buildWorkstreamCommand,
   processTeamCommandIo,
   type TeamIdentityActivityCommandBuilderOptions,
+  type TeamWorkstreamCommandBuilderOptions,
 } from "./builder.js";
 export {
   runActivityList,
@@ -12,6 +14,9 @@ export {
   runMemberList,
   runMemberShow,
   runTeamMutation,
+  runWorkstreamList,
+  runWorkstreamMutation,
+  runWorkstreamShow,
   type ActivityListFlags,
   type MemberListFlags,
   type TeamCliServiceSource,
@@ -19,6 +24,8 @@ export {
   type TeamMutationFlags,
   type TeamOutputFlags,
   type TeamPageFlags,
+  type TeamWorkstreamCliServiceSource,
+  type WorkstreamListFlags,
 } from "./commands.js";
 export {
   exitCodeForTeamEnvelope,
@@ -37,11 +44,15 @@ export {
   readBoundedJsonFile,
   readTeamCommandFile,
   readTeamPreviewFile,
+  type TeamIdentityActivityMutationCommandName,
   type TeamMutationCommandName,
+  type TeamWorkstreamMutationCommandName,
 } from "./request-file.js";
 export {
   asTeamIdentityActivityCliService,
   type TeamIdentityActivityCliService,
   type TeamIdentityActivityCliServiceFactory,
+  type TeamWorkstreamCliService,
+  type TeamWorkstreamCliServiceFactory,
 } from "./service.js";
 export { locateTeamRepositoryRoot } from "./repository-root.js";

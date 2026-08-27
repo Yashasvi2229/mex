@@ -45,13 +45,14 @@ describe("release benchmark contract", () => {
     expect(budgets.schemaVersion).toBe(1);
     expect(budgets.samples).toEqual({ timing: 10, idleMemory: 5 });
     expect(RELEASE_FIXTURE_PROFILES).toEqual({
-      small: { sourceFiles: 4, wikiEntities: 4, activityEvents: 4 },
-      medium: { sourceFiles: 16, wikiEntities: 16, activityEvents: 16 },
-      large: { sourceFiles: 48, wikiEntities: 48, activityEvents: 48 },
+      small: { sourceFiles: 4, wikiEntities: 4, workstreams: 1, activityEvents: 4 },
+      medium: { sourceFiles: 16, wikiEntities: 16, workstreams: 1, activityEvents: 16 },
+      large: { sourceFiles: 48, wikiEntities: 48, workstreams: 1, activityEvents: 48 },
     });
     expect(Object.keys(budgets.assets.routes)).toEqual(RELEASE_ROUTE_KEYS);
     expect(Object.keys(releaseWorkbenchPaths({
       knowledgeEntityId: "mx_knowledge",
+      specEntityId: "mx_spec",
       codeSymbolId: "symbol/release",
     }))).toEqual(RELEASE_ROUTE_KEYS);
     const appRoutes = readFileSync(
@@ -67,7 +68,7 @@ describe("release benchmark contract", () => {
     expect(budgets.assets.routes.code).toEqual(budgets.assets.routes.search);
     expect(budgets.provisional).toBe(false);
     expect(budgets.calibration).toEqual({
-      status: "calibrated-from-pinned-runs-33005876613-and-33083122092",
+      status: "calibrated-from-pinned-runs-33005876613-33083122092-and-33117048710",
       runtimeFormula: "ceil(measured p95 * 1.15)",
       assetFormula: "ceil(built bytes * 1.05)",
     });
@@ -85,6 +86,11 @@ describe("release benchmark contract", () => {
     expect(reportSchema.$defs.runtimeConfirmation.required).not.toContain("materialAssessments");
     expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("advisoryAssessments");
     expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("materialAssessments");
+    expect(reportSchema.$defs.profile.properties.fixture.required).toContain("workstreams");
+    expect(reportSchema.$defs.profile.properties.fixture.properties.workstreams).toEqual({
+      type: "integer",
+      minimum: 1,
+    });
   });
 
   it("uses nearest-rank p95 and rejects the wrong sample count", () => {
@@ -123,6 +129,18 @@ describe("release benchmark contract", () => {
     const ajv = new Ajv2020({ strict: true });
     addFormats(ajv);
     const validate = ajv.compile(reportSchema);
+    const validateFixture = ajv.compile({
+      $defs: reportSchema.$defs,
+      ...reportSchema.$defs.profile.properties.fixture,
+    });
+    const generatedFixture = {
+      profile: "small",
+      ...RELEASE_FIXTURE_PROFILES.small,
+      input: { graphBytes: 1, graphFiles: 1, wikiBytes: 1, wikiFiles: 1 },
+    };
+    expect(validateFixture(generatedFixture), JSON.stringify(validateFixture.errors)).toBe(true);
+    const { workstreams: _workstreams, ...legacyFixture } = generatedFixture;
+    expect(validateFixture(legacyFixture)).toBe(false);
     const metric = "runtime.apiLatencyMs.small.code";
     const legacyReport = representativeReleaseReport({
       runtimeViolations: [],
@@ -381,7 +399,7 @@ describe("release benchmark contract", () => {
     }
 
     const exactMetrics = committedConfirmableRuntimeMetrics();
-    expect(exactMetrics).toHaveLength(93);
+    expect(exactMetrics).toHaveLength(96);
     for (const metric of exactMetrics) {
       expect(runtimeMaterialityPolicy(metric)).not.toBeNull();
       const violation = runtimeViolation(metric);

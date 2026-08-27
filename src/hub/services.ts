@@ -21,6 +21,9 @@ import {
   type HubJobSnapshot,
   type SearchRequest,
   type SearchResponse,
+  type SpecDetailResponse,
+  type SpecListRequest,
+  type SpecListResponse,
   type TeamCurrentActorResponse,
   type TeamMember as HubTeamMember,
   type TeamMemberListRequest as HubTeamMemberListRequest,
@@ -29,6 +32,9 @@ import {
   type TeamOperationApplyResponse,
   type TeamOperationPreviewRequest,
   type TeamOperationPreviewResponse,
+  type TeamWorkstream as HubTeamWorkstream,
+  type TeamWorkstreamListRequest as HubTeamWorkstreamListRequest,
+  type TeamWorkstreamListResponse,
   type WikiBacklinksRequest,
   type WikiBacklinksResponse,
   type WikiEntityDetailResponse,
@@ -57,6 +63,7 @@ import {
   type Diagnostic,
   type EntityRef,
   type JsonValue,
+  type RevisionExpectation,
 } from "../team/contracts/shared.js";
 import type {
   ActivityEvent,
@@ -69,8 +76,20 @@ import type {
   TeamMember,
   TeamMemberListRequest,
   TeamPage,
+  TeamWorkstreamCommand,
+  TeamWorkstreamListRequest,
+  TeamWorkstreamPreviewEnvelope,
   TeamWorkflowResult,
+  Workstream,
 } from "../team/contracts/workflow.js";
+import type {
+  SpecDetailProjection,
+  SpecIndexProjection,
+  SpecListResult,
+  SpecReadService,
+  SpecShowResult,
+  SpecSummaryProjection,
+} from "../team/specs/service.js";
 import type {
   WikiEntity,
   WikiEntitySummary,
@@ -107,6 +126,10 @@ import type {
   RepositoryWikiListBundle,
   RepositoryWikiSearchBundle,
 } from "../wiki/application-adapter.js";
+import {
+  TEAM_READABLE_ENTITY_TYPES,
+  WIKI_ENTITY_TYPES,
+} from "../wiki/model/entity.js";
 
 interface HubJobReader {
   list(request?: { limit?: number }): {
@@ -145,11 +168,22 @@ export interface HubTeamIdentityActivityService {
   ): Promise<TeamWorkflowResult<JsonValue>>;
 }
 
+export interface HubTeamWorkstreamService {
+  getWorkstream(workstreamId: string): Promise<Workstream | null>;
+  listWorkstreams(request?: TeamWorkstreamListRequest): Promise<TeamPage<Workstream>>;
+  previewWorkstream(command: TeamWorkstreamCommand): Promise<TeamWorkstreamPreviewEnvelope>;
+  applyWorkstream(
+    envelope: TeamWorkstreamPreviewEnvelope,
+  ): Promise<TeamWorkflowResult<JsonValue>>;
+}
+
 export interface LocalHubReadServicesOptions {
   readonly projectRoot: string;
   readonly scaffoldId: string;
   readonly jobs: HubJobReader;
   readonly team: HubTeamIdentityActivityService;
+  readonly workstreams?: HubTeamWorkstreamService;
+  readonly specs?: SpecReadService;
   readonly git?: GitPort;
   readonly graph?: HubGraphReadService;
   readonly wiki?: HubWikiReadService;
@@ -171,6 +205,8 @@ export function createLocalHubReadServices(
   const graph = options.graph;
   const wiki = options.wiki;
   const team = options.team;
+  const workstreams = options.workstreams;
+  const specs = options.specs;
   // Activity's existing workbench includes bounded legacy JSONL alongside
   // canonical events and resolves today's effective member separately from the
   // immutable recorded actor. Keep that read model independent from C0 writes.
@@ -196,6 +232,13 @@ export function createLocalHubReadServices(
           canonicalMutation: available(),
           localSelection: available(),
         },
+        workstreams: {
+          read: workstreams ? available() : unavailable("Workstream reads are not connected in this build."),
+          canonicalMutation: workstreams ? available() : unavailable("Workstream mutations are not connected in this build."),
+        },
+        specs: {
+          read: specs ? available() : unavailable("The read-only Spec service is not connected in this build."),
+        },
         jobs: available(),
         graph: {
           read: graph ? available() : unavailable("The GraphPort is not connected in this build."),
@@ -211,9 +254,10 @@ export function createLocalHubReadServices(
     },
 
     async home(): Promise<HomeResponse> {
-      const [repository, actorResolution] = await Promise.all([
+      const [repository, actorResolution, workstreamSummary] = await Promise.all([
         git.getRepoState(),
         team.getCurrentActor(),
+        homeWorkstreamSummary(workstreams),
       ]);
       const jobs = options.jobs.list({ limit: 100 }).items;
       const active = jobs.filter((job) => job.state === "queued" || job.state === "running");
@@ -241,7 +285,7 @@ export function createLocalHubReadServices(
         },
         actor: actorResolution.actor as HubActor,
         sections: {
-          workstreams: unavailableSection("Workstreams are not connected in this foundation build."),
+          workstreams: workstreamSummary,
           relays: unavailableSection("Relays are not connected in this foundation build."),
           inbox: unavailableSection("Inbox workflows are not connected in this foundation build."),
           activity,
@@ -284,6 +328,60 @@ export function createLocalHubReadServices(
       return member === null ? null : projectTeamMember(member);
     },
 
+    async workstreams(
+      request: HubTeamWorkstreamListRequest,
+    ): Promise<TeamWorkstreamListResponse> {
+      if (workstreams === undefined) throw unavailableWorkstreams();
+      let pageLimit = request.limit;
+      while (true) {
+        const page = await workstreams.listWorkstreams({
+          ...(request.state === undefined ? {} : { states: [request.state] }),
+          ...(request.includeArchived === undefined ? {} : { includeArchived: request.includeArchived }),
+          ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+          limit: pageLimit,
+        });
+        const diagnostics = page.diagnostics.map(projectDiagnostic);
+        const response: TeamWorkstreamListResponse = {
+          items: page.items.map(projectTeamWorkstream),
+          nextCursor: page.nextCursor,
+          truncated: page.truncated,
+          sourceTruncated: page.sourceTruncated,
+          deterministicRevision: page.deterministicRevision,
+          diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+          diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+        };
+        if (Buffer.byteLength(JSON.stringify(response), "utf8") <= HUB_LIMITS.maxJsonResponseBytes) {
+          return response;
+        }
+        if (pageLimit <= 1) return response;
+        pageLimit = Math.max(1, Math.floor(pageLimit / 2));
+      }
+    },
+
+    async workstream(workstreamId: string): Promise<HubTeamWorkstream | null> {
+      if (workstreams === undefined) throw unavailableWorkstreams();
+      const item = await workstreams.getWorkstream(workstreamId);
+      return item === null ? null : projectTeamWorkstream(item);
+    },
+
+    async specs(request: SpecListRequest): Promise<SpecListResponse> {
+      if (specs === undefined) throw unavailableSpecs();
+      let pageLimit = request.limit;
+      while (true) {
+        const response = projectSpecList(await specs.list({ ...request, limit: pageLimit }));
+        if (Buffer.byteLength(JSON.stringify(response), "utf8") <= HUB_LIMITS.maxJsonResponseBytes) {
+          return response;
+        }
+        if (response.availability !== "ready" || pageLimit <= 1) return response;
+        pageLimit = Math.max(1, Math.floor(pageLimit / 2));
+      }
+    },
+
+    async spec(specId: string): Promise<SpecDetailResponse> {
+      if (specs === undefined) throw unavailableSpecs();
+      return projectSpecDetail(await specs.show(specId));
+    },
+
     async currentActor(): Promise<TeamCurrentActorResponse> {
       const current = await team.getCurrentActor();
       const diagnostics = current.diagnostics.map(projectDiagnostic);
@@ -299,6 +397,12 @@ export function createLocalHubReadServices(
     async previewTeamOperation(
       request: TeamOperationPreviewRequest,
     ): Promise<TeamOperationPreviewResponse> {
+      if (isWorkstreamOperation(request)) {
+        if (workstreams === undefined) throw unavailableWorkstreams();
+        return projectTeamOperationEnvelope(
+          await workstreams.previewWorkstream(toWorkstreamCommand(request)),
+        );
+      }
       return projectTeamOperationEnvelope(
         await team.previewIdentityActivity(toIdentityActivityCommand(request)),
       );
@@ -307,10 +411,15 @@ export function createLocalHubReadServices(
     async applyTeamOperation(
       request: TeamOperationApplyRequest,
     ): Promise<TeamOperationApplyResponse> {
-      const result = await team.applyIdentityActivity(
-        toIdentityActivityEnvelope(request),
-      );
-      if (result.artifacts.some((artifact) => artifact.kind !== "member")) {
+      const workstreamOperation = isWorkstreamOperation(request.request);
+      const result = workstreamOperation
+        ? await requireWorkstreamService(workstreams).applyWorkstream(
+          toWorkstreamEnvelope(request),
+        )
+        : await team.applyIdentityActivity(toIdentityActivityEnvelope(request));
+      if (result.artifacts.some((artifact) => (
+        workstreamOperation ? artifact.kind !== "workstream" : artifact.kind !== "member"
+      ))) {
         throw invalidTeamProjection();
       }
       return {
@@ -323,6 +432,9 @@ export function createLocalHubReadServices(
         members: result.artifacts
           .filter((artifact): artifact is TeamMember => artifact.kind === "member")
           .map(projectTeamMember),
+        workstreams: result.artifacts
+          .filter((artifact): artifact is Workstream => artifact.kind === "workstream")
+          .map(projectTeamWorkstream),
         events: result.events.map(projectTeamActivityEvent),
       };
     },
@@ -435,10 +547,18 @@ export function createLocalHubReadServices(
 
     async wikiEntities(request: WikiEntityListRequest): Promise<WikiEntityListResponse> {
       const connected = requireWiki(wiki);
+      if (request.kind !== undefined && isTeamReadableEntityKind(request.kind)) {
+        throw new HubHttpError(
+          400,
+          "INVALID_REQUEST",
+          "Invalid Knowledge kind",
+          "Team-owned entity kinds are available through their dedicated Hub workbenches, not Knowledge.",
+        );
+      }
       const bundle = await connected.listBundle({
         limit: request.limit,
         includeArchived: request.lifecycle === "archived",
-        ...(request.kind === undefined ? {} : { kinds: [request.kind] }),
+        kinds: request.kind === undefined ? WIKI_ENTITY_TYPES : [request.kind],
         ...(request.topic === undefined ? {} : { topics: [request.topic] }),
         ...(request.lifecycle === undefined ? {} : { lifecycleStates: [request.lifecycle] }),
         ...(request.grounding === undefined ? {} : { groundingHealth: [request.grounding] }),
@@ -587,6 +707,7 @@ async function unifiedSearch(
     : wiki.searchBundle({
         query: request.q,
         limit: request.limit,
+        kinds: WIKI_ENTITY_TYPES,
         ...(request.wikiCursor === undefined ? {} : { cursor: request.wikiCursor }),
       }).then((bundle): SearchResponse["groups"]["wiki"] => ({
         status: "available",
@@ -900,6 +1021,111 @@ function projectWikiDetail(workspace: RepositoryKnowledgeWorkspace): WikiEntityD
     // exceed its safety bound, so these are exact for every successful detail.
     relationCount: entity.relations.length,
     backlinkCount: entity.backlinks.length,
+  };
+}
+
+function projectSpecList(result: SpecListResult): SpecListResponse {
+  const index = projectSpecIndex(result.index);
+  if (result.availability !== "ready") {
+    return { availability: result.availability, index, page: null };
+  }
+  return {
+    availability: "ready",
+    index,
+    page: {
+      schemaVersion: 1,
+      items: result.page.items.map(projectSpecSummary),
+      nextCursor: result.page.nextCursor,
+      truncated: result.page.truncated,
+      estimatedTokens: result.page.estimatedTokens,
+      deterministicRevision: result.page.deterministicRevision,
+    },
+  };
+}
+
+function projectSpecDetail(result: SpecShowResult): SpecDetailResponse {
+  const index = projectSpecIndex(result.index);
+  if (result.availability !== "ready") {
+    return { availability: result.availability, index, detail: null };
+  }
+  return {
+    availability: "ready",
+    index,
+    detail: projectReadySpecDetail(result.detail),
+  };
+}
+
+function projectSpecIndex(index: SpecIndexProjection): SpecListResponse["index"] {
+  const diagnostics = index.diagnostics
+    .map(projectWikiDiagnostic)
+    .slice(0, HUB_LIMITS.maxDiagnosticCount);
+  return {
+    state: index.state,
+    observedAt: index.observedAt,
+    indexedRevision: index.indexedRevision,
+    indexedAt: index.indexedAt,
+    diagnostics,
+    diagnosticsTruncated: index.diagnosticsTruncated
+      || diagnostics.length < index.diagnostics.length,
+  };
+}
+
+function projectSpecSummary(
+  summary: SpecSummaryProjection,
+): Extract<SpecListResponse, { availability: "ready" }>["page"]["items"][number] {
+  const diagnostics = summary.diagnostics.map(projectWikiDiagnostic).slice(0, 10);
+  return {
+    schemaVersion: 1,
+    id: summary.id,
+    kind: summary.kind,
+    title: summary.title,
+    summary: summary.summary,
+    lifecycleState: summary.lifecycleState,
+    groundingHealth: summary.groundingHealth,
+    sourcePath: summary.sourcePath,
+    version: { ...summary.version },
+    topics: [...summary.topics],
+    sourceTypes: [...summary.sourceTypes],
+    diagnostics,
+    diagnosticsTruncated: summary.diagnosticsTruncated
+      || diagnostics.length < summary.diagnostics.length,
+  };
+}
+
+function projectReadySpecDetail(
+  detail: SpecDetailProjection,
+): Extract<SpecDetailResponse, { availability: "ready" }>["detail"] {
+  return {
+    schemaVersion: 1,
+    spec: projectSpecSummary(detail.spec),
+    body: detail.body,
+    bodyTruncated: detail.bodyTruncated,
+    provenance: detail.provenance === null
+      ? null
+      : {
+          kind: detail.provenance.kind,
+          id: safeEvidenceValue(detail.provenance.id, 256),
+          capturedAt: isIsoTimestamp(detail.provenance.capturedAt)
+            ? detail.provenance.capturedAt!
+            : null,
+        },
+    sources: detail.sources.map(projectWikiSource),
+    sourcesTruncated: detail.sourcesTruncated,
+    groundings: detail.groundings.map(projectWikiGrounding),
+    groundingsTruncated: detail.groundingsTruncated,
+    hierarchy: {
+      requirements: detail.hierarchy.requirements.map(projectSpecSummary),
+      acceptanceCriteria: detail.hierarchy.acceptanceCriteria.map(projectSpecSummary),
+      constraints: detail.hierarchy.constraints.map(projectSpecSummary),
+      relations: detail.hierarchy.relations.map((relation) => ({
+        type: relation.type,
+        source: { ...relation.source },
+        target: { ...relation.target },
+        note: relation.note,
+      })),
+      estimatedTokens: detail.hierarchy.estimatedTokens,
+    },
+    deterministicRevision: detail.deterministicRevision,
   };
 }
 
@@ -1310,6 +1536,13 @@ function requireWiki(wiki: HubWikiReadService | undefined): HubWikiReadService {
   );
 }
 
+function requireWorkstreamService(
+  workstreams: HubTeamWorkstreamService | undefined,
+): HubTeamWorkstreamService {
+  if (workstreams !== undefined) return workstreams;
+  throw unavailableWorkstreams();
+}
+
 function invalidWikiProjection(): HubHttpError {
   return new HubHttpError(
     500,
@@ -1328,6 +1561,10 @@ function boundedWikiText(value: string, maximumBytes: number, fallback: string):
 function safeWikiTaxonomy(value: string, fallback: string): string {
   const bounded = boundedWikiText(value, 128, fallback);
   return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(bounded) ? bounded : fallback;
+}
+
+function isTeamReadableEntityKind(value: string): boolean {
+  return (TEAM_READABLE_ENTITY_TYPES as readonly string[]).includes(value);
 }
 
 function safeEvidenceValue(value: string | undefined, maximumBytes: number): string | null {
@@ -1389,6 +1626,34 @@ function projectTeamMember(member: TeamMember): HubTeamMember {
   };
 }
 
+function projectTeamWorkstream(workstream: Workstream): HubTeamWorkstream {
+  return {
+    schemaVersion: 1,
+    id: workstream.ref.id,
+    entityRevision: workstream.entityRevision,
+    title: workstream.title,
+    goal: workstream.goal,
+    summary: workstream.summary,
+    state: workstream.state,
+    owners: workstream.owners.map(cloneActor),
+    contributors: workstream.contributors.map(cloneActor),
+    paths: [...workstream.paths],
+    code: workstream.code.map((entry) => ({ ...entry })),
+    topics: workstream.topics.map((entry) => ({ ...entry })),
+    components: workstream.components.map((entry) => ({ ...entry })),
+    related: workstream.related.map((entry) => ({ ...entry })),
+    blockers: [...workstream.blockers],
+    currentState: workstream.currentState,
+    nextMilestone: workstream.nextMilestone,
+    createdBy: cloneActor(workstream.createdBy),
+    createdAt: workstream.createdAt,
+    updatedBy: cloneActor(workstream.updatedBy),
+    updatedAt: workstream.updatedAt,
+    sourcePath: workstream.sourcePath,
+    revision: workstream.revision,
+  };
+}
+
 function projectTeamActivityEvent(event: ActivityEvent): TeamOperationApplyResponse["events"][number] {
   if (
     event.metadata !== undefined
@@ -1433,29 +1698,30 @@ function cloneActivitySubject(subject: ActivitySubjectRef): ActivitySubjectRef {
 function toIdentityActivityCommand(
   request: TeamOperationPreviewRequest,
 ): TeamIdentityActivityCommand {
+  if (isWorkstreamOperation(request)) throw invalidTeamProjection();
   return {
     operationId: request.operationId,
-    action: cloneIdentityActivityAction(request.action),
-    expectedRevisions: request.expectedRevisions.map((expectation) => (
-      expectation.target.kind === "artifact"
-        ? {
-            target: { kind: "artifact" as const, path: expectation.target.path },
-            revision: expectation.revision,
-          }
-        : {
-            target: {
-              kind: "local" as const,
-              namespace: "member-selection" as const,
-              id: "current" as const,
-            },
-            revision: expectation.revision,
-          }
-    )),
+    action: cloneTeamAction(request.action),
+    expectedRevisions: cloneTeamExpectations(request.expectedRevisions),
   } as TeamIdentityActivityCommand;
 }
 
-function cloneIdentityActivityAction(
-  action: TeamOperationPreviewRequest["action"] | TeamIdentityActivityCommand["action"],
+function toWorkstreamCommand(
+  request: TeamOperationPreviewRequest,
+): TeamWorkstreamCommand {
+  if (!isWorkstreamOperation(request)) throw invalidTeamProjection();
+  return {
+    operationId: request.operationId,
+    action: cloneTeamAction(request.action),
+    expectedRevisions: cloneTeamExpectations(request.expectedRevisions),
+  } as TeamWorkstreamCommand;
+}
+
+function cloneTeamAction(
+  action:
+    | TeamOperationPreviewRequest["action"]
+    | TeamIdentityActivityCommand["action"]
+    | TeamWorkstreamCommand["action"],
 ): TeamOperationPreviewRequest["action"] {
   switch (action.kind) {
     case "member.add":
@@ -1485,6 +1751,74 @@ function cloneIdentityActivityAction(
       return { kind: "member.select", memberId: action.memberId };
     case "member.clear":
       return { kind: "member.clear" };
+    case "workstream.create":
+      return {
+        kind: "workstream.create",
+        workstream: {
+          title: action.workstream.title,
+          goal: action.workstream.goal,
+          summary: action.workstream.summary,
+          owners: action.workstream.owners.map(cloneActor),
+          ...(action.workstream.contributors === undefined
+            ? {}
+            : { contributors: action.workstream.contributors.map(cloneActor) }),
+          ...(action.workstream.paths === undefined ? {} : { paths: [...action.workstream.paths] }),
+          ...(action.workstream.code === undefined
+            ? {}
+            : { code: action.workstream.code.map((entry) => ({ ...entry })) }),
+          ...(action.workstream.topics === undefined
+            ? {}
+            : { topics: action.workstream.topics.map((entry) => ({ ...entry })) }),
+          ...(action.workstream.components === undefined
+            ? {}
+            : { components: action.workstream.components.map((entry) => ({ ...entry })) }),
+          ...(action.workstream.related === undefined
+            ? {}
+            : { related: action.workstream.related.map((entry) => ({ ...entry })) }),
+          nextMilestone: action.workstream.nextMilestone,
+        },
+      };
+    case "workstream.update":
+      return {
+        kind: "workstream.update",
+        workstreamId: action.workstreamId,
+        patch: {
+          ...(action.patch.title === undefined ? {} : { title: action.patch.title }),
+          ...(action.patch.goal === undefined ? {} : { goal: action.patch.goal }),
+          ...(action.patch.summary === undefined ? {} : { summary: action.patch.summary }),
+          ...(action.patch.state === undefined ? {} : { state: action.patch.state }),
+          ...(action.patch.owners === undefined
+            ? {}
+            : { owners: action.patch.owners.map(cloneActor) }),
+          ...(action.patch.contributors === undefined
+            ? {}
+            : { contributors: action.patch.contributors.map(cloneActor) }),
+          ...(action.patch.paths === undefined ? {} : { paths: [...action.patch.paths] }),
+          ...(action.patch.code === undefined
+            ? {}
+            : { code: action.patch.code.map((entry) => ({ ...entry })) }),
+          ...(action.patch.topics === undefined
+            ? {}
+            : { topics: action.patch.topics.map((entry) => ({ ...entry })) }),
+          ...(action.patch.components === undefined
+            ? {}
+            : { components: action.patch.components.map((entry) => ({ ...entry })) }),
+          ...(action.patch.related === undefined
+            ? {}
+            : { related: action.patch.related.map((entry) => ({ ...entry })) }),
+          ...(action.patch.blockers === undefined
+            ? {}
+            : { blockers: [...action.patch.blockers] }),
+          ...(action.patch.currentState === undefined
+            ? {}
+            : { currentState: action.patch.currentState }),
+          ...(action.patch.nextMilestone === undefined
+            ? {}
+            : { nextMilestone: action.patch.nextMilestone }),
+        },
+      };
+    case "workstream.archive":
+      return { kind: "workstream.archive", workstreamId: action.workstreamId };
     case "activity.record": {
       if (action.activity.workstream !== undefined
         && action.activity.workstream.kind !== "workstream") {
@@ -1505,28 +1839,14 @@ function cloneIdentityActivityAction(
 }
 
 function projectTeamOperationEnvelope(
-  envelope: TeamIdentityActivityPreviewEnvelope,
+  envelope: TeamIdentityActivityPreviewEnvelope | TeamWorkstreamPreviewEnvelope,
 ): TeamOperationPreviewResponse {
   return {
     schemaVersion: 1,
     request: {
       operationId: envelope.request.operationId,
-      action: cloneIdentityActivityAction(envelope.request.action),
-      expectedRevisions: envelope.request.expectedRevisions.map((expectation) => (
-        expectation.target.kind === "artifact"
-          ? {
-              target: { kind: "artifact" as const, path: expectation.target.path },
-              revision: expectation.revision,
-            }
-          : {
-              target: {
-                kind: "local" as const,
-                namespace: "member-selection" as const,
-                id: "current" as const,
-              },
-              revision: expectation.revision,
-            }
-      )),
+      action: cloneTeamAction(envelope.request.action),
+      expectedRevisions: cloneTeamExpectations(envelope.request.expectedRevisions),
     },
     preview: {
       valid: envelope.preview.valid,
@@ -1596,6 +1916,10 @@ function projectPortableTeamDiagnostic(diagnostic: Diagnostic): ActivityDiagnost
 function toIdentityActivityEnvelope(
   envelope: TeamOperationApplyRequest,
 ): TeamIdentityActivityPreviewEnvelope {
+  const purposeIds = envelope.receipt.purposeIds.map((purpose) => {
+    if (purpose.purpose === "workstream") throw invalidTeamProjection();
+    return { ...purpose };
+  });
   return {
     schemaVersion: 1,
     request: toIdentityActivityCommand(envelope.request),
@@ -1613,12 +1937,72 @@ function toIdentityActivityEnvelope(
         occurredAt: envelope.receipt.authority.occurredAt,
         repoState: { ...envelope.receipt.authority.repoState },
       },
-      purposeIds: envelope.receipt.purposeIds.map((purpose) => ({ ...purpose })),
+      purposeIds,
       requestRevision: envelope.receipt.requestRevision,
       presentationRevision: envelope.receipt.presentationRevision,
       previewRevision: envelope.receipt.previewRevision,
     },
   };
+}
+
+function toWorkstreamEnvelope(
+  envelope: TeamOperationApplyRequest,
+): TeamWorkstreamPreviewEnvelope {
+  const purposeIds = envelope.receipt.purposeIds.map((purpose) => {
+    if (purpose.purpose === "member") throw invalidTeamProjection();
+    return { ...purpose };
+  });
+  return {
+    schemaVersion: 1,
+    request: toWorkstreamCommand(envelope.request),
+    preview: {
+      valid: envelope.preview.valid,
+      scope: envelope.preview.scope,
+      changes: envelope.preview.changes.map((change) => ({ ...change })),
+      localChanges: envelope.preview.localChanges.map((change) => ({ ...change })),
+      diagnostics: envelope.preview.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+    },
+    receipt: {
+      schemaVersion: 1,
+      authority: {
+        actor: cloneActor(envelope.receipt.authority.actor),
+        occurredAt: envelope.receipt.authority.occurredAt,
+        repoState: { ...envelope.receipt.authority.repoState },
+      },
+      purposeIds,
+      requestRevision: envelope.receipt.requestRevision,
+      presentationRevision: envelope.receipt.presentationRevision,
+      previewRevision: envelope.receipt.previewRevision,
+    },
+  };
+}
+
+function cloneTeamExpectations(
+  expectations: readonly RevisionExpectation[],
+): TeamOperationPreviewRequest["expectedRevisions"] {
+  return expectations.map((expectation) => (
+    expectation.target.kind === "artifact"
+      ? {
+          target: { kind: "artifact" as const, path: expectation.target.path },
+          revision: expectation.revision,
+        }
+      : {
+          target: {
+            kind: "local" as const,
+            namespace: "member-selection" as const,
+            id: "current" as const,
+          },
+          revision: expectation.revision,
+        }
+  ));
+}
+
+function isWorkstreamOperation(
+  request: { action: { kind: string } },
+): boolean {
+  return request.action.kind === "workstream.create"
+    || request.action.kind === "workstream.update"
+    || request.action.kind === "workstream.archive";
 }
 
 function projectTimelineEntry(item: ResolvedTimelineEntry): ActivityResponse["items"][number] {
@@ -1808,6 +2192,46 @@ async function gitCapability(git: GitPort): Promise<CapabilityStatus> {
 
 function unavailableSection(reason: string): HomeResponse["sections"]["activity"] {
   return { availability: "unavailable", count: null, reason };
+}
+
+async function homeWorkstreamSummary(
+  workstreams: HubTeamWorkstreamService | undefined,
+): Promise<HomeResponse["sections"]["workstreams"]> {
+  if (workstreams === undefined) {
+    return unavailableSection("Workstreams are not connected in this build.");
+  }
+  try {
+    const page = await workstreams.listWorkstreams({ includeArchived: false, limit: 100 });
+    if (
+      page.sourceTruncated
+      || page.truncated
+      || page.nextCursor !== null
+      || page.diagnostics.length > 0
+    ) {
+      return unavailableSection("The Workstream summary could not establish one complete diagnostic-free page.");
+    }
+    return { availability: "available", count: page.items.length };
+  } catch {
+    return unavailableSection("Workstreams could not be read safely.");
+  }
+}
+
+function unavailableWorkstreams(): HubHttpError {
+  return new HubHttpError(
+    503,
+    "CAPABILITY_UNAVAILABLE",
+    "Capability unavailable",
+    "Workstream workflows are not connected in this build.",
+  );
+}
+
+function unavailableSpecs(): HubHttpError {
+  return new HubHttpError(
+    503,
+    "CAPABILITY_UNAVAILABLE",
+    "Capability unavailable",
+    "Spec reads are not connected in this build.",
+  );
 }
 
 function unavailableSearch(reason: string): SearchResponse["groups"]["wiki"] {

@@ -12,12 +12,17 @@ import {
   JobPageResponseSchema,
   SearchResponseSchema,
   SessionResponseSchema,
+  SpecDetailResponseSchema,
+  SpecListResponseSchema,
   TeamCurrentActorResponseSchema,
   TeamMemberIdSchema,
   TeamMemberListResponseSchema,
   TeamMemberSchema,
   TeamOperationApplyResponseSchema,
   TeamOperationPreviewResponseSchema,
+  TeamWorkstreamIdSchema,
+  TeamWorkstreamListResponseSchema,
+  TeamWorkstreamSchema,
   WikiBacklinksResponseSchema,
   WikiEntityDetailResponseSchema,
   WikiEntityIdSchema,
@@ -42,6 +47,9 @@ import type {
   SearchRequest,
   SearchResponse,
   SessionResponse,
+  SpecDetailResponse,
+  SpecListRequest,
+  SpecListResponse,
   StartJobRequest,
   TeamCurrentActorResponse,
   TeamMember,
@@ -51,6 +59,9 @@ import type {
   TeamOperationApplyResponse,
   TeamOperationPreviewRequest,
   TeamOperationPreviewResponse,
+  TeamWorkstream,
+  TeamWorkstreamListRequest,
+  TeamWorkstreamListResponse,
   WikiBacklinksRequest,
   WikiBacklinksResponse,
   WikiEntityDetailResponse,
@@ -88,6 +99,10 @@ export interface HubApi {
   getMembers(request: TeamMemberListRequest): Promise<TeamMemberListResponse>;
   getMember(id: string): Promise<TeamMember>;
   getCurrentActor(): Promise<TeamCurrentActorResponse>;
+  getWorkstreams(request: TeamWorkstreamListRequest): Promise<TeamWorkstreamListResponse>;
+  getWorkstream(id: string): Promise<TeamWorkstream>;
+  listSpecs(request: SpecListRequest): Promise<SpecListResponse>;
+  getSpec(id: string): Promise<SpecDetailResponse>;
   previewTeamOperation(request: TeamOperationPreviewRequest): Promise<TeamOperationPreviewResponse>;
   applyTeamOperation(request: TeamOperationApplyRequest): Promise<TeamOperationApplyResponse>;
   getActivity(request: ActivityRequest): Promise<ActivityResponse>;
@@ -172,6 +187,14 @@ function assertSafeTeamMemberId(value: string): string {
   return parsed.data;
 }
 
+function assertSafeTeamWorkstreamId(value: string): string {
+  const parsed = TeamWorkstreamIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The Workstream identifier is invalid."));
+  }
+  return parsed.data;
+}
+
 export function readBootstrapToken(hash = window.location.hash): string | null {
   if (!hash || hash === "#") return null;
   const fragment = hash.slice(1);
@@ -250,6 +273,46 @@ export class HttpHubApi implements HubApi {
 
   getCurrentActor(): Promise<TeamCurrentActorResponse> {
     return this.#request("/actor/current", TeamCurrentActorResponseSchema);
+  }
+
+  getWorkstreams(request: TeamWorkstreamListRequest): Promise<TeamWorkstreamListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.state) params.set("state", request.state);
+    if (request.includeArchived !== undefined) {
+      params.set("includeArchived", String(request.includeArchived));
+    }
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/workstreams?${params}`, TeamWorkstreamListResponseSchema);
+  }
+
+  async getWorkstream(id: string): Promise<TeamWorkstream> {
+    return await this.#request(
+      `/workstreams/${encodeURIComponent(assertSafeTeamWorkstreamId(id))}`,
+      TeamWorkstreamSchema,
+    );
+  }
+
+  listSpecs(request: SpecListRequest): Promise<SpecListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.includeArchived !== undefined) {
+      params.set("includeArchived", String(request.includeArchived));
+    }
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    if (request.lifecycleStates?.length) {
+      params.set("lifecycleStates", request.lifecycleStates.join(","));
+    }
+    if (request.groundingHealth?.length) {
+      params.set("groundingHealth", request.groundingHealth.join(","));
+    }
+    if (request.topics?.length) params.set("topics", request.topics.join(","));
+    return this.#request(`/specs?${params}`, SpecListResponseSchema);
+  }
+
+  async getSpec(id: string): Promise<SpecDetailResponse> {
+    return await this.#request(
+      `/specs/${encodeURIComponent(assertSafeWikiEntityId(id))}`,
+      SpecDetailResponseSchema,
+    );
   }
 
   previewTeamOperation(

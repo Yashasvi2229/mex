@@ -28,6 +28,15 @@
         }
       },
       {
+        "id": "team_workstreams",
+        "installed": true,
+        "availability": "unavailable",
+        "unavailableReason": {
+          "code": "NOT_GIT_REPOSITORY",
+          "detail": "Repository initialization is required before this capability can be used."
+        }
+      },
+      {
         "id": "activity_read",
         "installed": true,
         "availability": "unavailable",
@@ -38,6 +47,15 @@
       },
       {
         "id": "activity_record",
+        "installed": true,
+        "availability": "unavailable",
+        "unavailableReason": {
+          "code": "NOT_GIT_REPOSITORY",
+          "detail": "Repository initialization is required before this capability can be used."
+        }
+      },
+      {
+        "id": "spec_read",
         "installed": true,
         "availability": "unavailable",
         "unavailableReason": {
@@ -99,6 +117,8 @@
           "entityKind": 64,
           "entityTitle": 512,
           "activityAction": 128,
+          "workstreamTitle": 512,
+          "workstreamText": 8192,
           "codeIdentifierOrFingerprint": 1024,
           "repositoryPath": 4096
         },
@@ -122,6 +142,15 @@
             },
             {
               "$ref": "#/$defs/activityRecordRequest"
+            },
+            {
+              "$ref": "#/$defs/workstreamCreateRequest"
+            },
+            {
+              "$ref": "#/$defs/workstreamUpdateRequest"
+            },
+            {
+              "$ref": "#/$defs/workstreamArchiveRequest"
             }
           ],
           "$defs": {
@@ -144,6 +173,10 @@
             "memberId": {
               "type": "string",
               "pattern": "^member_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+            },
+            "workstreamId": {
+              "type": "string",
+              "pattern": "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
             },
             "canonicalText": {
               "type": "string",
@@ -244,6 +277,37 @@
                     "path": {
                       "type": "string",
                       "pattern": "^\\.mex/team/members/member_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$"
+                    }
+                  }
+                },
+                "revision": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              }
+            },
+            "workstreamArtifactExpectation": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "target",
+                "revision"
+              ],
+              "properties": {
+                "target": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "path"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "artifact"
+                    },
+                    "path": {
+                      "type": "string",
+                      "pattern": "^\\.mex/workstreams/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$"
                     }
                   }
                 },
@@ -549,6 +613,353 @@
                 }
               ]
             },
+            "actorRef": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "memberId"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "member"
+                    },
+                    "memberId": {
+                      "$ref": "#/$defs/memberId"
+                    },
+                    "displayName": {
+                      "allOf": [
+                        {
+                          "$ref": "#/$defs/canonicalText"
+                        },
+                        {
+                          "type": "string",
+                          "maxLength": 512
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "name",
+                    "email"
+                  ],
+                  "not": {
+                    "required": [
+                      "name",
+                      "email"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "null"
+                      },
+                      "email": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "properties": {
+                    "kind": {
+                      "const": "git"
+                    },
+                    "name": {
+                      "anyOf": [
+                        {
+                          "allOf": [
+                            {
+                              "$ref": "#/$defs/canonicalText"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 512
+                            }
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "email": {
+                      "anyOf": [
+                        {
+                          "allOf": [
+                            {
+                              "$ref": "#/$defs/canonicalText"
+                            },
+                            {
+                              "type": "string",
+                              "maxLength": 512,
+                              "pattern": "^(?=.*@)\\S+$"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "unknown"
+                    }
+                  }
+                }
+              ]
+            },
+            "canonicalRepoPath": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "description": "Canonical contained repository-relative path; 4,096 UTF-8 bytes maximum."
+            },
+            "actorSet": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/actorRef"
+              }
+            },
+            "entitySet": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/entityRef"
+              }
+            },
+            "codeSet": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/codeRef"
+              }
+            },
+            "pathSet": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/canonicalRepoPath"
+              }
+            },
+            "workstreamCreateInput": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "title",
+                "goal",
+                "summary",
+                "owners",
+                "nextMilestone"
+              ],
+              "properties": {
+                "title": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/canonicalText"
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 512
+                    }
+                  ]
+                },
+                "goal": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/canonicalText"
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  ]
+                },
+                "summary": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/canonicalText"
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  ]
+                },
+                "owners": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/actorSet"
+                    },
+                    {
+                      "type": "array",
+                      "minItems": 1
+                    }
+                  ]
+                },
+                "contributors": {
+                  "$ref": "#/$defs/actorSet"
+                },
+                "paths": {
+                  "$ref": "#/$defs/pathSet"
+                },
+                "code": {
+                  "$ref": "#/$defs/codeSet"
+                },
+                "topics": {
+                  "$ref": "#/$defs/entitySet"
+                },
+                "components": {
+                  "$ref": "#/$defs/entitySet"
+                },
+                "related": {
+                  "$ref": "#/$defs/entitySet"
+                },
+                "nextMilestone": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/canonicalText"
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  ]
+                }
+              }
+            },
+            "workstreamUpdatePatch": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "title": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/canonicalText"
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 512
+                    }
+                  ]
+                },
+                "goal": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/canonicalText"
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  ]
+                },
+                "summary": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/canonicalText"
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  ]
+                },
+                "state": {
+                  "enum": [
+                    "planned",
+                    "active",
+                    "blocked",
+                    "done"
+                  ]
+                },
+                "owners": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/actorSet"
+                    },
+                    {
+                      "type": "array",
+                      "minItems": 1
+                    }
+                  ]
+                },
+                "contributors": {
+                  "$ref": "#/$defs/actorSet"
+                },
+                "paths": {
+                  "$ref": "#/$defs/pathSet"
+                },
+                "code": {
+                  "$ref": "#/$defs/codeSet"
+                },
+                "topics": {
+                  "$ref": "#/$defs/entitySet"
+                },
+                "components": {
+                  "$ref": "#/$defs/entitySet"
+                },
+                "related": {
+                  "$ref": "#/$defs/entitySet"
+                },
+                "blockers": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "uniqueItems": true,
+                  "items": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/canonicalText"
+                      },
+                      {
+                        "type": "string",
+                        "maxLength": 4096
+                      }
+                    ]
+                  }
+                },
+                "currentState": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/canonicalText"
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 8192
+                    }
+                  ]
+                },
+                "nextMilestone": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/canonicalText"
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 4096
+                    }
+                  ]
+                }
+              }
+            },
             "activitySubject": {
               "oneOf": [
                 {
@@ -803,6 +1214,58 @@
                 }
               }
             },
+            "workstreamCreateAction": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "workstream"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "workstream.create"
+                },
+                "workstream": {
+                  "$ref": "#/$defs/workstreamCreateInput"
+                }
+              }
+            },
+            "workstreamUpdateAction": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "workstreamId",
+                "patch"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "workstream.update"
+                },
+                "workstreamId": {
+                  "$ref": "#/$defs/workstreamId"
+                },
+                "patch": {
+                  "$ref": "#/$defs/workstreamUpdatePatch"
+                }
+              }
+            },
+            "workstreamArchiveAction": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "workstreamId"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "workstream.archive"
+                },
+                "workstreamId": {
+                  "$ref": "#/$defs/workstreamId"
+                }
+              }
+            },
             "memberAddRequest": {
               "type": "object",
               "additionalProperties": false,
@@ -930,6 +1393,82 @@
                 },
                 "expectedRevisions": {
                   "$ref": "#/$defs/expectations"
+                }
+              }
+            },
+            "workstreamCreateRequest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operationId",
+                "action",
+                "expectedRevisions"
+              ],
+              "properties": {
+                "operationId": {
+                  "$ref": "#/$defs/operationId"
+                },
+                "action": {
+                  "$ref": "#/$defs/workstreamCreateAction"
+                },
+                "expectedRevisions": {
+                  "$ref": "#/$defs/expectations"
+                }
+              }
+            },
+            "workstreamUpdateRequest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operationId",
+                "action",
+                "expectedRevisions"
+              ],
+              "properties": {
+                "operationId": {
+                  "$ref": "#/$defs/operationId"
+                },
+                "action": {
+                  "$ref": "#/$defs/workstreamUpdateAction"
+                },
+                "expectedRevisions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 64,
+                  "contains": {
+                    "$ref": "#/$defs/workstreamArtifactExpectation"
+                  },
+                  "items": {
+                    "$ref": "#/$defs/expectation"
+                  }
+                }
+              }
+            },
+            "workstreamArchiveRequest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operationId",
+                "action",
+                "expectedRevisions"
+              ],
+              "properties": {
+                "operationId": {
+                  "$ref": "#/$defs/operationId"
+                },
+                "action": {
+                  "$ref": "#/$defs/workstreamArchiveAction"
+                },
+                "expectedRevisions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 64,
+                  "contains": {
+                    "$ref": "#/$defs/workstreamArtifactExpectation"
+                  },
+                  "items": {
+                    "$ref": "#/$defs/expectation"
+                  }
                 }
               }
             }
@@ -1075,6 +1614,78 @@
                 }
               },
               "expectedRevisions": []
+            }
+          },
+          {
+            "command": "workstream.create",
+            "usage": "mex workstream create request.json --json",
+            "schemaRef": "team.identity_activity.request.v1#/$defs/workstreamCreateRequest",
+            "request": {
+              "operationId": "workstream-create-example-001",
+              "action": {
+                "kind": "workstream.create",
+                "workstream": {
+                  "title": "Human-team release",
+                  "goal": "Ship the next reviewed checkpoint",
+                  "summary": "Canonical coordination for the current checkpoint.",
+                  "owners": [
+                    {
+                      "kind": "unknown"
+                    }
+                  ],
+                  "nextMilestone": "Finish Checkpoint D review"
+                }
+              },
+              "expectedRevisions": []
+            }
+          },
+          {
+            "command": "workstream.update",
+            "usage": "mex workstream update request.json --json",
+            "schemaRef": "team.identity_activity.request.v1#/$defs/workstreamUpdateRequest",
+            "request": {
+              "operationId": "workstream-update-example-001",
+              "action": {
+                "kind": "workstream.update",
+                "workstreamId": "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "patch": {
+                  "state": "blocked",
+                  "blockers": [
+                    "Awaiting a reviewed dependency"
+                  ],
+                  "currentState": "Dependency review"
+                }
+              },
+              "expectedRevisions": [
+                {
+                  "target": {
+                    "kind": "artifact",
+                    "path": ".mex/workstreams/ws_01ARZ3NDEKTSV4RRFFQ69G5FAV.md"
+                  },
+                  "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
+            }
+          },
+          {
+            "command": "workstream.archive",
+            "usage": "mex workstream archive request.json --json",
+            "schemaRef": "team.identity_activity.request.v1#/$defs/workstreamArchiveRequest",
+            "request": {
+              "operationId": "workstream-archive-example-001",
+              "action": {
+                "kind": "workstream.archive",
+                "workstreamId": "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+              },
+              "expectedRevisions": [
+                {
+                  "target": {
+                    "kind": "artifact",
+                    "path": ".mex/workstreams/ws_01ARZ3NDEKTSV4RRFFQ69G5FAV.md"
+                  },
+                  "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+              ]
             }
           }
         ]

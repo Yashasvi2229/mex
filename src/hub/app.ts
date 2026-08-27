@@ -20,6 +20,9 @@ import {
   SearchRequestSchema,
   SearchResponseSchema,
   SessionResponseSchema,
+  SpecDetailResponseSchema,
+  SpecListRequestSchema,
+  SpecListResponseSchema,
   TeamCurrentActorResponseSchema,
   TeamMemberIdSchema,
   TeamMemberListRequestSchema,
@@ -29,6 +32,10 @@ import {
   TeamOperationApplyResponseSchema,
   TeamOperationPreviewRequestSchema,
   TeamOperationPreviewResponseSchema,
+  TeamWorkstreamIdSchema,
+  TeamWorkstreamListRequestSchema,
+  TeamWorkstreamListResponseSchema,
+  TeamWorkstreamSchema,
   WikiBacklinksRequestSchema,
   WikiBacklinksResponseSchema,
   WikiEntityDetailResponseSchema,
@@ -51,6 +58,9 @@ import {
   type JobPageRequest,
   type SearchRequest,
   type SearchResponse,
+  type SpecDetailResponse,
+  type SpecListRequest,
+  type SpecListResponse,
   type TeamCurrentActorResponse,
   type TeamMember,
   type TeamMemberListRequest,
@@ -59,6 +69,9 @@ import {
   type TeamOperationApplyResponse,
   type TeamOperationPreviewRequest,
   type TeamOperationPreviewResponse,
+  type TeamWorkstream,
+  type TeamWorkstreamListRequest,
+  type TeamWorkstreamListResponse,
   type WikiBacklinksRequest,
   type WikiBacklinksResponse,
   type WikiEntityDetailResponse,
@@ -127,6 +140,12 @@ export interface HubReadServices {
     request: TeamMemberListRequest,
   ): Promise<TeamMemberListResponse> | TeamMemberListResponse;
   member?(memberId: string): Promise<TeamMember | null> | TeamMember | null;
+  workstreams?(
+    request: TeamWorkstreamListRequest,
+  ): Promise<TeamWorkstreamListResponse> | TeamWorkstreamListResponse;
+  workstream?(workstreamId: string): Promise<TeamWorkstream | null> | TeamWorkstream | null;
+  specs?(request: SpecListRequest): Promise<SpecListResponse> | SpecListResponse;
+  spec?(specId: string): Promise<SpecDetailResponse> | SpecDetailResponse;
   currentActor?(): Promise<TeamCurrentActorResponse> | TeamCurrentActorResponse;
   previewTeamOperation?(
     request: TeamOperationPreviewRequest,
@@ -290,6 +309,48 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
     const member = await readMember(memberId);
     if (member === null) throw notFound("The requested member does not exist.");
     return resourceResponse(TeamMemberSchema, member);
+  });
+
+  app.get("/api/v1/workstreams", async (context) => {
+    const request = parseInput(
+      TeamWorkstreamListRequestSchema,
+      readStrictQuery(context.req.raw, ["state", "includeArchived", "cursor", "limit"]),
+    );
+    const workstreams = options.services.workstreams;
+    if (workstreams === undefined) {
+      throw unavailable("Workstream reads are not connected in this build.");
+    }
+    return resourceResponse(TeamWorkstreamListResponseSchema, await workstreams(request));
+  });
+
+  app.get("/api/v1/workstreams/:id", async (context) => {
+    readStrictQuery(context.req.raw, []);
+    const workstreamId = parseInput(TeamWorkstreamIdSchema, context.req.param("id"));
+    const readWorkstream = options.services.workstream;
+    if (readWorkstream === undefined) {
+      throw unavailable("Workstream reads are not connected in this build.");
+    }
+    const workstream = await readWorkstream(workstreamId);
+    if (workstream === null) throw notFound("The requested Workstream does not exist.");
+    return resourceResponse(TeamWorkstreamSchema, workstream);
+  });
+
+  app.get("/api/v1/specs", async (context) => {
+    const request = parseInput(
+      SpecListRequestSchema,
+      readSpecListQuery(context.req.raw),
+    );
+    const specs = options.services.specs;
+    if (specs === undefined) throw unavailable("Spec reads are not connected in this build.");
+    return resourceResponse(SpecListResponseSchema, await specs(request));
+  });
+
+  app.get("/api/v1/specs/:id", async (context) => {
+    readStrictQuery(context.req.raw, []);
+    const specId = parseInput(WikiEntityIdSchema, context.req.param("id"));
+    const spec = options.services.spec;
+    if (spec === undefined) throw unavailable("Spec reads are not connected in this build.");
+    return resourceResponse(SpecDetailResponseSchema, await spec(specId));
   });
 
   app.get("/api/v1/actor/current", async (context) => {
@@ -636,6 +697,29 @@ class SseSubscriberTracker {
       this.#total = Math.max(0, this.#total - 1);
     };
   }
+}
+
+function readSpecListQuery(request: Request): Record<string, unknown> {
+  const query = readStrictQuery(request, [
+    "includeArchived",
+    "cursor",
+    "limit",
+    "lifecycleStates",
+    "groundingHealth",
+    "topics",
+  ]);
+  return {
+    ...(query.includeArchived === undefined ? {} : { includeArchived: query.includeArchived }),
+    ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+    ...(query.limit === undefined ? {} : { limit: query.limit }),
+    ...(query.lifecycleStates === undefined
+      ? {}
+      : { lifecycleStates: query.lifecycleStates.split(",") }),
+    ...(query.groundingHealth === undefined
+      ? {}
+      : { groundingHealth: query.groundingHealth.split(",") }),
+    ...(query.topics === undefined ? {} : { topics: query.topics.split(",") }),
+  };
 }
 
 async function waitForEventOrHeartbeat(

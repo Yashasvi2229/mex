@@ -196,7 +196,8 @@ export function HomePage() {
       id: "workstreams",
       label: "Workstreams",
       value: data.sections.workstreams.count ?? "—",
-      detail: data.sections.workstreams.availability === "available" ? "Available" : "Not connected",
+      detail: data.sections.workstreams.availability === "available" ? "Canonical delivery threads" : "Not connected",
+      ...(data.sections.workstreams.availability === "available" ? { route: "/workstreams" } : {}),
       icon: FolderGit2,
     },
     {

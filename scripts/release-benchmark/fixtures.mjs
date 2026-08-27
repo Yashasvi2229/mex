@@ -15,9 +15,9 @@ const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const MAX_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 export const RELEASE_FIXTURE_PROFILES = Object.freeze({
-  small: Object.freeze({ sourceFiles: 4, wikiEntities: 4, activityEvents: 4 }),
-  medium: Object.freeze({ sourceFiles: 16, wikiEntities: 16, activityEvents: 16 }),
-  large: Object.freeze({ sourceFiles: 48, wikiEntities: 48, activityEvents: 48 }),
+  small: Object.freeze({ sourceFiles: 4, wikiEntities: 4, workstreams: 1, activityEvents: 4 }),
+  medium: Object.freeze({ sourceFiles: 16, wikiEntities: 16, workstreams: 1, activityEvents: 16 }),
+  large: Object.freeze({ sourceFiles: 48, wikiEntities: 48, workstreams: 1, activityEvents: 48 }),
 });
 
 export function createReleaseFixture({
@@ -34,6 +34,7 @@ export function createReleaseFixture({
   const scaffold = join(root, ".mex");
   mkdirSync(join(root, "src"), { recursive: true });
   mkdirSync(join(scaffold, "context"), { recursive: true });
+  mkdirSync(join(scaffold, "workstreams"), { recursive: true });
   mkdirSync(join(scaffold, "events", "activity", "2026-08"), { recursive: true });
 
   writeFileSync(join(root, "package.json"), `${JSON.stringify({
@@ -86,9 +87,22 @@ export function createReleaseFixture({
     const nextId = wikiIds[(index + 1) % wikiIds.length];
     writeFileSync(
       join(scaffold, "context", `benchmark-${suffix}.md`),
-      wikiDocument({ id: wikiIds[index], nextId, index, mutable: index === 0 }),
+      wikiDocument({
+        id: wikiIds[index],
+        nextId,
+        rootId: wikiIds[0],
+        constraintId: wikiIds[2],
+        index,
+        mutable: index === 0,
+      }),
     );
   }
+
+  const workstreamId = fixedId("ws_", 20_000);
+  writeFileSync(
+    join(scaffold, "workstreams", `${workstreamId}.md`),
+    workstreamDocument(workstreamId),
+  );
 
   for (let index = 0; index < profile.activityEvents; index += 1) {
     const id = fixedId("event_", 10_000 + index);
@@ -110,6 +124,8 @@ export function createReleaseFixture({
     root,
     profile,
     firstWikiEntityId: wikiIds[0],
+    firstSpecId: wikiIds[0],
+    firstWorkstreamId: workstreamId,
     mutableWikiPath: ".mex/context/benchmark-0000.md",
     input,
   };
@@ -237,18 +253,33 @@ function toggleMarker(path, label) {
   writeFileSync(path, after, "utf8");
 }
 
-function wikiDocument({ id, nextId, index, mutable }) {
+function wikiDocument({ id, nextId, rootId, constraintId, index, mutable }) {
   const suffix = String(index).padStart(4, "0");
+  const type = index === 0
+    ? "spec"
+    : index === 1
+      ? "requirement"
+      : index === 2
+        ? "constraint"
+        : index === 3
+          ? "acceptance_criterion"
+          : index % 2 === 0 ? "decision" : "pattern";
+  const relations = index === 0
+    ? ["  - type: constrained_by", `    target: ${constraintId}`]
+    : index === 1
+      ? ["  - type: derived_from", `    target: ${rootId}`]
+      : index === 3
+        ? ["  - type: verified_by", `    target: ${rootId}`]
+        : ["  - type: related_to", `    target: ${nextId}`];
   return [
     "<!-- mex:entity",
     `id: ${id}`,
-    `type: ${index % 2 === 0 ? "decision" : "pattern"}`,
+    `type: ${type}`,
     "status: promoted",
     "revision: 1",
     `summary: Release benchmark knowledge needle ${suffix}.`,
     "relations:",
-    "  - type: related_to",
-    `    target: ${nextId}`,
+    ...relations,
     "sources:",
     "  - type: manual",
     "    note: Deterministic release benchmark evidence.",
@@ -259,6 +290,56 @@ function wikiDocument({ id, nextId, index, mutable }) {
     ...(mutable ? ["", "<!-- benchmark-state:A -->"] : []),
     "",
   ].join("\n");
+}
+
+function workstreamDocument(id) {
+  const actor = {
+    email: "release-benchmark@example.invalid",
+    kind: "git",
+    name: "MEX Release Benchmark",
+  };
+  const title = "Release benchmark Workstream";
+  const summary = "One canonical populated Workstream for release route measurement.";
+  const timestamp = "2026-08-01T00:00:00.000Z";
+  const entries = [
+    ["schema_version", 1],
+    ["id", id],
+    ["mex", {
+      id,
+      revision: 1,
+      status: "in_flight",
+      summary,
+      title,
+      type: "workstream",
+    }],
+    ["state", "active"],
+    ["title", title],
+    ["goal", "Exercise the real Checkpoint D route and bounded projection."],
+    ["summary", summary],
+    ["owners", [actor]],
+    ["contributors", []],
+    ["paths", ["src"]],
+    ["code", [{ kind: "file", path: "src/module-0000.ts" }]],
+    ["topics", []],
+    ["components", []],
+    ["related", []],
+    ["blockers", []],
+    ["current_state", "Running pinned release checks."],
+    ["next_milestone", "Pass the release gate."],
+    ["created_by", actor],
+    ["created_at", timestamp],
+    ["updated_by", actor],
+    ["updated_at", timestamp],
+  ];
+  return `---\n${entries.map(([key, value]) => `${key}: ${canonicalJson(value)}`).join("\n")}\n---\n`;
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function activityDocument({ id, index, timestamp }) {

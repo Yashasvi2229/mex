@@ -8,10 +8,13 @@ import type {
   HubJobSnapshot,
   SearchRequest,
   SearchResponse,
+  SpecDetailResponse,
+  SpecListResponse,
   TeamMember,
   TeamOperationApplyResponse,
   TeamOperationPreviewRequest,
   TeamOperationPreviewResponse,
+  TeamWorkstream,
 } from "@mex/hub-contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -29,6 +32,9 @@ const BOOTSTRAP = Buffer.alloc(32, 7).toString("base64url");
 const JOB_ID = "job_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const TEAM_MEMBER_ID = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const TEAM_EVENT_ID = "event_01ARZ3NDEKTSV4RRFFQ69G5FAB";
+const TEAM_WORKSTREAM_ID = "ws_01ARZ3NDEKTSV4RRFFQ69G5FAC";
+const SPEC_ID = "mx_01ARZ3NDEKTSV4RRFFQ69G5FAD";
+const REQUIREMENT_ID = "mx_01ARZ3NDEKTSV4RRFFQ69G5FAE";
 const TEAM_NOW = "2026-08-27T04:05:06.000Z";
 
 describe("Project Hub HTTP application", () => {
@@ -461,6 +467,88 @@ describe("Project Hub HTTP application", () => {
     expect(members).not.toHaveBeenCalled();
     expect(member).not.toHaveBeenCalled();
     expect(currentActor).not.toHaveBeenCalled();
+  });
+
+  it("authenticates and strictly validates Workstream and read-only Spec routes", async () => {
+    const services = teamReadServices();
+    const workstreamValue = teamWorkstream();
+    const workstreams = vi.fn(() => ({
+      items: [workstreamValue],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "4".repeat(64),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    }));
+    const workstream = vi.fn((id: string) => id === TEAM_WORKSTREAM_ID ? workstreamValue : null);
+    const specs = vi.fn(() => specListResponse());
+    const spec = vi.fn(() => specDetailResponse());
+    const app = fixtureApp({
+      services: { ...services, workstreams, workstream, specs, spec },
+    });
+
+    for (const path of [
+      "/api/v1/workstreams",
+      `/api/v1/workstreams/${TEAM_WORKSTREAM_ID}`,
+      "/api/v1/specs",
+      `/api/v1/specs/${SPEC_ID}`,
+    ]) {
+      expect((await app.request(`${ORIGIN}${path}`, { headers: { host: HOST } })).status, path)
+        .toBe(401);
+    }
+
+    const { cookie } = await bootstrapSession(app);
+    const headers = { host: HOST, cookie };
+    const workstreamList = await app.request(
+      `${ORIGIN}/api/v1/workstreams?state=archived&includeArchived=true&limit=5`,
+      { headers },
+    );
+    expect(workstreamList.status).toBe(200);
+    expect(workstreams).toHaveBeenCalledWith({
+      state: "archived",
+      includeArchived: true,
+      limit: 5,
+    });
+    expect(await workstreamList.json()).toMatchObject({
+      items: [{ id: TEAM_WORKSTREAM_ID }],
+    });
+    expect((await app.request(`${ORIGIN}/api/v1/workstreams/${TEAM_WORKSTREAM_ID}`, { headers })).status)
+      .toBe(200);
+
+    const specList = await app.request(
+      `${ORIGIN}/api/v1/specs?lifecycleStates=in_flight,promoted&groundingHealth=fresh,missing&topics=${SPEC_ID},${REQUIREMENT_ID}&limit=5`,
+      { headers },
+    );
+    expect(specList.status).toBe(200);
+    expect(specs).toHaveBeenCalledWith({
+      lifecycleStates: ["in_flight", "promoted"],
+      groundingHealth: ["fresh", "missing"],
+      topics: [SPEC_ID, REQUIREMENT_ID],
+      limit: 5,
+    });
+    expect(await specList.json()).toMatchObject({
+      availability: "ready",
+      page: { items: [{ id: SPEC_ID, kind: "spec" }] },
+    });
+    expect((await app.request(`${ORIGIN}/api/v1/specs/${SPEC_ID}`, { headers })).status)
+      .toBe(200);
+
+    workstreams.mockClear();
+    specs.mockClear();
+    for (const path of [
+      "/api/v1/workstreams?state=paused",
+      "/api/v1/workstreams?state=active&state=blocked",
+      "/api/v1/workstreams?limit=101",
+      "/api/v1/specs?lifecycleStates=in_flight,unknown",
+      "/api/v1/specs?lifecycleStates=in_flight&lifecycleStates=promoted",
+      "/api/v1/specs?groundingHealth=fresh,fresh",
+      "/api/v1/specs?unexpected=true",
+    ]) {
+      expect((await app.request(`${ORIGIN}${path}`, { headers })).status, path).toBe(400);
+    }
+    expect(workstreams).not.toHaveBeenCalled();
+    expect(specs).not.toHaveBeenCalled();
   });
 
   it("protects team preview/apply and never invokes services for invalid authority", async () => {
@@ -1012,6 +1100,8 @@ function readServices(): HubReadServices {
       canonicalMutation: unavailable,
       localSelection: unavailable,
     },
+    workstreams: { read: unavailable, canonicalMutation: unavailable },
+    specs: { read: unavailable },
     jobs: { availability: "available" },
     graph: { read: unavailable, refresh: unavailable, rebuild: unavailable },
     wiki: { read: unavailable, refresh: unavailable, rebuild: unavailable },
@@ -1173,6 +1263,112 @@ function teamMember(): TeamMember {
   };
 }
 
+function teamWorkstream(): TeamWorkstream {
+  return {
+    schemaVersion: 1,
+    id: TEAM_WORKSTREAM_ID,
+    entityRevision: 2,
+    title: "Checkpoint D",
+    goal: "Ship bounded Workstreams",
+    summary: "A canonical release Workstream.",
+    state: "active",
+    owners: [{ kind: "unknown" }],
+    contributors: [],
+    paths: ["src/team"],
+    code: [],
+    topics: [],
+    components: [],
+    related: [],
+    blockers: [],
+    currentState: "Integration",
+    nextMilestone: "Review",
+    createdBy: { kind: "unknown" },
+    createdAt: TEAM_NOW,
+    updatedBy: { kind: "unknown" },
+    updatedAt: TEAM_NOW,
+    sourcePath: `.mex/workstreams/${TEAM_WORKSTREAM_ID}.md`,
+    revision: "4".repeat(64),
+  };
+}
+
+function specListResponse(): SpecListResponse {
+  return {
+    availability: "ready",
+    index: specIndex(),
+    page: {
+      schemaVersion: 1,
+      items: [specSummary(SPEC_ID, "spec")],
+      nextCursor: null,
+      truncated: false,
+      estimatedTokens: 32,
+      deterministicRevision: "7".repeat(64),
+    },
+  };
+}
+
+function specDetailResponse(): SpecDetailResponse {
+  return {
+    availability: "ready",
+    index: specIndex(),
+    detail: {
+      schemaVersion: 1,
+      spec: specSummary(SPEC_ID, "spec"),
+      body: "# Checkpoint D\n",
+      bodyTruncated: false,
+      provenance: null,
+      sources: [],
+      sourcesTruncated: false,
+      groundings: [],
+      groundingsTruncated: false,
+      hierarchy: {
+        requirements: [specSummary(REQUIREMENT_ID, "requirement")],
+        acceptanceCriteria: [],
+        constraints: [],
+        relations: [{
+          type: "derived_from",
+          source: { id: REQUIREMENT_ID, kind: "requirement" },
+          target: { id: SPEC_ID, kind: "spec" },
+          note: null,
+        }],
+        estimatedTokens: 48,
+      },
+      deterministicRevision: "8".repeat(64),
+    },
+  };
+}
+
+function specIndex(): SpecListResponse["index"] {
+  return {
+    state: "fresh",
+    observedAt: TEAM_NOW,
+    indexedRevision: "5".repeat(64),
+    indexedAt: TEAM_NOW,
+    diagnostics: [],
+    diagnosticsTruncated: false,
+  };
+}
+
+function specSummary(
+  id: string,
+  kind: "spec" | "requirement",
+): Extract<SpecListResponse, { availability: "ready" }>["page"]["items"][number] {
+  return {
+    schemaVersion: 1,
+    id,
+    kind,
+    title: kind === "spec" ? "Checkpoint D" : "Bounded Workstream reads",
+    summary: null,
+    lifecycleState: "promoted",
+    groundingHealth: "fresh",
+    sourcePath: `.mex/wiki/${id}.md`,
+    version: { semanticRevision: 1, contentHash: "6".repeat(64) },
+    topics: [],
+    sourceTypes: [],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+  };
+}
+
 function teamPreviewRequest(): TeamOperationPreviewRequest {
   return {
     operationId: "hub_member_add",
@@ -1240,6 +1436,7 @@ function teamApplyResult(
     changes: request.preview.changes,
     localChanges: request.preview.localChanges,
     members: [teamMember()],
+    workstreams: [],
     events: [{
       schemaVersion: 1,
       id: TEAM_EVENT_ID,

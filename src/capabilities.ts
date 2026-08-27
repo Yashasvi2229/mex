@@ -46,8 +46,10 @@ export interface InstalledCapability {
   id:
     | "project_hub"
     | "team_identity"
+    | "team_workstreams"
     | "activity_read"
     | "activity_record"
+    | "spec_read"
     | "code_graph"
     | "wiki";
   installed: true;
@@ -89,6 +91,8 @@ export interface TeamCliContract {
       entityKind: 64;
       entityTitle: 512;
       activityAction: 128;
+      workstreamTitle: 512;
+      workstreamText: 8_192;
       codeIdentifierOrFingerprint: 1_024;
       repositoryPath: 4_096;
     };
@@ -100,7 +104,10 @@ export interface TeamCliContract {
         | "member.deactivate"
         | "member.select"
         | "member.clear"
-        | "activity.record";
+        | "activity.record"
+        | "workstream.create"
+        | "workstream.update"
+        | "workstream.archive";
       usage: string;
       schemaRef: string;
       request: Readonly<Record<string, unknown>>;
@@ -227,6 +234,9 @@ const TEAM_REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
     { $ref: "#/$defs/memberDeactivateRequest" },
     { $ref: "#/$defs/memberSelectRequest" },
     { $ref: "#/$defs/activityRecordRequest" },
+    { $ref: "#/$defs/workstreamCreateRequest" },
+    { $ref: "#/$defs/workstreamUpdateRequest" },
+    { $ref: "#/$defs/workstreamArchiveRequest" },
   ],
   $defs: {
     operationId: {
@@ -243,6 +253,10 @@ const TEAM_REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
     memberId: {
       type: "string",
       pattern: "^member_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+    },
+    workstreamId: {
+      type: "string",
+      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
     },
     canonicalText: {
       type: "string",
@@ -292,6 +306,26 @@ const TEAM_REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
             path: {
               type: "string",
               pattern: "^\\.mex/team/members/member_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$",
+            },
+          },
+        },
+        revision: { type: "string", pattern: "^[a-f0-9]{64}$" },
+      },
+    },
+    workstreamArtifactExpectation: {
+      type: "object",
+      additionalProperties: false,
+      required: ["target", "revision"],
+      properties: {
+        target: {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind", "path"],
+          properties: {
+            kind: { const: "artifact" },
+            path: {
+              type: "string",
+              pattern: "^\\.mex/workstreams/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$",
             },
           },
         },
@@ -421,6 +455,114 @@ const TEAM_REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
           },
         },
       ],
+    },
+    actorRef: {
+      oneOf: [
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind", "memberId"],
+          properties: {
+            kind: { const: "member" },
+            memberId: { $ref: "#/$defs/memberId" },
+            displayName: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512 }] },
+          },
+        },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind", "name", "email"],
+          not: {
+            required: ["name", "email"],
+            properties: { name: { type: "null" }, email: { type: "null" } },
+          },
+          properties: {
+            kind: { const: "git" },
+            name: { anyOf: [{ allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512 }] }, { type: "null" }] },
+            email: { anyOf: [{ allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512, pattern: "^(?=.*@)\\S+$" }] }, { type: "null" }] },
+          },
+        },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind"],
+          properties: { kind: { const: "unknown" } },
+        },
+      ],
+    },
+    canonicalRepoPath: {
+      type: "string",
+      minLength: 1,
+      maxLength: 4_096,
+      description: "Canonical contained repository-relative path; 4,096 UTF-8 bytes maximum.",
+    },
+    actorSet: {
+      type: "array",
+      maxItems: 64,
+      uniqueItems: true,
+      items: { $ref: "#/$defs/actorRef" },
+    },
+    entitySet: {
+      type: "array",
+      maxItems: 64,
+      uniqueItems: true,
+      items: { $ref: "#/$defs/entityRef" },
+    },
+    codeSet: {
+      type: "array",
+      maxItems: 64,
+      uniqueItems: true,
+      items: { $ref: "#/$defs/codeRef" },
+    },
+    pathSet: {
+      type: "array",
+      maxItems: 64,
+      uniqueItems: true,
+      items: { $ref: "#/$defs/canonicalRepoPath" },
+    },
+    workstreamCreateInput: {
+      type: "object",
+      additionalProperties: false,
+      required: ["title", "goal", "summary", "owners", "nextMilestone"],
+      properties: {
+        title: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512 }] },
+        goal: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
+        summary: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
+        owners: { allOf: [{ $ref: "#/$defs/actorSet" }, { type: "array", minItems: 1 }] },
+        contributors: { $ref: "#/$defs/actorSet" },
+        paths: { $ref: "#/$defs/pathSet" },
+        code: { $ref: "#/$defs/codeSet" },
+        topics: { $ref: "#/$defs/entitySet" },
+        components: { $ref: "#/$defs/entitySet" },
+        related: { $ref: "#/$defs/entitySet" },
+        nextMilestone: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
+      },
+    },
+    workstreamUpdatePatch: {
+      type: "object",
+      additionalProperties: false,
+      minProperties: 1,
+      properties: {
+        title: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512 }] },
+        goal: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
+        summary: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
+        state: { enum: ["planned", "active", "blocked", "done"] },
+        owners: { allOf: [{ $ref: "#/$defs/actorSet" }, { type: "array", minItems: 1 }] },
+        contributors: { $ref: "#/$defs/actorSet" },
+        paths: { $ref: "#/$defs/pathSet" },
+        code: { $ref: "#/$defs/codeSet" },
+        topics: { $ref: "#/$defs/entitySet" },
+        components: { $ref: "#/$defs/entitySet" },
+        related: { $ref: "#/$defs/entitySet" },
+        blockers: {
+          type: "array",
+          maxItems: 64,
+          uniqueItems: true,
+          items: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
+        },
+        currentState: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 8_192 }] },
+        nextMilestone: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
+      },
     },
     activitySubject: {
       oneOf: [
@@ -561,6 +703,34 @@ const TEAM_REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
         },
       },
     },
+    workstreamCreateAction: {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "workstream"],
+      properties: {
+        kind: { const: "workstream.create" },
+        workstream: { $ref: "#/$defs/workstreamCreateInput" },
+      },
+    },
+    workstreamUpdateAction: {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "workstreamId", "patch"],
+      properties: {
+        kind: { const: "workstream.update" },
+        workstreamId: { $ref: "#/$defs/workstreamId" },
+        patch: { $ref: "#/$defs/workstreamUpdatePatch" },
+      },
+    },
+    workstreamArchiveAction: {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "workstreamId"],
+      properties: {
+        kind: { const: "workstream.archive" },
+        workstreamId: { $ref: "#/$defs/workstreamId" },
+      },
+    },
     memberAddRequest: {
       type: "object",
       additionalProperties: false,
@@ -627,6 +797,48 @@ const TEAM_REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
         expectedRevisions: { $ref: "#/$defs/expectations" },
       },
     },
+    workstreamCreateRequest: {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "action", "expectedRevisions"],
+      properties: {
+        operationId: { $ref: "#/$defs/operationId" },
+        action: { $ref: "#/$defs/workstreamCreateAction" },
+        expectedRevisions: { $ref: "#/$defs/expectations" },
+      },
+    },
+    workstreamUpdateRequest: {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "action", "expectedRevisions"],
+      properties: {
+        operationId: { $ref: "#/$defs/operationId" },
+        action: { $ref: "#/$defs/workstreamUpdateAction" },
+        expectedRevisions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 64,
+          contains: { $ref: "#/$defs/workstreamArtifactExpectation" },
+          items: { $ref: "#/$defs/expectation" },
+        },
+      },
+    },
+    workstreamArchiveRequest: {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "action", "expectedRevisions"],
+      properties: {
+        operationId: { $ref: "#/$defs/operationId" },
+        action: { $ref: "#/$defs/workstreamArchiveAction" },
+        expectedRevisions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 64,
+          contains: { $ref: "#/$defs/workstreamArtifactExpectation" },
+          items: { $ref: "#/$defs/expectation" },
+        },
+      },
+    },
   },
 });
 
@@ -653,6 +865,8 @@ const TEAM_CLI_CONTRACT: TeamCliContract = {
       entityKind: 64,
       entityTitle: 512,
       activityAction: 128,
+      workstreamTitle: 512,
+      workstreamText: 8_192,
       codeIdentifierOrFingerprint: 1_024,
       repositoryPath: 4_096,
     },
@@ -751,6 +965,59 @@ const TEAM_CLI_CONTRACT: TeamCliContract = {
             },
           },
           expectedRevisions: [],
+        },
+      },
+      {
+        command: "workstream.create",
+        usage: "mex workstream create request.json --json",
+        schemaRef: requestSchemaRef("workstreamCreateRequest"),
+        request: {
+          operationId: "workstream-create-example-001",
+          action: {
+            kind: "workstream.create",
+            workstream: {
+              title: "Human-team release",
+              goal: "Ship the next reviewed checkpoint",
+              summary: "Canonical coordination for the current checkpoint.",
+              owners: [{ kind: "unknown" }],
+              nextMilestone: "Finish Checkpoint D review",
+            },
+          },
+          expectedRevisions: [],
+        },
+      },
+      {
+        command: "workstream.update",
+        usage: "mex workstream update request.json --json",
+        schemaRef: requestSchemaRef("workstreamUpdateRequest"),
+        request: {
+          operationId: "workstream-update-example-001",
+          action: {
+            kind: "workstream.update",
+            workstreamId: EXAMPLE_WORKSTREAM_ID,
+            patch: {
+              state: "blocked",
+              blockers: ["Awaiting a reviewed dependency"],
+              currentState: "Dependency review",
+            },
+          },
+          expectedRevisions: [{
+            target: { kind: "artifact", path: `.mex/workstreams/${EXAMPLE_WORKSTREAM_ID}.md` },
+            revision: EXAMPLE_REVISION,
+          }],
+        },
+      },
+      {
+        command: "workstream.archive",
+        usage: "mex workstream archive request.json --json",
+        schemaRef: requestSchemaRef("workstreamArchiveRequest"),
+        request: {
+          operationId: "workstream-archive-example-001",
+          action: { kind: "workstream.archive", workstreamId: EXAMPLE_WORKSTREAM_ID },
+          expectedRevisions: [{
+            target: { kind: "artifact", path: `.mex/workstreams/${EXAMPLE_WORKSTREAM_ID}.md` },
+            revision: EXAMPLE_REVISION,
+          }],
         },
       },
     ],
@@ -921,6 +1188,62 @@ const COMMANDS = {
     "json",
     previewContractRef("activity.record"),
   ),
+  workstreamList: command(
+    "workstream.list",
+    "mex workstream list",
+    "mex workstream list --json",
+    "json",
+  ),
+  workstreamShow: command(
+    "workstream.show",
+    "mex workstream show",
+    "mex workstream show <workstream-id> --json",
+    "json",
+  ),
+  workstreamCreatePreview: command(
+    "workstream.create.preview",
+    "mex workstream create",
+    "mex workstream create <request-file> --json",
+    "json",
+    requestSchemaRef("workstreamCreateRequest"),
+  ),
+  workstreamCreateApply: command(
+    "workstream.create.apply",
+    "mex workstream create",
+    "mex workstream create --apply <preview-envelope> --json",
+    "json",
+    previewContractRef("workstream.create"),
+  ),
+  workstreamUpdatePreview: command(
+    "workstream.update.preview",
+    "mex workstream update",
+    "mex workstream update <request-file> --json",
+    "json",
+    requestSchemaRef("workstreamUpdateRequest"),
+  ),
+  workstreamUpdateApply: command(
+    "workstream.update.apply",
+    "mex workstream update",
+    "mex workstream update --apply <preview-envelope> --json",
+    "json",
+    previewContractRef("workstream.update"),
+  ),
+  workstreamArchivePreview: command(
+    "workstream.archive.preview",
+    "mex workstream archive",
+    "mex workstream archive <request-file> --json",
+    "json",
+    requestSchemaRef("workstreamArchiveRequest"),
+  ),
+  workstreamArchiveApply: command(
+    "workstream.archive.apply",
+    "mex workstream archive",
+    "mex workstream archive --apply <preview-envelope> --json",
+    "json",
+    previewContractRef("workstream.archive"),
+  ),
+  specList: command("spec.list", "mex spec list", "mex spec list --json", "json"),
+  specShow: command("spec.show", "mex spec show", "mex spec show <spec-id> --json", "json"),
 } as const;
 
 /** All paths a manifest can advertise, exported for the registration contract. */
@@ -986,8 +1309,10 @@ export async function inspectCapabilities(
     capabilities: [
       installedTeamCapability("project_hub", initializationState, teamUnavailableReason),
       installedTeamCapability("team_identity", initializationState, teamUnavailableReason),
+      installedTeamCapability("team_workstreams", initializationState, teamUnavailableReason),
       installedTeamCapability("activity_read", initializationState, teamUnavailableReason),
       installedTeamCapability("activity_record", initializationState, teamUnavailableReason),
+      installedSpecCapability(initializationState, wikiIndexState),
       installedCapability("code_graph", initializationState, graphIndexState),
       installedCapability("wiki", initializationState, wikiIndexState),
     ],
@@ -1078,6 +1403,8 @@ function availableCommands(
       COMMANDS.memberCurrent,
       COMMANDS.activityList,
       COMMANDS.activityShow,
+      COMMANDS.workstreamList,
+      COMMANDS.workstreamShow,
     );
     preview.push(
       COMMANDS.memberAddPreview,
@@ -1085,6 +1412,9 @@ function availableCommands(
       COMMANDS.memberDeactivatePreview,
       COMMANDS.memberSelectPreview,
       COMMANDS.activityRecordPreview,
+      COMMANDS.workstreamCreatePreview,
+      COMMANDS.workstreamUpdatePreview,
+      COMMANDS.workstreamArchivePreview,
     );
     apply.push(
       COMMANDS.memberAddApply,
@@ -1092,6 +1422,9 @@ function availableCommands(
       COMMANDS.memberDeactivateApply,
       COMMANDS.memberSelectApply,
       COMMANDS.activityRecordApply,
+      COMMANDS.workstreamCreateApply,
+      COMMANDS.workstreamUpdateApply,
+      COMMANDS.workstreamArchiveApply,
     );
   }
 
@@ -1107,6 +1440,8 @@ function availableCommands(
 
   if (wikiIndexState === "fresh") {
     read.push(
+      COMMANDS.specList,
+      COMMANDS.specShow,
       COMMANDS.wikiList,
       COMMANDS.wikiShow,
       COMMANDS.wikiQuery,
@@ -1129,6 +1464,7 @@ function installedTeamCapability(
   id: Extract<
     InstalledCapability["id"],
     "project_hub" | "team_identity" | "activity_read" | "activity_record"
+    | "team_workstreams"
   >,
   initializationState: RepositoryInitializationState,
   teamUnavailableReason: CapabilityUnavailableReason | null,
@@ -1136,6 +1472,19 @@ function installedTeamCapability(
   const reason = repositoryUnavailableReason(initializationState) ?? teamUnavailableReason;
   return {
     id,
+    installed: true,
+    availability: reason === null ? "available" : "unavailable",
+    unavailableReason: reason,
+  };
+}
+
+function installedSpecCapability(
+  initializationState: RepositoryInitializationState,
+  wikiIndexState: CapabilityIndexState,
+): InstalledCapability {
+  const reason = unavailableReason("wiki", initializationState, wikiIndexState);
+  return {
+    id: "spec_read",
     installed: true,
     availability: reason === null ? "available" : "unavailable",
     unavailableReason: reason,
@@ -1392,7 +1741,8 @@ function probePath(path: string): PathProbe {
   }
 }
 
-function readWikiExclude(scaffoldRoot: string): readonly string[] {
+/** Internal bounded config projection shared by capability and read-only Spec discovery. */
+export function readWikiExclude(scaffoldRoot: string): readonly string[] {
   const configPath = resolve(scaffoldRoot, "config.json");
   let descriptor: number | null = null;
   try {

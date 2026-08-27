@@ -12,8 +12,9 @@ export const RELEASE_ROUTE_MANIFEST_HINTS = Object.freeze({
   knowledgeDetail: Object.freeze(["KnowledgePage"]),
   code: Object.freeze(["SearchPage"]),
   codeSymbol: Object.freeze(["SymbolPage"]),
-  workstreams: Object.freeze(["CapabilityPage"]),
-  specs: Object.freeze(["CapabilityPage"]),
+  workstreams: Object.freeze(["WorkstreamsPage"]),
+  specs: Object.freeze(["SpecsPage"]),
+  specsDetail: Object.freeze(["SpecsPage"]),
   playbooks: Object.freeze(["CapabilityPage"]),
   inbox: Object.freeze(["CapabilityPage"]),
   relays: Object.freeze(["CapabilityPage"]),
@@ -34,6 +35,7 @@ export const RELEASE_ROUTE_PATTERNS = Object.freeze({
   codeSymbol: "code/symbols/:id",
   workstreams: "workstreams",
   specs: "specs",
+  specsDetail: "specs/:id",
   playbooks: "playbooks",
   inbox: "inbox",
   relays: "relays",
@@ -44,8 +46,9 @@ export const RELEASE_ROUTE_PATTERNS = Object.freeze({
   notFound: "*",
 });
 
-export function releaseWorkbenchPaths({ knowledgeEntityId, codeSymbolId }) {
+export function releaseWorkbenchPaths({ knowledgeEntityId, specEntityId, codeSymbolId }) {
   const knowledgeId = boundedIdentifier(knowledgeEntityId, "Knowledge entity");
+  const specId = boundedIdentifier(specEntityId, "Spec entity");
   const symbolId = boundedIdentifier(codeSymbolId, "Code symbol");
   return {
     home: "/",
@@ -56,6 +59,7 @@ export function releaseWorkbenchPaths({ knowledgeEntityId, codeSymbolId }) {
     codeSymbol: `/code/symbols/${encodeURIComponent(symbolId)}`,
     workstreams: "/workstreams",
     specs: "/specs",
+    specsDetail: `/specs/${encodeURIComponent(specId)}`,
     playbooks: "/playbooks",
     inbox: "/inbox",
     relays: "/relays",

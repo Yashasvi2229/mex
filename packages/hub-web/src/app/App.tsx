@@ -17,6 +17,8 @@ const CapabilityPage = lazy(async () => ({ default: (await import("../pages/Capa
 const NotFoundPage = lazy(async () => ({ default: (await import("../pages/CapabilityPage")).NotFoundPage }));
 const ActivityPage = lazy(async () => ({ default: (await import("../pages/ActivityPage")).ActivityPage }));
 const MembersPage = lazy(async () => ({ default: (await import("../pages/MembersPage")).MembersPage }));
+const WorkstreamsPage = lazy(async () => ({ default: (await import("../pages/WorkstreamsPage")).WorkstreamsPage }));
+const SpecsPage = lazy(async () => ({ default: (await import("../pages/SpecsPage")).SpecsPage }));
 const JobsPage = lazy(async () => ({ default: (await import("../pages/JobsPage")).JobsPage }));
 const HealthPage = lazy(async () => ({ default: (await import("../pages/HealthPage")).HealthPage }));
 
@@ -88,8 +90,9 @@ export function AppRoutes() {
         <Route path="knowledge/:id" element={<KnowledgeDetailPage />} />
         <Route path="code" element={<CodePage />} />
         <Route path="code/symbols/:id" element={<SymbolPage />} />
-        <Route path="workstreams" element={<CapabilityPage page="workstreams" />} />
-        <Route path="specs" element={<CapabilityPage page="specs" />} />
+        <Route path="workstreams" element={<WorkstreamsPage />} />
+        <Route path="specs" element={<SpecsPage />} />
+        <Route path="specs/:id" element={<SpecsPage />} />
         <Route path="playbooks" element={<CapabilityPage page="playbooks" />} />
         <Route path="inbox" element={<CapabilityPage page="inbox" />} />
         <Route path="relays" element={<CapabilityPage page="relays" />} />

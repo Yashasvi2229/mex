@@ -98,6 +98,7 @@ import {
   type WikiBacklinksRequest,
   type WikiEntity,
   type WikiEntityNeighborhood,
+  type WikiEntityNeighborhoodSnapshot,
   type WikiEntitySummary,
   type WikiGrounding,
   type WikiGroundingCandidate,
@@ -588,6 +589,23 @@ export class RepositoryWikiPort implements WikiPort<
     });
   }
 
+  async getEntityNeighborhood(
+    request: WikiNeighborhoodRequest,
+  ): Promise<WikiEntityNeighborhoodSnapshot<never> | null> {
+    return this.#readCurrent((session, graph) => {
+      const entity = session.get(request.entityId);
+      if (entity === null) return null;
+      const observedAt = stableObservationTime(session);
+      return {
+        indexedRevision: session.indexedRevision,
+        projectionRevision: currentProjectionRevision(session, graph),
+        observedAt,
+        entity: projectEntity(entity, observedAt, graph),
+        neighborhood: this.#currentNeighborhood(session, graph, request),
+      };
+    });
+  }
+
   async listEntities(request: WikiListRequest = {}): Promise<WikiPage<WikiEntitySummary>> {
     return this.#readCurrent((session, graph) => this.#currentListPage(session, graph, request));
   }
@@ -708,16 +726,22 @@ export class RepositoryWikiPort implements WikiPort<
   }
 
   async getNeighborhood(request: WikiNeighborhoodRequest): Promise<WikiEntityNeighborhood> {
-    return this.#readCurrent((session, graph) => {
-      const result = session.neighborhood(request);
-      return {
-        root: this.#projectCurrentSummary(session, graph, result.root),
-        entities: result.entities.map((entity) => this.#projectCurrentSummary(session, graph, entity)),
-        relations: result.relations.map(projectRelation),
-        estimatedTokens: result.estimatedTokens,
-        truncated: result.truncated,
-      };
-    });
+    return this.#readCurrent((session, graph) => this.#currentNeighborhood(session, graph, request));
+  }
+
+  #currentNeighborhood(
+    session: WikiContractReadSession,
+    graph: RepositoryWikiGroundingSnapshot | null,
+    request: WikiNeighborhoodRequest,
+  ): WikiEntityNeighborhood {
+    const result = session.neighborhood(request);
+    return {
+      root: this.#projectCurrentSummary(session, graph, result.root),
+      entities: result.entities.map((entity) => this.#projectCurrentSummary(session, graph, entity)),
+      relations: result.relations.map(projectRelation),
+      estimatedTokens: result.estimatedTokens,
+      truncated: result.truncated,
+    };
   }
 
   async getGroundingStatus(id: EntityId): Promise<readonly WikiGroundingResolution[]> {

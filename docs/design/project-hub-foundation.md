@@ -93,9 +93,11 @@ Jobs, Members, and Activity states. Members exposes bounded canonical reads,
 effective actor resolution, local selection, and exact preview/apply for the
 Checkpoint C mutations. Activity is a date-grouped canonical and legacy feed
 with bounded provenance, revision-safe pagination, explicit partial-read
-diagnostics, and an append-only reviewed record flow. Knowledge, Code,
-Workstreams, Specs, Playbooks, Inbox, and Relays remain capability-aware
-foundations rather than fake CRUD.
+diagnostics, and an append-only reviewed record flow. Knowledge and Code remain
+read-only index workspaces. Checkpoint D supersedes the original Workstreams and
+Specs placeholders with a canonical Workstream preview/apply workbench and a
+fresh-index, read-only Spec hierarchy. Playbooks, Inbox, and Relays remain
+capability-aware foundations rather than fake CRUD.
 Search keeps Wiki, symbol, and source groups independent, including independent
 partial failure, and never fuses their scores.
 
@@ -115,8 +117,10 @@ the production bundle.
 - No Activity creation or Catch Up cursor advancement in the read-only Hub slice.
 - No change to `src/index.ts`, graph retrieval/ranking, protocol-v3 JSONL, or `mex tui`.
 
-Checkpoint C supersedes only the historical Activity-creation and member-UI
-boundaries above. Catch Up and every later team workbench remain unavailable.
+Checkpoint C supersedes the historical Activity-creation and member-UI
+boundaries above. Checkpoint D additionally supersedes the Workstream and
+read-only Spec placeholder boundaries. Spec authoring, Catch Up, and every later
+team workbench remain unavailable.
 
 ## Verification
 

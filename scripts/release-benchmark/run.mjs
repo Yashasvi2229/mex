@@ -144,6 +144,7 @@ try {
         auth,
         samples: budgets.samples.idleMemory,
         knowledgeEntityId: baseFixture.firstWikiEntityId,
+        specEntityId: baseFixture.firstSpecId,
         codeSymbolId: commonReads.codeSymbolId,
       });
       const maintenance = await measureMaintenance({

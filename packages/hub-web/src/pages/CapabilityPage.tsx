@@ -3,12 +3,10 @@ import {
   ArrowLeft,
   BookOpenText,
   Code2,
-  FileCheck2,
   GitPullRequestArrow,
   Inbox,
   ListChecks,
   Send,
-  Workflow,
 } from "lucide-react";
 import { Link, useLocation, useOutletContext } from "react-router-dom";
 import type { CapabilitiesResponse, CapabilityName, CapabilityStatus } from "../api/types";
@@ -48,18 +46,6 @@ export const capabilityPages: Record<string, CapabilityPageDefinition> = {
     connectedCopy: "Code browsing is unavailable.",
     unavailableCopy: "Code is unavailable.",
   },
-  workstreams: {
-    title: "Workstreams", capability: "wiki", icon: Workflow,
-    connectedCopy: "Workstreams are unavailable.",
-    unavailableCopy: "Workstreams are unavailable.",
-    structuralUnavailable: true,
-  },
-  specs: {
-    title: "Specs", capability: "wiki", icon: FileCheck2,
-    connectedCopy: "Specs are unavailable.",
-    unavailableCopy: "Specs are unavailable.",
-    structuralUnavailable: true,
-  },
   playbooks: {
     title: "Playbooks", capability: "wiki", icon: ListChecks,
     connectedCopy: "Playbooks are unavailable.",
@@ -84,6 +70,9 @@ function capabilityStatus(capabilities: CapabilitiesResponse | undefined, name: 
   if (name === "wiki") return capabilities.wiki.read;
   if (name === "jobs") return capabilities.jobs;
   if (name === "activity") return capabilities.activity;
+  if (name === "members") return capabilities.members.read;
+  if (name === "workstreams") return capabilities.workstreams.read;
+  if (name === "specs") return capabilities.specs.read;
   return undefined;
 }
 

@@ -11,6 +11,7 @@ import { TeamLocalState } from "../team/local-state/index.js";
 import { createRepositoryGraphPort } from "../graph/application-adapter.js";
 import { createRepositoryWikiPort } from "../wiki/application-adapter.js";
 import { createRepositoryTeamWorkflowPort } from "../team/workflow/repository-team-workflow-port.js";
+import { createSpecReadService } from "../team/specs/index.js";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -64,6 +65,8 @@ export async function runHubCommand(options: RunHubCommandOptions): Promise<void
       scaffoldId: options.scaffoldId,
       jobs,
       team,
+      workstreams: team,
+      specs: createSpecReadService(wiki),
       graph,
       wiki,
     });
