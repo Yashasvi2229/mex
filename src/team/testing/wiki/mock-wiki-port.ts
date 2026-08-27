@@ -421,6 +421,12 @@ export class MockWikiPort implements WikiPort<
     return this.planOperation(request);
   }
 
+  async validateCurrentRevisionExpectations(
+    expectations: readonly WikiRevisionExpectation[],
+  ): Promise<void> {
+    this.assertExpectedRevisions(expectations);
+  }
+
   async applyOperations(
     request: WikiOperationApplyRequest<MockWikiOperationPlan, MockWikiOperationPlan>,
   ): Promise<WikiOperationResult> {

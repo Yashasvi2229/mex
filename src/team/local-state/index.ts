@@ -36,6 +36,10 @@ import type {
   Revision,
 } from "../contracts/shared.js";
 import { isRevision, JOB_STATES, MexPortError } from "../contracts/shared.js";
+import {
+  WIKI_OPERATION_TYPES,
+  type WikiOperationRecoveryManifest,
+} from "../contracts/wiki.js";
 import type { ActivitySubjectRef, CatchUpCursor } from "../contracts/workflow.js";
 import { ACTIVITY_SUBJECT_LIMIT } from "../artifacts/codecs.js";
 
@@ -619,12 +623,26 @@ export interface LocalCleanupWorkflowEffect {
   expectedRevision: Revision;
 }
 
+/** Body-free, engine-produced metadata needed to resume an interrupted Wiki batch. */
+export interface WikiRecoveryWorkflowEffect {
+  kind: "wiki_recovery";
+  manifest: WikiOperationRecoveryManifest;
+}
+
 /** Metadata-only recovery effects. Source bodies, diffs, prompts, and raw errors are impossible. */
 export type TeamWorkflowJournalEffect =
   | CanonicalWorkflowEffect
   | ActivityWorkflowEffect
   | LocalWorkflowEffect
-  | LocalCleanupWorkflowEffect;
+  | LocalCleanupWorkflowEffect
+  | WikiRecoveryWorkflowEffect;
+
+/** Pure strict boundary used by preview before local storage is initialized. */
+export function normalizeTeamWorkflowJournalEffects(
+  value: unknown,
+): readonly TeamWorkflowJournalEffect[] {
+  return JSON.parse(canonicalWorkflowEffectsJson(value)) as readonly TeamWorkflowJournalEffect[];
+}
 
 export interface TeamWorkflowJournalEntry {
   scaffoldId: string;
@@ -2224,13 +2242,186 @@ function normalizeWorkflowEffect(value: unknown, index: number): TeamWorkflowJou
         : { metadata: normalizeActivityMetadata(value.metadata) }),
     };
   }
+  if (value.kind === "wiki_recovery") {
+    assertOnlyKeys(value, ["kind", "manifest"], `Workflow effect ${index}`);
+    return {
+      kind: "wiki_recovery",
+      manifest: normalizeWikiRecoveryManifest(value.manifest),
+    };
+  }
   throw validationError(`Workflow effect ${index} has an unsupported kind.`);
 }
 
 function workflowEffectKey(effect: TeamWorkflowJournalEffect): string {
   if (effect.kind === "activity") return `activity:${effect.id}`;
   if (effect.kind === "local_cleanup") return `cleanup:${effect.draftKind}:${effect.draftId}`;
+  if (effect.kind === "wiki_recovery") {
+    return `wiki-recovery:${effect.manifest.operationId}`;
+  }
   return `${effect.kind}:${effect.namespace}:${effect.id}`;
+}
+
+function normalizeWikiRecoveryManifest(value: unknown): WikiOperationRecoveryManifest {
+  if (!isStrictPlainObject(value)) {
+    throw validationError("Wiki recovery manifest has an invalid shape.");
+  }
+  assertOnlyKeys(
+    value,
+    ["schemaVersion", "requestHash", "operationId", "items"],
+    "Wiki recovery manifest",
+  );
+  if (value.schemaVersion !== 1) {
+    throw validationError("Wiki recovery manifest schema is unsupported.");
+  }
+  const operationId = validateLocalIdentifier(
+    value.operationId,
+    "Wiki recovery operation ID",
+  );
+  const requestHash = validateRequiredRevision(
+    value.requestHash,
+    "Wiki recovery request hash",
+  );
+  if (!Array.isArray(value.items) || value.items.length < 1 || value.items.length > 25) {
+    throw validationError("Wiki recovery manifest must contain between 1 and 25 items.");
+  }
+  let totalFiles = 0;
+  const seenOperations = new Set<string>();
+  const items = value.items.map((rawItem, itemIndex) => {
+    if (!isStrictPlainObject(rawItem)) {
+      throw validationError(`Wiki recovery item ${itemIndex} has an invalid shape.`);
+    }
+    assertOnlyKeys(
+      rawItem,
+      [
+        "operationId", "type", "payloadHash", "createdIds", "files",
+        "revisions", "audit",
+      ],
+      `Wiki recovery item ${itemIndex}`,
+    );
+    const itemOperationId = validateLocalIdentifier(
+      rawItem.operationId,
+      `Wiki recovery item ${itemIndex} operation ID`,
+    );
+    if (seenOperations.has(itemOperationId)) {
+      throw validationError("Wiki recovery operation IDs must be unique.");
+    }
+    seenOperations.add(itemOperationId);
+    if (
+      typeof rawItem.type !== "string"
+      || !(WIKI_OPERATION_TYPES as readonly string[]).includes(rawItem.type)
+    ) {
+      throw validationError(`Wiki recovery item ${itemIndex} type is invalid.`);
+    }
+    if (!Array.isArray(rawItem.createdIds) || rawItem.createdIds.length > 64) {
+      throw validationError(`Wiki recovery item ${itemIndex} created IDs are invalid.`);
+    }
+    const createdIds = rawItem.createdIds.map((id) => validateLocalIdentifier(
+      id,
+      `Wiki recovery item ${itemIndex} created ID`,
+    ));
+    if (new Set(createdIds).size !== createdIds.length) {
+      throw validationError(`Wiki recovery item ${itemIndex} created IDs must be unique.`);
+    }
+    if (!Array.isArray(rawItem.files) || rawItem.files.length > 100) {
+      throw validationError(`Wiki recovery item ${itemIndex} files are invalid.`);
+    }
+    totalFiles += rawItem.files.length;
+    if (totalFiles > 100) {
+      throw validationError("Wiki recovery manifest contains too many file records.");
+    }
+    const seenFiles = new Set<string>();
+    const files = rawItem.files.map((rawFile, fileIndex) => {
+      if (!isStrictPlainObject(rawFile)) {
+        throw validationError(`Wiki recovery file ${itemIndex}:${fileIndex} is invalid.`);
+      }
+      assertOnlyKeys(
+        rawFile,
+        ["path", "beforeRevision", "afterRevision"],
+        `Wiki recovery file ${itemIndex}:${fileIndex}`,
+      );
+      const path = validateJournalPath(rawFile.path);
+      if (seenFiles.has(path)) {
+        throw validationError(`Wiki recovery item ${itemIndex} file paths must be unique.`);
+      }
+      seenFiles.add(path);
+      return {
+        path,
+        beforeRevision: validateNullableRevision(
+          rawFile.beforeRevision,
+          `Wiki recovery file ${itemIndex}:${fileIndex} before revision`,
+        ),
+        afterRevision: validateRequiredRevision(
+          rawFile.afterRevision,
+          `Wiki recovery file ${itemIndex}:${fileIndex} after revision`,
+        ),
+      };
+    });
+    if (!Array.isArray(rawItem.revisions) || rawItem.revisions.length > 100) {
+      throw validationError(`Wiki recovery item ${itemIndex} revisions are invalid.`);
+    }
+    const seenEntities = new Set<string>();
+    const revisions = rawItem.revisions.map((rawRevision, revisionIndex) => {
+      if (!isStrictPlainObject(rawRevision)) {
+        throw validationError(`Wiki recovery revision ${itemIndex}:${revisionIndex} is invalid.`);
+      }
+      assertOnlyKeys(
+        rawRevision,
+        ["entityId", "before", "after"],
+        `Wiki recovery revision ${itemIndex}:${revisionIndex}`,
+      );
+      const entityId = validateLocalIdentifier(
+        rawRevision.entityId,
+        `Wiki recovery revision ${itemIndex}:${revisionIndex} entity ID`,
+      );
+      if (seenEntities.has(entityId)) {
+        throw validationError(`Wiki recovery item ${itemIndex} entity revisions must be unique.`);
+      }
+      seenEntities.add(entityId);
+      const before = validateWikiSemanticRevision(rawRevision.before);
+      const after = validateWikiSemanticRevision(rawRevision.after);
+      if (after < before) {
+        throw validationError("Wiki recovery semantic revisions must be monotonic.");
+      }
+      return { entityId, before, after };
+    });
+    if (!isStrictPlainObject(rawItem.audit)) {
+      throw validationError(`Wiki recovery item ${itemIndex} audit state is invalid.`);
+    }
+    assertOnlyKeys(
+      rawItem.audit,
+      ["beforeRevision", "afterRevision"],
+      `Wiki recovery item ${itemIndex} audit state`,
+    );
+    return {
+      operationId: itemOperationId,
+      type: rawItem.type as WikiOperationRecoveryManifest["items"][number]["type"],
+      payloadHash: validateRequiredRevision(
+        rawItem.payloadHash,
+        `Wiki recovery item ${itemIndex} payload hash`,
+      ),
+      createdIds,
+      files,
+      revisions,
+      audit: {
+        beforeRevision: validateNullableRevision(
+          rawItem.audit.beforeRevision,
+          `Wiki recovery item ${itemIndex} audit before revision`,
+        ),
+        afterRevision: validateRequiredRevision(
+          rawItem.audit.afterRevision,
+          `Wiki recovery item ${itemIndex} audit after revision`,
+        ),
+      },
+    };
+  });
+  return { schemaVersion: 1, requestHash, operationId, items };
+}
+
+function validateWikiSemanticRevision(value: unknown): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw validationError("Wiki recovery semantic revision is invalid.");
+  }
+  return value as number;
 }
 
 function validateWorkflowNamespace(value: unknown): string {

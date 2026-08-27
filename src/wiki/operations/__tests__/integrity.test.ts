@@ -21,6 +21,8 @@ import {
   acceptedOperations,
   appendAudit,
   auditRecord,
+  OPERATION_LOG_MAX_BYTES,
+  OPERATION_LOG_MAX_ENTRIES,
   OperationLogPathError,
   operationLogPath,
   readAuditLog,
@@ -251,6 +253,42 @@ describe("replay, and the log as its only oracle", () => {
 });
 
 describe("the audit log's privacy boundary", () => {
+  it("enforces one shared byte budget before reads or appends", () => {
+    const target = scaffold();
+    mkdirSync(join(target.root, "events"), { recursive: true });
+    const path = operationLogPath(target.root);
+    const bounded = " ".repeat(OPERATION_LOG_MAX_BYTES);
+    writeFileSync(path, bounded, "utf8");
+    expect(() => appendAudit(target.root, {
+      v: 1,
+      phase: "intent",
+      opId: "op-audit-budget",
+      type: "update-entry",
+      entityIds: [JWT],
+      createdIds: [],
+      actor: { kind: "system", id: "audit-budget-test" },
+      timestamp: "2026-08-27T00:00:00.000Z",
+      files: ["context/architecture.md"],
+      payloadHash: "a".repeat(64),
+      revisions: [{ entityId: JWT as never, before: 1, after: 2 }],
+    })).toThrow(OperationLogPathError);
+    expect(readFileSync(path, "utf8")).toBe(bounded);
+
+    writeFileSync(path, `${bounded}x`, "utf8");
+    expect(readAuditLog(target.root).diagnostics.map((entry) => entry.code))
+      .toContain("MALFORMED_OPERATION_LOG");
+    expect(() => planOperation(
+      envelope(target, "update-entry", { summary: "Never planned." }, { entityId: JWT }),
+      { scaffoldRoot: target.root },
+    )).toThrow(OperationLogPathError);
+    expect(readFileSync(path, "utf8")).toBe(`${bounded}x`);
+
+    const tooManyEntries = "{}\n".repeat(OPERATION_LOG_MAX_ENTRIES + 1);
+    writeFileSync(path, tooManyEntries, "utf8");
+    expect(readAuditLog(target.root).diagnostics.map((entry) => entry.code))
+      .toContain("MALFORMED_OPERATION_LOG");
+  });
+
   it("rejects symlinked directories and deterministic ancestor/leaf retarget races", () => {
     const makeEntry = (target: Scaffold, opId: string) => {
       const planned = planOperation(

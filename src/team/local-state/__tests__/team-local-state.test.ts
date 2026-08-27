@@ -1127,6 +1127,63 @@ describe("TeamLocalState", () => {
       expectedRevision: boundary.revision,
     });
     expect(store.getIncompleteWorkflowOperation()).toBeNull();
+
+    const wikiManifest = {
+      schemaVersion: 1 as const,
+      requestHash: "1".repeat(64),
+      operationId: "wiki-batch-1",
+      items: [{
+        operationId: "wiki-batch-1-item-01",
+        type: "update-entry" as const,
+        payloadHash: "2".repeat(64),
+        createdIds: [],
+        files: [{
+          path: ".mex/context/decision.md",
+          beforeRevision: "3".repeat(64),
+          afterRevision: "4".repeat(64),
+        }],
+        revisions: [{
+          entityId: "mx_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          before: 1,
+          after: 2,
+        }],
+        audit: {
+          beforeRevision: "5".repeat(64),
+          afterRevision: "6".repeat(64),
+        },
+      }],
+    };
+    const wikiEntry = store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-wiki-manifest",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [{ kind: "wiki_recovery", manifest: wikiManifest }],
+    }).entry;
+    expect(wikiEntry.effects).toEqual([{
+      kind: "wiki_recovery",
+      manifest: wikiManifest,
+    }]);
+    store.abandonWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: wikiEntry.operationId,
+      commandRevision: wikiEntry.commandRevision,
+      previewRevision: wikiEntry.previewRevision,
+      expectedRevision: wikiEntry.revision,
+    });
+    expectCode(() => store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-wiki-private",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [{
+        kind: "wiki_recovery",
+        manifest: {
+          ...wikiManifest,
+          items: [{ ...wikiManifest.items[0]!, sourceBody: "private body" }],
+        },
+      } as never],
+    }), "VALIDATION_FAILED");
   });
 
   it("retains no more than 256 terminal workflow rows per scaffold", () => {

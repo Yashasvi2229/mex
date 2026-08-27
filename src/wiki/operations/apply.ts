@@ -107,6 +107,8 @@ export interface ApplyOptions extends PlanOptions {
    * than against a mock.
    */
   onFileWritten?: (path: string) => void;
+  /** Test-only process-death seam after one child completes durably. */
+  onOperationCompleted?: (opId: string) => void;
   /** Deterministic adversarial seam before the bound parent is revalidated. */
   beforeFileOpen?: (path: string) => void;
   /** Deterministic adversarial seam before the final same-directory rename. */
@@ -540,6 +542,11 @@ function applyPlannedOperationSequenceHeld(
       expectedAudit = pendingAudit;
       expectedAuditExists = true;
       pendingAudit = null;
+      try {
+        options.onOperationCompleted?.(plan.opId);
+      } catch (error) {
+        throw new SimulatedWikiCrashError(error);
+      }
     }
     options.beforeSequenceCommit?.();
     const finalAudit = readOperationLogExact(scaffoldRoot);
