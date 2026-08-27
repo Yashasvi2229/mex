@@ -778,10 +778,15 @@ describe("TeamLocalState", () => {
       INSERT INTO inbox_drafts (scaffold_id, id, payload_json, updated_at, revision)
       VALUES ('scaffold-a', ?, '{}', ?, ?)
     `);
-    for (let index = 0; index < 512; index += 1) {
-      insert.run(`seed-${String(index).padStart(3, "0")}`, NOW, "a".repeat(64));
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      for (let index = 0; index < 512; index += 1) {
+        insert.run(`seed-${String(index).padStart(3, "0")}`, NOW, "a".repeat(64));
+      }
+      db.exec("COMMIT");
+    } finally {
+      db.close();
     }
-    db.close();
 
     expectCode(() => store.saveLocalDraft({
       id: DRAFT_A,
@@ -1197,17 +1202,22 @@ describe("TeamLocalState", () => {
         created_at, updated_at, revision
       ) VALUES ('scaffold-a', ?, ?, ?, 'complete', '[]', ?, ?, ?)
     `);
-    for (let index = 0; index < 256; index += 1) {
-      insert.run(
-        `retained-${String(index).padStart(3, "0")}`,
-        "c".repeat(64),
-        "9".repeat(64),
-        NOW,
-        NOW,
-        "d".repeat(64),
-      );
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      for (let index = 0; index < 256; index += 1) {
+        insert.run(
+          `retained-${String(index).padStart(3, "0")}`,
+          "c".repeat(64),
+          "9".repeat(64),
+          NOW,
+          NOW,
+          "d".repeat(64),
+        );
+      }
+      db.exec("COMMIT");
+    } finally {
+      db.close();
     }
-    db.close();
 
     let entry = store.beginWorkflowOperation({
       leaseToken: LEASE_A,
