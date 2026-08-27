@@ -64,6 +64,10 @@ import type { RevisionChange, WikiPatchPlan } from "./plan.js";
 
 /** Fixed by `MALFORMED_OPERATION_LOG`'s remediation text. */
 export const OPERATION_LOG_FILE = "events/operations.jsonl";
+/** Shared hard cap for the append-only operation recovery ledger. */
+export const OPERATION_LOG_MAX_BYTES = 2 * 1024 * 1024;
+/** Shared hard cap for non-empty operation recovery records. */
+export const OPERATION_LOG_MAX_ENTRIES = 4_096;
 
 export function operationLogPath(scaffoldRoot: string): string {
   return resolve(scaffoldRoot, OPERATION_LOG_FILE);
@@ -145,6 +149,7 @@ function writeExact(fd: number, bytes: Buffer, path: string): void {
 }
 
 function assertFdText(fd: number, expectedText: string, path: string): void {
+  assertOperationLogBounds(expectedText, path);
   const expected = Buffer.from(expectedText, "utf8");
   const before = fstatSync(fd, { bigint: true });
   if (!before.isFile() || before.size !== BigInt(expected.length)) throw new OperationLogPathError(path);
@@ -169,6 +174,7 @@ function assertFdText(fd: number, expectedText: string, path: string): void {
 function readFdText(fd: number, path: string): string {
   const stats = fstatSync(fd);
   if (!stats.isFile()) throw new OperationLogPathError(path);
+  if (stats.size > OPERATION_LOG_MAX_BYTES) throw new OperationLogPathError(path);
   const bytes = Buffer.alloc(stats.size);
   let offset = 0;
   while (offset < bytes.length) {
@@ -177,7 +183,9 @@ function readFdText(fd: number, path: string): string {
     offset += read;
   }
   try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    assertOperationLogBounds(text, path);
+    return text;
   } catch {
     throw new OperationLogPathError(path);
   }
@@ -247,6 +255,7 @@ export function appendAudit(
     const expectedBefore = options.expectedText ?? readFdText(fd, path);
     assertFdText(fd, expectedBefore, path);
     const line = `${JSON.stringify(entry)}\n`;
+    assertOperationLogBounds(`${expectedBefore}${line}`, path);
     const bytes = Buffer.from(line, "utf8");
     writeExact(fd, bytes, path);
     options.afterWrite?.();
@@ -540,6 +549,7 @@ export function readOperationLogExact(scaffoldRoot: string): ExactOperationLog {
   try {
     fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const opened = fstatSync(fd, { bigint: true });
+    if (opened.size > BigInt(OPERATION_LOG_MAX_BYTES)) throw new OperationLogPathError(path);
     assertOperationLogBinding(binding, path);
     const current = lstatSync(path);
     if (
@@ -549,6 +559,7 @@ export function readOperationLogExact(scaffoldRoot: string): ExactOperationLog {
       || BigInt(current.ino) !== opened.ino
     ) throw new OperationLogPathError(path);
     const text = readFileSync(fd, "utf-8");
+    assertOperationLogBounds(text, path);
     const after = fstatSync(fd, { bigint: true });
     assertOperationLogBinding(binding, path);
     const leafAfter = lstatSync(path, { bigint: true });
@@ -569,6 +580,24 @@ export function readOperationLogExact(scaffoldRoot: string): ExactOperationLog {
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
+}
+
+function assertOperationLogBounds(text: string, path: string): void {
+  if (Buffer.byteLength(text, "utf8") > OPERATION_LOG_MAX_BYTES) throw new OperationLogPathError(path);
+  let entries = 0;
+  let lineHasContent = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text.charCodeAt(index);
+    if (character === 0x0a) {
+      if (lineHasContent) entries += 1;
+      lineHasContent = false;
+    } else if (character !== 0x0d && character !== 0x20 && character !== 0x09) {
+      lineHasContent = true;
+    }
+    if (entries > OPERATION_LOG_MAX_ENTRIES) throw new OperationLogPathError(path);
+  }
+  if (lineHasContent) entries += 1;
+  if (entries > OPERATION_LOG_MAX_ENTRIES) throw new OperationLogPathError(path);
 }
 
 /** True when `value` has the shape this reader will act on. */

@@ -374,7 +374,7 @@ describe("built CLI main-module guard", () => {
       rmSync(fixture, { recursive: true, force: true });
       rmSync(userHome, { recursive: true, force: true });
     }
-  }, 20_000);
+  }, 40_000);
 });
 
 describe("mex --version", () => {

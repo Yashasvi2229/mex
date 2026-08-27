@@ -28,7 +28,7 @@ import {
  * failure this rule exists to avoid.
  */
 
-/** The fourteen default entity types. */
+/** Entity types Wiki operations and synthesis may author. */
 export const WIKI_ENTITY_TYPES = [
   "architecture",
   "component",
@@ -46,7 +46,29 @@ export const WIKI_ENTITY_TYPES = [
   "acceptance_criterion",
 ] as const;
 
-export type WikiDefaultEntityType = (typeof WIKI_ENTITY_TYPES)[number];
+/**
+ * Team-owned entity types accepted by Wiki reads but never authored by Wiki.
+ *
+ * Their canonical paths are hard-reserved in the operation layer. Keeping this
+ * list separate from {@link WIKI_ENTITY_TYPES} also prevents operation payload
+ * validation and synthesis prompts from advertising them as Wiki write types.
+ * Registration only accepts a valid `mex:` entity on read; it does not project
+ * strict Team frontmatter. In particular, the current Activity codec remains a
+ * direct Team repository read and is not automatically indexed by Wiki.
+ */
+export const TEAM_READABLE_ENTITY_TYPES = [
+  "member",
+  "workstream",
+  "proposal",
+  "relay",
+  "activity",
+  "playbook",
+  "playbook_run",
+] as const;
+
+export type WikiDefaultEntityType =
+  | (typeof WIKI_ENTITY_TYPES)[number]
+  | (typeof TEAM_READABLE_ENTITY_TYPES)[number];
 
 /**
  * An entity type.
@@ -79,7 +101,9 @@ export function isWikiLifecycleState(value: unknown): value is WikiLifecycleStat
 }
 
 export function isDefaultEntityType(value: unknown): value is WikiDefaultEntityType {
-  return typeof value === "string" && (WIKI_ENTITY_TYPES as readonly string[]).includes(value);
+  return typeof value === "string"
+    && ((WIKI_ENTITY_TYPES as readonly string[]).includes(value)
+      || (TEAM_READABLE_ENTITY_TYPES as readonly string[]).includes(value));
 }
 
 /**
@@ -171,7 +195,11 @@ export interface EntityTypeRegistry {
 }
 
 export function createEntityTypeRegistry(additionalTypes: readonly string[] = []): EntityTypeRegistry {
-  const types = new Set<string>([...WIKI_ENTITY_TYPES, ...additionalTypes]);
+  const types = new Set<string>([
+    ...WIKI_ENTITY_TYPES,
+    ...TEAM_READABLE_ENTITY_TYPES,
+    ...additionalTypes,
+  ]);
   return {
     has: (type) => types.has(type),
     list: () => [...types].sort(),

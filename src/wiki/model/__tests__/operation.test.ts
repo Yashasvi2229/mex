@@ -178,6 +178,13 @@ describe("create-entry payload", () => {
     expect(check(envelope("create-entry", payload)).codes).toContain("INVALID_ENTITY_TYPE");
   });
 
+  it("does not make readable Team kinds, including Activity, Wiki-authorable", () => {
+    for (const type of ["member", "workstream", "proposal", "relay", "activity", "playbook", "playbook_run"]) {
+      const payload = { ...(PAYLOADS["create-entry"] as object), type };
+      expect(check(envelope("create-entry", payload)).codes, type).toContain("INVALID_ENTITY_TYPE");
+    }
+  });
+
   it("rejects unsafe file-source metadata before a create can be planned", () => {
     const payload = { ...(PAYLOADS["create-entry"] as object), sources: [{ type: "file", ref: "../secret.md" }] };
     expect(check(envelope("create-entry", payload)).codes).toContain("MALFORMED_SOURCE");

@@ -9,8 +9,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RepoRelativePath } from "../../contracts/shared.js";
 import {
@@ -42,24 +44,80 @@ describe("contained atomic artifact I/O", () => {
     expect(() => atomicCreateArtifact(root, path, "overwrite\n")).toThrow(/already exists/);
     expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe(first);
 
-    expect(atomicReplaceArtifact(root, path, revisionOf(first), second)).toBe(revisionOf(second));
+    expect(atomicReplaceArtifact(root, path, revisionOf(first), second, 64 * 1024)).toBe(revisionOf(second));
     expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe(second);
-    expect(() => atomicReplaceArtifact(root, path, revisionOf(first), "stale\n")).toThrow(/expected revision/);
+    expect(() => atomicReplaceArtifact(root, path, revisionOf(first), "stale\n", 64 * 1024)).toThrow(/expected revision/);
     expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe(second);
     expect(readdirSync(dirname(join(root, ...path.split("/")))).every(
       (name) => !name.includes("mex-tmp") && !name.includes("mex-lock"),
     )).toBe(true);
   });
 
-  it("does not remove another writer's lock", () => {
+  it("enforces the artifact byte budget during reads and replacement revalidation", () => {
+    const root = temporaryRoot();
+    const path = ".mex/team/members/member_00000000000000000000000000.md" as RepoRelativePath;
+    const oversized = "x".repeat(64 * 1024 + 1);
+    atomicCreateArtifact(root, path, oversized);
+
+    expect(() => readContainedArtifact(root, path, 64 * 1024)).toThrowError(
+      expect.objectContaining({ problem: expect.objectContaining({ code: "VALIDATION_FAILED" }) }),
+    );
+    expect(() => atomicReplaceArtifact(
+      root,
+      path,
+      revisionOf(oversized),
+      "bounded replacement\n",
+      64 * 1024,
+    )).toThrowError(
+      expect.objectContaining({ problem: expect.objectContaining({ code: "VALIDATION_FAILED" }) }),
+    );
+    expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe(oversized);
+  });
+
+  it("fails closed without removing unknown per-file lock metadata", () => {
     const root = temporaryRoot();
     const path = ".mex/team/members/member_00000000000000000000000000.md" as RepoRelativePath;
     atomicCreateArtifact(root, path, "first\n");
     const lock = join(root, ".mex/team/members", `.${path.split("/").at(-1)}.mex-lock`);
     writeFileSync(lock, "other writer\n");
 
-    expect(() => atomicReplaceArtifact(root, path, revisionOf("first\n"), "second\n")).toThrow(/locked/);
+    expect(() => atomicReplaceArtifact(root, path, revisionOf("first\n"), "second\n", 64 * 1024))
+      .toThrowError(expect.objectContaining({
+        problem: expect.objectContaining({ code: "REVISION_CONFLICT" }),
+      }));
     expect(readFileSync(lock, "utf8")).toBe("other writer\n");
+  });
+
+  it("recovers a per-file replacement lock after its holder is killed", async () => {
+    const root = temporaryRoot();
+    const path = ".mex/team/members/member_00000000000000000000000000.md" as RepoRelativePath;
+    const directory = ".mex/team/members" as RepoRelativePath;
+    atomicCreateArtifact(root, path, "first\n");
+    const lock = join(root, directory, `.${path.split("/").at(-1)}.mex-lock`);
+    const captureLock = ".capture-owner.mex-lock";
+    let captured = "";
+    await withContainedArtifactLock(root, directory, captureLock, () => {
+      captured = readFileSync(join(root, directory, captureLock), "utf8");
+    });
+    const metadata = JSON.parse(captured) as Record<string, unknown>;
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    try {
+      await once(child, "spawn");
+      metadata.pid = child.pid;
+      writeFileSync(lock, `${JSON.stringify(metadata)}\n`, "utf8");
+      child.kill("SIGKILL");
+      await once(child, "exit");
+
+      expect(atomicReplaceArtifact(root, path, revisionOf("first\n"), "second\n", 64 * 1024))
+        .toBe(revisionOf("second\n"));
+      expect(readFileSync(join(root, ...path.split("/")), "utf8")).toBe("second\n");
+      expect(existsSync(lock)).toBe(false);
+      expect(existsSync(`${lock}.recovery`)).toBe(false);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
   });
 
   it("rejects a concurrent collection lock without removing the active writer's lock", async () => {
@@ -96,6 +154,98 @@ describe("contained atomic artifact I/O", () => {
     }
 
     await expect(first).resolves.toBe("first complete");
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("recovers bounded collection-lock metadata after its holder is killed", async () => {
+    const root = temporaryRoot();
+    const directory = ".mex/team/members" as RepoRelativePath;
+    const lockName = ".members.mex-lock";
+    const lockPath = join(root, directory, lockName);
+    let captured = "";
+    await withContainedArtifactLock(root, directory, lockName, () => {
+      captured = readFileSync(lockPath, "utf8");
+    });
+    const metadata = JSON.parse(captured) as Record<string, unknown>;
+
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    try {
+      await once(child, "spawn");
+      metadata.pid = child.pid;
+      writeFileSync(lockPath, `${JSON.stringify(metadata)}\n`, "utf8");
+      child.kill("SIGKILL");
+      await once(child, "exit");
+
+      await expect(withContainedArtifactLock(
+        root,
+        directory,
+        lockName,
+        () => "recovered",
+      )).resolves.toBe("recovered");
+      expect(existsSync(lockPath)).toBe(false);
+      expect(existsSync(`${lockPath}.recovery`)).toBe(false);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+  });
+
+  it("recovers a dead crash marker but never steals malformed or foreign-root locks", async () => {
+    const root = temporaryRoot();
+    const otherRoot = temporaryRoot();
+    const directory = ".mex/team/members" as RepoRelativePath;
+    const lockName = ".members.mex-lock";
+    const lockPath = join(root, directory, lockName);
+    let captured = "";
+    await withContainedArtifactLock(root, directory, lockName, () => {
+      captured = readFileSync(lockPath, "utf8");
+    });
+    const deadMetadata = JSON.parse(captured) as Record<string, unknown>;
+    deadMetadata.pid = 2_147_483_647;
+    writeFileSync(`${lockPath}.recovery`, `${JSON.stringify(deadMetadata)}\n`, "utf8");
+    await expect(withContainedArtifactLock(root, directory, lockName, () => "after crash"))
+      .resolves.toBe("after crash");
+
+    writeFileSync(lockPath, "not canonical lock metadata\n", "utf8");
+    await expect(withContainedArtifactLock(root, directory, lockName, () => undefined))
+      .rejects.toMatchObject({ problem: { code: "REVISION_CONFLICT" } });
+    expect(readFileSync(lockPath, "utf8")).toBe("not canonical lock metadata\n");
+
+    rmSync(lockPath);
+    const otherDirectory = join(otherRoot, directory);
+    mkdirSync(otherDirectory, { recursive: true });
+    let foreign = "";
+    await withContainedArtifactLock(otherRoot, directory, lockName, () => {
+      foreign = readFileSync(join(otherDirectory, lockName), "utf8");
+    });
+    writeFileSync(lockPath, foreign, "utf8");
+    await expect(withContainedArtifactLock(root, directory, lockName, () => undefined))
+      .rejects.toMatchObject({ problem: { code: "REVISION_CONFLICT" } });
+    expect(readFileSync(lockPath, "utf8")).toBe(foreign);
+  });
+
+  it("fails closed on a symlinked collection lock and cleans up after operation failure", async () => {
+    const root = temporaryRoot();
+    const outside = temporaryRoot();
+    const directory = ".mex/team/members" as RepoRelativePath;
+    const lockName = ".members.mex-lock";
+    const directoryPath = join(root, directory);
+    const lockPath = join(directoryPath, lockName);
+    mkdirSync(directoryPath, { recursive: true });
+    const target = join(outside, "lock-target");
+    writeFileSync(target, "outside\n", "utf8");
+    symlinkSync(target, lockPath, "file");
+
+    await expect(withContainedArtifactLock(root, directory, lockName, () => undefined))
+      .rejects.toMatchObject({ problem: { code: "PATH_OUTSIDE_PROJECT" } });
+    expect(readFileSync(target, "utf8")).toBe("outside\n");
+    expect(lstatSync(lockPath).isSymbolicLink()).toBe(true);
+
+    rmSync(lockPath);
+    await expect(withContainedArtifactLock(root, directory, lockName, () => {
+      throw new Error("simulated writer crash");
+    })).rejects.toThrow("simulated writer crash");
     expect(existsSync(lockPath)).toBe(false);
   });
 

@@ -76,12 +76,24 @@ Then read this file fully before doing anything else in this session.
   and explicit apply/maintenance commands that are currently safe. Generated
   agent anchors require discovery first, structured reads, mutation preview,
   and explicit approval before apply.
+- Checkpoint B supplies the internal repository-bound `TeamWorkflowPort` and
+  consumer-owned real conformance suite. Strict schema-v1 repositories cover
+  Workstreams, Inbox proposals, Relays, Playbooks, and manual runs; team-owned
+  paths are reserved from Wiki authoring while remaining readable by Wiki.
+- Checkout-local `team.db` schema v4 adds bounded Inbox/Relay drafts, one
+  repository workflow lease, and a metadata-only operation journal. Reads do
+  not initialize storage; the first explicit mutation migrates transactionally.
+- Canonical workflow publication binds service-owned actor/time/repository
+  authority, exact revisions, Activity, local cleanup, and operation replay.
+  Interrupted multi-file Wiki batches resume only from a bounded portable
+  manifest after proving the exact durable audit prefix.
 
 **Not Built:**
 - Wiki creation/editing, migration and synthesis UI, grounding-drift/review
-  workbenches, Workstream/Inbox/Relay/Playbook persistence, Catch Up actions,
-  activity creation, and later delivery checkpoints from the human-team
-  program.
+  workbenches, product Workstream/Inbox/Relay/Playbook commands and Hub routes,
+  Catch Up actions, direct activity creation, and later delivery checkpoints
+  from the human-team program. Checkpoint B persistence and the workflow port
+  remain internal until those later checkpoints bind real product surfaces.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**

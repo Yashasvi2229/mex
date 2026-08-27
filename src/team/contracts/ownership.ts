@@ -155,6 +155,7 @@ export const TEAM_ARTIFACT_PATHS = {
   specs: ".mex/specs",
   topics: ".mex/topics",
   playbooks: ".mex/playbooks",
+  playbookRuns: ".mex/playbooks/runs",
   activity: ".mex/events/activity",
   wikiOperations: ".mex/events/operations.jsonl",
   localState: ".mex/local/team.db",

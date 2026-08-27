@@ -28,6 +28,7 @@ import {
 } from "../model/diagnostic.js";
 import { indexedCorpusRevision, exactFileContentHash, isContentHash } from "../model/hash.js";
 import type { GroundingHealth } from "../model/grounding.js";
+import { isEntityId } from "../model/ids.js";
 import { discoverMarkdownFiles, insideRoot } from "../index/discover.js";
 import {
   WIKI_CORPUS_LIMITS,
@@ -1941,10 +1942,6 @@ function isBoundedNullableDiagnosticPath(value: unknown): boolean {
     isBoundedString(value, 4096)
     && !/[\u0000-\u001f\u007f]/u.test(value)
   );
-}
-
-function isEntityId(value: unknown): value is string {
-  return typeof value === "string" && /^mx_[0-9A-HJKMNP-TV-Z]{26}$/.test(value);
 }
 
 function isSafeRepoPath(value: unknown): value is string {

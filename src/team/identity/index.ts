@@ -5,7 +5,7 @@ export type {
   GitIdentityReader,
   HistoricalActorResolution,
 } from "./actor-resolver.js";
-export { MemberRepository } from "./member-repository.js";
+export { MEMBER_REPOSITORY_LIMITS, MemberRepository } from "./member-repository.js";
 export type {
   MemberCreateInput,
   MemberReader,

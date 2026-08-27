@@ -7,11 +7,12 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  readSync,
   realpathSync,
 } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type { EntityTypeRegistry } from "./model/entity.js";
-import { isEntityId, type EntityId as EngineEntityId } from "./model/ids.js";
+import { generateEntityId, isEntityId, type EntityId as EngineEntityId } from "./model/ids.js";
 import type { GroundingGraph } from "./grounding/adapter.js";
 import { resolveGrounding } from "./grounding/resolve.js";
 import type { GroundingResolution as EngineGroundingResolution } from "./model/grounding.js";
@@ -29,10 +30,24 @@ import {
 } from "./index/refresh.js";
 import {
   applyPlannedOperationBatch,
+  auditRecord,
+  batchPreviewRevisionOf,
+  OPERATION_LOG_MAX_BYTES,
+  OPERATION_LOG_MAX_ENTRIES,
+  attestEntityClaimants,
+  payloadHashOf,
   planOperationBatch,
+  readAuditLog,
+  recordFor,
+  locateEntity,
+  WikiClaimantScanIncompleteError,
+  type AuditEntry,
   type WikiOperationBatchPlan,
   type WikiPatchPlan,
 } from "./operations/index.js";
+import { readOperationLogExact } from "./operations/audit.js";
+import { createParseCache } from "./operations/locate.js";
+import { WIKI_CORPUS_LIMITS, WikiCorpusLimitError } from "./index/corpus-policy.js";
 import {
   inspectWikiContractIndex,
   WikiContractReadError,
@@ -51,6 +66,7 @@ import {
 } from "./query/contract-session.js";
 import type { WikiDiagnostic } from "./model/diagnostic.js";
 import { exactFileContentHash } from "./model/hash.js";
+import { readContainedSource } from "./index/source-read.js";
 import { estimateTokens } from "./query/budget.js";
 import { healthRank, LIFECYCLE_RANK, MATCH_FIELD_RANK } from "./query/rank.js";
 import {
@@ -96,12 +112,15 @@ import {
   type WikiNeighborhoodRequest,
   type WikiOperationApplyRequest,
   type WikiOperationPreview,
+  type WikiOperationRecoveryInspection,
+  type WikiOperationRecoveryManifest,
   type WikiOperationRequest,
   type WikiOperationResult,
   type WikiOperationType,
   type WikiPage,
   type WikiPort,
   type WikiQueryRequest,
+  type WikiRevisionExpectation,
   type WikiRelation,
   type WikiRelationHit,
   type WikiSearchHit,
@@ -119,6 +138,9 @@ const MAX_CODE_LOOKUP_NODES = 50;
 const MAX_CURSOR_BYTES = 4 * 1024;
 const MAX_OPAQUE_PLANS = 128;
 const MAX_CURRENT_SEARCH_RESULTS = 500;
+const MAX_RECOVERY_MANIFEST_BYTES = 64 * 1024;
+const MAX_RECOVERY_MANIFEST_FILES = 100;
+const MAX_CURRENT_REVISION_EXPECTATIONS = 100;
 
 export type RepositoryWikiOperationPayload = JsonValue;
 
@@ -218,6 +240,14 @@ export type RepositoryWikiOperationPlan =
       readonly diagnostics: readonly Diagnostic[];
     };
 
+/** Package-private aliases; the canonical internal shapes live with WikiPort. */
+export type RepositoryWikiOperationRecoveryManifest = WikiOperationRecoveryManifest;
+export type RepositoryWikiOperationRecoveryInspection = WikiOperationRecoveryInspection;
+
+export type RepositoryWikiOperationPreview = WikiOperationPreview<RepositoryWikiOperationPlan> & {
+  readonly recoveryManifest?: RepositoryWikiOperationRecoveryManifest;
+};
+
 /** Replaced by the engine-owned pinned migration plan once planning succeeds. */
 export interface RepositoryWikiMigrationPlan {
   readonly v: 1;
@@ -230,6 +260,29 @@ interface StoredOperationPlan {
   readonly requestHash: Revision;
   readonly enginePreviewRevision: Revision;
   readonly plan: WikiOperationBatchPlan;
+}
+
+interface DurableOperationResume {
+  readonly activeIndex: number;
+  readonly intent: AuditEntry | null;
+  readonly auditBaseText: string;
+  readonly auditBaseExists: boolean;
+  readonly manifest: RepositoryWikiOperationRecoveryManifest;
+}
+
+interface OperationRecoveryAnalysis {
+  readonly inspection: RepositoryWikiOperationRecoveryInspection;
+  readonly exactText: string;
+  readonly exactExists: boolean;
+  readonly intent: AuditEntry | null;
+}
+
+interface PreparedDurableOperationResume {
+  readonly envelopes: readonly Record<string, unknown>[];
+  readonly preferFile?: string;
+  readonly generateId?: () => EngineEntityId;
+  readonly settledIntentPlan?: WikiPatchPlan;
+  readonly rebindFirstAuthority?: boolean;
 }
 
 interface StoredMigrationPlan {
@@ -250,6 +303,12 @@ interface AdapterDependencies {
 interface AdapterTestSeams {
   /** @internal Fail only the operation pipeline's post-write index refresh. */
   failOperationIndexRefresh?: () => boolean;
+  /** @internal Simulate process death after an operation file is published. */
+  onOperationFileWritten?: (path: string) => void;
+  /** @internal Simulate process death after one batch child completes. */
+  onOperationCompleted?: (opId: string) => void;
+  /** @internal Mutate an artifact after its descriptor-bound bytes are read. */
+  onCurrentRevisionArtifactRead?: (path: string) => void;
 }
 
 class GroundingWorkFailure {
@@ -702,16 +761,164 @@ export class RepositoryWikiPort implements WikiPort<
     });
   }
 
+  async validateCurrentRevisionExpectations(
+    expectations: readonly WikiRevisionExpectation[],
+  ): Promise<void> {
+    if (expectations.length > MAX_CURRENT_REVISION_EXPECTATIONS) {
+      throw validationError("Too many current Wiki revision expectations were requested.");
+    }
+    const options = { ...this.#operationOptions(null), parseCache: createParseCache() };
+    const targets = new Set<string>();
+    for (const expectation of expectations) {
+      const targetKey = expectation.target.kind === "entity"
+        ? `entity:${expectation.target.id}`
+        : `artifact:${expectation.target.path}`;
+      if (targets.has(targetKey)) throw validationError("A Wiki revision target appears more than once.");
+      targets.add(targetKey);
+      if ("contentHash" in expectation) {
+        const path = toScaffoldPath(expectation.target.path);
+        const actual = readContainedArtifactRevision(
+          this.#scaffoldRoot,
+          path,
+          this.#options.__internal?.onCurrentRevisionArtifactRead,
+        );
+        if (actual !== expectation.contentHash) {
+          throw revisionConflict("A Wiki artifact changed after it was read.");
+        }
+        continue;
+      }
+
+      if (!isEntityId(expectation.target.id)) {
+        throw validationError("A Wiki entity revision expectation contains an invalid entity id.");
+      }
+      let current;
+      try {
+        current = attestEntityClaimants(expectation.target.id, options);
+      } catch (error) {
+        if (
+          error instanceof WikiClaimantScanIncompleteError
+          || error instanceof WikiCorpusLimitError
+        ) {
+          throw revisionConflict(
+            "The complete bounded Wiki claimant corpus could not be observed safely.",
+          );
+        }
+        throw error;
+      }
+      if (current.ambiguous || current.claimantCount === 2) {
+        throw revisionConflict("A Wiki entity has duplicate canonical claimants.");
+      }
+      if (!("version" in expectation)) throw validationError("A Wiki revision expectation is malformed.");
+      if (expectation.version === null) {
+        if (current.claimantCount !== 0 || current.winner !== null) throw revisionConflict("A Wiki entity now exists.");
+        continue;
+      }
+      if (current.claimantCount !== 1
+        || current.winner === null
+        || current.winner.entity.revision !== expectation.version.semanticRevision
+        || exactFileContentHash(current.winner.text) !== expectation.version.contentHash) {
+        throw revisionConflict("A Wiki entity changed after it was read.");
+      }
+    }
+  }
+
   async previewOperations(
     request: WikiOperationRequest<RepositoryWikiOperationPayload>,
-  ): Promise<WikiOperationPreview<RepositoryWikiOperationPlan>> {
+  ): Promise<RepositoryWikiOperationPreview> {
+    return this.#previewOperationRequest(request, null);
+  }
+
+  /** Package-private recovery entry point; callers persist only its bounded manifest. */
+  async resumeOperations(
+    request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+    manifest: RepositoryWikiOperationRecoveryManifest,
+  ): Promise<RepositoryWikiOperationPreview> {
+    return this.#previewOperationRequest(request, manifest);
+  }
+
+  /** Package-private, read-only classification of this request's ledger records. */
+  inspectOperationRecovery(
+    request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+  ): RepositoryWikiOperationRecoveryInspection {
     const items = normalizeRepositoryOperations(request.operation);
     assertOperationPayloadPaths(items);
-    const prepared = this.#prepareOperationBatch(request, items);
+    this.#assertOperationEnvelope(request, items);
+    return this.#operationRecoveryAnalysis(request, items).inspection;
+  }
+
+  async #previewOperationRequest(
+    request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+    manifest: RepositoryWikiOperationRecoveryManifest | null,
+  ): Promise<RepositoryWikiOperationPreview> {
+    const items = normalizeRepositoryOperations(request.operation);
+    assertOperationPayloadPaths(items);
+    this.#assertOperationEnvelope(request, items);
     const requestHash = hashCanonical({ operation: request.operation, expectedRevisions: request.expectedRevisions });
-    const result = await this.#withStableGrounding((graph) => (
-      planOperationBatch(prepared, this.#operationOptions(graph))
-    ));
+    const recovery = this.#operationRecoveryAnalysis(request, items);
+    let durableResume: DurableOperationResume | null = null;
+    if (recovery.inspection.state === "mismatch") {
+      throw validationError("The Wiki operation ledger does not match this recovery request.");
+    }
+    if (recovery.inspection.state === "complete") {
+      throw validationError("This Wiki operation batch is already complete.");
+    }
+    if (recovery.inspection.state === "prefix") {
+      if (manifest === null) {
+        throw validationError("This Wiki operation requires its bounded recovery manifest after restart.");
+      }
+      this.#validateRecoveryManifest(request, items, requestHash, manifest);
+      durableResume = {
+        activeIndex: recovery.inspection.completedOperationIds.length,
+        intent: recovery.intent,
+        auditBaseText: recovery.intent === null
+          ? recovery.exactText
+          : recovery.exactText.slice(0, -`${JSON.stringify(recovery.intent)}\n`.length),
+        auditBaseExists: manifest.items[recovery.inspection.completedOperationIds.length]?.audit.beforeRevision !== null,
+        manifest,
+      };
+    } else if (manifest !== null) {
+      throw validationError("No durable Wiki operation prefix exists for this recovery manifest.");
+    }
+    const prepared: PreparedDurableOperationResume = durableResume === null
+      ? { envelopes: this.#prepareOperationBatch(request, items) }
+      : this.#prepareDurableOperationResume(request, items, durableResume);
+    const result = await this.#withStableGrounding((graph) => {
+      const operationOptions = {
+        ...this.#operationOptions(graph),
+        ...(prepared.preferFile === undefined ? {} : { preferFile: prepared.preferFile }),
+        ...(prepared.generateId === undefined ? {} : { generateId: prepared.generateId }),
+        ...(durableResume === null ? {} : {
+          auditText: prepared.settledIntentPlan?.audit.proposedText ?? durableResume.auditBaseText,
+          auditExists: prepared.settledIntentPlan === undefined ? durableResume.auditBaseExists : true,
+        }),
+      };
+      const planned = prepared.envelopes.length === 0
+        ? {
+            ok: true as const,
+            plan: {
+              v: 1 as const,
+              operations: [] as readonly WikiPatchPlan[],
+              previewRevision: batchPreviewRevisionOf({ v: 1, operations: [] }),
+            },
+            diagnostics: [],
+          }
+        : planOperationBatch(prepared.envelopes, operationOptions);
+      if (!planned.ok || durableResume === null) return planned;
+      if (prepared.settledIntentPlan !== undefined) {
+        const operations = [prepared.settledIntentPlan, ...planned.plan.operations];
+        const unsigned = { v: 1 as const, operations };
+        return { ...planned, plan: { ...unsigned, previewRevision: batchPreviewRevisionOf(unsigned) } };
+      }
+      if (durableResume.intent === null) return planned;
+      return {
+        ...planned,
+        plan: this.#bindDurableResumePlan(
+          planned.plan,
+          durableResume,
+          prepared.rebindFirstAuthority === true,
+        ),
+      };
+    });
     if (!result.ok) {
       const diagnostics = result.diagnostics.map(projectDiagnostic);
       const pathProblem = pathDiagnostic(result.diagnostics);
@@ -719,7 +926,8 @@ export class RepositoryWikiPort implements WikiPort<
       return invalidOperationPreview(request.operation.opId, requestHash, diagnostics);
     }
 
-    await this.#validatePlannedAuthority(request, result.plan.operations);
+    await this.#validatePlannedAuthority(request, result.plan.operations, durableResume !== null);
+    if (durableResume !== null) this.#validateResumedPlan(result.plan, durableResume);
 
     const enginePreviewRevision = result.plan.previewRevision;
     const stored = {
@@ -738,6 +946,8 @@ export class RepositoryWikiPort implements WikiPort<
     const changes = operationBatchChanges(result.plan);
     const affectedIds = [...new Set(result.plan.operations.flatMap((operation) => operation.entityIds))];
     const affectedEntities = await this.#affectedEntities(affectedIds);
+    const recoveryManifest = durableResume?.manifest
+      ?? operationRecoveryManifest(request.operation.opId, requestHash, result.plan);
     return {
       operationId: request.operation.opId,
       plan,
@@ -745,6 +955,7 @@ export class RepositoryWikiPort implements WikiPort<
       valid: true,
       changes,
       affectedEntities,
+      recoveryManifest,
       validation: {
         valid: !result.diagnostics.some((entry) => entry.severity === "error"),
         diagnostics: result.diagnostics.map(projectDiagnostic),
@@ -1044,18 +1255,519 @@ export class RepositoryWikiPort implements WikiPort<
     }
   }
 
+  #assertOperationEnvelope(
+    request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+    items: readonly NormalizedRepositoryOperation[],
+  ): void {
+    if (request.expectedRevisions.length === 0) {
+      throw validationError("Every Wiki operation target requires an optimistic revision expectation.");
+    }
+    const first = items[0]!;
+    if (request.operation.type !== first.type || request.operation.entityId !== first.entityId) {
+      throw validationError("The operation envelope must identify the first ordered Wiki operation.");
+    }
+  }
+
+  #operationRecoveryAnalysis(
+    request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+    items: readonly NormalizedRepositoryOperation[],
+  ): OperationRecoveryAnalysis {
+    const operationIds = items.map((_, index) => operationItemId(request.operation.opId, index, items.length));
+    let exact: ReturnType<typeof readOperationLogExact>;
+    let log: ReturnType<typeof readAuditLog>;
+    try {
+      exact = readOperationLogExact(this.#scaffoldRoot);
+      log = readAuditLog(this.#scaffoldRoot);
+    } catch {
+      return recoveryMismatch(operationIds, "audit_unsafe");
+    }
+    if (Buffer.byteLength(exact.text, "utf8") > OPERATION_LOG_MAX_BYTES
+      || log.entries.length > OPERATION_LOG_MAX_ENTRIES
+      || log.diagnostics.length > 0) {
+      return recoveryMismatch(operationIds, "audit_unsafe", exact);
+    }
+
+    const expected = items.map((item, index) => operationAuditAuthority(request, item, index, items.length));
+    const expectedIdSet = new Set(operationIds);
+    const anyExpectedRecord = log.entries.some((entry) => expectedIdSet.has(entry.opId));
+    const recordedIds = [...new Set(log.entries.map((entry) => entry.opId))];
+    const unfinished = recordedIds.flatMap((opId) => {
+      const record = recordFor(log, opId);
+      return record.intent !== null && record.complete === null ? [record.intent] : [];
+    });
+    if (!anyExpectedRecord) {
+      return unfinished.length === 0
+        ? { inspection: { schemaVersion: 1, state: "none", operationIds }, exactText: exact.text, exactExists: exact.exists, intent: null }
+        : recoveryMismatch(operationIds, "invalid_prefix", exact);
+    }
+
+    const completedOperationIds: string[] = [];
+    const tailEntries: AuditEntry[] = [];
+    let active: AuditEntry | null = null;
+    let gap = false;
+    for (let index = 0; index < expected.length; index += 1) {
+      const authority = expected[index]!;
+      const entries = log.entries.filter((entry) => entry.opId === authority.opId);
+      if (entries.length === 0) {
+        gap = true;
+        continue;
+      }
+      if (gap) return recoveryMismatch(operationIds, "invalid_prefix", exact);
+      if (entries.length === 2 && entries[0]?.phase === "intent" && entries[1]?.phase === "complete") {
+        if (!matchesAuditAuthority(entries[0], authority) || !matchesAuditAuthority(entries[1], authority)) {
+          return recoveryMismatch(operationIds, "authority_mismatch", exact);
+        }
+        completedOperationIds.push(authority.opId);
+        tailEntries.push(entries[0], entries[1]);
+        continue;
+      }
+      if (entries.length === 1 && entries[0]?.phase === "intent" && active === null) {
+        if (!matchesAuditAuthority(entries[0], authority) || !validResumeIntent(entries[0])) {
+          return recoveryMismatch(operationIds, "authority_mismatch", exact);
+        }
+        active = entries[0];
+        tailEntries.push(active);
+        gap = true;
+        continue;
+      }
+      return recoveryMismatch(operationIds, "invalid_prefix", exact);
+    }
+
+    if (unfinished.some((entry) => entry !== active)) {
+      return recoveryMismatch(operationIds, "invalid_prefix", exact);
+    }
+    if (completedOperationIds.length === operationIds.length) {
+      return {
+        inspection: { schemaVersion: 1, state: "complete", operationIds, completedOperationIds },
+        exactText: exact.text,
+        exactExists: exact.exists,
+        intent: null,
+      };
+    }
+    const actualTail = log.entries.slice(-tailEntries.length);
+    if (tailEntries.length === 0
+      || actualTail.some((entry, index) => entry !== tailEntries[index])) {
+      return recoveryMismatch(operationIds, "invalid_prefix", exact);
+    }
+    if (active !== null) {
+      const intentLine = `${JSON.stringify(active)}\n`;
+      if (!exact.exists || !exact.text.endsWith(intentLine)) {
+        return recoveryMismatch(operationIds, "invalid_prefix", exact);
+      }
+    }
+    return {
+      inspection: {
+        schemaVersion: 1,
+        state: "prefix",
+        operationIds,
+        completedOperationIds,
+        activeOperationId: active?.opId ?? null,
+      },
+      exactText: exact.text,
+      exactExists: exact.exists,
+      intent: active,
+    };
+  }
+
+  #prepareDurableOperationResume(
+    request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+    items: readonly NormalizedRepositoryOperation[],
+    resume: DurableOperationResume,
+  ): PreparedDurableOperationResume {
+    const activeItem = items[resume.activeIndex]!;
+    const settledIntentPlan = resume.intent === null ? null : this.#settledIntentPlan(resume);
+    const suffixStart = resume.activeIndex + (settledIntentPlan === null ? 0 : 1);
+    const preferFile = resume.intent === null || settledIntentPlan !== null
+      ? undefined
+      : this.#resumePreferredFile(activeItem, resume.intent);
+    const resumeSupersedeSourceOnly = settledIntentPlan === null
+      && resume.intent !== null
+      && this.#resumeSupersedeSourceOnly(activeItem, resume);
+    const options = this.#operationOptions(null);
+    const envelopes = items.slice(suffixStart).map((item, suffixIndex) => {
+      const index = suffixStart + suffixIndex;
+      const plannedItem: NormalizedRepositoryOperation = suffixIndex === 0 && resumeSupersedeSourceOnly
+        ? {
+            type: "set-property",
+            entityId: item.entityId,
+            payload: { property: "status", value: "deprecated" },
+          }
+        : item;
+      const entity = item.entityId === undefined
+        ? null
+        : locateEntity(item.entityId, {
+            ...options,
+            ...(suffixIndex === 0 && preferFile !== undefined ? { preferFile } : {}),
+          });
+      if (item.entityId !== undefined && entity === null && item.type !== "create-entry") {
+        throw portError("NOT_FOUND", 404, "Wiki entity not found", "A Wiki recovery target does not exist.");
+      }
+      return {
+        opId: operationItemId(request.operation.opId, index, items.length),
+        type: plannedItem.type,
+        ...(plannedItem.entityId === undefined ? {} : { entityId: plannedItem.entityId }),
+        ...(entity === null ? {} : {
+          baseRevision: entity.entity.revision,
+          baseContentHash: entity.entity.location.entityContentHash,
+        }),
+        actor: request.operation.actor,
+        ...(request.operation.reason === undefined ? {} : { reason: request.operation.reason }),
+        timestamp: request.operation.timestamp,
+        payload: plannedItem.payload,
+      };
+    });
+
+    const forcedIds = resume.manifest.items
+      .slice(suffixStart + (resumeSupersedeSourceOnly ? 1 : 0))
+      .flatMap((item) => item.createdIds)
+      .map((id) => id as EngineEntityId);
+    let forcedIndex = 0;
+    return {
+      envelopes,
+      ...(preferFile === undefined ? {} : { preferFile }),
+      ...(settledIntentPlan === null ? {} : { settledIntentPlan }),
+      ...(resumeSupersedeSourceOnly ? { rebindFirstAuthority: true } : {}),
+      ...(forcedIds.length === 0 ? {} : {
+        generateId: () => forcedIds[forcedIndex++] ?? generateEntityId(),
+      }),
+    };
+  }
+
+  #resumeSupersedeSourceOnly(
+    item: NormalizedRepositoryOperation,
+    resume: DurableOperationResume,
+  ): boolean {
+    // A cross-file supersede writes its larger replacement first. Once those
+    // exact reviewed bytes have landed, replaying the original create/relation
+    // would correctly reject a duplicate. Re-plan only the still-original
+    // source deprecation; #bindDurableResumePlan restores the original audit
+    // authority and #validateResumedPlan proves both files against the manifest.
+    if (item.type !== "supersede-entry" || item.entityId === undefined) return false;
+    const expected = resume.manifest.items[resume.activeIndex];
+    if (expected === undefined || expected.files.length < 2) return false;
+    const source = locateEntity(item.entityId, this.#operationOptions(null));
+    if (source === null) return false;
+    const sourceEffect = expected.files.find((file) => toScaffoldPath(file.path) === source.path);
+    if (sourceEffect === undefined
+      || sourceEffect.beforeRevision === null
+      || exactFileContentHash(source.text) !== sourceEffect.beforeRevision) return false;
+    for (const file of expected.files) {
+      if (file === sourceEffect) continue;
+      let text: string;
+      try {
+        text = readContainedSource(
+          this.#scaffoldRoot,
+          resolve(this.#scaffoldRoot, toScaffoldPath(file.path)),
+        );
+      } catch {
+        return false;
+      }
+      if (exactFileContentHash(text) !== file.afterRevision) return false;
+    }
+    return true;
+  }
+
+  #settledIntentPlan(resume: DurableOperationResume): WikiPatchPlan | null {
+    const intent = resume.intent;
+    const expected = resume.manifest.items[resume.activeIndex];
+    if (intent === null || expected === undefined) return null;
+    const expectedFiles = new Map(expected.files.map((file) => [toScaffoldPath(file.path), file]));
+    if (expectedFiles.size !== intent.files.length
+      || intent.files.some((path) => !expectedFiles.has(path))) return null;
+    const files: WikiPatchPlan["files"] = [];
+    for (const path of intent.files) {
+      const recorded = expectedFiles.get(path)!;
+      let text: string;
+      try {
+        text = readContainedSource(this.#scaffoldRoot, resolve(this.#scaffoldRoot, path));
+      } catch {
+        return null;
+      }
+      if (exactFileContentHash(text) !== recorded.afterRevision) return null;
+      files.push({
+        path,
+        absolutePath: resolve(this.#scaffoldRoot, path),
+        baseText: text,
+        baseFileHash: recorded.afterRevision,
+        existed: true,
+        declared: [],
+        edits: [],
+        proposedText: text,
+      });
+    }
+    const core: Omit<WikiPatchPlan, "audit"> = {
+      opId: intent.opId,
+      type: intent.type as WikiOperationType,
+      actor: {
+        kind: intent.actor.kind,
+        id: intent.actor.id,
+        ...(intent.sessionId === undefined ? {} : { sessionId: intent.sessionId }),
+      },
+      timestamp: intent.timestamp,
+      ...(intent.reason === undefined ? {} : { reason: intent.reason }),
+      payloadHash: intent.payloadHash,
+      entityIds: intent.entityIds.map((id) => id as EngineEntityId),
+      createdIds: intent.createdIds.map((id) => id as EngineEntityId),
+      files,
+      preconditions: [],
+      revisions: intent.revisions.map((revision) => ({
+        entityId: revision.entityId as EngineEntityId,
+        before: revision.before,
+        after: revision.after,
+      })),
+      diagnostics: [],
+    };
+    if (JSON.stringify(auditRecord(core, "intent")) !== JSON.stringify(intent)) return null;
+    const complete = auditRecord(core, "complete");
+    return {
+      ...core,
+      audit: {
+        path: "events/operations.jsonl",
+        absolutePath: resolve(this.#scaffoldRoot, "events", "operations.jsonl"),
+        baseText: resume.auditBaseText,
+        baseFileHash: resume.auditBaseExists ? exactFileContentHash(resume.auditBaseText) : null,
+        proposedText: `${resume.auditBaseText}${JSON.stringify(intent)}\n${JSON.stringify(complete)}\n`,
+      },
+    };
+  }
+
+  #resumePreferredFile(
+    item: NormalizedRepositoryOperation,
+    intent: AuditEntry,
+  ): string | undefined {
+    if (item.type !== "move-entry" || item.entityId === undefined || !isPlainObject(item.payload)) return undefined;
+    const destination = item.payload["file"];
+    if (typeof destination !== "string") return undefined;
+    const options = this.#operationOptions(null);
+    for (const path of intent.files) {
+      if (path === destination) continue;
+      const located = locateEntity(item.entityId, { ...options, preferFile: path });
+      if (located?.path === path) return path;
+    }
+    return undefined;
+  }
+
+  #bindDurableResumePlan(
+    plan: WikiOperationBatchPlan,
+    resume: DurableOperationResume,
+    rebindFirstAuthority: boolean,
+  ): WikiOperationBatchPlan {
+    const recordedIntent = resume.intent;
+    const plannedFirst = plan.operations[0];
+    const first = plannedFirst === undefined || recordedIntent === null || !rebindFirstAuthority
+      ? plannedFirst
+      : {
+          ...plannedFirst,
+          type: recordedIntent.type as WikiOperationType,
+          payloadHash: recordedIntent.payloadHash,
+          actor: {
+            kind: recordedIntent.actor.kind,
+            id: recordedIntent.actor.id,
+            ...(recordedIntent.sessionId === undefined ? {} : { sessionId: recordedIntent.sessionId }),
+          },
+          timestamp: recordedIntent.timestamp,
+          ...(recordedIntent.reason === undefined ? {} : { reason: recordedIntent.reason }),
+        };
+    if (recordedIntent === null || first === undefined || !resumePlanIsSubset(first, recordedIntent)) {
+      throw validationError("The current Wiki corpus cannot reproduce the recorded recovery intent.");
+    }
+    const files: WikiPatchPlan["files"] = [...first.files];
+    for (const path of recordedIntent.files) {
+      if (files.some((file) => file.path === path)) continue;
+      let text: string;
+      try {
+        text = readContainedSource(this.#scaffoldRoot, resolve(this.#scaffoldRoot, path));
+      } catch {
+        throw validationError("A recorded Wiki recovery path is no longer safely readable.");
+      }
+      files.push({
+        path,
+        absolutePath: resolve(this.#scaffoldRoot, path),
+        baseText: text,
+        baseFileHash: exactFileContentHash(text),
+        existed: true,
+        declared: [],
+        edits: [],
+        proposedText: text,
+      });
+    }
+
+    const reboundFirst: WikiPatchPlan = {
+      ...first,
+      entityIds: recordedIntent.entityIds.map((id) => id as EngineEntityId),
+      createdIds: recordedIntent.createdIds.map((id) => id as EngineEntityId),
+      files,
+      revisions: recordedIntent.revisions.map((revision) => ({
+        entityId: revision.entityId as EngineEntityId,
+        before: revision.before,
+        after: revision.after,
+      })),
+    };
+    let auditText = resume.auditBaseText;
+    let auditExists = resume.auditBaseExists;
+    const operations = plan.operations.map((operation, index): WikiPatchPlan => {
+      const current = index === 0 ? reboundFirst : operation;
+      const { audit: _discarded, ...core } = current;
+      const intent = auditRecord(core, "intent");
+      if (index === 0 && JSON.stringify(intent) !== JSON.stringify(recordedIntent)) {
+        throw validationError("The reproduced Wiki plan does not match the exact durable intent.");
+      }
+      const complete = auditRecord(core, "complete");
+      const proposedText = `${auditText}${JSON.stringify(intent)}\n${JSON.stringify(complete)}\n`;
+      const rebound: WikiPatchPlan = {
+        ...core,
+        audit: {
+          path: "events/operations.jsonl",
+          absolutePath: resolve(this.#scaffoldRoot, "events", "operations.jsonl"),
+          baseText: auditText,
+          baseFileHash: auditExists ? exactFileContentHash(auditText) : null,
+          proposedText,
+        },
+      };
+      auditText = proposedText;
+      auditExists = true;
+      return rebound;
+    });
+    const unsigned = { v: 1 as const, operations };
+    return { ...unsigned, previewRevision: batchPreviewRevisionOf(unsigned) };
+  }
+
+  #validateRecoveryManifest(
+    request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+    items: readonly NormalizedRepositoryOperation[],
+    requestHash: Revision,
+    manifest: RepositoryWikiOperationRecoveryManifest,
+  ): void {
+    let bytes: number;
+    try {
+      bytes = Buffer.byteLength(JSON.stringify(manifest), "utf8");
+    } catch {
+      throw validationError("The Wiki recovery manifest is not deterministic JSON.");
+    }
+    if (bytes > MAX_RECOVERY_MANIFEST_BYTES
+      || !isPlainObject(manifest)
+      || !hasExactKeys(manifest, ["items", "operationId", "requestHash", "schemaVersion"])
+      || manifest.schemaVersion !== 1
+      || manifest.requestHash !== requestHash
+      || manifest.operationId !== request.operation.opId
+      || !Array.isArray(manifest.items)
+      || manifest.items.length !== items.length) {
+      throw validationError("The Wiki recovery manifest does not identify this exact bounded request.");
+    }
+
+    const createdIds = new Set<string>();
+    let fileCount = 0;
+    for (let index = 0; index < manifest.items.length; index += 1) {
+      const recorded = manifest.items[index];
+      const item = items[index]!;
+      const authority = operationAuditAuthority(request, item, index, items.length);
+      if (!isPlainObject(recorded)
+        || !hasExactKeys(recorded, ["audit", "createdIds", "files", "operationId", "payloadHash", "revisions", "type"])
+        || recorded.operationId !== authority.opId
+        || recorded.type !== authority.type
+        || recorded.payloadHash !== authority.payloadHash
+        || !Array.isArray(recorded.createdIds)
+        || !Array.isArray(recorded.files)
+        || !Array.isArray(recorded.revisions)
+        || recorded.createdIds.length > 25
+        || recorded.files.length > MAX_RECOVERY_MANIFEST_FILES
+        || recorded.revisions.length > 50) {
+        throw validationError("The Wiki recovery manifest item authority is invalid.");
+      }
+      for (const id of recorded.createdIds) {
+        if (!isEntityId(id) || createdIds.has(id)) {
+          throw validationError("The Wiki recovery manifest contains an invalid or repeated created id.");
+        }
+        createdIds.add(id);
+      }
+      const paths = new Set<string>();
+      for (const file of recorded.files) {
+        fileCount += 1;
+        if (!isPlainObject(file)
+          || !hasExactKeys(file, ["afterRevision", "beforeRevision", "path"])
+          || typeof file.path !== "string"
+          || (file.beforeRevision !== null && !isExactRevision(file.beforeRevision))
+          || !isExactRevision(file.afterRevision)) {
+          throw validationError("The Wiki recovery manifest contains an invalid file revision.");
+        }
+        const path = toScaffoldPath(file.path);
+        if (!isWikiMarkdownMutationPath(path) || paths.has(path)) {
+          throw validationError("The Wiki recovery manifest contains an invalid or repeated path.");
+        }
+        paths.add(path);
+      }
+      for (const revision of recorded.revisions) {
+        if (!isPlainObject(revision)
+          || !hasExactKeys(revision, ["after", "before", "entityId"])
+          || !isEntityId(revision.entityId)
+          || typeof revision.before !== "number"
+          || typeof revision.after !== "number"
+          || !Number.isSafeInteger(revision.before)
+          || !Number.isSafeInteger(revision.after)
+          || revision.before < 0
+          || revision.after < 0) {
+          throw validationError("The Wiki recovery manifest contains an invalid semantic revision.");
+        }
+      }
+      if (!isPlainObject(recorded.audit)
+        || !hasExactKeys(recorded.audit, ["afterRevision", "beforeRevision"])
+        || (recorded.audit.beforeRevision !== null && !isExactRevision(recorded.audit.beforeRevision))
+        || !isExactRevision(recorded.audit.afterRevision)) {
+        throw validationError("The Wiki recovery manifest contains an invalid audit revision.");
+      }
+    }
+    if (fileCount > MAX_RECOVERY_MANIFEST_FILES) {
+      throw validationError("The Wiki recovery manifest contains too many file effects.");
+    }
+  }
+
+  #validateResumedPlan(
+    plan: WikiOperationBatchPlan,
+    resume: DurableOperationResume,
+  ): void {
+    const expectedItems = resume.manifest.items.slice(resume.activeIndex);
+    if (plan.operations.length !== expectedItems.length) {
+      throw validationError("The reproduced Wiki recovery suffix has the wrong operation count.");
+    }
+    for (let index = 0; index < plan.operations.length; index += 1) {
+      const operation = plan.operations[index]!;
+      const expected = expectedItems[index]!;
+      if (operation.opId !== expected.operationId
+        || operation.type !== expected.type
+        || operation.payloadHash !== expected.payloadHash
+        || canonical(operation.createdIds) !== canonical(expected.createdIds)
+        || canonical(operation.revisions) !== canonical(expected.revisions)) {
+        throw validationError("The reproduced Wiki recovery operation differs from its manifest.");
+      }
+      const expectedFiles = new Map(expected.files.map((file) => [toScaffoldPath(file.path), file]));
+      if (operation.files.length !== expectedFiles.size) {
+        throw validationError("The reproduced Wiki recovery file set differs from its manifest.");
+      }
+      for (const file of operation.files) {
+        const recorded = expectedFiles.get(file.path);
+        const beforeRevision = file.existed ? exactFileContentHash(file.baseText) : null;
+        const afterRevision = exactFileContentHash(file.proposedText);
+        if (recorded === undefined
+          || afterRevision !== recorded.afterRevision
+          || (beforeRevision !== recorded.beforeRevision && beforeRevision !== recorded.afterRevision)) {
+          throw validationError("The reproduced Wiki recovery bytes differ from the reviewed manifest.");
+        }
+      }
+      const auditBefore = operation.audit.baseFileHash === null
+        ? null
+        : exactFileContentHash(operation.audit.baseText);
+      if (auditBefore !== expected.audit.beforeRevision
+        || exactFileContentHash(operation.audit.proposedText) !== expected.audit.afterRevision) {
+        throw validationError("The reproduced Wiki recovery audit differs from the reviewed manifest.");
+      }
+    }
+  }
+
   #prepareOperationBatch(
     request: WikiOperationRequest<RepositoryWikiOperationPayload>,
     items: readonly NormalizedRepositoryOperation[],
   ): readonly Record<string, unknown>[] {
-    if (request.expectedRevisions.length === 0) {
-      throw validationError("Every Wiki operation target requires an optimistic revision expectation.");
-    }
     return this.#read((session) => {
-      const first = items[0]!;
-      if (request.operation.type !== first.type || request.operation.entityId !== first.entityId) {
-        throw validationError("The operation envelope must identify the first ordered Wiki operation.");
-      }
       for (const expected of request.expectedRevisions) {
         if (expected.target.kind === "artifact" && "contentHash" in expected) {
           const path = toScaffoldPath(expected.target.path);
@@ -1087,9 +1799,7 @@ export class RepositoryWikiPort implements WikiPort<
           }
         }
         return {
-          opId: items.length === 1
-            ? request.operation.opId
-            : `${request.operation.opId}_item_${String(index + 1).padStart(2, "0")}`,
+          opId: operationItemId(request.operation.opId, index, items.length),
           type: item.type,
           ...(item.entityId === undefined ? {} : { entityId: item.entityId }),
           ...(entity === null ? {} : {
@@ -1108,6 +1818,7 @@ export class RepositoryWikiPort implements WikiPort<
   async #validatePlannedAuthority(
     request: WikiOperationRequest<RepositoryWikiOperationPayload>,
     plans: readonly WikiPatchPlan[],
+    durableResume = false,
   ): Promise<void> {
     for (const plan of plans) {
       if (plan.audit.path !== "events/operations.jsonl") {
@@ -1119,6 +1830,8 @@ export class RepositoryWikiPort implements WikiPort<
         }
       }
     }
+
+    if (durableResume) return;
 
     await this.#read((session) => {
       const created = new Set(plans.flatMap((plan) => plan.createdIds));
@@ -1270,6 +1983,12 @@ export class RepositoryWikiPort implements WikiPort<
       ...this.#writeOptions(graph),
       ...(this.#options.readOnly === undefined ? {} : { readOnly: this.#options.readOnly }),
       ...(graph === null ? {} : { graph }),
+      ...(this.#options.__internal?.onOperationFileWritten === undefined ? {} : {
+        onFileWritten: this.#options.__internal.onOperationFileWritten,
+      }),
+      ...(this.#options.__internal?.onOperationCompleted === undefined ? {} : {
+        onOperationCompleted: this.#options.__internal.onOperationCompleted,
+      }),
       now: () => this.#now(),
     };
   }
@@ -1875,7 +2594,11 @@ function toScaffoldPath(path: string): RepoRelativePath {
   return relative;
 }
 
-function readContainedArtifactRevision(scaffoldRoot: string, path: string): Revision | null {
+function readContainedArtifactRevision(
+  scaffoldRoot: string,
+  path: string,
+  afterRead?: (path: string) => void,
+): Revision | null {
   try {
     const absolute = resolve(scaffoldRoot, path);
     const root = realpathSync(scaffoldRoot);
@@ -1896,14 +2619,130 @@ function readContainedArtifactRevision(scaffoldRoot: string, path: string): Revi
       if (!sameFileIdentity(before, opened) || !sameFileIdentity(opened, after)) {
         throw revisionConflict("A Wiki artifact changed while its revision was being observed.");
       }
-      return exactFileContentHash(readFileSync(fd));
+      const maxBytes = path === "events/operations.jsonl"
+        ? OPERATION_LOG_MAX_BYTES
+        : WIKI_CORPUS_LIMITS.maxFileBytes;
+      if (opened.size > maxBytes) {
+        throw revisionConflict("A Wiki artifact exceeds the bounded revision-observation limit.");
+      }
+      const bytes = readBoundedArtifactBytes(fd, maxBytes);
+      afterRead?.(path);
+      const observedAfterRead = fstatSync(fd);
+      const leafAfterRead = lstatSync(absolute);
+      if (
+        bytes.byteLength !== opened.size
+        || !sameFileIdentity(opened, observedAfterRead)
+        || !sameFileIdentity(observedAfterRead, leafAfterRead)
+      ) {
+        throw revisionConflict("A Wiki artifact changed while its revision was being observed.");
+      }
+      return exactFileContentHash(bytes);
     } finally {
       closeSync(fd);
     }
   } catch (error) {
     if (error instanceof MexPortError) throw error;
-    return null;
+    if (isMissingFilesystemEntry(error) && proveContainedArtifactAbsence(scaffoldRoot, path)) {
+      return null;
+    }
+    throw revisionConflict("A Wiki artifact could not be observed safely.");
   }
+}
+
+/**
+ * Consume at most one byte beyond the accepted artifact budget. A size check
+ * before reading is not a bound: another process can grow the open file after
+ * `fstat`, and `readFileSync(fd)` would then allocate for the new size. The
+ * extra byte distinguishes exact-budget EOF from concurrent/oversized input
+ * without ever retaining more than `maxBytes + 1` bytes.
+ */
+function readBoundedArtifactBytes(fd: number, maxBytes: number): Buffer {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  while (total <= maxBytes) {
+    const remaining = maxBytes + 1 - total;
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+    const bytesRead = readSync(fd, chunk, 0, chunk.byteLength, total);
+    if (bytesRead === 0) break;
+    chunks.push(chunk.subarray(0, bytesRead));
+    total += bytesRead;
+  }
+  if (total > maxBytes) {
+    throw revisionConflict("A Wiki artifact exceeds the bounded revision-observation limit.");
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * Treat `ENOENT` as absence only after binding the scaffold and the nearest
+ * extant directory on both sides of a second leaf probe. A dangling symlink,
+ * escaping/mutated ancestor, unreadable directory, and every non-ENOENT error
+ * remain observation failures rather than silently becoming `null`.
+ */
+function proveContainedArtifactAbsence(scaffoldRoot: string, path: string): boolean {
+  const root = resolve(scaffoldRoot);
+  const target = resolve(root, path);
+  const lexical = relative(root, target);
+  if (lexical === "" || lexical.startsWith("..") || isAbsolute(lexical)) return false;
+
+  try {
+    const realRoot = realpathSync(root);
+    const rootStats = lstatSync(realRoot);
+    if (!rootStats.isDirectory()) return false;
+
+    try {
+      lstatSync(target);
+      return false;
+    } catch (error) {
+      if (!isMissingFilesystemEntry(error)) return false;
+    }
+
+    let ancestor = dirname(target);
+    let realAncestor: string;
+    let ancestorStats: ReturnType<typeof lstatSync>;
+    for (;;) {
+      try {
+        const declaredStats = lstatSync(ancestor);
+        if (!declaredStats.isDirectory() || declaredStats.isSymbolicLink()) return false;
+        realAncestor = realpathSync(ancestor);
+        ancestorStats = lstatSync(realAncestor);
+        break;
+      } catch (error) {
+        if (!isMissingFilesystemEntry(error)) return false;
+        const parent = dirname(ancestor);
+        if (parent === ancestor) return false;
+        ancestor = parent;
+      }
+    }
+
+    const ancestorRelative = relative(realRoot, realAncestor);
+    if (ancestorRelative.startsWith("..") || isAbsolute(ancestorRelative)) return false;
+
+    try {
+      lstatSync(target);
+      return false;
+    } catch (error) {
+      if (!isMissingFilesystemEntry(error)) return false;
+    }
+
+    const realRootAfter = realpathSync(root);
+    const rootAfter = lstatSync(realRootAfter);
+    const realAncestorAfter = realpathSync(ancestor);
+    const ancestorAfter = lstatSync(realAncestorAfter);
+    return realRootAfter === realRoot
+      && sameFileIdentity(rootStats, rootAfter)
+      && realAncestorAfter === realAncestor
+      && sameFileIdentity(ancestorStats, ancestorAfter);
+  } catch {
+    return false;
+  }
+}
+
+function isMissingFilesystemEntry(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: unknown }).code === "ENOENT";
 }
 
 function stableObservationTime(session: WikiContractReadSession): string {
@@ -2142,6 +2981,194 @@ function invalidOperationPreview(
     affectedEntities: [],
     validation: { valid: false, diagnostics },
   };
+}
+
+interface OperationAuditAuthority {
+  readonly opId: string;
+  readonly type: WikiOperationType;
+  readonly payloadHash: Revision;
+  readonly actor: WikiOperationRequest<RepositoryWikiOperationPayload>["operation"]["actor"];
+  readonly timestamp: string;
+  readonly reason?: string;
+}
+
+function operationItemId(operationId: string, index: number, itemCount: number): string {
+  return itemCount === 1
+    ? operationId
+    : `${operationId}_item_${String(index + 1).padStart(2, "0")}`;
+}
+
+function operationAuditAuthority(
+  request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+  item: NormalizedRepositoryOperation,
+  index: number,
+  itemCount: number,
+): OperationAuditAuthority {
+  return {
+    opId: operationItemId(request.operation.opId, index, itemCount),
+    type: item.type,
+    payloadHash: payloadHashOf(item.type, item.payload),
+    actor: request.operation.actor,
+    timestamp: request.operation.timestamp,
+    ...(request.operation.reason === undefined ? {} : { reason: request.operation.reason }),
+  };
+}
+
+function matchesAuditAuthority(entry: AuditEntry, authority: OperationAuditAuthority): boolean {
+  return validResumeIntent({ ...entry, phase: "intent" })
+    && entry.opId === authority.opId
+    && entry.type === authority.type
+    && entry.payloadHash === authority.payloadHash
+    && entry.actor.kind === authority.actor.kind
+    && entry.actor.id === authority.actor.id
+    && entry.sessionId === authority.actor.sessionId
+    && entry.timestamp === authority.timestamp
+    && entry.reason === authority.reason;
+}
+
+function validResumeIntent(entry: AuditEntry): boolean {
+  if (!isPlainObject(entry)
+    || !hasExactKeys(entry, [
+      "actor",
+      "createdIds",
+      "entityIds",
+      "files",
+      "opId",
+      "payloadHash",
+      "phase",
+      "revisions",
+      "timestamp",
+      "type",
+      "v",
+    ], ["reason", "sessionId"])
+    || entry.v !== 1
+    || entry.phase !== "intent"
+    || typeof entry.opId !== "string"
+    || entry.opId.length === 0
+    || entry.opId.length > 256
+    || !(WIKI_OPERATION_TYPES as readonly string[]).includes(entry.type)
+    || !isExactRevision(entry.payloadHash)
+    || !isPlainObject(entry.actor)
+    || !hasExactKeys(entry.actor, ["id", "kind"])
+    || !["human", "agent", "system"].includes(entry.actor.kind)
+    || typeof entry.actor.id !== "string"
+    || entry.actor.id.length === 0
+    || entry.actor.id.length > 256
+    || typeof entry.timestamp !== "string"
+    || entry.timestamp.length > 64
+    || (entry.reason !== undefined && (typeof entry.reason !== "string" || entry.reason.length > 4_096))
+    || (entry.sessionId !== undefined && (typeof entry.sessionId !== "string" || entry.sessionId.length > 256))
+    || !Array.isArray(entry.entityIds)
+    || !Array.isArray(entry.createdIds)
+    || !Array.isArray(entry.files)
+    || !Array.isArray(entry.revisions)
+    || entry.entityIds.length > 50
+    || entry.createdIds.length > 25
+    || entry.files.length > MAX_RECOVERY_MANIFEST_FILES
+    || entry.revisions.length > 50
+    || entry.entityIds.some((id) => !isEntityId(id))
+    || entry.createdIds.some((id) => !isEntityId(id))
+    || entry.files.some((path) => typeof path !== "string" || !isWikiMarkdownMutationPath(path))) {
+    return false;
+  }
+  return entry.revisions.every((revision) => isPlainObject(revision)
+    && hasExactKeys(revision, ["after", "before", "entityId"])
+    && isEntityId(revision.entityId)
+    && Number.isSafeInteger(revision.before)
+    && Number.isSafeInteger(revision.after)
+    && revision.before >= 0
+    && revision.after >= 0);
+}
+
+function resumePlanIsSubset(plan: WikiPatchPlan, intent: AuditEntry): boolean {
+  const authority: OperationAuditAuthority = {
+    opId: plan.opId,
+    type: plan.type,
+    payloadHash: plan.payloadHash,
+    actor: plan.actor,
+    timestamp: plan.timestamp,
+    ...(plan.reason === undefined ? {} : { reason: plan.reason }),
+  };
+  if (!matchesAuditAuthority(intent, authority)) return false;
+  const recordedEntities = new Set(intent.entityIds);
+  const recordedCreated = new Set(intent.createdIds);
+  const recordedFiles = new Set(intent.files);
+  return plan.entityIds.every((id) => recordedEntities.has(id))
+    && plan.createdIds.every((id) => recordedCreated.has(id))
+    && plan.files.every((file) => recordedFiles.has(file.path))
+    && plan.revisions.every((revision) => intent.revisions.some((recorded) => (
+      recorded.entityId === revision.entityId
+      && recorded.before === revision.before
+      && recorded.after === revision.after
+    )));
+}
+
+function recoveryMismatch(
+  operationIds: readonly string[],
+  reason: Extract<RepositoryWikiOperationRecoveryInspection, { state: "mismatch" }>["reason"],
+  exact: { readonly text: string; readonly exists: boolean } = { text: "", exists: false },
+): OperationRecoveryAnalysis {
+  return {
+    inspection: { schemaVersion: 1, state: "mismatch", operationIds, reason },
+    exactText: exact.text,
+    exactExists: exact.exists,
+    intent: null,
+  };
+}
+
+function operationRecoveryManifest(
+  operationId: string,
+  requestHash: Revision,
+  plan: WikiOperationBatchPlan,
+): RepositoryWikiOperationRecoveryManifest {
+  let fileCount = 0;
+  const manifest: RepositoryWikiOperationRecoveryManifest = {
+    schemaVersion: 1,
+    requestHash,
+    operationId,
+    items: plan.operations.map((operation) => ({
+      operationId: operation.opId,
+      type: operation.type,
+      payloadHash: operation.payloadHash,
+      createdIds: operation.createdIds,
+      files: operation.files.map((file) => {
+        fileCount += 1;
+        return {
+          path: toProjectPath(file.path),
+          beforeRevision: file.existed ? exactFileContentHash(file.baseText) : null,
+          afterRevision: exactFileContentHash(file.proposedText),
+        };
+      }),
+      revisions: operation.revisions.map((revision) => ({
+        entityId: revision.entityId,
+        before: revision.before,
+        after: revision.after,
+      })),
+      audit: {
+        beforeRevision: operation.audit.baseFileHash,
+        afterRevision: exactFileContentHash(operation.audit.proposedText),
+      },
+    })),
+  };
+  if (fileCount > MAX_RECOVERY_MANIFEST_FILES
+    || Buffer.byteLength(JSON.stringify(manifest), "utf8") > MAX_RECOVERY_MANIFEST_BYTES) {
+    throw validationError("The Wiki recovery manifest exceeds its fixed release bounds.");
+  }
+  return manifest;
+}
+
+function hasExactKeys(
+  value: Readonly<Record<string, unknown>>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  const keys = Object.keys(value).sort();
+  const expected = [...required, ...optional.filter((key) => value[key] !== undefined)].sort();
+  return canonical(keys) === canonical(expected) && required.every((key) => key in value);
+}
+
+function isExactRevision(value: unknown): value is Revision {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
 interface NormalizedRepositoryOperation {

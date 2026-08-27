@@ -29,5 +29,13 @@ export default defineConfig({
     env: {
       MEX_TELEMETRY: "0",
     },
+    // The root suite opens many independent immutable SQLite snapshots. Keep
+    // cross-file concurrency below the platform resource cliff so a busy test
+    // runner cannot turn a valid index into a transient CANTOPEN/corrupt read.
+    maxWorkers: 4,
+    // Real Graph/Wiki/Hub integration scenarios build bounded repositories and
+    // databases. This is a hang guard, not a performance budget; numeric timing
+    // enforcement belongs to benchmark:release on the pinned runner.
+    testTimeout: 15_000,
   },
 });

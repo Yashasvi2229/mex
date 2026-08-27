@@ -207,7 +207,14 @@ export const DEFAULT_WIKI_EXCLUDE: readonly string[] = ["**/node_modules/**"];
  * indexed, queried and grounded exactly like any other — the restriction is on
  * writes, and P5's `operations/plan.ts` is where it is enforced.
  */
-export const DEFAULT_WIKI_READ_ONLY: readonly string[] = ["team/**", "workstreams/**", "inbox/**", "relays/**"];
+export const DEFAULT_WIKI_READ_ONLY: readonly string[] = [
+  "team/**",
+  "workstreams/**",
+  "inbox/**",
+  "relays/**",
+  "playbooks/**",
+  "events/activity/**",
+];
 
 /** Keep only the strings; a non-string entry is dropped rather than stored. */
 function globList(value: unknown, fallback: readonly string[]): string[] {

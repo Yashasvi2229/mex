@@ -18,19 +18,17 @@
  * opener has set `busy_timeout = 5000` since it was written, with a comment
  * insisting it come first. The wiki now does the same.
  *
- * ## Performance at D10's scale
+ * ## Characterization at D10's scale
  *
- * `perf.test.ts` runs a tenth-scale corpus at ten times the thresholds,
- * deliberately, so it does not become a flaky gate on a loaded CI box. That is
- * sound calibration and it stays. It is not the same thing as having measured
- * the real target, which is what this file does: **5,000 entities across 1,000
- * files**, D10's actual numbers.
+ * `perf.test.ts` runs a tenth-scale corpus, while this file can run **5,000
+ * entities across 1,000 files**, D10's actual numbers. Timings here are emitted
+ * as characterization only. Release budgets are enforced by the pinned Ubuntu
+ * benchmark; a shared unit-test worker is not a stable performance environment.
  *
  * The corpus is generated into a temp directory and never committed (finding
- * 50). The assertions are deliberately loose multiples of D10's targets for the
- * same reason the tenth-scale ones are — the value is catching an accidental
- * O(n²), which is orders of magnitude and visible at any honest threshold — but
- * the *measurements* are printed, and those are what the handoff records.
+ * 50). Deterministic assertions prove the operation and incremental-read
+ * contracts; measurements are printed for diagnostics without making the
+ * result depend on host speed or scheduler contention.
  */
 
 import { describe, it, expect, afterEach } from "vitest";
@@ -77,25 +75,6 @@ const FULL_SCALE = process.env["MEX_WIKI_SCALE"] === "1";
 const CORPUS = FULL_SCALE
   ? { files: D10.files, entities: D10.entities }
   : { files: D10.files / 5, entities: D10.entities / 5 };
-
-/**
- * How far over target a measurement may land before the test fails.
- *
- * Ten, matching the existing perf suite's calibration and for its reason: a
- * threshold set at target fails on a loaded box, and a test that fails for the
- * machine's mood teaches people to re-run rather than to look. An accidental
- * O(n²) at this corpus size is one to three orders of magnitude.
- */
-const TOLERANCE = 10;
-
-/**
- * Targeted refresh includes descriptor-bound clone, validation, and atomic
- * publication work, so its short wall-clock sample is especially sensitive to
- * scheduler contention in the full parallel suite. Keep its budget explicit
- * and local; the separate rebuild-ratio test still guards the incremental
- * complexity invariant.
- */
-const REFRESH_TOLERANCE = 20;
 
 const SCALE_TIMEOUT = 300_000;
 
@@ -287,7 +266,7 @@ describe("concurrency", () => {
   });
 });
 
-describe("D10's targets, at D10's scale", () => {
+describe("D10's workload, at D10's scale", () => {
   it(
     "builds, refreshes and queries D10’s corpus",
     () => {
@@ -303,6 +282,7 @@ describe("D10's targets, at D10's scale", () => {
       const refreshMs = millis(() => {
         const result = refreshWikiIndex({ scaffoldRoot: root, changed: ["context/area-0000.md"] });
         expect(result.ok).toBe(true);
+        if (result.ok) expect(result.unchanged).toEqual(["context/area-0000.md"]);
       });
 
       const target = ids[Math.floor(ids.length / 2)]!;
@@ -330,31 +310,49 @@ describe("D10's targets, at D10's scale", () => {
           `related ${relatedMs.toFixed(1)}ms (${D10.related})\n`,
       );
 
-      expect(rebuildMs).toBeLessThan(D10.rebuild * TOLERANCE);
-      expect(refreshMs).toBeLessThan(D10.refresh * REFRESH_TOLERANCE);
-      expect(getMs).toBeLessThan(D10.get * TOLERANCE);
-      expect(listMs).toBeLessThan(D10.list * TOLERANCE);
-      expect(searchMs).toBeLessThan(D10.list * TOLERANCE);
-      expect(relatedMs).toBeLessThan(D10.related * TOLERANCE);
     },
     SCALE_TIMEOUT,
   );
 
   it(
-    "refreshes one file far faster than it rebuilds the scaffold",
+    "refreshes only the selected changed file",
     () => {
-      // The ratio, not the absolute, is what says incremental is incremental —
-      // and it survives a loaded machine because both numbers inflate together
-      // (finding 52.4). A refresh that reparsed everything would land near the
-      // rebuild's own time.
+      // Source-body reads and parse progress state the incremental contract
+      // directly. A wall-clock ratio varies with the host and scheduler; a
+      // refresh that falls back to a full rebuild must read or schedule more
+      // than this one selected file and fails deterministically here.
       const { root } = generateScaffold(CORPUS.files, CORPUS.entities);
-      const rebuildMs = millis(() => {
-        expect(rebuildWikiIndex({ scaffoldRoot: root }).entityCount).toBe(CORPUS.entities);
+      expect(rebuildWikiIndex({ scaffoldRoot: root }).entityCount).toBe(CORPUS.entities);
+
+      const target = "context/area-0000.md";
+      const targetAbsolute = join(root, "context", "area-0000.md");
+      writeFileSync(targetAbsolute, `${readFileSync(targetAbsolute, "utf-8")}\nChanged after rebuild.\n`, "utf-8");
+
+      const sourceReads: string[] = [];
+      const parseTotals: number[] = [];
+      const result = refreshWikiIndex({
+        scaffoldRoot: root,
+        changed: [target],
+        readFile: (absolutePath) => {
+          sourceReads.push(absolutePath);
+          return readFileSync(absolutePath, "utf-8");
+        },
+        maintenance: {
+          reportProgress(progress) {
+            if (progress.phase === "parse" && progress.total !== undefined) parseTotals.push(progress.total);
+          },
+        },
       });
-      const refreshMs = millis(() => {
-        expect(refreshWikiIndex({ scaffoldRoot: root, changed: ["context/area-0000.md"] }).ok).toBe(true);
-      });
-      expect(refreshMs * 5).toBeLessThan(rebuildMs);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.reparsed).toEqual([target]);
+      expect(result.removed).toEqual([]);
+      expect(result.unchanged).toEqual([]);
+      expect(new Set(sourceReads)).toEqual(new Set([targetAbsolute]));
+      expect(sourceReads.length).toBeGreaterThan(0);
+      expect(parseTotals.length).toBeGreaterThan(0);
+      expect(parseTotals.every((total) => total === 1)).toBe(true);
     },
     SCALE_TIMEOUT,
   );

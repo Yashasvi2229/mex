@@ -6,6 +6,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,12 +20,15 @@ import {
   type RepositoryWikiOperationPayload,
 } from "../application-adapter.js";
 import { prepareWikiRebuild } from "../index/rebuild.js";
+import { WIKI_CORPUS_LIMITS } from "../index/corpus-policy.js";
+import { OPERATION_LOG_MAX_BYTES } from "../operations/audit.js";
 
 const ENTITY = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
 const TARGET = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJE";
 const THIRD = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJF";
 const TOPIC = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJG";
 const FOURTH = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJH";
+const WORKSTREAM = "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const roots: string[] = [];
 
 afterEach(() => {
@@ -144,6 +148,61 @@ Payment capture and delivery behavior.
 }
 
 describe("RepositoryWikiPort", () => {
+  it("reads a Team-owned mex entity but cannot preview a write to its hard-reserved path", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-wiki-adapter-team-"));
+    roots.push(root);
+    const workstreams = join(root, ".mex", "workstreams");
+    mkdirSync(workstreams, { recursive: true });
+    const sourcePath = join(workstreams, `${WORKSTREAM}.md`);
+    writeFileSync(sourcePath, `<!-- mex:entity
+id: ${WORKSTREAM}
+type: workstream
+status: in_flight
+revision: 1
+-->
+## Release performance baseline
+
+Coordinate the bounded release work.
+`, "utf8");
+    mkdirSync(join(root, ".mex", "events"), { recursive: true });
+    const auditPath = join(root, ".mex", "events", "operations.jsonl");
+    writeFileSync(auditPath, "", "utf8");
+
+    const port = createRepositoryWikiPort(root, { readOnly: [] });
+    await expect(port.rebuildIndex()).resolves.toMatchObject({ entitiesIndexed: 1 });
+    const entity = await port.getEntity(WORKSTREAM);
+    expect(entity).toMatchObject({
+      ref: { id: WORKSTREAM, kind: "workstream", title: "Release performance baseline" },
+      lifecycleState: "in_flight",
+      body: expect.stringContaining("bounded release work"),
+      location: { path: `.mex/workstreams/${WORKSTREAM}.md` },
+    });
+    expect((await port.listEntities({ kinds: ["workstream"] })).items.map((item) => item.ref.id))
+      .toEqual([WORKSTREAM]);
+    if (!entity) throw new Error("team fixture entity missing");
+
+    const beforeSource = readFileSync(sourcePath);
+    const beforeAudit = readFileSync(auditPath);
+    await expectCode(() => port.previewOperations({
+      operation: {
+        opId: "operation_adapter_team_ownership",
+        type: "update-entry",
+        entityId: WORKSTREAM,
+        baseRevision: entity.version.semanticRevision,
+        baseContentHash: entity.version.contentHash,
+        actor: { kind: "human", id: "member_adapter_test" },
+        timestamp: "2026-08-27T00:00:00.000Z",
+        payload: { body: "Wiki must not own this update." },
+      },
+      expectedRevisions: [{
+        target: { kind: "entity", id: WORKSTREAM },
+        version: entity.version,
+      }],
+    }), "PATH_OUTSIDE_PROJECT");
+    expect(readFileSync(sourcePath)).toEqual(beforeSource);
+    expect(readFileSync(auditPath)).toEqual(beforeAudit);
+  });
+
   it("discovers the exact added, modified, and deleted paths for targeted refresh", async () => {
     const target = project();
     const port = createRepositoryWikiPort(target.root);
@@ -212,6 +271,194 @@ New bounded Wiki content.
     );
   });
 
+  it("validates revisions from bounded canonical bytes and rejects duplicate claimants", async () => {
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const entity = await port.getEntity(ENTITY);
+    if (!entity) throw new Error("fixture entity missing");
+    const auditPath = join(target.root, ".mex", "events", "operations.jsonl");
+    const indexBefore = readFileSync(join(target.root, ".mex", "wiki.db"));
+    const auditBefore = readFileSync(auditPath);
+    await expect(port.validateCurrentRevisionExpectations([
+      { target: { kind: "entity", id: ENTITY }, version: entity.version },
+      { target: { kind: "entity", id: FOURTH }, version: null },
+      {
+        target: { kind: "artifact", path: ".mex/context/worker.md" },
+        contentHash: hash(readFileSync(join(target.root, ".mex", "context", "worker.md"))),
+      },
+    ])).resolves.toBeUndefined();
+    expect(readFileSync(join(target.root, ".mex", "wiki.db"))).toEqual(indexBefore);
+    expect(readFileSync(auditPath)).toEqual(auditBefore);
+
+    writeFileSync(
+      target.firstPath,
+      readFileSync(target.firstPath, "utf8").replace("One service owns", "Two services own"),
+      "utf8",
+    );
+    await expectCode(() => port.validateCurrentRevisionExpectations([
+      { target: { kind: "entity", id: ENTITY }, version: entity.version },
+    ]), "REVISION_CONFLICT");
+
+    const duplicatePath = join(target.root, ".mex", "context", "duplicate.md");
+    writeFileSync(duplicatePath, readFileSync(target.firstPath), "utf8");
+    await expectCode(() => port.validateCurrentRevisionExpectations([
+      {
+        target: { kind: "entity", id: ENTITY },
+        version: {
+          semanticRevision: entity.version.semanticRevision,
+          contentHash: hash(readFileSync(target.firstPath)),
+        },
+      },
+    ]), "REVISION_CONFLICT");
+    expect(readFileSync(join(target.root, ".mex", "wiki.db"))).toEqual(indexBefore);
+    expect(readFileSync(auditPath)).toEqual(auditBefore);
+  });
+
+  it("bounds and post-read stabilizes direct artifact revision observations", async () => {
+    const target = project();
+    const oversizedPath = join(target.root, ".mex", "context", "oversized.md");
+    writeFileSync(oversizedPath, "", "utf8");
+    truncateSync(oversizedPath, WIKI_CORPUS_LIMITS.maxFileBytes + 1);
+    const bounded = createRepositoryWikiPort(target.root);
+    await expectCode(() => bounded.validateCurrentRevisionExpectations([{
+      target: { kind: "artifact", path: ".mex/context/oversized.md" },
+      contentHash: "0".repeat(64),
+    }]), "REVISION_CONFLICT");
+
+    const auditPath = join(target.root, ".mex", "events", "operations.jsonl");
+    truncateSync(auditPath, OPERATION_LOG_MAX_BYTES + 1);
+    await expectCode(() => bounded.validateCurrentRevisionExpectations([{
+      target: { kind: "artifact", path: ".mex/events/operations.jsonl" },
+      contentHash: "0".repeat(64),
+    }]), "REVISION_CONFLICT");
+
+    await expect(bounded.validateCurrentRevisionExpectations([{
+      target: { kind: "artifact", path: ".mex/context/absent.md" },
+      contentHash: null,
+    }])).resolves.toBeUndefined();
+    if (process.platform !== "win32") {
+      symlinkSync("missing-target.md", join(target.root, ".mex", "context", "dangling.md"));
+      await expectCode(() => bounded.validateCurrentRevisionExpectations([{
+        target: { kind: "artifact", path: ".mex/context/dangling.md" },
+        contentHash: null,
+      }]), "REVISION_CONFLICT");
+    }
+
+    const workerPath = join(target.root, ".mex", "context", "worker.md");
+    const expected = hash(readFileSync(workerPath));
+    const failing = createRepositoryWikiPort(target.root, {
+      __internal: {
+        onCurrentRevisionArtifactRead: () => { throw new Error("injected read failure"); },
+      },
+    });
+    await expectCode(() => failing.validateCurrentRevisionExpectations([{
+      target: { kind: "artifact", path: ".mex/context/worker.md" },
+      contentHash: null,
+    }]), "REVISION_CONFLICT");
+    let raced = false;
+    const racing = createRepositoryWikiPort(target.root, {
+      __internal: {
+        onCurrentRevisionArtifactRead: (path) => {
+          if (raced || path !== "context/worker.md") return;
+          raced = true;
+          writeFileSync(workerPath, `${readFileSync(workerPath, "utf8")}\nConcurrent edit.\n`, "utf8");
+        },
+      },
+    });
+    await expectCode(() => racing.validateCurrentRevisionExpectations([{
+      target: { kind: "artifact", path: ".mex/context/worker.md" },
+      contentHash: expected,
+    }]), "REVISION_CONFLICT");
+    expect(raced).toBe(true);
+  });
+
+  it("fails closed when canonical claimant discovery is incomplete", async () => {
+    if (process.platform === "win32") return;
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const entity = await port.getEntity(ENTITY);
+    if (!entity) throw new Error("fixture entity missing");
+    symlinkSync("missing-claimant.md", join(target.root, ".mex", "context", "broken.md"));
+
+    await expectCode(() => port.validateCurrentRevisionExpectations([{
+      target: { kind: "entity", id: ENTITY },
+      version: entity.version,
+    }]), "REVISION_CONFLICT");
+  });
+
+  it("re-attests duplicate claimant ownership inside the Wiki apply boundary", async () => {
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const entity = await port.getEntity(ENTITY);
+    if (!entity) throw new Error("fixture entity missing");
+    const request: WikiOperationRequest<RepositoryWikiOperationPayload> = {
+      operation: {
+        opId: "operation_adapter_apply_duplicate",
+        type: "update-entry",
+        entityId: ENTITY,
+        baseRevision: entity.version.semanticRevision,
+        baseContentHash: entity.version.contentHash,
+        actor: { kind: "human", id: "member_adapter_test" },
+        timestamp: "2026-08-27T04:00:00.000Z",
+        payload: { summary: "This must not land in an ambiguous corpus." },
+      },
+      expectedRevisions: [{ target: { kind: "entity", id: ENTITY }, version: entity.version }],
+    };
+    const preview = await port.previewOperations(request);
+    if (!preview.plan.valid) throw new Error("expected a valid preview");
+    const auditPath = join(target.root, ".mex", "events", "operations.jsonl");
+    const original = readFileSync(target.firstPath, "utf8");
+    writeFileSync(join(target.root, ".mex", "context", "z-duplicate.md"), original, "utf8");
+    const auditBefore = readFileSync(auditPath);
+
+    await expectCode(() => port.applyOperations({
+      ...request,
+      plan: preview.plan,
+      expectedPreviewRevision: preview.previewRevision,
+    }), "REVISION_CONFLICT");
+    expect(readFileSync(target.firstPath, "utf8")).toBe(original);
+    expect(readFileSync(auditPath)).toEqual(auditBefore);
+  });
+
+  it("keeps an ordinary stale preview invalid when no durable recovery prefix exists", async () => {
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const entity = await port.getEntity(ENTITY);
+    if (!entity) throw new Error("fixture entity missing");
+    const request: WikiOperationRequest<RepositoryWikiOperationPayload> = {
+      operation: {
+        opId: "operation_adapter_ordinary_stale",
+        type: "update-entry",
+        entityId: ENTITY,
+        baseRevision: entity.version.semanticRevision,
+        baseContentHash: entity.version.contentHash,
+        actor: { kind: "human", id: "member_adapter_test" },
+        timestamp: "2026-08-27T00:30:00.000Z",
+        payload: { summary: "This stale request must not become recovery." },
+      },
+      expectedRevisions: [{ target: { kind: "entity", id: ENTITY }, version: entity.version }],
+    };
+    writeFileSync(target.firstPath, `${readFileSync(target.firstPath, "utf8")}\nConcurrent manual edit.\n`, "utf8");
+    const before = [
+      readFileSync(target.firstPath),
+      readFileSync(join(target.root, ".mex", "events", "operations.jsonl")),
+      readFileSync(join(target.root, ".mex", "wiki.db")),
+    ];
+    expect(port.inspectOperationRecovery(request).state).toBe("none");
+    const preview = await port.previewOperations(request);
+    expect(preview.valid).toBe(false);
+    expect(preview.recoveryManifest).toBeUndefined();
+    expect([
+      readFileSync(target.firstPath),
+      readFileSync(join(target.root, ".mex", "events", "operations.jsonl")),
+      readFileSync(join(target.root, ".mex", "wiki.db")),
+    ]).toEqual(before);
+  });
+
   it("previews exact canonical and audit bytes, then applies that plan", async () => {
     const target = project();
     const port = createRepositoryWikiPort(target.root);
@@ -277,6 +524,336 @@ New bounded Wiki content.
       expectedPreviewRevision: preview.previewRevision,
     });
     expect(replay.idempotentReplay).toBe(true);
+  });
+
+  it("re-previews an exact interrupted multi-file move without writing or accepting changed authority", async () => {
+    const target = project();
+    let crash = true;
+    const crashing = createRepositoryWikiPort(target.root, {
+      __internal: {
+        onOperationFileWritten: () => {
+          if (!crash) return;
+          crash = false;
+          throw new Error("simulated process death");
+        },
+      },
+    });
+    await crashing.rebuildIndex();
+    const entity = await crashing.getEntity(ENTITY);
+    if (!entity) throw new Error("fixture entity missing");
+    const destinationPath = join(target.root, ".mex", "context", "worker.md");
+    const request: WikiOperationRequest<RepositoryWikiOperationPayload> = {
+      operation: {
+        opId: "operation_adapter_resume_move",
+        type: "move-entry",
+        entityId: ENTITY,
+        baseRevision: entity.version.semanticRevision,
+        baseContentHash: entity.version.contentHash,
+        actor: { kind: "agent", id: "agent_adapter_test", sessionId: "session_adapter_test" },
+        reason: "Resume the exact reviewed move.",
+        timestamp: "2026-08-27T01:00:00.000Z",
+        payload: { file: "context/worker.md", insertAt: { at: "end-of-file" } },
+      },
+      expectedRevisions: [
+        { target: { kind: "entity", id: ENTITY }, version: entity.version },
+        {
+          target: { kind: "artifact", path: ".mex/context/worker.md" },
+          contentHash: hash(readFileSync(destinationPath)),
+        },
+      ],
+    };
+    const reviewed = await crashing.previewOperations(request);
+    if (!reviewed.plan.valid || reviewed.recoveryManifest === undefined) {
+      throw new Error("expected a valid recovery-bound preview");
+    }
+    await expect(crashing.applyOperations({
+      ...request,
+      plan: reviewed.plan,
+      expectedPreviewRevision: reviewed.previewRevision,
+    })).rejects.toThrow();
+
+    expect(readFileSync(destinationPath, "utf8")).toContain(ENTITY);
+    expect(readFileSync(target.firstPath, "utf8")).toContain(ENTITY);
+    const resumedPort = createRepositoryWikiPort(target.root);
+    expect(resumedPort.inspectOperationRecovery(request)).toEqual({
+      schemaVersion: 1,
+      state: "prefix",
+      operationIds: [request.operation.opId],
+      completedOperationIds: [],
+      activeOperationId: request.operation.opId,
+    });
+    const partialBytes = [
+      readFileSync(target.firstPath),
+      readFileSync(destinationPath),
+      readFileSync(join(target.root, ".mex", "events", "operations.jsonl")),
+      readFileSync(join(target.root, ".mex", "wiki.db")),
+    ];
+    const mismatches: WikiOperationRequest<RepositoryWikiOperationPayload>[] = [
+      {
+        ...request,
+        operation: { ...request.operation, payload: { file: "context/worker.md", insertAt: { at: "start-of-file" } } },
+      },
+      {
+        ...request,
+        operation: { ...request.operation, actor: { kind: "agent", id: "different_agent" } },
+      },
+      {
+        ...request,
+        operation: { ...request.operation, timestamp: "2026-08-27T01:00:01.000Z" },
+      },
+      {
+        ...request,
+        operation: { ...request.operation, reason: "Different reason." },
+      },
+      {
+        ...request,
+        operation: { ...request.operation, opId: "operation_adapter_resume_move_changed" },
+      },
+    ];
+    for (const mismatch of mismatches) {
+      await expectCode(
+        () => resumedPort.resumeOperations(mismatch, reviewed.recoveryManifest!),
+        "VALIDATION_FAILED",
+      );
+      expect([
+        readFileSync(target.firstPath),
+        readFileSync(destinationPath),
+        readFileSync(join(target.root, ".mex", "events", "operations.jsonl")),
+        readFileSync(join(target.root, ".mex", "wiki.db")),
+      ]).toEqual(partialBytes);
+    }
+
+    const resumed = await resumedPort.resumeOperations(request, reviewed.recoveryManifest);
+    expect(resumed.recoveryManifest).toEqual(reviewed.recoveryManifest);
+    expect([
+      readFileSync(target.firstPath),
+      readFileSync(destinationPath),
+      readFileSync(join(target.root, ".mex", "events", "operations.jsonl")),
+      readFileSync(join(target.root, ".mex", "wiki.db")),
+    ]).toEqual(partialBytes);
+    if (!resumed.plan.valid) throw new Error("expected a valid resumed plan");
+    await resumedPort.applyOperations({
+      ...request,
+      plan: resumed.plan,
+      expectedPreviewRevision: resumed.previewRevision,
+    });
+    expect(readFileSync(target.firstPath, "utf8")).not.toContain(ENTITY);
+    expect(readFileSync(destinationPath, "utf8").split(ENTITY)).toHaveLength(2);
+    expect(resumedPort.inspectOperationRecovery(request).state).toBe("complete");
+  });
+
+  it("completes a fully published child from manifest hashes without applying it twice", async () => {
+    const target = project();
+    const crashing = createRepositoryWikiPort(target.root, {
+      __internal: { onOperationFileWritten: () => { throw new Error("death before completion audit"); } },
+    });
+    await crashing.rebuildIndex();
+    const entity = await crashing.getEntity(ENTITY);
+    if (!entity) throw new Error("fixture entity missing");
+    const request: WikiOperationRequest<RepositoryWikiOperationPayload> = {
+      operation: {
+        opId: "operation_adapter_settled_intent",
+        type: "update-entry",
+        entityId: ENTITY,
+        baseRevision: entity.version.semanticRevision,
+        baseContentHash: entity.version.contentHash,
+        actor: { kind: "human", id: "member_adapter_test" },
+        timestamp: "2026-08-27T01:30:00.000Z",
+        payload: { summary: "Published exactly once before recovery." },
+      },
+      expectedRevisions: [{ target: { kind: "entity", id: ENTITY }, version: entity.version }],
+    };
+    const reviewed = await crashing.previewOperations(request);
+    if (!reviewed.plan.valid || reviewed.recoveryManifest === undefined) throw new Error("expected valid preview");
+    await expect(crashing.applyOperations({
+      ...request,
+      plan: reviewed.plan,
+      expectedPreviewRevision: reviewed.previewRevision,
+    })).rejects.toThrow();
+    const published = readFileSync(target.firstPath, "utf8");
+    expect(published).toContain("Published exactly once before recovery.");
+    const resumedPort = createRepositoryWikiPort(target.root);
+    const resumed = await resumedPort.resumeOperations(request, reviewed.recoveryManifest);
+    if (!resumed.plan.valid) throw new Error("expected valid settled-intent recovery");
+    await resumedPort.applyOperations({
+      ...request,
+      plan: resumed.plan,
+      expectedPreviewRevision: resumed.previewRevision,
+    });
+    expect(readFileSync(target.firstPath, "utf8")).toBe(published);
+    expect(resumedPort.inspectOperationRecovery(request).state).toBe("complete");
+  });
+
+  it("resumes a cross-file supersede after only its replacement was published", async () => {
+    const target = project();
+    let crash = true;
+    const crashing = createRepositoryWikiPort(target.root, {
+      __internal: {
+        onOperationFileWritten: () => {
+          if (!crash) return;
+          crash = false;
+          throw new Error("death after supersede replacement");
+        },
+      },
+    });
+    await crashing.rebuildIndex();
+    const entity = await crashing.getEntity(ENTITY);
+    if (!entity) throw new Error("fixture entity missing");
+    const destinationPath = join(target.root, ".mex", "context", "worker.md");
+    const request: WikiOperationRequest<RepositoryWikiOperationPayload> = {
+      operation: {
+        opId: "operation_adapter_resume_supersede",
+        type: "supersede-entry",
+        entityId: ENTITY,
+        baseRevision: entity.version.semanticRevision,
+        baseContentHash: entity.version.contentHash,
+        actor: { kind: "human", id: "member_adapter_test" },
+        reason: "Resume the source deprecation without recreating the replacement.",
+        timestamp: "2026-08-27T01:45:00.000Z",
+        payload: {
+          replacement: {
+            file: "context/worker.md",
+            insertAt: { at: "end-of-file" },
+            type: "decision",
+            title: "Use bounded recovery manifests",
+            body: "Persist ids, paths, revisions, hashes, and audit state only.",
+            headingDepth: 2,
+          },
+        },
+      },
+      expectedRevisions: [
+        { target: { kind: "entity", id: ENTITY }, version: entity.version },
+        {
+          target: { kind: "artifact", path: ".mex/context/worker.md" },
+          contentHash: hash(readFileSync(destinationPath)),
+        },
+      ],
+    };
+    const reviewed = await crashing.previewOperations(request);
+    if (!reviewed.plan.valid || reviewed.recoveryManifest === undefined) throw new Error("expected valid preview");
+    const replacementId = reviewed.recoveryManifest.items[0]?.createdIds[0];
+    expect(replacementId).toMatch(/^mx_/);
+    await expect(crashing.applyOperations({
+      ...request,
+      plan: reviewed.plan,
+      expectedPreviewRevision: reviewed.previewRevision,
+    })).rejects.toThrow();
+    expect(readFileSync(destinationPath, "utf8")).toContain(replacementId);
+    expect(readFileSync(target.firstPath, "utf8")).not.toContain("status: deprecated");
+
+    const resumedPort = createRepositoryWikiPort(target.root);
+    const resumed = await resumedPort.resumeOperations(request, reviewed.recoveryManifest);
+    if (!resumed.plan.valid) throw new Error("expected valid cross-file supersede recovery");
+    await resumedPort.applyOperations({
+      ...request,
+      plan: resumed.plan,
+      expectedPreviewRevision: resumed.previewRevision,
+    });
+    expect(readFileSync(destinationPath, "utf8").split(replacementId!)).toHaveLength(2);
+    expect(readFileSync(target.firstPath, "utf8")).toContain("status: deprecated");
+    expect(resumedPort.inspectOperationRecovery(request).state).toBe("complete");
+  });
+
+  it("retains future create ids across a crash after a completed batch prefix", async () => {
+    const target = project();
+    const firstOperationId = "operation_adapter_prefix_ids_item_01";
+    const crashing = createRepositoryWikiPort(target.root, {
+      __internal: {
+        onOperationCompleted: (operationId) => {
+          if (operationId === firstOperationId) throw new Error("process died between batch children");
+        },
+      },
+    });
+    await crashing.rebuildIndex();
+    const entity = await crashing.getEntity(ENTITY);
+    if (!entity) throw new Error("fixture entity missing");
+    const destinationPath = join(target.root, ".mex", "context", "worker.md");
+    const request: WikiOperationRequest<RepositoryWikiOperationPayload> = {
+      operation: {
+        opId: "operation_adapter_prefix_ids",
+        type: "update-entry",
+        entityId: ENTITY,
+        baseRevision: entity.version.semanticRevision,
+        baseContentHash: entity.version.contentHash,
+        actor: { kind: "human", id: "member_adapter_test" },
+        reason: "Prove future ids survive a restart.",
+        timestamp: "2026-08-27T02:00:00.000Z",
+        payload: {
+          operations: [
+            { type: "update-entry", entityId: ENTITY, summary: "Durable completed prefix." },
+            {
+              type: "create-entry",
+              payload: {
+                file: "context/worker.md",
+                insertAt: { at: "end-of-file" },
+                type: "convention",
+                title: "Keep generated ids stable",
+                body: "Persist body-free recovery metadata before apply.",
+                headingDepth: 2,
+              },
+            },
+          ],
+        },
+      },
+      expectedRevisions: [
+        { target: { kind: "entity", id: ENTITY }, version: entity.version },
+        {
+          target: { kind: "artifact", path: ".mex/context/worker.md" },
+          contentHash: hash(readFileSync(destinationPath)),
+        },
+      ],
+    };
+    const reviewed = await crashing.previewOperations(request);
+    if (!reviewed.plan.valid || reviewed.recoveryManifest === undefined) {
+      throw new Error("expected a valid recovery-bound batch preview");
+    }
+    const futureId = reviewed.recoveryManifest.items[1]?.createdIds[0];
+    expect(futureId).toMatch(/^mx_/);
+    await expect(crashing.applyOperations({
+      ...request,
+      plan: reviewed.plan,
+      expectedPreviewRevision: reviewed.previewRevision,
+    })).rejects.toThrow();
+
+    const resumedPort = createRepositoryWikiPort(target.root);
+    expect(resumedPort.inspectOperationRecovery(request)).toEqual({
+      schemaVersion: 1,
+      state: "prefix",
+      operationIds: [firstOperationId, "operation_adapter_prefix_ids_item_02"],
+      completedOperationIds: [firstOperationId],
+      activeOperationId: null,
+    });
+    await expectCode(() => resumedPort.previewOperations(request), "VALIDATION_FAILED");
+    const beforeForgedResume = [
+      readFileSync(target.firstPath),
+      readFileSync(destinationPath),
+      readFileSync(join(target.root, ".mex", "events", "operations.jsonl")),
+    ];
+    const forgedManifest = {
+      ...reviewed.recoveryManifest,
+      items: reviewed.recoveryManifest.items.map((item, index) => index === 1
+        ? { ...item, createdIds: [FOURTH] }
+        : item),
+    };
+    await expectCode(() => resumedPort.resumeOperations(request, forgedManifest), "VALIDATION_FAILED");
+    expect([
+      readFileSync(target.firstPath),
+      readFileSync(destinationPath),
+      readFileSync(join(target.root, ".mex", "events", "operations.jsonl")),
+    ]).toEqual(beforeForgedResume);
+    const resumed = await resumedPort.resumeOperations(request, reviewed.recoveryManifest);
+    expect(resumed.recoveryManifest).toEqual(reviewed.recoveryManifest);
+    if (!resumed.plan.valid) throw new Error("expected a valid resumed suffix");
+    await resumedPort.applyOperations({
+      ...request,
+      plan: resumed.plan,
+      expectedPreviewRevision: resumed.previewRevision,
+    });
+    expect(readFileSync(destinationPath, "utf8")).toContain(futureId);
+    expect(resumedPort.inspectOperationRecovery(request)).toMatchObject({
+      state: "complete",
+      completedOperationIds: [firstOperationId, "operation_adapter_prefix_ids_item_02"],
+    });
   });
 
   it("rejects unsafe direct paths before maintenance or validation", async () => {

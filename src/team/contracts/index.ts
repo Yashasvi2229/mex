@@ -125,6 +125,14 @@ export {
   GIT_READ_LIMITS,
 } from "./git.js";
 export type {
+  CatchUpCursor,
+  CatchUpDigest,
+  CatchUpGroup,
+  CatchUpItem,
+  CatchUpPort,
+  CatchUpRequest,
+} from "./catch-up.js";
+export type {
   ChangedFile,
   GitChangedFilesRequest,
   GitChangeStatus,
@@ -153,11 +161,6 @@ export type {
   ActivityEvent,
   ActivitySubjectRef,
   ActorResolutionRequest,
-  CatchUpCursor,
-  CatchUpDigest,
-  CatchUpGroup,
-  CatchUpItem,
-  CatchUpRequest,
   InboxDraft,
   InboxDraftInput,
   InboxProposal,
@@ -193,6 +196,10 @@ export type {
   TeamWorkflowCreateAction,
   TeamWorkflowPort,
   TeamWorkflowPreview,
+  TeamWorkflowAuthority,
+  PreparedTeamWorkflowCommand,
+  PortableWikiOperation,
+  PortableWikiOperationRequest,
   TeamWorkflowRevisionBoundAction,
   TeamWorkflowResult,
   StoredActivityEvent,

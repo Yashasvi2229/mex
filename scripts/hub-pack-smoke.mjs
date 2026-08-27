@@ -14,14 +14,17 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmCli = process.env.npm_execpath;
+if (!npmCli) {
+  throw new Error("The packed Hub smoke must run through npm so its CLI entry is known.");
+}
 const work = mkdtempSync(join(tmpdir(), "mex-hub-pack-smoke-"));
 const npmCache = join(work, "npm-cache");
 mkdirSync(npmCache, { recursive: true });
 let child;
 
 try {
-  const packed = run(npm, [
+  const packed = runNpm([
     "pack",
     "--silent",
     "--cache",
@@ -67,7 +70,7 @@ try {
   run("git", ["config", "user.email", "packed@example.test"], project);
   run("git", ["add", ".gitignore", "package.json", ".mex", "src"], project);
   run("git", ["commit", "--quiet", "-m", "test fixture"], project);
-  run(npm, [
+  runNpm([
     "install",
     tarball,
     "--ignore-scripts",
@@ -185,14 +188,40 @@ try {
     redirect: "error",
   });
   const homeBody = await home.json();
-  if (!home.ok || homeBody.sections?.activity?.count !== 1) {
-    throw new Error("The packaged Hub did not report the exact canonical activity count.");
-  }
   const activity = await fetch(`${url.origin}/api/v1/activity`, {
     headers: { cookie },
     redirect: "error",
   });
   const activityBody = await activity.json();
+  if (!home.ok || homeBody.sections?.activity?.count !== 1) {
+    const diagnosticCodes = Array.isArray(activityBody?.diagnostics)
+      ? activityBody.diagnostics.slice(0, 10).map((item) => ({
+          code: typeof item?.code === "string" ? item.code : "UNKNOWN",
+          severity: typeof item?.severity === "string" ? item.severity : "unknown",
+        }))
+      : null;
+    const detail = JSON.stringify({
+      homeStatus: home.status,
+      homeProblemCode: typeof homeBody?.code === "string" ? homeBody.code : null,
+      homeActivity: homeBody.sections?.activity ?? null,
+      activityStatus: activity.status,
+      canonicalActivityCount: Array.isArray(activityBody?.items)
+        ? activityBody.items.filter((item) => item?.source === "activity").length
+        : null,
+      fixtureHasCarriageReturn: readFileSync(
+        join(
+          project,
+          ".mex",
+          "events",
+          "activity",
+          "2026-08",
+          "event_01K3Q080000000000000000001.md",
+        ),
+      ).includes(13),
+      diagnosticCodes,
+    });
+    throw new Error(`The packaged Hub did not report the exact canonical activity count: ${detail}`);
+  }
   if (
     !activity.ok
     || activityBody.items?.length !== 2
@@ -523,7 +552,11 @@ try {
   child.kill("SIGTERM");
   const exit = await waitForExit(child, 8_000);
   child = undefined;
-  if (exit.signal !== null || exit.code !== 0) {
+  const stoppedAsRequested = exit.code === 0 && exit.signal === null;
+  const terminatedAsRequestedOnWindows = process.platform === "win32"
+    && exit.code === null
+    && exit.signal === "SIGTERM";
+  if (!stoppedAsRequested && !terminatedAsRequestedOnWindows) {
     throw new Error(`The packaged Hub did not stop cleanly (${JSON.stringify(exit)}).`);
   }
   process.stdout.write("Packed Project Hub smoke test passed.\n");
@@ -731,12 +764,24 @@ function run(command, args, cwd) {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
+  if (result.error !== undefined) {
+    throw new Error(
+      `${command} ${args.join(" ")} could not start: ${result.error.message}`,
+      { cause: result.error },
+    );
+  }
   if (result.status !== 0) {
     throw new Error(
-      `${command} ${args.join(" ")} failed:\n${result.stderr || result.stdout}`,
+      `${command} ${args.join(" ")} failed with exit ${String(result.status)}`
+      + `${result.signal === null ? "" : ` (signal ${result.signal})`}:\n`
+      + `${result.stderr || result.stdout || "The command produced no output."}`,
     );
   }
   return result.stdout;
+}
+
+function runNpm(args, cwd) {
+  return run(process.execPath, [npmCli, ...args], cwd);
 }
 
 function readBootstrapUrl(processHandle) {

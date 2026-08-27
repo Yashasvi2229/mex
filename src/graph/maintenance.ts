@@ -1405,7 +1405,10 @@ function fsyncMaintenanceDirectory(paths: MaintenancePaths): void {
 
 function fsyncFile(path: string): void {
   const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
-  const fd = openSync(path, constants.O_RDONLY | noFollow);
+  // Windows requires a write-capable handle for FlushFileBuffers. The
+  // candidate and recovery files are maintenance-owned writable artifacts;
+  // O_RDWR preserves no-follow binding while making fsync portable.
+  const fd = openSync(path, constants.O_RDWR | noFollow);
   try {
     fsyncSync(fd);
   } finally {

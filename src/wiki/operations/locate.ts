@@ -8,12 +8,12 @@
  * pipeline that needed one would be a pipeline that never runs; and a stale one
  * is worse than none, because it answers confidently and wrongly.
  *
- * So the index is used for exactly what it is good at — turning an id into a
- * *candidate file* in one query instead of a scaffold walk — and every fact the
- * plan is built from comes from re-reading and re-parsing that file. If the
- * candidate turns out not to hold the entity, the index was stale and the walk
- * runs anyway. The answer is therefore identical with a fresh index, a stale
- * index, and no index at all; only the cost differs.
+ * The current-filesystem claimant view deliberately does not consult the index.
+ * A caller that has to distinguish one claimant from duplicate ownership must
+ * inspect the complete bounded corpus: an index hit can prove that one file used
+ * to claim an id, but cannot prove that another current file does not claim it.
+ * The answer is therefore identical with a fresh index, a stale index, and no
+ * index at all.
  *
  * **The winner rule is shared, not re-derived.** A duplicate id is a state the
  * index is built to hold (finding 31): both claimants are stored and all but
@@ -32,8 +32,6 @@ import { parseDocument, type RawDocument } from "../markdown/parse.js";
 import type { WikiEntity, EntityTypeRegistry } from "../model/entity.js";
 import { discoverMarkdownFiles } from "../index/discover.js";
 import { entityKeyOf } from "../index/write.js";
-import { openWikiIndex } from "../index/open.js";
-import { defaultIndexPath } from "../index/rebuild.js";
 import { readContainedSource } from "../index/source-read.js";
 import {
   WikiCorpusLimitError,
@@ -61,11 +59,10 @@ export interface LocatedEntity {
 /**
  * A parse cache for one batch run — **keyed on the bytes, never on time.**
  *
- * `locateEntity` walks and re-parses the scaffold for every operation whose id
- * the index cannot place, which is every operation in a migration (a pre-wiki
- * scaffold has no index at all). Sixty-five operations over twenty-five files
- * is sixteen hundred parses of the same unchanged prose, and it is why five
- * migration tests time out at vitest's default five seconds.
+ * `locateEntity` walks and re-parses the scaffold for every operation. Sixty-five
+ * operations over twenty-five files is sixteen hundred parses of the same
+ * unchanged prose, and it is why five migration tests time out at vitest's
+ * default five seconds.
  *
  * The obvious cache — remember a file until something writes it — buys the
  * speed by taking on an invalidation policy, and an invalidation policy is a
@@ -123,6 +120,7 @@ export function createParseCache(): ParseCache {
 
 export interface LocateOptions {
   scaffoldRoot: string;
+  /** Retained for caller compatibility; current claimant resolution never trusts it. */
   indexPath?: string;
   exclude?: readonly string[];
   registry?: EntityTypeRegistry;
@@ -278,66 +276,164 @@ function located(
   };
 }
 
-/** The index's candidate file for `id`, or null when there is no usable index. */
-function candidateFromIndex(options: LocateOptions, id: string): string | null {
-  const indexPath = options.indexPath ?? defaultIndexPath(resolve(options.scaffoldRoot));
-  if (!existsSync(indexPath)) return null;
+/**
+ * Bounded current-filesystem ownership for one entity id.
+ *
+ * `claimantCount` is deliberately saturating: `2` means "two or more". The
+ * consumer needs to distinguish absent, uniquely owned, and ambiguous; retaining
+ * or reporting every duplicate would turn corrupt input into an unbounded result.
+ * The full bounded corpus is still scanned even after the count saturates so a
+ * later corpus-limit violation cannot be hidden by an earlier claimant.
+ */
+export interface LocatedEntityClaimants {
+  winner: LocatedEntity | null;
+  claimantCount: 0 | 1 | 2;
+  ambiguous: boolean;
+}
 
-  // A read never builds one (P3's layering rule), and a failure to open is not
-  // an error here: it means the hint is unavailable, and the walk answers.
-  const opened = openWikiIndex(indexPath);
-  if (!opened.ok) return null;
-  try {
-    const row = opened.index.db
-      .prepare(`SELECT file FROM wiki_entities WHERE id = ? AND shadowed = 0 ORDER BY entity_key LIMIT 1`)
-      .get(id) as { file?: string } | undefined;
-    return typeof row?.file === "string" ? row.file : null;
-  } finally {
-    opened.index.close();
-  }
+export interface AttestedEntityClaimants extends LocatedEntityClaimants {
+  /**
+   * Deterministic evidence for at most three claimants. Two is the largest
+   * valid recovery set; a third entry is a bounded "three or more" witness.
+   */
+  claimantEvidence: readonly {
+    entityKey: string;
+    path: string;
+  }[];
 }
 
 /**
- * Locate the entity `id` names, or null when the scaffold does not hold it.
- *
- * Never throws, and never writes. An unreadable candidate file falls through to
- * the walk exactly as a stale hint does.
+ * The authoritative claimant view is useful only when every discoverable
+ * canonical source was observed. Ordinary locator compatibility still skips an
+ * unreadable source, but mutation preflights and apply revalidation use the
+ * strict attestation below and fail closed on an incomplete walk.
  */
-export function locateEntity(id: string, options: LocateOptions): LocatedEntity | null {
+export class WikiClaimantScanIncompleteError extends Error {
+  readonly code = "WIKI_CLAIMANT_SCAN_INCOMPLETE";
+
+  constructor(readonly reason: "discovery" | "read") {
+    super("The complete bounded Wiki claimant corpus could not be observed safely.");
+    this.name = "WikiClaimantScanIncompleteError";
+  }
+}
+
+/** Saturating increment for the only claimant cardinalities callers can use safely. */
+function incrementClaimantCount(count: 0 | 1 | 2): 1 | 2 {
+  return count === 0 ? 1 : 2;
+}
+
+function claimantCountIsAmbiguous(count: 0 | 1 | 2): boolean {
+  return count === 2;
+}
+
+/**
+ * Inspect canonical Markdown bytes for every current claimant of `id`.
+ *
+ * The deterministic winner is the smallest engine entity key. `preferFile` is
+ * the one deliberate exception: operation replay pins a duplicated move residue
+ * to the source recorded by its durable intent. Ambiguity always reflects the
+ * complete scan, including claimants outside that preferred file.
+ */
+function scanEntityClaimants(
+  id: string,
+  options: LocateOptions,
+  requireCompleteScan: boolean,
+): AttestedEntityClaimants {
   const root = resolve(options.scaffoldRoot);
   let corpusBytes = 0;
   const countedPaths = new Set<string>();
+  const scannedAbsolutePaths = new Set<string>();
+  let winner: LocatedEntity | null = null;
+  let preferredWinner: LocatedEntity | null = null;
+  let claimantCount: 0 | 1 | 2 = 0;
+  const claimantEvidence: Array<{ entityKey: string; path: string }> = [];
+
   const account = (path: string, text: string): void => {
     if (countedPaths.has(path)) return;
     corpusBytes = addWikiCorpusBytes(corpusBytes, Buffer.byteLength(text, "utf8"));
     countedPaths.add(path);
   };
-
-  const hint = options.preferFile ?? candidateFromIndex(options, id);
-  if (hint !== null) {
-    const absolute = resolve(root, hint);
-    const read = readParsed(options, hint, absolute);
-    if (read !== null) account(hint, read.text);
-    const claimants = read === null ? [] : claimantsIn(read.parsed, id);
-    if (read !== null && claimants.length > 0) {
-      return located(hint, absolute, read.text, read.parsed, claimants[0]!);
+  const inspect = (
+    path: string,
+    absolutePath: string,
+    preferred: boolean,
+    discovered: boolean,
+  ): void => {
+    const absolute = resolve(absolutePath);
+    if (scannedAbsolutePaths.has(absolute)) return;
+    const read = readParsed(options, path, absolute);
+    if (read === null) {
+      if (requireCompleteScan && discovered) {
+        throw new WikiClaimantScanIncompleteError("read");
+      }
+      // Preserve the tolerant locator's historical single-attempt behavior.
+      // Strict attestation deliberately retries a failed optional replay hint
+      // when canonical discovery later proves that path is mandatory.
+      if (!requireCompleteScan) scannedAbsolutePaths.add(absolute);
+      return;
     }
-    // The hint was stale. Fall through rather than reporting "not found": the
-    // scaffold is the record, and the index is a cache that may be behind it.
+    scannedAbsolutePaths.add(absolute);
+    account(path, read.text);
+    for (const claimant of claimantsIn(read.parsed, id)) {
+      const candidate = located(path, absolute, read.text, read.parsed, claimant);
+      claimantCount = incrementClaimantCount(claimantCount);
+      if (claimantEvidence.length < 3) {
+        claimantEvidence.push({ entityKey: candidate.entityKey, path: candidate.path });
+      }
+      if (winner === null || candidate.entityKey < winner.entityKey) winner = candidate;
+      if (preferred && (preferredWinner === null || candidate.entityKey < preferredWinner.entityKey)) {
+        preferredWinner = candidate;
+      }
+    }
+  };
+
+  if (options.preferFile !== undefined) {
+    // A replay hint may name a source that an interrupted move already removed.
+    // Only files returned by canonical discovery are mandatory observations.
+    inspect(options.preferFile, resolve(root, options.preferFile), true, false);
   }
 
   const discovery = discoverMarkdownFiles({ root, exclude: options.exclude });
-  let best: LocatedEntity | null = null;
-  for (const file of discovery.files) {
-    const read = readParsed(options, file.path, file.absolutePath);
-    if (read === null) continue;
-    account(file.path, read.text);
-    for (const claimant of claimantsIn(read.parsed, id)) {
-      const candidate = located(file.path, file.absolutePath, read.text, read.parsed, claimant);
-      if (best === null || candidate.entityKey < best.entityKey) best = candidate;
-    }
+  if (requireCompleteScan && discovery.diagnostics.length > 0) {
+    throw new WikiClaimantScanIncompleteError("discovery");
   }
-  return best;
+  for (const file of discovery.files) inspect(file.path, file.absolutePath, false, true);
+
+  const resolvedWinner = preferredWinner ?? winner;
+  return {
+    winner: resolvedWinner,
+    claimantCount,
+    ambiguous: claimantCountIsAmbiguous(claimantCount),
+    claimantEvidence,
+  };
+}
+
+export function locateEntityClaimants(id: string, options: LocateOptions): LocatedEntityClaimants {
+  const scanned = scanEntityClaimants(id, options, false);
+  return {
+    winner: scanned.winner,
+    claimantCount: scanned.claimantCount,
+    ambiguous: scanned.ambiguous,
+  };
+}
+
+/**
+ * Complete bounded claimant attestation for optimistic mutation boundaries.
+ * Unlike the compatibility locator, this never turns an unreadable or
+ * diagnostically incomplete corpus into a trusted absence/unique answer.
+ */
+export function attestEntityClaimants(id: string, options: LocateOptions): AttestedEntityClaimants {
+  return scanEntityClaimants(id, options, true);
+}
+
+/**
+ * Locate the entity `id` names, or null when the scaffold does not hold it.
+ *
+ * Never writes. Unreadable files are skipped, while a corpus safety-limit
+ * violation is surfaced so callers cannot trust a partial scan.
+ */
+export function locateEntity(id: string, options: LocateOptions): LocatedEntity | null {
+  return scanEntityClaimants(id, options, false).winner;
 }
 
 export interface LocatedFile {

@@ -337,7 +337,61 @@ export interface WikiOperationPreview<TOperationPlan = unknown> {
   changes: readonly FileChange[];
   affectedEntities: readonly EntityRef[];
   validation: WikiValidationReport;
+  /** Bounded, body-free restart metadata; never an executable plan handle. */
+  recoveryManifest?: WikiOperationRecoveryManifest;
 }
+
+export interface WikiOperationRecoveryManifest {
+  schemaVersion: 1;
+  requestHash: Revision;
+  operationId: string;
+  items: readonly {
+    operationId: string;
+    type: WikiOperationType;
+    payloadHash: Revision;
+    createdIds: readonly EntityId[];
+    files: readonly {
+      path: RepoRelativePath;
+      beforeRevision: Revision | null;
+      afterRevision: Revision;
+    }[];
+    revisions: readonly {
+      entityId: EntityId;
+      before: number;
+      after: number;
+    }[];
+    audit: {
+      beforeRevision: Revision | null;
+      afterRevision: Revision;
+    };
+  }[];
+}
+
+export type WikiOperationRecoveryInspection =
+  | {
+      schemaVersion: 1;
+      state: "none";
+      operationIds: readonly string[];
+    }
+  | {
+      schemaVersion: 1;
+      state: "prefix";
+      operationIds: readonly string[];
+      completedOperationIds: readonly string[];
+      activeOperationId: string | null;
+    }
+  | {
+      schemaVersion: 1;
+      state: "complete";
+      operationIds: readonly string[];
+      completedOperationIds: readonly string[];
+    }
+  | {
+      schemaVersion: 1;
+      state: "mismatch";
+      operationIds: readonly string[];
+      reason: "authority_mismatch" | "invalid_prefix" | "audit_unsafe";
+    };
 
 export interface WikiOperationApplyRequest<
   TOperationPayload = JsonValue,
@@ -463,6 +517,14 @@ export interface WikiPort<
   getNeighborhood(request: WikiNeighborhoodRequest): Promise<WikiEntityNeighborhood>;
   getGroundingStatus(id: EntityId): Promise<readonly WikiGroundingResolution[]>;
   validate(request?: WikiValidationRequest): Promise<WikiValidationReport>;
+  /**
+   * Validate optimistic mutation preconditions against bounded canonical
+   * filesystem truth. This must not trust wiki.db, initialize storage, refresh,
+   * rebuild, or write. Duplicate entity claimants fail closed.
+   */
+  validateCurrentRevisionExpectations(
+    expectations: readonly WikiRevisionExpectation[],
+  ): Promise<void>;
   previewOperations(
     request: WikiOperationRequest<TOperationPayload>,
   ): Promise<WikiOperationPreview<TOperationPlan>>;

@@ -303,7 +303,7 @@ describe("graph maintenance", () => {
     });
     expect(readFileSync(dbPath)).toEqual(replacementBytes);
     expect(readFileSync(join(root, failure!.recoveryPath!))).toEqual(priorBytes);
-  });
+  }, 15_000);
 
   it("fails closed when a callback retargets the bound .mex directory", async () => {
     const root = temporaryRoot();

@@ -90,7 +90,7 @@ export const WIKI_DIAGNOSTICS = {
   // -- Identity and entity structure -----------------------------------------
   INVALID_ENTITY_ID: {
     severity: "error",
-    remediation: "Entity ids are `mx_` plus 26 Crockford Base32 characters. Do not hand-edit them; MEX assigns them.",
+    remediation: "Entity ids use a registered lower-case owner prefix plus 26 upper-case Crockford Base32 characters. Wiki assigns `mx_` ids; Team repositories assign their own prefixes. Do not hand-edit them.",
   },
   DUPLICATE_ENTITY_ID: {
     severity: "error",

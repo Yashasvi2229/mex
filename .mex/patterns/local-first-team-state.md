@@ -12,7 +12,7 @@ edges:
   - target: "context/conventions.md"
     condition: "when changing canonical serialization or validation"
 grounds_to: []
-last_updated: 2026-08-23
+last_updated: 2026-08-27
 ---
 
 # Local-First Team State
@@ -35,6 +35,12 @@ under `.mex/local/`. Legacy `events/decisions.jsonl` stays byte-for-byte compati
    write transaction, and require exact revisions plus explicit branch resets.
 6. Preserve recorded actors/events. Resolve current display identity as a separate
    projection and surface ambiguity instead of guessing.
+7. Serialize mixed canonical/local workflows behind one repository workflow
+   lease. Journal only bounded IDs, revisions, paths, hashes, authority, and
+   phase state; publish canonical bytes before local cleanup.
+8. Treat exact replay as a bounded retained window. A completed journal row is
+   terminal proof; incomplete replay must prove branch/HEAD and every durable
+   effect before writing, cleaning up, or advancing a phase.
 
 ## Gotchas
 
@@ -47,6 +53,13 @@ under `.mex/local/`. Legacy `events/decisions.jsonl` stays byte-for-byte compati
   into team-state code.
 - Production code writes files only. Git publication belongs to the human or test
   harness.
+- A page cursor must bind both its filter and the complete bounded corpus
+  revision; a position-only cursor can silently skip records after mutation.
+- Filesystem collection locks need bounded owner metadata and proven-dead
+  recovery. Never remove a live, malformed, foreign-root, or symlinked lock.
+- A process-local Wiki patch handle is not recovery state. Persist a body-free
+  manifest before apply, require a new preview when nothing landed, and resume
+  only an exact operation-specific audit prefix when canonical bytes landed.
 
 ## Verify
 

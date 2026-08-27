@@ -62,7 +62,7 @@ describe("contained artifact publication failure", () => {
     atomicCreateArtifact(root, path, before);
 
     publicationFault.enabled = true;
-    expect(() => atomicReplaceArtifact(root, path, revisionOf(before), after))
+    expect(() => atomicReplaceArtifact(root, path, revisionOf(before), after, 64 * 1024))
       .toThrow(/injected publication failure/);
     publicationFault.enabled = false;
 

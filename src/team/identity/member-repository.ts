@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { opendirSync } from "node:fs";
 import type { FileChange, RepoRelativePath, Revision } from "../contracts/shared.js";
 import { isRevision } from "../contracts/shared.js";
 import type { MemberGitAlias, TeamMember } from "../contracts/workflow.js";
@@ -13,6 +13,7 @@ import {
   assertContainedArtifactDirectory,
   atomicCreateArtifact,
   atomicReplaceArtifact,
+  canonicalizeProjectRoot,
   tryReadContainedArtifact,
   withContainedArtifactLock,
 } from "../artifacts/filesystem.js";
@@ -22,6 +23,12 @@ import { canonicalFileDiff } from "../artifacts/unified-diff.js";
 import { normalizeGitEmail } from "./aliases.js";
 
 const MEMBERS_DIRECTORY = ".mex/team/members" as RepoRelativePath;
+
+export const MEMBER_REPOSITORY_LIMITS = {
+  maxDirectoryEntries: 4_096,
+  maxRecords: 2_048,
+  maxCorpusBytes: 32 * 1024 * 1024,
+} as const;
 
 export interface MemberCreateInput {
   id?: string;
@@ -79,7 +86,7 @@ export class MemberRepository implements MemberReader {
   readonly #idFactory: () => string;
 
   constructor(projectRoot: string, options: MemberRepositoryOptions = {}) {
-    this.#projectRoot = projectRoot;
+    this.#projectRoot = canonicalizeProjectRoot(projectRoot);
     this.#idFactory = options.idFactory ?? (() => generateArtifactId("member"));
   }
 
@@ -90,12 +97,31 @@ export class MemberRepository implements MemberReader {
   }
 
   async list(): Promise<readonly TeamMember[]> {
+    return this.#list(false);
+  }
+
+  async #list(ignoreCollectionLock: boolean): Promise<readonly TeamMember[]> {
     const directory = assertContainedArtifactDirectory(this.#projectRoot, MEMBERS_DIRECTORY);
     if (directory === null) return [];
 
-    const paths = readdirSync(directory, { withFileTypes: true })
-      .filter((entry) => entry.name.endsWith(".md"))
-      .map((entry) => {
+    const paths: RepoRelativePath[] = [];
+    const handle = opendirSync(directory);
+    let entries = 0;
+    try {
+      for (;;) {
+        const entry = handle.readSync();
+        if (entry === null) break;
+        if (ignoreCollectionLock && entry.name === ".members.mex-lock") continue;
+        entries += 1;
+        if (entries > MEMBER_REPOSITORY_LIMITS.maxDirectoryEntries) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Member directory is too large",
+            `Member directory exceeds ${MEMBER_REPOSITORY_LIMITS.maxDirectoryEntries} entries.`,
+            MEMBERS_DIRECTORY,
+          );
+        }
+        if (!entry.name.endsWith(".md")) continue;
         if (!entry.isFile()) {
           throw artifactError(
             "PATH_OUTSIDE_PROJECT",
@@ -103,10 +129,22 @@ export class MemberRepository implements MemberReader {
             `Member entry ${entry.name} must be a regular file.`,
           );
         }
-        return `${MEMBERS_DIRECTORY}/${entry.name}` as RepoRelativePath;
-      })
-      .sort(compareCodePoints);
+        paths.push(`${MEMBERS_DIRECTORY}/${entry.name}` as RepoRelativePath);
+        if (paths.length > MEMBER_REPOSITORY_LIMITS.maxRecords) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Member collection is too large",
+            `Member collection exceeds ${MEMBER_REPOSITORY_LIMITS.maxRecords} records.`,
+            MEMBERS_DIRECTORY,
+          );
+        }
+      }
+    } finally {
+      handle.closeSync();
+    }
+    paths.sort(compareCodePoints);
 
+    let corpusBytes = 0;
     return paths.map((path) => {
       const stored = tryReadContainedArtifact(this.#projectRoot, path, MEMBER_ARTIFACT_MAX_BYTES);
       if (stored === null) {
@@ -114,6 +152,15 @@ export class MemberRepository implements MemberReader {
           "REVISION_CONFLICT",
           "Member changed during listing",
           `Member ${path} disappeared while members were being listed.`,
+          path,
+        );
+      }
+      corpusBytes += stored.bytes.byteLength;
+      if (corpusBytes > MEMBER_REPOSITORY_LIMITS.maxCorpusBytes) {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Member corpus is too large",
+          `Member corpus exceeds ${MEMBER_REPOSITORY_LIMITS.maxCorpusBytes} bytes.`,
           path,
         );
       }
@@ -145,6 +192,7 @@ export class MemberRepository implements MemberReader {
       );
     }
     await this.#assertUniqueEmails(candidate, null);
+    this.#assertWriteCapacity("create", path, document);
     const change: FileChange = {
       kind: "create",
       path,
@@ -219,6 +267,7 @@ export class MemberRepository implements MemberReader {
       );
     }
     const before = new TextDecoder("utf-8", { fatal: true }).decode(beforeRead.bytes);
+    this.#assertWriteCapacity("update", current.sourcePath, document);
     const change: FileChange = {
       kind: "update",
       path: current.sourcePath,
@@ -258,6 +307,7 @@ export class MemberRepository implements MemberReader {
             );
           }
           await this.#assertUniqueEmails(candidate, null);
+          this.#assertWriteCapacity("create", candidate.sourcePath, plan.document);
           atomicCreateArtifact(this.#projectRoot, candidate.sourcePath, plan.document);
         } else {
           const current = await this.get(candidate.ref.id);
@@ -270,12 +320,14 @@ export class MemberRepository implements MemberReader {
             );
           }
           await this.#assertUniqueEmails(candidate, candidate.ref.id);
+          this.#assertWriteCapacity("update", candidate.sourcePath, plan.document);
           if (candidate.revision !== current.revision) {
             atomicReplaceArtifact(
               this.#projectRoot,
               candidate.sourcePath,
               plan.beforeRevision,
               plan.document,
+              MEMBER_ARTIFACT_MAX_BYTES,
             );
           }
         }
@@ -354,7 +406,7 @@ export class MemberRepository implements MemberReader {
     );
     if (candidateEmails.size === 0) return;
 
-    for (const member of await this.list()) {
+    for (const member of await this.#list(true)) {
       if (member.ref.id === excludedMemberId) continue;
       const collision = member.gitAliases.some((alias) => {
         const email = normalizeGitEmail(alias.email);
@@ -368,6 +420,143 @@ export class MemberRepository implements MemberReader {
           candidate.sourcePath,
         );
       }
+    }
+  }
+
+  #assertWriteCapacity(
+    kind: "create" | "update",
+    targetPath: RepoRelativePath,
+    document: string,
+  ): void {
+    const directory = assertContainedArtifactDirectory(this.#projectRoot, MEMBERS_DIRECTORY);
+    const candidateBytes = Buffer.byteLength(document, "utf8");
+    if (directory === null) {
+      if (kind === "update") {
+        throw artifactError(
+          "REVISION_CONFLICT",
+          "Member preview is stale",
+          `Member ${targetPath} disappeared while collection capacity was checked.`,
+          targetPath,
+        );
+      }
+      if (candidateBytes > MEMBER_REPOSITORY_LIMITS.maxCorpusBytes) {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Member corpus is too large",
+          `Member corpus would exceed ${MEMBER_REPOSITORY_LIMITS.maxCorpusBytes} bytes.`,
+          targetPath,
+        );
+      }
+      return;
+    }
+
+    const handle = opendirSync(directory);
+    let directoryEntries = 0;
+    let records = 0;
+    let projectedCorpusBytes = candidateBytes;
+    let foundTarget = false;
+    try {
+      for (;;) {
+        const entry = handle.readSync();
+        if (entry === null) break;
+        // The collection lock is transient and cannot remain after this operation.
+        if (entry.name === ".members.mex-lock") continue;
+        directoryEntries += 1;
+        if (directoryEntries > MEMBER_REPOSITORY_LIMITS.maxDirectoryEntries) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Member directory is too large",
+            `Member directory exceeds ${MEMBER_REPOSITORY_LIMITS.maxDirectoryEntries} entries.`,
+            MEMBERS_DIRECTORY,
+          );
+        }
+        if (!entry.name.endsWith(".md")) continue;
+        if (!entry.isFile()) {
+          throw artifactError(
+            "PATH_OUTSIDE_PROJECT",
+            "Unsafe member artifact",
+            `Member entry ${entry.name} must be a regular file.`,
+            MEMBERS_DIRECTORY,
+          );
+        }
+        records += 1;
+        if (records > MEMBER_REPOSITORY_LIMITS.maxRecords) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Member collection is too large",
+            `Member collection exceeds ${MEMBER_REPOSITORY_LIMITS.maxRecords} records.`,
+            MEMBERS_DIRECTORY,
+          );
+        }
+        const path = `${MEMBERS_DIRECTORY}/${entry.name}` as RepoRelativePath;
+        if (path === targetPath) {
+          foundTarget = true;
+          if (kind === "create") {
+            throw artifactError(
+              "REVISION_CONFLICT",
+              "Member preview is stale",
+              `Member ${targetPath} already exists.`,
+              targetPath,
+            );
+          }
+          continue;
+        }
+        const stored = tryReadContainedArtifact(this.#projectRoot, path, MEMBER_ARTIFACT_MAX_BYTES);
+        if (stored === null) {
+          throw artifactError(
+            "REVISION_CONFLICT",
+            "Member changed during capacity check",
+            `Member ${path} disappeared while collection capacity was checked.`,
+            path,
+          );
+        }
+        projectedCorpusBytes += stored.bytes.byteLength;
+        if (projectedCorpusBytes > MEMBER_REPOSITORY_LIMITS.maxCorpusBytes) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Member corpus is too large",
+            `Member corpus would exceed ${MEMBER_REPOSITORY_LIMITS.maxCorpusBytes} bytes.`,
+            targetPath,
+          );
+        }
+      }
+    } finally {
+      handle.closeSync();
+    }
+
+    const projectedEntries = directoryEntries + (kind === "create" ? 1 : 0);
+    const projectedRecords = records + (kind === "create" ? 1 : 0);
+    if (projectedEntries > MEMBER_REPOSITORY_LIMITS.maxDirectoryEntries) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Member directory is full",
+        `Creating ${targetPath} would exceed ${MEMBER_REPOSITORY_LIMITS.maxDirectoryEntries} directory entries.`,
+        targetPath,
+      );
+    }
+    if (projectedRecords > MEMBER_REPOSITORY_LIMITS.maxRecords) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Member collection is full",
+        `Creating ${targetPath} would exceed ${MEMBER_REPOSITORY_LIMITS.maxRecords} records.`,
+        targetPath,
+      );
+    }
+    if (kind === "update" && !foundTarget) {
+      throw artifactError(
+        "REVISION_CONFLICT",
+        "Member preview is stale",
+        `Member ${targetPath} disappeared while collection capacity was checked.`,
+        targetPath,
+      );
+    }
+    if (projectedCorpusBytes > MEMBER_REPOSITORY_LIMITS.maxCorpusBytes) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Member corpus is too large",
+        `Member corpus would exceed ${MEMBER_REPOSITORY_LIMITS.maxCorpusBytes} bytes.`,
+        targetPath,
+      );
     }
   }
 }

@@ -32,6 +32,7 @@ import type {
 import type { ProjectHealth } from "../src/team/contracts/health.js";
 import type { FileChange, RepoState } from "../src/team/contracts/shared.js";
 import type {
+  PreparedTeamWorkflowCommand,
   TeamWorkflowApplyRequest,
   TeamWorkflowCommand,
 } from "../src/team/contracts/workflow.js";
@@ -206,8 +207,6 @@ describe("human-team application contract lock", () => {
     type WikiPlan = { readonly operations: readonly { readonly kind: string }[] };
     const command: TeamWorkflowCommand<WikiPlan> = {
       operationId: "op-1",
-      actor: { kind: "member", memberId: "member-1" },
-      occurredAt: "2026-08-22T00:00:00.000Z",
       expectedRevisions: [{
         target: { kind: "entity", id: "ws_contract" },
         revision: "b".repeat(64),
@@ -219,8 +218,21 @@ describe("human-team application contract lock", () => {
         patch: { summary: "Checkpoint 0 contracts locked" },
       },
     };
+    const prepared: PreparedTeamWorkflowCommand<WikiPlan> = {
+      ...command,
+      authority: {
+        actor: { kind: "unknown" },
+        occurredAt: "2026-08-22T00:00:00.000Z",
+        repoState: {
+          branch: "integration/human-team-memory-v1",
+          head: "a".repeat(40),
+          dirty: false,
+          observedAt: "2026-08-22T00:00:00.000Z",
+        },
+      },
+    };
     const request: TeamWorkflowApplyRequest<WikiPlan> = {
-      command,
+      command: prepared,
       expectedPreviewRevision: "a".repeat(64),
     };
 

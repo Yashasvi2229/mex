@@ -4,6 +4,8 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,7 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { memberArtifactPath, serializeMemberArtifact } from "../../artifacts/codecs.js";
 import { atomicCreateArtifact, atomicReplaceArtifact } from "../../artifacts/filesystem.js";
 import { generateArtifactId } from "../../artifacts/ulid.js";
-import { MemberRepository } from "../member-repository.js";
+import { MEMBER_REPOSITORY_LIMITS, MemberRepository } from "../member-repository.js";
 
 const roots: string[] = [];
 
@@ -113,7 +115,7 @@ describe("MemberRepository", () => {
       gitAliases: [],
       active: true,
     });
-    atomicReplaceArtifact(root, created.sourcePath, created.revision, concurrent);
+    atomicReplaceArtifact(root, created.sourcePath, created.revision, concurrent, 64 * 1024);
 
     await expect(repository.apply(preview, preview.previewRevision)).rejects.toMatchObject({
       problem: { code: "REVISION_CONFLICT" },
@@ -181,6 +183,140 @@ describe("MemberRepository", () => {
       problem: { code: "VALIDATION_FAILED" },
     });
   });
+
+  it("fails closed before materializing an oversized member collection", async () => {
+    const root = temporaryRoot();
+    const directory = join(root, ".mex", "team", "members");
+    mkdirSync(directory, { recursive: true });
+    for (let index = 0; index <= MEMBER_REPOSITORY_LIMITS.maxRecords; index += 1) {
+      writeFileSync(join(directory, `${String(index).padStart(4, "0")}.md`), "", "utf8");
+    }
+
+    await expect(new MemberRepository(root).list()).rejects.toMatchObject({
+      problem: { code: "VALIDATION_FAILED" },
+    });
+  });
+
+  it("rejects creates that would exceed directory or record capacity and rechecks after preview", async () => {
+    await withMemberRepositoryLimits({
+      maxDirectoryEntries: 10,
+      maxRecords: 1,
+      maxCorpusBytes: 1_000_000,
+    }, async () => {
+      const root = temporaryRoot();
+      const repository = new MemberRepository(root);
+      const pending = await repository.previewCreate({
+        id: memberId(11), displayName: "Pending", gitAliases: [],
+      });
+      const occupied = await repository.previewCreate({
+        id: memberId(12), displayName: "Occupied", gitAliases: [],
+      });
+      await repository.apply(occupied, occupied.previewRevision);
+
+      await expect(repository.previewCreate({
+        id: memberId(13), displayName: "Too many", gitAliases: [],
+      })).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
+      await expect(repository.apply(pending, pending.previewRevision)).rejects.toMatchObject({
+        problem: { code: "VALIDATION_FAILED" },
+      });
+      expect(await repository.get(memberId(11))).toBeNull();
+    });
+
+    await withMemberRepositoryLimits({
+      maxDirectoryEntries: 1,
+      maxRecords: 10,
+      maxCorpusBytes: 1_000_000,
+    }, async () => {
+      const root = temporaryRoot();
+      const repository = new MemberRepository(root);
+      const pending = await repository.previewCreate({
+        id: memberId(14), displayName: "No directory slot", gitAliases: [],
+      });
+      const directory = join(root, ".mex", "team", "members");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "README"), "reserved", "utf8");
+
+      await expect(repository.previewCreate({
+        id: memberId(15), displayName: "No directory slot", gitAliases: [],
+      })).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
+      await expect(repository.apply(pending, pending.previewRevision)).rejects.toMatchObject({
+        problem: { code: "VALIDATION_FAILED" },
+      });
+    });
+
+    await withMemberRepositoryLimits({
+      maxDirectoryEntries: 10,
+      maxRecords: 10,
+      maxCorpusBytes: 1_000_000,
+    }, async (limits) => {
+      const root = temporaryRoot();
+      const repository = new MemberRepository(root);
+      const pending = await repository.previewCreate({
+        id: memberId(16), displayName: "Corpus pending", gitAliases: [],
+      });
+      limits.maxCorpusBytes = Buffer.byteLength(pending.document, "utf8");
+      const directory = join(root, ".mex", "team", "members");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "occupied.md"), "x", "utf8");
+
+      await expect(repository.previewCreate({
+        id: memberId(17), displayName: "Corpus pending", gitAliases: [],
+      })).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
+      await expect(repository.apply(pending, pending.previewRevision)).rejects.toMatchObject({
+        problem: { code: "VALIDATION_FAILED" },
+      });
+    });
+  });
+
+  it("uses replacement bytes for projected member corpus capacity", async () => {
+    await withMemberRepositoryLimits({
+      maxDirectoryEntries: 10,
+      maxRecords: 10,
+      maxCorpusBytes: 1_000_000,
+    }, async (limits) => {
+      const root = temporaryRoot();
+      const id = memberId(18);
+      const repository = new MemberRepository(root);
+      const created = await repository.create({
+        id,
+        displayName: "A deliberately long canonical member display name",
+        gitAliases: [],
+      });
+      const shrink = await repository.previewUpdate(id, { displayName: "Short" }, created.revision);
+      limits.maxCorpusBytes = Buffer.byteLength(shrink.document, "utf8");
+
+      const boundedShrink = await repository.previewUpdate(id, { displayName: "Short" }, created.revision);
+      const updated = (await repository.apply(boundedShrink, boundedShrink.previewRevision)).member;
+      expect(updated.displayName).toBe("Short");
+
+      await expect(repository.previewUpdate(id, {
+        displayName: "A display name that grows beyond the newly bounded corpus",
+      }, updated.revision)).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
+    });
+  });
+
+  it("binds a symlinked project root before preview so apply cannot follow a target swap", async () => {
+    const container = temporaryRoot();
+    const original = join(container, "original");
+    const replacement = join(container, "replacement");
+    const link = join(container, "project");
+    mkdirSync(original);
+    mkdirSync(replacement);
+    symlinkSync(original, link);
+    const repository = new MemberRepository(link);
+    const preview = await repository.previewCreate({
+      id: memberId(10),
+      displayName: "Bound Root",
+      gitAliases: [],
+    });
+
+    unlinkSync(link);
+    symlinkSync(replacement, link);
+    await repository.apply(preview, preview.previewRevision);
+
+    expect(readFileSync(join(original, ...preview.change.path.split("/")), "utf8")).toBe(preview.document);
+    expect(() => statSync(join(replacement, ...preview.change.path.split("/")))).toThrow();
+  });
 });
 
 function memberId(fill: number): string {
@@ -194,4 +330,24 @@ function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "mex-lane-c-members-"));
   roots.push(root);
   return root;
+}
+
+interface MutableMemberRepositoryLimits {
+  maxDirectoryEntries: number;
+  maxRecords: number;
+  maxCorpusBytes: number;
+}
+
+async function withMemberRepositoryLimits(
+  overrides: Partial<MutableMemberRepositoryLimits>,
+  operation: (limits: MutableMemberRepositoryLimits) => Promise<void>,
+): Promise<void> {
+  const limits = MEMBER_REPOSITORY_LIMITS as unknown as MutableMemberRepositoryLimits;
+  const original = { ...limits };
+  Object.assign(limits, overrides);
+  try {
+    await operation(limits);
+  } finally {
+    Object.assign(limits, original);
+  }
 }

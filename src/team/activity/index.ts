@@ -10,6 +10,7 @@ export {
 export type {
   ActivityCreateInput,
   ActivityCreatePreview,
+  PreparedActivityAuthority,
   ActivityListPage,
   ActivityReadResult,
   ActivityRepositoryOptions,

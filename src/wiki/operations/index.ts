@@ -38,6 +38,8 @@ export type {
 
 export {
   OPERATION_LOG_FILE,
+  OPERATION_LOG_MAX_BYTES,
+  OPERATION_LOG_MAX_ENTRIES,
   acceptedOperations,
   appendAudit,
   auditRecord,
@@ -47,8 +49,20 @@ export {
 } from "./audit.js";
 export type { AuditEntry, AuditLog, AuditPhase, OperationRecord } from "./audit.js";
 
-export { locateEntity, locateFile } from "./locate.js";
-export type { LocateOptions, LocatedEntity, LocatedFile } from "./locate.js";
+export {
+  attestEntityClaimants,
+  locateEntity,
+  locateEntityClaimants,
+  locateFile,
+  WikiClaimantScanIncompleteError,
+} from "./locate.js";
+export type {
+  AttestedEntityClaimants,
+  LocateOptions,
+  LocatedEntity,
+  LocatedEntityClaimants,
+  LocatedFile,
+} from "./locate.js";
 
 export {
   assertWritablePath,

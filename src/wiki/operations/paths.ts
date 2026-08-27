@@ -9,9 +9,10 @@
  *    calls, because a read side and a write side that disagree about "inside
  *    the scaffold" is its own class of bug (handoff §29.9). The symlink half is
  *    here, because the write side has two problems the read side never had.
- * 2. **Read-only reservation.** `wiki.readOnly` has been loaded since P3 and
- *    enforced nowhere. It is enforced at plan time, before a preview exists —
- *    a preview of a change that can never be applied is worse than a refusal.
+ * 2. **Read-only reservation.** TeamWorkflowPort-owned paths are immutable to
+ *    Wiki regardless of configuration. Project `wiki.readOnly` globs add more
+ *    reservations. Both are enforced at plan time, before a preview exists — a
+ *    preview of a change that can never be applied is worse than a refusal.
  * 3. **Writability.** Is this a Markdown file, or the temp file about to become
  *    one? That is the runtime guard behind `apply.ts`'s lint exemption,
  *    following `dbfile.ts`'s pattern: a lint rule cannot tell that
@@ -50,6 +51,21 @@ const MARKDOWN = /\.mdx?$/i;
 const TEMP_SUFFIX = /\.mdx?(?:\.recovery-[0-9a-z]+)?\.tmp-[0-9a-z]+$/i;
 /** Exact prior bytes retained only when in-process rollback itself fails. */
 const RECOVERY_SUFFIX = /\.mdx?\.recovery-[0-9a-z]+$/i;
+
+/**
+ * Canonical TeamWorkflowPort paths that Wiki may index but must never write.
+ *
+ * This is an engine invariant, not a configurable default. An empty or custom
+ * `wiki.readOnly` list therefore cannot transfer ownership to Wiki.
+ */
+export const TEAM_OWNED_READ_ONLY_PATHS = [
+  "team/**",
+  "workstreams/**",
+  "inbox/**",
+  "relays/**",
+  "playbooks/**",
+  "events/activity/**",
+] as const;
 
 export class WritePathError extends Error {
   readonly path: string;
@@ -142,22 +158,33 @@ export function checkContainment(scaffoldRoot: string, relativePath: string): Co
 }
 
 /**
- * Is this path reserved read-only by `wiki.readOnly`?
+ * Is this path reserved from Wiki writes?
  *
- * Matched against the scaffold-relative POSIX path with the same glob matcher
- * `wiki.exclude` uses, so the two settings cannot come to mean different things
- * about the same pattern.
+ * Hard team ownership is checked first and cannot be configured away. Project
+ * patterns are matched against the scaffold-relative POSIX path with the same
+ * glob matcher `wiki.exclude` uses, so the settings cannot come to mean
+ * different things about the same pattern.
  */
 export function isReadOnlyPath(relativePath: string, readOnly: readonly string[]): boolean {
-  return matchesAnyGlob(toPosix(relativePath), readOnly);
+  const path = toPosix(relativePath);
+  return isTeamOwnedReadOnlyPath(path) || matchesAnyGlob(path, readOnly);
+}
+
+/** True when the path is under an invariant TeamWorkflowPort-owned root. */
+export function isTeamOwnedReadOnlyPath(relativePath: string): boolean {
+  return matchesAnyGlob(toPosix(relativePath).toLowerCase(), TEAM_OWNED_READ_ONLY_PATHS);
 }
 
 /** The diagnostic a plan returns when its target is reserved. */
 export function readOnlyDiagnostic(relativePath: string): WikiDiagnostic {
+  const path = toPosix(relativePath);
+  const reason = isTeamOwnedReadOnlyPath(path)
+    ? "is owned by TeamWorkflowPort and is always read-only to Wiki"
+    : "is reserved read-only by wiki.readOnly";
   return diagnostic(
     "WRITE_SCOPE_VIOLATION",
-    `${toPosix(relativePath)} is reserved read-only by wiki.readOnly. Nothing was written.`,
-    { file: toPosix(relativePath) },
+    `${path} ${reason}. Nothing was written.`,
+    { file: path },
   );
 }
 
