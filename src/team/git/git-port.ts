@@ -551,13 +551,14 @@ class ReadOnlyRepositoryGitPort implements GitPort {
       throw internalFailure("The Git repository path exceeded the safe output limit.");
     }
     const reportedRoot = stripOneLineEnding(decodeUtf8(rootResult.stdout));
-    let canonicalReportedRoot: string;
+    let reportedRootIdentity: NodeIdentity;
     try {
-      canonicalReportedRoot = realpathSync(reportedRoot);
+      const canonicalReportedRoot = realpathSync(reportedRoot);
+      reportedRootIdentity = captureDirectory(canonicalReportedRoot);
     } catch {
       throw internalFailure("Git reported an inaccessible repository root.");
     }
-    if (canonicalReportedRoot !== this.#projectRoot) {
+    if (!sameNodeIdentity(reportedRootIdentity, this.#projectRootIdentity)) {
       throw invalidRequest(
         "The project root must be the repository top-level directory.",
       );

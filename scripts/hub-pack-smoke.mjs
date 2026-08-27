@@ -202,6 +202,7 @@ try {
       : null;
     const detail = JSON.stringify({
       homeStatus: home.status,
+      homeProblemCode: typeof homeBody?.code === "string" ? homeBody.code : null,
       homeActivity: homeBody.sections?.activity ?? null,
       activityStatus: activity.status,
       canonicalActivityCount: Array.isArray(activityBody?.items)

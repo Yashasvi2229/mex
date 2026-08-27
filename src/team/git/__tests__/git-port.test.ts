@@ -5,12 +5,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import type { GitPage, GitWorkingTreeEntry } from "../../contracts/git.js";
@@ -83,6 +85,50 @@ describe("read-only repository GitPort", () => {
         }),
       ]),
     );
+  });
+
+  it("accepts equivalent top-level roots when Git and Node preserve different casing", async () => {
+    const repository = createRepository(true);
+    const repositoryName = basename(repository);
+    const alternateName = repositoryName.replace(/[A-Za-z]/u, (character) =>
+      character === character.toUpperCase()
+        ? character.toLowerCase()
+        : character.toUpperCase(),
+    );
+    const alternateRoot = join(dirname(repository), alternateName);
+
+    let requestedRoot: string;
+    let reportedRoot: string;
+    try {
+      requestedRoot = realpathSync(alternateRoot);
+      const reported = execFileSync(
+        "git",
+        ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        { cwd: requestedRoot, encoding: "utf8" },
+      ).trim();
+      reportedRoot = realpathSync(reported);
+    } catch {
+      // Case-sensitive or case-normalizing filesystems cannot expose this alias.
+      return;
+    }
+    if (requestedRoot === reportedRoot) return;
+
+    const requestedIdentity = statSync(requestedRoot, { bigint: true });
+    const reportedIdentity = statSync(reportedRoot, { bigint: true });
+    expect({
+      device: requestedIdentity.dev,
+      inode: requestedIdentity.ino,
+      birthtimeNs: requestedIdentity.birthtimeNs,
+    }).toEqual({
+      device: reportedIdentity.dev,
+      inode: reportedIdentity.ino,
+      birthtimeNs: reportedIdentity.birthtimeNs,
+    });
+
+    await expect(createRepositoryGitPort(alternateRoot).getRepoState()).resolves.toMatchObject({
+      branch: "main",
+      dirty: false,
+    });
   });
 
   it("supports detached and unborn repositories and rejects stale working-tree cursors", async () => {
