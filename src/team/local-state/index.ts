@@ -608,6 +608,17 @@ export interface ActivityWorkflowEffect {
   metadata?: Readonly<Record<string, JsonValue>>;
 }
 
+/**
+ * Body-free attestation of the exact portable C preview envelope accepted by
+ * the caller. This lets journal-backed replay remain available after a local
+ * receipt key is lost without trusting altered presentation or authority
+ * fields supplied by a later process.
+ */
+export interface IdentityActivityReceiptWorkflowEffect {
+  kind: "identity_activity_receipt";
+  envelopeRevision: Revision;
+}
+
 export interface LocalWorkflowEffect {
   kind: "local";
   namespace: string;
@@ -633,6 +644,7 @@ export interface WikiRecoveryWorkflowEffect {
 export type TeamWorkflowJournalEffect =
   | CanonicalWorkflowEffect
   | ActivityWorkflowEffect
+  | IdentityActivityReceiptWorkflowEffect
   | LocalWorkflowEffect
   | LocalCleanupWorkflowEffect
   | WikiRecoveryWorkflowEffect;
@@ -2275,6 +2287,20 @@ function normalizeWorkflowEffect(value: unknown, index: number): TeamWorkflowJou
         : { metadata: normalizeActivityMetadata(value.metadata) }),
     };
   }
+  if (value.kind === "identity_activity_receipt") {
+    assertOnlyKeys(
+      value,
+      ["kind", "envelopeRevision"],
+      `Workflow effect ${index}`,
+    );
+    return {
+      kind: "identity_activity_receipt",
+      envelopeRevision: validateRequiredRevision(
+        value.envelopeRevision,
+        `workflow effect ${index} envelope revision`,
+      ),
+    };
+  }
   if (value.kind === "wiki_recovery") {
     assertOnlyKeys(value, ["kind", "manifest"], `Workflow effect ${index}`);
     return {
@@ -2287,6 +2313,7 @@ function normalizeWorkflowEffect(value: unknown, index: number): TeamWorkflowJou
 
 function workflowEffectKey(effect: TeamWorkflowJournalEffect): string {
   if (effect.kind === "activity") return `activity:${effect.id}`;
+  if (effect.kind === "identity_activity_receipt") return effect.kind;
   if (effect.kind === "local_cleanup") return `cleanup:${effect.draftKind}:${effect.draftId}`;
   if (effect.kind === "wiki_recovery") {
     return `wiki-recovery:${effect.manifest.operationId}`;

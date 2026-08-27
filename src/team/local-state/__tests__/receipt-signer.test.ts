@@ -74,6 +74,22 @@ describe("TeamReceiptSigner", () => {
     )).toThrowError(MexPortError);
   });
 
+  it("accepts the shared 512-character scaffold boundary including multibyte text", () => {
+    const root = temporaryRoot();
+    const scaffoldId = "🙂".repeat(256);
+    expect(scaffoldId).toHaveLength(512);
+    expect(Buffer.byteLength(scaffoldId, "utf8")).toBeGreaterThan(512);
+    const signer = new TeamReceiptSigner(root, scaffoldId);
+    signer.initialize();
+    const signature = signer.sign("canonical receipt");
+    expect(() => signer.verify("canonical receipt", signature)).not.toThrow();
+
+    expect(() => new TeamReceiptSigner(root, "a".repeat(513)))
+      .toThrowError(MexPortError);
+    expect(() => new TeamReceiptSigner(root, "scaffold\nidentity"))
+      .toThrowError(MexPortError);
+  });
+
   it("fails closed for symlinked, malformed, oversized, or permissive credentials", () => {
     const cases: readonly [string, (path: string, root: string) => void][] = [
       ["symlinked", (path, root) => {

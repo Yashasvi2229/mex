@@ -488,10 +488,22 @@ export type TeamWorkflowCommand<TWikiOperationPlan> =
       expectedRevisions: NonEmptyRevisionExpectations;
     });
 
-export type TeamIdentityActivityCreateAction = Extract<
-  TeamWorkflowCreateAction<never>,
-  { kind: "member.add" | "activity.record" }
->;
+type TeamIdentityActivityMemberAddAction = Omit<
+  Extract<TeamWorkflowCreateAction<never>, { kind: "member.add" }>,
+  "member"
+> & {
+  member: Omit<
+    Extract<TeamWorkflowCreateAction<never>, { kind: "member.add" }>["member"],
+    "active"
+  > & {
+    /** C members always begin active; callers must use member.deactivate later. */
+    active?: never;
+  };
+};
+
+export type TeamIdentityActivityCreateAction =
+  | TeamIdentityActivityMemberAddAction
+  | Extract<TeamWorkflowCreateAction<never>, { kind: "activity.record" }>;
 
 export type TeamIdentityActivityRevisionBoundAction = Extract<
   TeamWorkflowRevisionBoundAction<never>,

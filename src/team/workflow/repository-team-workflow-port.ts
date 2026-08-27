@@ -100,7 +100,10 @@ import {
   workstreamArtifactPath,
 } from "../artifacts/workflow-codecs.js";
 import { createRepositoryGitPort } from "../git/git-port.js";
-import { ActorResolver } from "../identity/actor-resolver.js";
+import {
+  ActorResolver,
+  type ActorResolution,
+} from "../identity/actor-resolver.js";
 import {
   MemberRepository,
   type MemberWritePlan,
@@ -112,6 +115,7 @@ import {
   type ActivityWorkflowEffect,
   type CanonicalWorkflowEffect,
   type HubLeaseProcessStatus,
+  type IdentityActivityReceiptWorkflowEffect,
   type LocalCleanupWorkflowEffect,
   type LocalWorkflowEffect,
   type StoredLocalDraft,
@@ -380,9 +384,7 @@ export class RepositoryTeamWorkflowPort<
   async getCurrentActor(): Promise<TeamCurrentActor> {
     this.#root.assertCurrent();
     const configured = this.#local.getConfiguredMember();
-    const resolution = await this.#actors.resolveDetailed(
-      configured === null ? {} : { configuredMemberId: configured.memberId },
-    );
+    const resolution = await this.#resolveCurrentActorDetailed(configured);
     return {
       actor: resolution.actor,
       source: resolution.source,
@@ -463,7 +465,11 @@ export class RepositoryTeamWorkflowPort<
       receipt: { ...receiptBase, previewRevision },
     });
     assertIdentityActivityEnvelope(envelope);
-    const portable = withPortablePreviewRevision(prepared, previewRevision);
+    const portable = withPortableEnvelopeAttestation(
+      prepared,
+      previewRevision,
+      identityActivityEnvelopeRevision(envelope),
+    );
     this.#rememberIssued(previewRevision, portable, false);
     return envelope;
   }
@@ -493,6 +499,7 @@ export class RepositoryTeamWorkflowPort<
       }
     }
     if (existing !== null) {
+      assertJournalEnvelopeAttestation(existing.effects, envelope);
       return this.apply({
         command,
         expectedPreviewRevision: envelope.receipt.previewRevision,
@@ -504,7 +511,10 @@ export class RepositoryTeamWorkflowPort<
       envelope.receipt.previewRevision,
     );
     this.#assertPortablePreviewFresh(envelope.receipt.authority.occurredAt);
-    await this.#assertAuthorityCurrent(envelope.receipt.authority);
+    await this.#assertAuthorityCurrent(
+      envelope.receipt.authority,
+      envelope.request.action.kind === "member.clear",
+    );
     const replanned = await this.#plan(
       command,
       envelope.receipt.requestRevision,
@@ -519,9 +529,10 @@ export class RepositoryTeamWorkflowPort<
     ) {
       throw previewConflict();
     }
-    const portable = withPortablePreviewRevision(
+    const portable = withPortableEnvelopeAttestation(
       replanned,
       envelope.receipt.previewRevision,
+      identityActivityEnvelopeRevision(envelope),
     );
     this.#rememberIssued(envelope.receipt.previewRevision, portable, false);
     return this.apply({
@@ -617,10 +628,15 @@ export class RepositoryTeamWorkflowPort<
       ? undefined
       : this.#issued.get(cachedRevision);
     if (cached !== undefined) {
-      await this.#assertAuthorityCurrent(cached.preview.command.authority);
+      await this.#assertAuthorityCurrent(
+        cached.preview.command.authority,
+        cached.preview.command.action.kind === "member.clear",
+      );
       return cached.preview;
     }
-    const actor = await this.resolveActor();
+    const actor = callerCommand.action.kind === "member.clear"
+      ? (await this.#resolveCurrentActorDetailed()).actor
+      : await this.resolveActor();
     const occurredAt = this.#nowIso();
     const repoState = await this.#git.getRepoState();
     const preparedCommand = deepFreeze({
@@ -760,10 +776,17 @@ export class RepositoryTeamWorkflowPort<
     try {
       await this.#runPhaseHook("before-canonical-publication");
       this.#root.assertCurrent();
-      await this.#assertAuthorityCurrent(prepared.preview.command.authority);
+      await this.#assertAuthorityCurrent(
+        prepared.preview.command.authority,
+        prepared.preview.command.action.kind === "member.clear",
+      );
       const primary = await prepared.applyPrimary();
       await this.#runPhaseHook("after-canonical-publication");
-      await this.#assertPostPrimaryRepository(prepared.preview.command.authority.repoState);
+      if (isAuditOnlyEffects(prepared.effects)) {
+        await this.#assertAuthorityCurrent(prepared.preview.command.authority);
+      } else {
+        await this.#assertPostPrimaryRepository(prepared.preview.command.authority.repoState);
+      }
       const event = activityPublication === null ? null : await activityPublication.publish();
       await this.#runPhaseHook("after-activity-publication");
       journal = this.#advanceJournal(journal, leaseToken, "canonical_published");
@@ -1479,12 +1502,26 @@ export class RepositoryTeamWorkflowPort<
     return playbook;
   }
 
-  async #assertAuthorityCurrent(authority: { actor: ActorRef; repoState: RepoState }): Promise<void> {
-    if (stableJson(await this.resolveActor()) !== stableJson(authority.actor)) {
+  async #assertAuthorityCurrent(
+    authority: { actor: ActorRef; repoState: RepoState },
+    allowStaleSelectionFallback = false,
+  ): Promise<void> {
+    const actor = allowStaleSelectionFallback
+      ? (await this.#resolveCurrentActorDetailed()).actor
+      : await this.resolveActor();
+    if (stableJson(actor) !== stableJson(authority.actor)) {
       throw artifactError("REVISION_CONFLICT", "Workflow actor changed", "The resolved actor changed after preview. Preview the workflow again.");
     }
     const current = await this.#git.getRepoState();
     if (!sameRepoCheckpoint(current, authority.repoState)) throw repositoryChanged();
+  }
+
+  async #resolveCurrentActorDetailed(
+    configured = this.#local.getConfiguredMember(),
+  ): Promise<ActorResolution> {
+    return this.#actors.resolveCurrentDetailed(
+      configured === null ? {} : { configuredMemberId: configured.memberId },
+    );
   }
 
   #assertPortablePreviewFresh(occurredAt: string): void {
@@ -1584,7 +1621,10 @@ export class RepositoryTeamWorkflowPort<
     prepared: PreparedOperation<TWikiPayload, TWikiPlan>,
     prepareActivity: boolean,
   ): Promise<PreparedActivityPublication | null> {
-    await this.#assertAuthorityCurrent(prepared.preview.command.authority);
+    await this.#assertAuthorityCurrent(
+      prepared.preview.command.authority,
+      prepared.preview.command.action.kind === "member.clear",
+    );
     await this.#assertExpectationsCurrent(
       prepared.preview.command.expectedRevisions,
     );
@@ -1900,7 +1940,10 @@ export class RepositoryTeamWorkflowPort<
     // Once an exact effect exists, the journaled recovery path below may finish
     // without depending on mutable current identity.
     this.#assertPortablePreviewFresh(command.authority.occurredAt);
-    await this.#assertAuthorityCurrent(command.authority);
+    await this.#assertAuthorityCurrent(
+      command.authority,
+      command.action.kind === "member.clear",
+    );
     await this.#assertExpectationsCurrent(command.expectedRevisions);
     const activity = effects.find(
       (effect): effect is ActivityWorkflowEffect => effect.kind === "activity",
@@ -1927,11 +1970,18 @@ export class RepositoryTeamWorkflowPort<
     await this.#runPhaseHook("before-canonical-publication");
     this.#root.assertCurrent();
     this.#assertPortablePreviewFresh(command.authority.occurredAt);
-    await this.#assertAuthorityCurrent(command.authority);
+    await this.#assertAuthorityCurrent(
+      command.authority,
+      command.action.kind === "member.clear",
+    );
     await this.#assertExpectationsCurrent(command.expectedRevisions);
     await planned.applyPrimary();
     await this.#runPhaseHook("after-canonical-publication");
-    await this.#assertPostPrimaryRepository(command.authority.repoState);
+    if (isAuditOnlyEffects(effects)) {
+      await this.#assertAuthorityCurrent(command.authority);
+    } else {
+      await this.#assertPostPrimaryRepository(command.authority.repoState);
+    }
     await this.#recoverActivity(effects);
     await this.#runPhaseHook("after-activity-publication");
   }
@@ -2560,12 +2610,13 @@ function commandFromPrepared<TWikiPayload extends JsonValue>(
   return deepFreeze(request) as TeamWorkflowCommand<TWikiPayload>;
 }
 
-function withPortablePreviewRevision<
+function withPortableEnvelopeAttestation<
   TWikiPayload extends JsonValue,
   TWikiPlan,
 >(
   prepared: PreparedOperation<TWikiPayload, TWikiPlan>,
   previewRevision: Revision,
+  envelopeRevision: Revision,
 ): PreparedOperation<TWikiPayload, TWikiPlan> {
   return {
     ...prepared,
@@ -2573,7 +2624,41 @@ function withPortablePreviewRevision<
       ...prepared.preview,
       previewRevision,
     }),
+    effects: normalizeTeamWorkflowJournalEffects([
+      ...prepared.effects,
+      {
+        kind: "identity_activity_receipt",
+        envelopeRevision,
+      } satisfies IdentityActivityReceiptWorkflowEffect,
+    ]),
   };
+}
+
+function identityActivityEnvelopeRevision(
+  envelope: TeamIdentityActivityPreviewEnvelope,
+): Revision {
+  return hashText(boundedIdentityEnvelopeJson(envelope));
+}
+
+function assertJournalEnvelopeAttestation(
+  effects: readonly TeamWorkflowJournalEffect[],
+  envelope: TeamIdentityActivityPreviewEnvelope,
+): void {
+  const receipts = effects.filter(
+    (effect): effect is IdentityActivityReceiptWorkflowEffect =>
+      effect.kind === "identity_activity_receipt",
+  );
+  if (
+    receipts.length !== 1
+    || receipts[0]!.envelopeRevision !== identityActivityEnvelopeRevision(envelope)
+  ) {
+    throw previewConflict();
+  }
+}
+
+function isAuditOnlyEffects(effects: readonly TeamWorkflowJournalEffect[]): boolean {
+  return effects.some((effect) => effect.kind === "activity")
+    && !effects.some((effect) => effect.kind === "canonical" || effect.kind === "local");
 }
 
 function purposeIdsFromEffects(
@@ -2626,7 +2711,8 @@ function assertIdentityActivityCommand(
   switch (action.kind) {
     case "member.add": {
       if (!isPlainObject(action.member)) invalidIdentityActivityCommand();
-      exactIdentityKeys(action.member, ["displayName", "gitAliases"], ["active"]);
+      if (Object.hasOwn(action.member, "active")) invalidIdentityActivityCommand();
+      exactIdentityKeys(action.member, ["displayName", "gitAliases"]);
       break;
     }
     case "member.update": {

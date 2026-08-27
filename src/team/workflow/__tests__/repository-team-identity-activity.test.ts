@@ -9,10 +9,12 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { generateArtifactId } from "../../artifacts/ulid.js";
+import { MemberRepository } from "../../identity/member-repository.js";
 import type {
   GitChangedFilesRequest,
   GitDiffRequest,
@@ -248,6 +250,38 @@ describe("RepositoryTeamWorkflowPort identity and Activity contract", () => {
     expect(activityFiles(root)).toHaveLength(1);
   });
 
+  it("binds completed journal replay to the exact portable envelope without the signer", async () => {
+    const root = temporaryRoot();
+    const git = fakeGit();
+    const envelope = await port(root, git, {
+      memberIds: [MEMBER_IDS[0]],
+      eventIds: [EVENT_IDS[0]],
+    }).previewIdentityActivity(addMember("identity_exact_replay", "Ada Lovelace"));
+    await port(root, git, { pid: 311 }).applyIdentityActivity(envelope);
+    unlinkSync(signerPath(root));
+
+    const presentation = structuredClone(envelope) as any;
+    presentation.preview.scope = "local";
+    presentation.receipt.presentationRevision = canonicalRevision(presentation.preview);
+    const purpose = structuredClone(envelope) as any;
+    purpose.receipt.purposeIds[0].id = EVENT_IDS[1];
+    const authority = structuredClone(envelope) as any;
+    authority.receipt.authority.actor = {
+      kind: "git",
+      name: "Grace",
+      email: "grace@example.test",
+    };
+    for (const altered of [presentation, purpose, authority]) {
+      expect(altered.receipt.previewRevision).toBe(envelope.receipt.previewRevision);
+      await expect(port(root, git, { pid: 312 }).applyIdentityActivity(altered))
+        .rejects.toMatchObject({ problem: { code: "REVISION_CONFLICT" } });
+    }
+
+    await expect(port(root, git, { pid: 313 }).applyIdentityActivity(envelope))
+      .resolves.toMatchObject({ idempotentReplay: true });
+    expect(activityFiles(root)).toEqual([`${EVENT_IDS[0]}.md`]);
+  });
+
   it("recovers a journaled fresh intent without requiring the lost signer", async () => {
     const root = temporaryRoot();
     const git = fakeGit();
@@ -265,7 +299,15 @@ describe("RepositoryTeamWorkflowPort identity and Activity contract", () => {
     }).applyIdentityActivity(envelope)).rejects.toBeInstanceOf(WorkflowPhaseInterruption);
     unlinkSync(signerPath(root));
 
-    await expect(port(root, git, { pid: 322 }).applyIdentityActivity(envelope))
+    const altered = structuredClone(envelope) as any;
+    altered.preview.scope = "local";
+    altered.receipt.presentationRevision = canonicalRevision(altered.preview);
+    await expect(port(root, git, { pid: 322 }).applyIdentityActivity(altered))
+      .rejects.toMatchObject({ problem: { code: "REVISION_CONFLICT" } });
+    expect(activityFiles(root)).toEqual([]);
+    expect(existsSync(join(root, ".mex/team"))).toBe(false);
+
+    await expect(port(root, git, { pid: 323 }).applyIdentityActivity(envelope))
       .resolves.toMatchObject({
         idempotentReplay: true,
         artifacts: [{ ref: { id: MEMBER_IDS[0] } }],
@@ -405,6 +447,59 @@ describe("RepositoryTeamWorkflowPort identity and Activity contract", () => {
     }
   });
 
+  it("revalidates actor and dirty state after audit-only primary work in live apply", async () => {
+    const mutations: readonly [string, (git: FakeGit) => void][] = [
+      ["actor", (git) => { git.identity = { name: "Grace", email: "grace@example.test" }; }],
+      ["dirty", (git) => { git.state = { ...git.state, dirty: true }; }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const root = temporaryRoot();
+      const git = fakeGit();
+      const envelope = await port(root, git, { eventIds: [EVENT_IDS[0]] })
+        .previewIdentityActivity(activityRecord(`identity_live_after_${label}`));
+      await expect(port(root, git, {
+        pid: 365,
+        phaseHook(boundary) {
+          if (boundary === "after-canonical-publication") mutate(git);
+        },
+      }).applyIdentityActivity(envelope)).rejects.toMatchObject({
+        problem: { code: "REVISION_CONFLICT" },
+      });
+      expect(activityFiles(root), label).toEqual([]);
+    }
+  });
+
+  it("revalidates actor and dirty state after audit-only recovery primary work", async () => {
+    const mutations: readonly [string, (git: FakeGit) => void][] = [
+      ["actor", (git) => { git.identity = { name: "Grace", email: "grace@example.test" }; }],
+      ["dirty", (git) => { git.state = { ...git.state, dirty: true }; }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const root = temporaryRoot();
+      const git = fakeGit();
+      const envelope = await port(root, git, { eventIds: [EVENT_IDS[0]] })
+        .previewIdentityActivity(activityRecord(`identity_recovery_after_${label}`));
+      await expect(port(root, git, {
+        pid: 366,
+        phaseHook(boundary) {
+          if (boundary === "before-canonical-publication") {
+            throw new WorkflowPhaseInterruption(boundary);
+          }
+        },
+      }).applyIdentityActivity(envelope)).rejects.toBeInstanceOf(WorkflowPhaseInterruption);
+
+      await expect(port(root, git, {
+        pid: 367,
+        phaseHook(boundary) {
+          if (boundary === "after-canonical-publication") mutate(git);
+        },
+      }).applyIdentityActivity(envelope)).rejects.toMatchObject({
+        problem: { code: "REVISION_CONFLICT" },
+      });
+      expect(activityFiles(root), label).toEqual([]);
+    }
+  });
+
   it("abandons an audit-only intent whose unpublished path became conflicting", async () => {
     const root = temporaryRoot();
     const git = fakeGit();
@@ -534,22 +629,120 @@ describe("RepositoryTeamWorkflowPort identity and Activity contract", () => {
     expect(activityFiles(root)).toHaveLength(3);
   });
 
+  it("exposes missing or inactive selections and permits exact local recovery only", async () => {
+    const staleCases = ["missing", "inactive"] as const;
+    for (const staleCase of staleCases) {
+      const root = temporaryRoot();
+      const git = fakeGit();
+      const service = port(root, git, {
+        memberIds: [MEMBER_IDS[0]],
+        eventIds: [EVENT_IDS[0]],
+      });
+      const added = await service.applyIdentityActivity(await service.previewIdentityActivity(
+        addMember(`identity_stale_add_${staleCase}`, "Ada Lovelace"),
+      ));
+      const member = added.artifacts[0]!;
+      await service.applyIdentityActivity(await service.previewIdentityActivity({
+        operationId: `identity_stale_select_${staleCase}`,
+        action: { kind: "member.select", memberId: member.ref.id },
+        expectedRevisions: [
+          {
+            target: { kind: "artifact", path: member.sourcePath },
+            revision: member.revision,
+          },
+          {
+            target: { kind: "local", namespace: "member-selection", id: "current" },
+            revision: null,
+          },
+        ],
+      }));
+      const selection = (await service.getCurrentActor()).selection!;
+
+      if (staleCase === "missing") {
+        unlinkSync(join(root, member.sourcePath));
+      } else {
+        await new MemberRepository(root).update(
+          member.ref.id,
+          { active: false },
+          member.revision,
+        );
+      }
+
+      await expect(service.getCurrentActor()).resolves.toMatchObject({
+        source: "git-fallback",
+        actor: { kind: "git", name: "Ada", email: "ada@example.test" },
+        selection,
+        diagnostics: [{
+          code: staleCase === "missing" ? "ACTOR_MEMBER_MISSING" : "ACTOR_MEMBER_INACTIVE",
+          severity: "warning",
+        }],
+      });
+      await expect(service.previewIdentityActivity(
+        activityRecord(`identity_stale_block_${staleCase}`),
+      )).rejects.toMatchObject({
+        problem: { code: staleCase === "missing" ? "NOT_FOUND" : "VALIDATION_FAILED" },
+      });
+
+      const clear = await service.previewIdentityActivity({
+        operationId: `identity_stale_clear_${staleCase}`,
+        action: { kind: "member.clear" },
+        expectedRevisions: [{
+          target: { kind: "local", namespace: "member-selection", id: "current" },
+          revision: selection.revision,
+        }],
+      });
+      await expect(port(root, git, { pid: 425 }).applyIdentityActivity(clear))
+        .resolves.toMatchObject({
+        events: [],
+        localChanges: [{ namespace: "member-selection", afterRevision: null }],
+      });
+      await expect(service.getCurrentActor()).resolves.toMatchObject({
+        source: "git-fallback",
+        selection: null,
+        diagnostics: [],
+      });
+      expect(activityFiles(root)).toEqual([`${EVENT_IDS[0]}.md`]);
+    }
+  });
+
+  it("requires C member.add to begin active and reserves deactivation for its own action", async () => {
+    const root = temporaryRoot();
+    const service = port(root, fakeGit());
+    for (const active of [true, false]) {
+      await expect(service.previewIdentityActivity({
+        operationId: `identity_add_active_${String(active)}`,
+        action: {
+          kind: "member.add",
+          member: { displayName: "Ada Lovelace", gitAliases: [], active },
+        },
+        expectedRevisions: [],
+      } as unknown as TeamIdentityActivityCommand)).rejects.toMatchObject({
+        problem: { code: "VALIDATION_FAILED" },
+      });
+    }
+    expect(existsSync(join(root, ".mex"))).toBe(false);
+  });
+
   it("provides bounded filtered member and fail-closed canonical Activity reads", async () => {
     const root = temporaryRoot();
     const git = fakeGit();
     const service = port(root, git, {
       memberIds: [MEMBER_IDS[0], MEMBER_IDS[1]],
-      eventIds: [EVENT_IDS[0], EVENT_IDS[1], EVENT_IDS[2]],
+      eventIds: [EVENT_IDS[0], EVENT_IDS[1], EVENT_IDS[2], EVENT_IDS[3]],
     });
     await service.applyIdentityActivity(await service.previewIdentityActivity(
       addMember("identity_reads_first", "Ada Lovelace"),
     ));
+    const second = await service.applyIdentityActivity(await service.previewIdentityActivity(
+      addMember("identity_reads_second", "Grace Hopper"),
+    ));
     await service.applyIdentityActivity(await service.previewIdentityActivity({
-      ...addMember("identity_reads_second", "Grace Hopper"),
-      action: {
-        kind: "member.add",
-        member: { displayName: "Grace Hopper", gitAliases: [], active: false },
-      },
+      operationId: "identity_reads_deactivate_second",
+      action: { kind: "member.deactivate", memberId: MEMBER_IDS[1] },
+      expectedRevisions: [{
+        target: { kind: "artifact", path: second.artifacts[0]!.sourcePath },
+        revision: second.artifacts[0]!.revision,
+      }],
     }));
     await service.applyIdentityActivity(await service.previewIdentityActivity({
       operationId: "identity_direct_activity",
@@ -582,8 +775,8 @@ describe("RepositoryTeamWorkflowPort identity and Activity contract", () => {
     const activity = await service.listActivity({ limit: 2 });
     expect(activity.items).toHaveLength(2);
     expect(activity.nextCursor).not.toBeNull();
-    expect(await service.getActivity(EVENT_IDS[2])).toMatchObject({
-      id: EVENT_IDS[2],
+    expect(await service.getActivity(EVENT_IDS[3])).toMatchObject({
+      id: EVENT_IDS[3],
       action: "activity.recorded",
     });
   });
@@ -660,6 +853,32 @@ function addMember(
     },
     expectedRevisions: [],
   };
+}
+
+function activityRecord(operationId: string): TeamIdentityActivityCommand {
+  return {
+    operationId,
+    action: {
+      kind: "activity.record",
+      activity: { action: "review.started", subjects: [] },
+    },
+    expectedRevisions: [],
+  };
+}
+
+function canonicalRevision(value: unknown): string {
+  const canonicalize = (current: unknown): unknown => {
+    if (Array.isArray(current)) return current.map(canonicalize);
+    if (current !== null && typeof current === "object") {
+      return Object.fromEntries(
+        Object.entries(current as Record<string, unknown>)
+          .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+          .map(([key, child]) => [key, canonicalize(child)]),
+      );
+    }
+    return current;
+  };
+  return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
 }
 
 function fakeGit(): FakeGit {

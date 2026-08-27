@@ -44,8 +44,8 @@ export class TeamReceiptSigner {
     if (
       typeof scaffoldId !== "string"
       || scaffoldId.length === 0
-      || Buffer.byteLength(scaffoldId, "utf8") > 256
-      || scaffoldId.includes("\0")
+      || scaffoldId.length > 512
+      || /[\0-\x1f\x7f]/u.test(scaffoldId)
     ) {
       throw signerProblem(
         "VALIDATION_FAILED",

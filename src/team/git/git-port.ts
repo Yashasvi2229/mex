@@ -39,6 +39,7 @@ const MAX_STRUCTURED_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_CURSOR_BYTES = 4 * 1024;
 const MAX_REF_LENGTH = 1_024;
+const MAX_BRANCH_BYTES = 1_024;
 const MAX_PATH_BYTES = 4_096;
 const MAX_PATHS_PER_REQUEST = 4_096;
 const UTF8_LOOKAHEAD_BYTES = 4;
@@ -890,7 +891,7 @@ function parseStatus(output: Buffer): StatusSnapshot {
     }
     if (record.startsWith("# branch.head ")) {
       const value = record.slice("# branch.head ".length);
-      branch = value === "(detached)" ? null : value;
+      branch = value === "(detached)" ? null : requireCanonicalGitBranch(value);
       continue;
     }
     if (record.startsWith("# ")) continue;
@@ -1164,6 +1165,21 @@ function assertDiffRequest(request: GitDiffRequest): void {
 function requireGitPath(path: string): string {
   if (!isCanonicalGitPath(path)) throw malformedGitOutput("repository path");
   return path;
+}
+
+/** @internal */
+export function requireCanonicalGitBranch(branch: string): string {
+  if (
+    branch.length === 0 ||
+    branch.trim() !== branch ||
+    branch.normalize("NFC") !== branch ||
+    /[\p{Cc}\u2028\u2029]/u.test(branch) ||
+    hasUnpairedSurrogate(branch) ||
+    Buffer.byteLength(branch, "utf8") > MAX_BRANCH_BYTES
+  ) {
+    throw malformedGitOutput("branch name");
+  }
+  return branch;
 }
 
 function isCanonicalGitPath(value: unknown): value is string {
