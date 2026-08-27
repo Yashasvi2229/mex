@@ -42,7 +42,13 @@ export interface CapabilityUnavailableReason {
 }
 
 export interface InstalledCapability {
-  id: "project_hub" | "activity_read" | "code_graph" | "wiki";
+  id:
+    | "project_hub"
+    | "team_identity"
+    | "activity_read"
+    | "activity_record"
+    | "code_graph"
+    | "wiki";
   installed: true;
   availability: CapabilityAvailability;
   unavailableReason: CapabilityUnavailableReason | null;
@@ -114,6 +120,7 @@ interface MaintenanceAvailability {
 }
 
 export interface CapabilityInspectionDependencies {
+  inspectTeam(projectRoot: string): Promise<CapabilityUnavailableReason | null>;
   inspectGraphIndex(projectRoot: string): Promise<CapabilityInspectionResult<GraphStatusKind>>;
   inspectWikiIndex(
     scaffoldRoot: string,
@@ -192,6 +199,76 @@ const COMMANDS = {
     "mex wiki rebuild-index --json",
     "json",
   ),
+  memberList: command("member.list", "mex member list", "mex member list --json", "json"),
+  memberShow: command("member.show", "mex member show", "mex member show <member-id> --json", "json"),
+  memberCurrent: command("member.current", "mex member current", "mex member current --json", "json"),
+  memberAddPreview: command(
+    "member.add.preview",
+    "mex member add",
+    "mex member add <request-file> --json",
+    "json",
+  ),
+  memberAddApply: command(
+    "member.add.apply",
+    "mex member add",
+    "mex member add --apply <preview-envelope> --json",
+    "json",
+  ),
+  memberUpdatePreview: command(
+    "member.update.preview",
+    "mex member update",
+    "mex member update <request-file> --json",
+    "json",
+  ),
+  memberUpdateApply: command(
+    "member.update.apply",
+    "mex member update",
+    "mex member update --apply <preview-envelope> --json",
+    "json",
+  ),
+  memberDeactivatePreview: command(
+    "member.deactivate.preview",
+    "mex member deactivate",
+    "mex member deactivate <request-file> --json",
+    "json",
+  ),
+  memberDeactivateApply: command(
+    "member.deactivate.apply",
+    "mex member deactivate",
+    "mex member deactivate --apply <preview-envelope> --json",
+    "json",
+  ),
+  memberSelectPreview: command(
+    "member.select.preview",
+    "mex member select",
+    "mex member select <request-file> --json",
+    "json",
+  ),
+  memberSelectApply: command(
+    "member.select.apply",
+    "mex member select",
+    "mex member select --apply <preview-envelope> --json",
+    "json",
+  ),
+  activityList: command("activity.list", "mex activity list", "mex activity list --json", "json"),
+  activityShow: command(
+    "activity.show",
+    "mex activity show",
+    "mex activity show <event-id> --json",
+    "json",
+  ),
+  activityRecordPreview: command(
+    "activity.record.preview",
+    "mex activity record",
+    "mex activity record <request-file> --json",
+    "json",
+  ),
+  activityRecordApply: command(
+    "activity.record.apply",
+    "mex activity record",
+    "mex activity record --apply <preview-envelope> --json",
+    "json",
+  ),
 } as const;
 
 /** All paths a manifest can advertise, exported for the registration contract. */
@@ -200,6 +277,9 @@ export const CAPABILITY_COMMAND_CATALOG: readonly CapabilityCommandDescriptor[] 
 );
 
 const DEFAULT_DEPENDENCIES: CapabilityInspectionDependencies = {
+  async inspectTeam(projectRoot) {
+    return inspectTeamAvailability(projectRoot);
+  },
   async inspectGraphIndex(projectRoot) {
     const { inspectGraphStatus } = await import("./graph/status.js");
     // Retain one diagnostic so a corpus-limit refusal is not collapsed into the
@@ -226,12 +306,17 @@ export async function inspectCapabilities(
   let graphIndexState: CapabilityIndexState = "unavailable";
   let wikiIndexState: CapabilityIndexState = "unavailable";
   let graphMaintenance: MaintenanceAvailability = { refresh: false, rebuild: false };
+  let teamUnavailableReason: CapabilityUnavailableReason | null = fixedReason(
+    "REPOSITORY_UNAVAILABLE",
+    "Repository state cannot be inspected safely.",
+  );
 
   if (repository.initializationState === "ready") {
     const deps = { ...DEFAULT_DEPENDENCIES, ...dependencies };
     const exclude = readWikiExclude(repository.scaffoldRoot);
     // Keep corpus inspections sequential so capability discovery cannot combine
     // their bounded working sets into one avoidable peak-RSS spike.
+    teamUnavailableReason = await deps.inspectTeam(repository.projectRoot);
     const graphInspection = await deps.inspectGraphIndex(repository.projectRoot);
     graphIndexState = capabilityIndexState(graphInspection);
     graphMaintenance = graphMaintenanceAvailability(graphIndexState, graphInspection.diagnostics);
@@ -247,8 +332,10 @@ export async function inspectCapabilities(
       wikiIndexState,
     },
     capabilities: [
-      installedRepositoryCapability("project_hub", initializationState),
-      installedRepositoryCapability("activity_read", initializationState),
+      installedTeamCapability("project_hub", initializationState, teamUnavailableReason),
+      installedTeamCapability("team_identity", initializationState, teamUnavailableReason),
+      installedTeamCapability("activity_read", initializationState, teamUnavailableReason),
+      installedTeamCapability("activity_record", initializationState, teamUnavailableReason),
       installedCapability("code_graph", initializationState, graphIndexState),
       installedCapability("wiki", initializationState, wikiIndexState),
     ],
@@ -257,12 +344,14 @@ export async function inspectCapabilities(
       graphIndexState,
       wikiIndexState,
       graphMaintenance,
+      teamUnavailableReason,
     ),
     nextInitializationAction: nextInitializationAction(
       initializationState,
       graphIndexState,
       wikiIndexState,
       graphMaintenance,
+      teamUnavailableReason,
     ),
   };
 
@@ -314,12 +403,37 @@ function availableCommands(
   graphIndexState: CapabilityIndexState,
   wikiIndexState: CapabilityIndexState,
   graphMaintenance: MaintenanceAvailability,
+  teamUnavailableReason: CapabilityUnavailableReason | null,
 ): Record<CapabilityCommandKind, CapabilityCommandDescriptor[]> {
   const read: CapabilityCommandDescriptor[] = [COMMANDS.capabilities];
   const preview: CapabilityCommandDescriptor[] = [];
   const apply: CapabilityCommandDescriptor[] = [];
 
   if (initializationState !== "ready") return { read, preview, apply };
+
+  if (teamUnavailableReason === null) {
+    read.push(
+      COMMANDS.memberList,
+      COMMANDS.memberShow,
+      COMMANDS.memberCurrent,
+      COMMANDS.activityList,
+      COMMANDS.activityShow,
+    );
+    preview.push(
+      COMMANDS.memberAddPreview,
+      COMMANDS.memberUpdatePreview,
+      COMMANDS.memberDeactivatePreview,
+      COMMANDS.memberSelectPreview,
+      COMMANDS.activityRecordPreview,
+    );
+    apply.push(
+      COMMANDS.memberAddApply,
+      COMMANDS.memberUpdateApply,
+      COMMANDS.memberDeactivateApply,
+      COMMANDS.memberSelectApply,
+      COMMANDS.activityRecordApply,
+    );
+  }
 
   read.push(COMMANDS.graphStatus);
   if (wikiIndexState !== "corpus_limit_exceeded") read.push(COMMANDS.wikiValidate);
@@ -351,11 +465,15 @@ function availableCommands(
   return { read, preview, apply };
 }
 
-function installedRepositoryCapability(
-  id: Extract<InstalledCapability["id"], "project_hub" | "activity_read">,
+function installedTeamCapability(
+  id: Extract<
+    InstalledCapability["id"],
+    "project_hub" | "team_identity" | "activity_read" | "activity_record"
+  >,
   initializationState: RepositoryInitializationState,
+  teamUnavailableReason: CapabilityUnavailableReason | null,
 ): InstalledCapability {
-  const reason = repositoryUnavailableReason(initializationState);
+  const reason = repositoryUnavailableReason(initializationState) ?? teamUnavailableReason;
   return {
     id,
     installed: true,
@@ -431,6 +549,7 @@ function nextInitializationAction(
   graphIndexState: CapabilityIndexState,
   wikiIndexState: CapabilityIndexState,
   graphMaintenance: MaintenanceAvailability,
+  teamUnavailableReason: CapabilityUnavailableReason | null,
 ): NextInitializationAction | null {
   if (initializationState === "not_git_repository") {
     return { command: "git init", reason: "Initialize the repository before MEX setup." };
@@ -440,6 +559,27 @@ function nextInitializationAction(
   }
   if (initializationState === "unavailable") {
     return { command: "mex capabilities --json", reason: "Retry from a readable repository directory." };
+  }
+  if (teamUnavailableReason?.code === "TEAM_SCAFFOLD_IDENTITY_MISSING") {
+    return {
+      command: "mex setup",
+      reason: "Initialize the bounded tracked scaffold identity required by Team workflows.",
+    };
+  }
+  if (
+    teamUnavailableReason?.code === "TEAM_SCAFFOLD_IDENTITY_UNTRACKED"
+    || teamUnavailableReason?.code === "TEAM_SCAFFOLD_IDENTITY_CHANGED"
+  ) {
+    return {
+      command: null,
+      reason: "Review and commit the intended .mex/config.json, then run mex capabilities --json again.",
+    };
+  }
+  if (teamUnavailableReason !== null) {
+    return {
+      command: "mex capabilities --json",
+      reason: "Retry after repository Team state can be inspected safely.",
+    };
   }
   if (graphIndexState === "corpus_limit_exceeded") {
     return {
@@ -619,6 +759,97 @@ function readWikiExclude(scaffoldRoot: string): readonly string[] {
     return DEFAULT_WIKI_EXCLUDE;
   } finally {
     if (descriptor !== null) closeSync(descriptor);
+  }
+}
+
+async function inspectTeamAvailability(
+  projectRoot: string,
+): Promise<CapabilityUnavailableReason | null> {
+  try {
+    const [{ createRepositoryGitPort }, { tryReadContainedArtifact }] = await Promise.all([
+      import("./team/git/git-port.js"),
+      import("./team/artifacts/filesystem.js"),
+    ]);
+    const config = tryReadContainedArtifact(projectRoot, ".mex/config.json", MAX_CONFIG_BYTES);
+    if (config === null) {
+      return fixedReason(
+        "TEAM_SCAFFOLD_IDENTITY_MISSING",
+        "Team workflows require one bounded scaffold identity in .mex/config.json.",
+      );
+    }
+
+    const git = createRepositoryGitPort(projectRoot);
+    const before = await git.getRepoState();
+    if (before.head === null) {
+      return fixedReason(
+        "TEAM_SCAFFOLD_IDENTITY_UNTRACKED",
+        "Team workflows require .mex/config.json to be tracked at the current repository HEAD.",
+      );
+    }
+    const tracked = await git.readFileAtRevision({
+      revision: before.head,
+      path: ".mex/config.json",
+      maxBytes: MAX_CONFIG_BYTES,
+    });
+    if (tracked === null) {
+      return fixedReason(
+        "TEAM_SCAFFOLD_IDENTITY_UNTRACKED",
+        "Team workflows require .mex/config.json to be tracked at the current repository HEAD.",
+      );
+    }
+    if (tracked.truncated || !Buffer.from(tracked.content).equals(Buffer.from(config.bytes))) {
+      return fixedReason(
+        "TEAM_SCAFFOLD_IDENTITY_CHANGED",
+        "Team workflows require the working .mex/config.json to match the current repository HEAD.",
+      );
+    }
+
+    let scaffoldId: unknown;
+    try {
+      const parsed = JSON.parse(Buffer.from(config.bytes).toString("utf8")) as unknown;
+      scaffoldId = isRecord(parsed) ? parsed.scaffold_id : undefined;
+    } catch {
+      return fixedReason(
+        "TEAM_SCAFFOLD_IDENTITY_MISSING",
+        "Team workflows require one bounded scaffold identity in .mex/config.json.",
+      );
+    }
+    if (
+      typeof scaffoldId !== "string"
+      || scaffoldId.length === 0
+      || scaffoldId.length > 512
+      || /[\0-\x1f\x7f]/u.test(scaffoldId)
+    ) {
+      return fixedReason(
+        "TEAM_SCAFFOLD_IDENTITY_MISSING",
+        "Team workflows require one bounded scaffold identity in .mex/config.json.",
+      );
+    }
+
+    const confirmedConfig = tryReadContainedArtifact(
+      projectRoot,
+      ".mex/config.json",
+      MAX_CONFIG_BYTES,
+    );
+    const after = await git.getRepoState();
+    if (
+      confirmedConfig === null
+      || confirmedConfig.revision !== config.revision
+      || before.branch !== after.branch
+      || before.head !== after.head
+      || before.dirty !== after.dirty
+    ) {
+      return fixedReason(
+        "TEAM_STATE_UNAVAILABLE",
+        "Team repository state changed while it was being inspected.",
+      );
+    }
+    return null;
+  } catch {
+    return fixedReason(
+      "TEAM_STATE_UNAVAILABLE",
+      "Team repository state cannot be inspected safely.",
+    );
   }
 }
 

@@ -19,7 +19,25 @@
         }
       },
       {
+        "id": "team_identity",
+        "installed": true,
+        "availability": "unavailable",
+        "unavailableReason": {
+          "code": "NOT_GIT_REPOSITORY",
+          "detail": "Repository initialization is required before this capability can be used."
+        }
+      },
+      {
         "id": "activity_read",
+        "installed": true,
+        "availability": "unavailable",
+        "unavailableReason": {
+          "code": "NOT_GIT_REPOSITORY",
+          "detail": "Repository initialization is required before this capability can be used."
+        }
+      },
+      {
+        "id": "activity_record",
         "installed": true,
         "availability": "unavailable",
         "unavailableReason": {

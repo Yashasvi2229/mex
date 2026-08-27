@@ -43,12 +43,14 @@ afterEach(() => {
 describe("mex capabilities manifest", () => {
   it("matches the deterministic uninitialized golden without running index inspectors", async () => {
     const root = temporaryRoot();
+    const inspectTeam = vi.fn<CapabilityInspectionDependencies["inspectTeam"]>();
     const inspectGraphIndex = vi.fn<CapabilityInspectionDependencies["inspectGraphIndex"]>();
     const inspectWikiIndex = vi.fn<CapabilityInspectionDependencies["inspectWikiIndex"]>();
 
-    const envelope = await inspectCapabilities(root, { inspectGraphIndex, inspectWikiIndex });
+    const envelope = await inspectCapabilities(root, { inspectTeam, inspectGraphIndex, inspectWikiIndex });
 
     expect(JSON.stringify(envelope, null, 2) + "\n").toBe(golden("not-git.json"));
+    expect(inspectTeam).not.toHaveBeenCalled();
     expect(inspectGraphIndex).not.toHaveBeenCalled();
     expect(inspectWikiIndex).not.toHaveBeenCalled();
   });
@@ -56,8 +58,11 @@ describe("mex capabilities manifest", () => {
   it("matches the ready golden and honors bounded Wiki exclude configuration", async () => {
     const root = readyRoot();
     writeFileSync(join(root, ".mex", "config.json"), JSON.stringify({
+      scaffold_id: "scaffold-capabilities-001",
       wiki: { exclude: ["private/**", "generated/**"] },
     }));
+    execFileSync("git", ["add", ".mex/config.json"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "configure wiki"], { cwd: root });
     const inspectGraphIndex = vi.fn(async () => inspection("fresh"));
     const inspectWikiIndex = vi.fn(async () => inspection("fresh"));
 
@@ -199,6 +204,30 @@ describe("mex capabilities manifest", () => {
     expect(safe.data.nextInitializationAction?.command).toBe("mex graph rebuild --json");
   });
 
+  it("suppresses Team commands when the tracked scaffold identity has changed", async () => {
+    const root = readyRoot();
+    writeFileSync(join(root, ".mex", "config.json"), JSON.stringify({
+      scaffold_id: "scaffold-capabilities-changed",
+    }));
+
+    const envelope = await inspectCapabilities(root, {
+      inspectGraphIndex: async () => inspection("fresh"),
+      inspectWikiIndex: async () => inspection("fresh"),
+    });
+
+    for (const id of ["project_hub", "team_identity", "activity_read", "activity_record"] as const) {
+      expect(envelope.data.capabilities.find((entry) => entry.id === id)).toMatchObject({
+        availability: "unavailable",
+        unavailableReason: { code: "TEAM_SCAFFOLD_IDENTITY_CHANGED" },
+      });
+    }
+    expect(JSON.stringify(envelope.data.commands)).not.toMatch(/mex (?:member|activity) /u);
+    expect(envelope.data.nextInitializationAction).toEqual({
+      command: null,
+      reason: "Review and commit the intended .mex/config.json, then run mex capabilities --json again.",
+    });
+  });
+
   it("does not advertise Wiki rebuild for degraded, migration, corrupt, or unavailable states", async () => {
     const root = readyRoot();
     for (const state of ["degraded", "migration_required", "corrupt"] as const) {
@@ -253,7 +282,10 @@ describe("mex capabilities manifest", () => {
     execFileSync("git", ["config", "user.name", "Capabilities Contract"], { cwd: root });
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "src", "example.ts"), "export const example = 1;\n");
-    writeFileSync(join(root, ".mex", "config.json"), JSON.stringify({ aiTools: ["claude"] }));
+    writeFileSync(join(root, ".mex", "config.json"), JSON.stringify({
+      scaffold_id: "scaffold-capabilities-001",
+      aiTools: ["claude"],
+    }));
     execFileSync("git", ["add", "src/example.ts", ".mex/ROUTER.md", ".mex/config.json"], { cwd: root });
     execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
     const graph = createGraphEngine({ rootDir: root, dbPath: join(root, ".mex", "graph.db") });
@@ -366,12 +398,15 @@ describe("mex capabilities manifest", () => {
     });
     expect(envelope.data.capabilities.map((entry) => entry.id)).toEqual([
       "project_hub",
+      "team_identity",
       "activity_read",
+      "activity_record",
       "code_graph",
       "wiki",
     ]);
     const serializedCommands = JSON.stringify(envelope.data.commands);
-    expect(serializedCommands).not.toMatch(/workstream|inbox|relay|playbook|catch[-_ ]?up|activity/i);
+    expect(serializedCommands).not.toMatch(/workstream|inbox|relay|playbook|catch[-_ ]?up/i);
+    expect(serializedCommands).not.toMatch(/activity\.(?:create|update|delete)/i);
     expect(serializedCommands).not.toMatch(/wiki\.(?:build|prepare|propose)/i);
   });
 
@@ -379,7 +414,11 @@ describe("mex capabilities manifest", () => {
     const capabilities = program.commands.find((candidate) => candidate.name() === "capabilities");
     expect(capabilities?.options.map((option) => option.long)).toEqual(["--json"]);
     expect(isTelemetryExemptCommand("capabilities", "mex")).toBe(true);
+    expect(isTelemetryExemptCommand("list", "member")).toBe(true);
+    expect(isTelemetryExemptCommand("record", "activity")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("capabilities")).toBe(true);
+    expect(isFirstRunNoticeExemptCommand("member")).toBe(true);
+    expect(isFirstRunNoticeExemptCommand("activity")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("check")).toBe(false);
   });
 });
@@ -392,9 +431,16 @@ function temporaryRoot(): string {
 
 function readyRoot(): string {
   const root = temporaryRoot();
-  mkdirSync(join(root, ".git"));
   mkdirSync(join(root, ".mex"));
   writeFileSync(join(root, ".mex", "ROUTER.md"), "# Router\n");
+  writeFileSync(join(root, ".mex", "config.json"), JSON.stringify({
+    scaffold_id: "scaffold-capabilities-001",
+  }));
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "capabilities@example.invalid"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "Capabilities Contract"], { cwd: root });
+  execFileSync("git", ["add", ".mex/ROUTER.md", ".mex/config.json"], { cwd: root });
+  execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
   return root;
 }
 

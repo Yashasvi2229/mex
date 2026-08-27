@@ -10,6 +10,11 @@ import { readMachineId, setGlobalConfigKey } from "./global-config.js";
 import { runFeedback, maybeShowInvite, dismissInvite, enableInvite } from "./feedback/index.js";
 import type { MexConfig } from "./types.js";
 import type { RunHubCommandOptions } from "./hub/command.js";
+import {
+  buildTeamIdentityActivityCommands,
+  processTeamCommandIo,
+  type TeamIdentityActivityCliServiceFactory,
+} from "./team/cli/index.js";
 
 /**
  * Load config for a CLI command and backfill scaffold identity on the way.
@@ -77,13 +82,18 @@ export function isTelemetryExemptCommand(
 ): boolean {
   return parentName === "telemetry"
     || parentName === "config"
+    || parentName === "member"
+    || parentName === "activity"
     || commandName === "hub"
     || commandName === "capabilities";
 }
 
 /** Commands whose machine/read-only contract must precede any global notice. */
 export function isFirstRunNoticeExemptCommand(commandName?: string): boolean {
-  return commandName === "hub" || commandName === "capabilities";
+  return commandName === "hub"
+    || commandName === "capabilities"
+    || commandName === "member"
+    || commandName === "activity";
 }
 
 async function runTuiCommand(): Promise<void> {
@@ -177,6 +187,24 @@ program
     const { runCapabilities } = await import("./capabilities.js");
     await runCapabilities();
   });
+
+const teamIdentityActivityService: TeamIdentityActivityCliServiceFactory = async () => {
+  // Team reads and previews must not backfill scaffold identity. The concrete
+  // repository port independently attests that config.json is tracked at the
+  // current HEAD before it exposes any Team surface.
+  const config = findConfig();
+  const { createRepositoryTeamWorkflowPort } = await import(
+    "./team/workflow/repository-team-workflow-port.js"
+  );
+  return createRepositoryTeamWorkflowPort(config.projectRoot);
+};
+
+for (const command of buildTeamIdentityActivityCommands({
+  service: teamIdentityActivityService,
+  io: processTeamCommandIo(),
+})) {
+  program.addCommand(command);
+}
 
 // ── Setup (npx entry point) ──
 program
@@ -902,6 +930,11 @@ program
     console.log("  mex setup              First-time setup — create .mex/ scaffold");
     console.log("  mex setup --dry-run    Preview setup without making changes");
     console.log("  mex capabilities --json  Discover structured agent capabilities");
+    console.log("  mex member list --json  List canonical team members");
+    console.log("  mex member current --json  Show the effective local/Git actor");
+    console.log("  mex member <add|update|deactivate|select> <request.json> --json  Preview an identity change");
+    console.log("  mex activity list --json  Read canonical Activity events");
+    console.log("  mex activity record <request.json> --json  Preview canonical Activity recording");
     console.log("  mex check              Drift score — are scaffold files still accurate?");
     console.log("  mex check --quiet      One-liner drift score");
     console.log("  mex check --json       Full drift report as JSON");
@@ -965,7 +998,7 @@ if (isMainModule) {
 
 function buildCompletion(shell: string): string {
   const commands = [
-    "setup", "capabilities", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
+    "setup", "capabilities", "member", "activity", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
     "heartbeat", "doctor", "watch", "tui", "commands", "completion",
     "telemetry", "config", "feedback", "hub",
   ];

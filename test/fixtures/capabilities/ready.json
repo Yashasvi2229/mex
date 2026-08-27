@@ -16,7 +16,19 @@
         "unavailableReason": null
       },
       {
+        "id": "team_identity",
+        "installed": true,
+        "availability": "available",
+        "unavailableReason": null
+      },
+      {
         "id": "activity_read",
+        "installed": true,
+        "availability": "available",
+        "unavailableReason": null
+      },
+      {
+        "id": "activity_record",
         "installed": true,
         "availability": "available",
         "unavailableReason": null
@@ -40,6 +52,36 @@
           "id": "capabilities.inspect",
           "path": "mex capabilities",
           "usage": "mex capabilities --json",
+          "output": "json"
+        },
+        {
+          "id": "member.list",
+          "path": "mex member list",
+          "usage": "mex member list --json",
+          "output": "json"
+        },
+        {
+          "id": "member.show",
+          "path": "mex member show",
+          "usage": "mex member show <member-id> --json",
+          "output": "json"
+        },
+        {
+          "id": "member.current",
+          "path": "mex member current",
+          "usage": "mex member current --json",
+          "output": "json"
+        },
+        {
+          "id": "activity.list",
+          "path": "mex activity list",
+          "usage": "mex activity list --json",
+          "output": "json"
+        },
+        {
+          "id": "activity.show",
+          "path": "mex activity show",
+          "usage": "mex activity show <event-id> --json",
           "output": "json"
         },
         {
@@ -123,6 +165,36 @@
       ],
       "preview": [
         {
+          "id": "member.add.preview",
+          "path": "mex member add",
+          "usage": "mex member add <request-file> --json",
+          "output": "json"
+        },
+        {
+          "id": "member.update.preview",
+          "path": "mex member update",
+          "usage": "mex member update <request-file> --json",
+          "output": "json"
+        },
+        {
+          "id": "member.deactivate.preview",
+          "path": "mex member deactivate",
+          "usage": "mex member deactivate <request-file> --json",
+          "output": "json"
+        },
+        {
+          "id": "member.select.preview",
+          "path": "mex member select",
+          "usage": "mex member select <request-file> --json",
+          "output": "json"
+        },
+        {
+          "id": "activity.record.preview",
+          "path": "mex activity record",
+          "usage": "mex activity record <request-file> --json",
+          "output": "json"
+        },
+        {
           "id": "wiki.apply.preview",
           "path": "mex wiki apply",
           "usage": "mex wiki apply <operation-file> --json",
@@ -136,6 +208,36 @@
         }
       ],
       "apply": [
+        {
+          "id": "member.add.apply",
+          "path": "mex member add",
+          "usage": "mex member add --apply <preview-envelope> --json",
+          "output": "json"
+        },
+        {
+          "id": "member.update.apply",
+          "path": "mex member update",
+          "usage": "mex member update --apply <preview-envelope> --json",
+          "output": "json"
+        },
+        {
+          "id": "member.deactivate.apply",
+          "path": "mex member deactivate",
+          "usage": "mex member deactivate --apply <preview-envelope> --json",
+          "output": "json"
+        },
+        {
+          "id": "member.select.apply",
+          "path": "mex member select",
+          "usage": "mex member select --apply <preview-envelope> --json",
+          "output": "json"
+        },
+        {
+          "id": "activity.record.apply",
+          "path": "mex activity record",
+          "usage": "mex activity record --apply <preview-envelope> --json",
+          "output": "json"
+        },
         {
           "id": "graph.refresh",
           "path": "mex graph refresh",

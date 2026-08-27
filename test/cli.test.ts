@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { Command, InvalidArgumentError } from "commander";
-import { execSync, spawnSync } from "node:child_process";
+import { execFileSync, execSync, spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, symlinkSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -375,6 +375,80 @@ describe("built CLI main-module guard", () => {
       rmSync(userHome, { recursive: true, force: true });
     }
   }, 40_000);
+
+  it("keeps Team reads immutable and provisions only the signed preview key", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-team-cli-process-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-team-cli-home-"));
+    const requestRoot = mkdtempSync(join(tmpdir(), "mex-team-cli-request-"));
+    try {
+      const mexPath = join(fixture, ".mex");
+      mkdirSync(mexPath);
+      writeFileSync(join(mexPath, "ROUTER.md"), "# Router\n");
+      writeFileSync(join(mexPath, "config.json"), JSON.stringify({
+        scaffold_id: "scaffold-team-cli-process-001",
+      }));
+      execFileSync("git", ["init", "--quiet"], { cwd: fixture });
+      execFileSync("git", ["config", "user.email", "team-cli@example.invalid"], { cwd: fixture });
+      execFileSync("git", ["config", "user.name", "Team CLI Contract"], { cwd: fixture });
+      execFileSync("git", ["add", ".mex/ROUTER.md", ".mex/config.json"], { cwd: fixture });
+      execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: fixture });
+
+      const projectBefore = snapshotProcessTree(fixture);
+      const homeBefore = snapshotProcessTree(userHome);
+      for (const args of [
+        ["member", "list", "--json"],
+        ["member", "current", "--json"],
+        ["activity", "list", "--json"],
+      ] as const) {
+        const result = spawnSync(process.execPath, [cliPath, ...args], {
+          cwd: fixture,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+        });
+        expect(result.status, `${args.join(" ")}\n${result.stderr}`).toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({ schemaVersion: 1, ok: true });
+      }
+      expect(snapshotProcessTree(fixture)).toEqual(projectBefore);
+      expect(snapshotProcessTree(userHome)).toEqual(homeBefore);
+
+      const requestPath = join(requestRoot, "activity-record.json");
+      writeFileSync(requestPath, JSON.stringify({
+        operationId: "activity-record-process-001",
+        action: {
+          kind: "activity.record",
+          activity: {
+            action: "review.completed",
+            subjects: [{ kind: "file", path: "src/index.ts" }],
+          },
+        },
+        expectedRevisions: [],
+      }));
+      const preview = spawnSync(
+        process.execPath,
+        [cliPath, "activity", "record", requestPath, "--json"],
+        {
+          cwd: fixture,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+        },
+      );
+      expect(preview.status, preview.stderr).toBe(0);
+      expect(JSON.parse(preview.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "activity.record",
+        mode: "preview",
+        ok: true,
+      });
+      expect(readdirSync(join(mexPath, "local"))).toEqual([
+        "identity-activity-signing.key",
+      ]);
+      expect(snapshotProcessTree(userHome)).toEqual(homeBefore);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+      rmSync(requestRoot, { recursive: true, force: true });
+    }
+  }, 40_000);
 });
 
 describe("mex --version", () => {
@@ -390,3 +464,28 @@ describe("mex --version", () => {
     expect(program.version()).not.toBe("0.3.5"); // the original bug (#48)
   });
 });
+
+function snapshotProcessTree(root: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const visit = (directory: string, prefix: string): void => {
+    for (const name of readdirSync(directory).sort()) {
+      const absolute = join(directory, name);
+      const relative = prefix.length === 0 ? name : `${prefix}/${name}`;
+      const entry = readFileOrDirectory(absolute);
+      result[relative] = entry.kind === "file" ? entry.bytes : "directory";
+      if (entry.kind === "directory") visit(absolute, relative);
+    }
+  };
+  visit(root, "");
+  return result;
+}
+
+function readFileOrDirectory(path: string):
+  | { kind: "file"; bytes: string }
+  | { kind: "directory" } {
+  try {
+    return { kind: "file", bytes: readFileSync(path).toString("base64") };
+  } catch {
+    return { kind: "directory" };
+  }
+}
