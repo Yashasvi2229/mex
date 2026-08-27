@@ -289,7 +289,60 @@
         "repositoryHead": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "firstPassViolations": { "$ref": "#/$defs/violations" },
         "secondPassViolations": { "$ref": "#/$defs/violations" },
-        "confirmedViolations": { "$ref": "#/$defs/violations" }
+        "confirmedViolations": { "$ref": "#/$defs/violations" },
+        "advisoryAssessments": { "$ref": "#/$defs/advisoryAssessments" },
+        "materialAssessments": { "$ref": "#/$defs/materialAssessments" }
+      }
+    },
+    "advisoryAssessments": {
+      "type": "array",
+      "maxItems": 400,
+      "items": {
+        "allOf": [
+          { "$ref": "#/$defs/materialityAssessment" },
+          {
+            "type": "object",
+            "properties": {
+              "classification": { "const": "advisory" },
+              "reason": { "enum": ["not_repeated", "below_material_threshold"] }
+            }
+          }
+        ]
+      }
+    },
+    "materialAssessments": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "allOf": [
+          { "$ref": "#/$defs/materialityAssessment" },
+          {
+            "type": "object",
+            "properties": {
+              "classification": { "const": "material" },
+              "reason": { "const": "repeated_material_threshold" }
+            }
+          }
+        ]
+      }
+    },
+    "materialityAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metric", "category", "classification", "reason", "budget", "relativeExcessRatio", "minimumExcess", "materialThreshold", "firstMeasured", "secondMeasured"],
+      "properties": {
+        "metric": { "type": "string", "maxLength": 256 },
+        "category": {
+          "enum": ["api_latency_ms", "cold_readiness_ms", "maintenance_ms", "idle_cpu_ms", "rss_bytes", "browser_heap_bytes"]
+        },
+        "classification": { "enum": ["advisory", "material"] },
+        "reason": { "enum": ["not_repeated", "below_material_threshold", "repeated_material_threshold"] },
+        "budget": { "$ref": "#/$defs/number" },
+        "relativeExcessRatio": { "const": 0.15 },
+        "minimumExcess": { "$ref": "#/$defs/number" },
+        "materialThreshold": { "$ref": "#/$defs/number" },
+        "firstMeasured": { "type": ["number", "null"], "minimum": 0 },
+        "secondMeasured": { "type": ["number", "null"], "minimum": 0 }
       }
     }
   }
