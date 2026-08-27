@@ -132,6 +132,13 @@ export const DATA_OWNERSHIP: readonly DataOwnershipRule[] = [
     owner: "team-workflows",
   },
   {
+    data: "Identity and Activity preview signing credential",
+    location: ".mex/local/identity-activity-signing.key",
+    ownership: "local",
+    gitTracked: false,
+    owner: "team-workflows",
+  },
+  {
     data: "Hub session token",
     location: "process memory",
     ownership: "ephemeral",
@@ -159,4 +166,5 @@ export const TEAM_ARTIFACT_PATHS = {
   activity: ".mex/events/activity",
   wikiOperations: ".mex/events/operations.jsonl",
   localState: ".mex/local/team.db",
+  localReceiptSigner: ".mex/local/identity-activity-signing.key",
 } as const;

@@ -87,6 +87,11 @@ describe("human-team application contract lock", () => {
       expect.objectContaining({ location: ".mex/wiki.db*", ownership: "derived" }),
       expect.objectContaining({ location: ".mex/local/team.db*", ownership: "local" }),
       expect.objectContaining({
+        location: ".mex/local/identity-activity-signing.key",
+        ownership: "local",
+        gitTracked: false,
+      }),
+      expect.objectContaining({
         location: ".mex/events/activity/YYYY-MM/<event-id>.md",
         ownership: "canonical",
         owner: "team-workflows",
