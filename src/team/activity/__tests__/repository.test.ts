@@ -11,6 +11,7 @@ import type {
 } from "../../contracts/git.js";
 import type { RepoState } from "../../contracts/shared.js";
 import { MexPortError } from "../../contracts/shared.js";
+import { generateArtifactId } from "../../artifacts/ulid.js";
 import { ActivityRepository, TimelineReader } from "../repository.js";
 
 const roots: string[] = [];
@@ -23,6 +24,29 @@ afterEach(() => {
 });
 
 describe("ActivityRepository", () => {
+  it("accepts an explicit workflow-owned event ID without consuming the generator", async () => {
+    const root = temporaryRoot();
+    const git = fakeGit();
+    const repository = fixedRepository(root, git, secondId);
+    const preview = await repository.previewCreateWithAuthority({
+      actor: { kind: "unknown" },
+      action: "activity.recorded",
+      subjects: [],
+    }, {
+      timestamp,
+      repoState: git.state,
+    }, firstId);
+
+    expect(preview.event.id).toBe(firstId);
+    expect((await repository.applyCreate(preview, preview.previewRevision)).id).toBe(firstId);
+    const generated = await repository.previewCreate({
+      actor: { kind: "unknown" },
+      action: "activity.recorded",
+      subjects: [],
+    });
+    expect(generated.event.id).toBe(secondId);
+  });
+
   it("binds an enclosing workflow's service-owned authority and still revalidates Git", async () => {
     const root = temporaryRoot();
     const git = fakeGit();
@@ -103,11 +127,11 @@ describe("ActivityRepository", () => {
     );
     // Simulate the enclosing workflow's reviewed canonical publication.
     git.state = { ...git.state, dirty: true };
-    const stored = publication.publish();
+    const stored = await publication.publish();
 
     expect(stored.revision).toBe(preview.revision);
     expect(stored.repoState.dirty).toBe(false);
-    expect(() => publication.publish()).toThrowError(MexPortError);
+    await expect(publication.publish()).rejects.toThrowError(MexPortError);
   });
 
   it("does not consume a prepared publication when a conflicting path is removed for retry", async () => {
@@ -121,9 +145,9 @@ describe("ActivityRepository", () => {
     mkdirSync(join(path, ".."), { recursive: true });
     writeFileSync(path, "conflicting bytes\n", "utf8");
 
-    expect(() => publication.publish()).toThrowError(MexPortError);
+    await expect(publication.publish()).rejects.toThrowError(MexPortError);
     unlinkSync(path);
-    expect(publication.publish().revision).toBe(preview.revision);
+    expect((await publication.publish()).revision).toBe(preview.revision);
   });
 
   it("recovers only an exact journaled Activity event and replays it idempotently", async () => {
@@ -133,11 +157,11 @@ describe("ActivityRepository", () => {
       actor: { kind: "unknown" }, action: "workstream.created", subjects: [],
     });
 
-    const recovered = repository.recoverJournaledCreate(preview.event, preview.revision);
-    expect(repository.recoverJournaledCreate(preview.event, preview.revision)).toEqual(recovered);
-    expect(() => repository.recoverJournaledCreate(preview.event, "f".repeat(64))).toThrowError(
-      MexPortError,
-    );
+    const recovered = await repository.recoverJournaledCreate(preview.event, preview.revision);
+    await expect(repository.recoverJournaledCreate(preview.event, preview.revision))
+      .resolves.toEqual(recovered);
+    await expect(repository.recoverJournaledCreate(preview.event, "f".repeat(64)))
+      .rejects.toThrowError(MexPortError);
   });
 
   it("binds the canonical project root before a caller symlink can be swapped", async () => {
@@ -176,6 +200,71 @@ describe("ActivityRepository", () => {
     expect(read.events).toEqual([]);
     expect(read.diagnostics.map((item) => item.code)).toContain("ACTIVITY_ID_CONFLICT");
     expect(read.diagnostics.map((item) => item.code)).toContain("ACTIVITY_ARTIFACT_UNEXPECTED");
+    expect(() => first.get(firstId)).toThrowError(MexPortError);
+  });
+
+  it("enforces directory capacity at preview and again under the publication lock", async () => {
+    const root = temporaryRoot();
+    const git = fakeGit();
+    const repository = fixedRepository(root, git, firstId);
+    const preview = await repository.previewCreate({
+      actor: { kind: "unknown" }, action: "workstream.created", subjects: [],
+    });
+    const publication = await repository.prepareApplyCreate(preview, preview.previewRevision);
+    const month = join(root, ".mex/events/activity", timestamp.slice(0, 7));
+    mkdirSync(month, { recursive: true });
+    for (let index = 0; index < 4_095; index += 1) {
+      writeFileSync(join(month, `unexpected-${String(index).padStart(4, "0")}.txt`), "x");
+    }
+
+    const bounded = repository.readAll();
+    expect(bounded.sourceTruncated).toBe(false);
+    expect(bounded.diagnostics).toHaveLength(100);
+    expect(bounded.diagnostics.at(-1)?.code).toBe("ACTIVITY_DIAGNOSTICS_TRUNCATED");
+    await expect(fixedRepository(root, git, secondId).previewCreate({
+      actor: { kind: "unknown" }, action: "workstream.created", subjects: [],
+    })).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
+    await expect(publication.publish()).rejects.toMatchObject({
+      problem: { code: "VALIDATION_FAILED" },
+    });
+
+    unlinkSync(join(month, "unexpected-4094.txt"));
+    await expect(publication.publish()).resolves.toMatchObject({ id: firstId });
+  });
+
+  it("counts malformed canonical candidates toward the 2,048-record ceiling", async () => {
+    const root = temporaryRoot();
+    const month = join(root, ".mex/events/activity", timestamp.slice(0, 7));
+    mkdirSync(month, { recursive: true });
+    const ids = Array.from({ length: 2_048 }, (_, index) => seededEventId(index));
+    for (const eventId of ids) writeFileSync(join(month, `${eventId}.md`), "malformed\n");
+    const repository = fixedRepository(root, fakeGit(), firstId);
+
+    const read = repository.readAll();
+    expect(read.sourceTruncated).toBe(false);
+    expect(read.untrustedIds).toHaveLength(2_048);
+    expect(read.diagnostics).toHaveLength(100);
+    expect(() => repository.get(ids[0]!)).toThrowError(MexPortError);
+    await expect(repository.previewCreate({
+      actor: { kind: "unknown" }, action: "workstream.created", subjects: [],
+    })).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
+  });
+
+  it("fails closed at the 32 MiB aggregate Activity byte ceiling", async () => {
+    const root = temporaryRoot();
+    const month = join(root, ".mex/events/activity", timestamp.slice(0, 7));
+    mkdirSync(month, { recursive: true });
+    for (let index = 0; index < 513; index += 1) {
+      writeFileSync(join(month, `${seededEventId(index)}.md`), "x".repeat(65_500));
+    }
+    const repository = fixedRepository(root, fakeGit(), firstId);
+    const read = repository.readAll();
+    expect(read.sourceTruncated).toBe(true);
+    expect(read.events).toEqual([]);
+    expect(read.diagnostics).toHaveLength(100);
+    await expect(repository.previewCreate({
+      actor: { kind: "unknown" }, action: "workstream.created", subjects: [],
+    })).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
   });
 
   it("combines canonical and legacy history without rewriting legacy bytes", async () => {
@@ -224,7 +313,7 @@ describe("ActivityRepository", () => {
     const root = temporaryRoot();
     const month = join(root, ".mex/events/activity/2026-08");
     mkdirSync(month, { recursive: true });
-    for (let index = 0; index < 2_049; index += 1) {
+    for (let index = 0; index < 4_097; index += 1) {
       writeFileSync(join(month, `unexpected-${String(index).padStart(4, "0")}.txt`), "x", "utf8");
     }
 
@@ -274,6 +363,13 @@ function fixedRepository(root: string, git: FakeGit, id: string): ActivityReposi
     git,
     now: () => new Date(timestamp),
     generateId: () => id,
+  });
+}
+
+function seededEventId(index: number): string {
+  return generateArtifactId("event", {
+    now: Date.parse(timestamp) + index,
+    random: new Uint8Array(10).fill(index % 251),
   });
 }
 

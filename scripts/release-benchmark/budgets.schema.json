@@ -48,7 +48,7 @@
         "routes": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "playbooks", "inbox", "relays", "activity", "jobs", "health", "notFound"],
+          "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
           "properties": {
             "home": { "$ref": "#/$defs/assetGroup" },
             "search": { "$ref": "#/$defs/assetGroup" },
@@ -61,6 +61,7 @@
             "playbooks": { "$ref": "#/$defs/assetGroup" },
             "inbox": { "$ref": "#/$defs/assetGroup" },
             "relays": { "$ref": "#/$defs/assetGroup" },
+            "members": { "$ref": "#/$defs/assetGroup" },
             "activity": { "$ref": "#/$defs/assetGroup" },
             "jobs": { "$ref": "#/$defs/assetGroup" },
             "health": { "$ref": "#/$defs/assetGroup" },
@@ -153,7 +154,7 @@
     "routeBudgets": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "playbooks", "inbox", "relays", "activity", "jobs", "health", "notFound"],
+      "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
       "properties": {
         "home": { "$ref": "#/$defs/nonNegativeNumber" },
         "search": { "$ref": "#/$defs/nonNegativeNumber" },
@@ -166,6 +167,7 @@
         "playbooks": { "$ref": "#/$defs/nonNegativeNumber" },
         "inbox": { "$ref": "#/$defs/nonNegativeNumber" },
         "relays": { "$ref": "#/$defs/nonNegativeNumber" },
+        "members": { "$ref": "#/$defs/nonNegativeNumber" },
         "activity": { "$ref": "#/$defs/nonNegativeNumber" },
         "jobs": { "$ref": "#/$defs/nonNegativeNumber" },
         "health": { "$ref": "#/$defs/nonNegativeNumber" },

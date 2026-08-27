@@ -16,7 +16,10 @@ import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import type { GitPage, GitWorkingTreeEntry } from "../../contracts/git.js";
-import { createRepositoryGitPort } from "../git-port.js";
+import {
+  createRepositoryGitPort,
+  requireCanonicalGitBranch,
+} from "../git-port.js";
 
 const repositories: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -162,6 +165,67 @@ describe("read-only repository GitPort", () => {
     git(repository, ["checkout", "--detach", "-q"]);
     expect(await port.getRepoState()).toMatchObject({ branch: null });
   }, 20_000);
+
+  it("accepts a canonical repository branch of exactly 1,024 UTF-8 bytes", () => {
+    const branch = asciiBranchWithBytes(1_024);
+    expect(requireCanonicalGitBranch(branch)).toBe(branch);
+  });
+
+  it("rejects a 1,025-byte repository branch with a safe typed failure", async () => {
+    const branch = asciiBranchWithBytes(1_025);
+
+    await expect(
+      Promise.resolve().then(() => requireCanonicalGitBranch(branch)),
+    ).rejects.toMatchObject({
+      problem: {
+        title: "Git read failed",
+        status: 500,
+        code: "INTERNAL_ERROR",
+        detail: "Git returned malformed branch name data.",
+      },
+    });
+  });
+
+  it("rejects non-trimmed and control-bearing repository branches", () => {
+    for (const branch of [" main", "main ", "feature/\u0001hidden", "feature/\u0085hidden"]) {
+      expect(() => requireCanonicalGitBranch(branch)).toThrow(
+        "Git returned malformed branch name data.",
+      );
+    }
+  });
+
+  it("accepts NFC repository branches and safely rejects decomposed Unicode", async () => {
+    const canonicalRepository = createRepository();
+    const canonicalBranch = "feature/caf\u00e9";
+    expect(canonicalBranch.normalize("NFC")).toBe(canonicalBranch);
+    writeFileSync(
+      join(canonicalRepository, ".git", "HEAD"),
+      `ref: refs/heads/${canonicalBranch}\n`,
+      "utf8",
+    );
+    await expect(
+      createRepositoryGitPort(canonicalRepository).getRepoState(),
+    ).resolves.toMatchObject({ branch: canonicalBranch, head: null });
+
+    const decomposedRepository = createRepository();
+    const decomposedBranch = "feature/cafe\u0301";
+    expect(decomposedBranch.normalize("NFC")).toBe(canonicalBranch);
+    writeFileSync(
+      join(decomposedRepository, ".git", "HEAD"),
+      `ref: refs/heads/${decomposedBranch}\n`,
+      "utf8",
+    );
+    await expect(
+      createRepositoryGitPort(decomposedRepository).getRepoState(),
+    ).rejects.toMatchObject({
+      problem: {
+        title: "Git read failed",
+        status: 500,
+        code: "INTERNAL_ERROR",
+        detail: "Git returned malformed branch name data.",
+      },
+    });
+  });
 
   it("separates staged and unstaged diffs, treats pathspec-looking names literally, and bounds output", async () => {
     const repository = createRepository();
@@ -613,6 +677,15 @@ function createRepository(withInitialCommit = false): string {
     commit(repository, "empty", false, true);
   }
   return repository;
+}
+
+function asciiBranchWithBytes(bytes: 1_024 | 1_025): string {
+  const directoryPrefix = `${"a".repeat(200)}/`.repeat(5);
+  const branch = `${directoryPrefix}${"b".repeat(bytes - Buffer.byteLength(directoryPrefix))}`;
+  if (Buffer.byteLength(branch, "utf8") !== bytes) {
+    throw new Error("Failed to construct the requested test branch length.");
+  }
+  return branch;
 }
 
 function write(repository: string, path: string, content: string): void {

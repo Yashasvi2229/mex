@@ -253,6 +253,11 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 |---|---|
 | `mex` / `mex tui` | Open the interactive terminal dashboard |
 | `mex hub [--port <n>] [--no-open]` | Open the secure local Project Hub |
+| `mex capabilities --json` | Discover bounded structured reads, previews, and apply commands |
+| `mex member list\|show\|current --json` | Read canonical members and the effective actor |
+| `mex member add\|update\|deactivate\|select` | Preview a member/selection request; apply only an approved preview envelope |
+| `mex activity list\|show --json` | Read bounded canonical Activity |
+| `mex activity record` | Preview an append-only canonical Activity record |
 | `mex setup` | Create and populate the living wiki |
 | `mex check` | Check wiki health and calculate a drift score |
 | `mex sync` | Repair stale or inconsistent knowledge |
@@ -279,8 +284,12 @@ in-memory session, and mutating requests also require same-origin CSRF proof.
 Use `--no-open` to print the launch URL without opening a browser, or `--port`
 to request a specific loopback port.
 
-The Hub displays repository context, locally persisted job history, and the
-read-only Activity timeline. Its real Code workspace searches symbols and
+The Hub displays repository context, locally persisted job history, canonical
+members, the effective checkout actor, and the Activity timeline. The Members
+workbench uses explicit preview/review/apply for canonical identity changes and
+keeps member selection local. Activity remains immutable and adds only an
+append-only reviewed record flow; the service captures actor, timestamp, branch,
+HEAD, and dirty state. Its real Code workspace searches symbols and
 source, inspects callers/callees/impact, reports graph Health, and lets you
 explicitly refresh or rebuild the local graph. Its read-only Knowledge workspace
 browses and searches canonical Wiki entries, shows bounded evidence, provenance,

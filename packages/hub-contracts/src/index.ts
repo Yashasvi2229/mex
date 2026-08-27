@@ -144,6 +144,12 @@ export const HubCapabilitiesSchema = z.object({
   apiVersion: z.literal(HUB_API_VERSION),
   git: CapabilityStatusSchema,
   activity: CapabilityStatusSchema,
+  activityRecord: CapabilityStatusSchema,
+  members: z.object({
+    read: CapabilityStatusSchema,
+    canonicalMutation: CapabilityStatusSchema,
+    localSelection: CapabilityStatusSchema,
+  }).strict(),
   jobs: CapabilityStatusSchema,
   graph: z.object({
     read: CapabilityStatusSchema,
@@ -235,6 +241,370 @@ export const HomeResponseSchema = z.object({
   }).strict(),
   activeJobs: z.number().int().nonnegative(),
   attention: z.array(HubAttentionItemSchema).max(100),
+}).strict();
+
+const teamMemberId = z.string()
+  .regex(/^member_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid member ID.");
+const teamEventId = z.string()
+  .regex(/^event_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Activity event ID.");
+const teamWorkstreamId = z.string()
+  .regex(/^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Workstream ID.");
+const teamOperationId = z.string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/, "Invalid team operation ID.");
+const gitObjectId = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
+const teamText = (maximum: number) => utf8Text(maximum).refine(
+  (value) => value.trim() === value
+    && value.normalize("NFC") === value
+    && !/[\u0000-\u001f\u007f]/.test(value),
+  "Text must be trimmed canonical Unicode without control characters.",
+);
+const jsonByteLength = (value: unknown) => new TextEncoder()
+  .encode(JSON.stringify(value)).byteLength;
+const teamActivityAction = teamText(128).refine(
+  (value) => /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(value),
+  "Activity action must be a lower-case namespaced identifier.",
+);
+const teamRepositoryPath = utf8Text(4_096).refine((value) => {
+  if (value.includes("\0") || value.includes("\\") || value.startsWith("/")) return false;
+  if (/^[A-Za-z]:\//.test(value)) return false;
+  if (value.normalize("NFC") !== value || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(value)) {
+    return false;
+  }
+  return value.split("/").every(
+    (segment) => segment !== "" && segment !== "." && segment !== "..",
+  );
+}, "Path must be a safe repository-relative POSIX path.");
+
+export const TeamMemberIdSchema = teamMemberId;
+
+export const TeamGitAliasSchema = z.object({
+  name: teamText(200).nullable(),
+  email: teamText(320).nullable(),
+}).strict().superRefine((value, context) => {
+  if (value.name === null && value.email === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "A Git alias requires a name or email.",
+    });
+  }
+  if (value.email !== null && (!value.email.includes("@") || /\s/.test(value.email))) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["email"],
+      message: "The Git alias email is invalid.",
+    });
+  }
+});
+
+export const TeamMemberSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: teamMemberId,
+  displayName: teamText(200),
+  gitAliases: z.array(TeamGitAliasSchema).max(32),
+  active: z.boolean(),
+  sourcePath: teamRepositoryPath,
+  revision,
+}).strict().superRefine((value, context) => {
+  if (value.sourcePath !== `.mex/team/members/${value.id}.md`) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sourcePath"],
+      message: "Member source path must match its ID.",
+    });
+  }
+});
+
+const teamActiveFilter = z.union([
+  z.boolean(),
+  z.enum(["true", "false"]).transform((value) => value === "true"),
+]);
+
+export const TeamMemberListRequestSchema = z.object({
+  active: teamActiveFilter.optional(),
+  cursor: cursor.optional(),
+  limit: z.coerce.number().int().min(1).max(HUB_LIMITS.maxPageSize)
+    .default(HUB_LIMITS.defaultPageSize),
+}).strict();
+
+export const TeamMemberListResponseSchema = z.object({
+  items: z.array(TeamMemberSchema).max(HUB_LIMITS.maxPageSize),
+  nextCursor: cursor.nullable(),
+  truncated: z.boolean(),
+  sourceTruncated: z.boolean(),
+  deterministicRevision: revision,
+  diagnostics: z.array(HubDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
+  diagnosticsTruncated: z.boolean(),
+}).strict().superRefine((value, context) => {
+  if (value.truncated !== (value.nextCursor !== null)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["truncated"],
+      message: "Member page truncation must match cursor presence.",
+    });
+  }
+});
+
+export const TeamActorRefSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("member"),
+    memberId: teamMemberId,
+    displayName: teamText(200).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("git"),
+    name: teamText(200).nullable(),
+    email: teamText(320).nullable(),
+  }).strict(),
+  z.object({ kind: z.literal("unknown") }).strict(),
+]).superRefine((value, context) => {
+  if (value.kind === "git" && value.name === null && value.email === null) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "A Git actor requires a name or email.",
+    });
+  }
+});
+
+export const TeamCurrentActorResponseSchema = z.object({
+  actor: TeamActorRefSchema,
+  source: z.enum(["configured-member", "git-alias", "git-fallback", "unknown"]),
+  selection: z.object({
+    memberId: teamMemberId,
+    updatedAt: isoTimestamp,
+    revision,
+  }).strict().nullable(),
+  diagnostics: z.array(HubDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
+  diagnosticsTruncated: z.boolean(),
+}).strict();
+
+const teamEntityRef = z.object({
+  id: teamText(256),
+  kind: teamText(64),
+  title: teamText(256).optional(),
+}).strict();
+
+const teamWorkstreamRef = z.object({
+  id: teamWorkstreamId,
+  kind: z.literal("workstream"),
+  title: teamText(256).optional(),
+}).strict();
+
+const teamCodeRef = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("symbol"),
+    symbolId: teamText(512),
+    fingerprint: teamText(512).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("file"),
+    path: teamRepositoryPath,
+    fingerprint: teamText(512).optional(),
+  }).strict(),
+]);
+
+export const TeamActivitySubjectInputSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("entity"), entity: teamEntityRef }).strict(),
+  z.object({ kind: z.literal("code"), code: teamCodeRef }).strict(),
+  z.object({ kind: z.literal("file"), path: teamRepositoryPath }).strict(),
+  z.object({ kind: z.literal("commit"), hash: gitObjectId }).strict(),
+]);
+
+const teamMemberAddAction = z.object({
+  kind: z.literal("member.add"),
+  member: z.object({
+    displayName: teamText(200),
+    gitAliases: z.array(TeamGitAliasSchema).max(32),
+  }).strict(),
+}).strict();
+
+const teamMemberUpdateAction = z.object({
+  kind: z.literal("member.update"),
+  memberId: teamMemberId,
+  patch: z.object({
+    displayName: teamText(200).optional(),
+    gitAliases: z.array(TeamGitAliasSchema).max(32).optional(),
+  }).strict().refine(
+    (value) => value.displayName !== undefined || value.gitAliases !== undefined,
+    "A member update requires at least one supported field.",
+  ),
+}).strict();
+
+const teamIdentityActivityAction = z.discriminatedUnion("kind", [
+  teamMemberAddAction,
+  teamMemberUpdateAction,
+  z.object({ kind: z.literal("member.deactivate"), memberId: teamMemberId }).strict(),
+  z.object({ kind: z.literal("member.select"), memberId: teamMemberId }).strict(),
+  z.object({ kind: z.literal("member.clear") }).strict(),
+  z.object({
+    kind: z.literal("activity.record"),
+    activity: z.object({
+      action: teamActivityAction,
+      subjects: z.array(TeamActivitySubjectInputSchema).max(64),
+      workstream: teamWorkstreamRef.optional(),
+    }).strict(),
+  }).strict(),
+]);
+
+const teamRevisionExpectation = z.union([
+  z.object({
+    target: z.object({ kind: z.literal("artifact"), path: teamRepositoryPath }).strict(),
+    revision: revision.nullable(),
+  }).strict(),
+  z.object({
+    target: z.object({
+      kind: z.literal("local"),
+      namespace: z.literal("member-selection"),
+      id: z.literal("current"),
+    }).strict(),
+    revision: revision.nullable(),
+  }).strict(),
+]);
+
+export const TeamOperationPreviewRequestSchema = z.object({
+  operationId: teamOperationId,
+  action: teamIdentityActivityAction,
+  expectedRevisions: z.array(teamRevisionExpectation).max(64),
+}).strict().superRefine((value, context) => {
+  if (
+    value.action.kind !== "member.add"
+    && value.action.kind !== "activity.record"
+    && value.expectedRevisions.length === 0
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["expectedRevisions"],
+      message: "Existing-target operations require a revision expectation.",
+    });
+  }
+});
+
+const teamFileChangeBase = {
+  path: teamRepositoryPath,
+  diff: utf8Text(64 * 1024, 0),
+} as const;
+
+export const TeamFileChangeSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("create"),
+    ...teamFileChangeBase,
+    beforeRevision: z.null(),
+    afterRevision: revision,
+  }).strict(),
+  z.object({
+    kind: z.literal("update"),
+    ...teamFileChangeBase,
+    beforeRevision: revision,
+    afterRevision: revision,
+  }).strict(),
+  z.object({
+    kind: z.literal("delete"),
+    ...teamFileChangeBase,
+    beforeRevision: revision,
+    afterRevision: z.null(),
+  }).strict(),
+  z.object({
+    kind: z.literal("move"),
+    ...teamFileChangeBase,
+    previousPath: teamRepositoryPath,
+    beforeRevision: revision,
+    afterRevision: revision,
+  }).strict(),
+]);
+
+export const TeamLocalChangeSchema = z.object({
+  namespace: z.literal("member-selection"),
+  id: z.literal("current"),
+  beforeRevision: revision.nullable(),
+  afterRevision: revision.nullable(),
+  summary: teamText(2_048),
+}).strict();
+
+const teamPublicPreview = z.object({
+  valid: z.boolean(),
+  scope: z.enum(["canonical", "local", "mixed"]),
+  changes: z.array(TeamFileChangeSchema).max(16),
+  localChanges: z.array(TeamLocalChangeSchema).max(16),
+  diagnostics: z.array(HubDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
+}).strict();
+
+const teamRepositoryState = z.object({
+  branch: teamText(1_024).nullable(),
+  head: gitObjectId.nullable(),
+  dirty: z.boolean(),
+  observedAt: isoTimestamp,
+}).strict();
+
+const teamPurposeId = z.discriminatedUnion("purpose", [
+  z.object({ purpose: z.literal("activity"), id: teamEventId }).strict(),
+  z.object({ purpose: z.literal("member"), id: teamMemberId }).strict(),
+]);
+
+export const TeamOperationReceiptSchema = z.object({
+  schemaVersion: z.literal(1),
+  authority: z.object({
+    actor: TeamActorRefSchema,
+    occurredAt: isoTimestamp,
+    repoState: teamRepositoryState,
+  }).strict(),
+  purposeIds: z.array(teamPurposeId).max(2),
+  requestRevision: revision,
+  presentationRevision: revision,
+  previewRevision: revision,
+}).strict().superRefine((value, context) => {
+  const keys = value.purposeIds.map(({ purpose, id }) => `${purpose}\0${id}`);
+  if (new Set(keys).size !== keys.length || keys.some((key, index) => (
+    index > 0 && key <= keys[index - 1]!
+  ))) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["purposeIds"],
+      message: "Purpose IDs must be unique and sorted.",
+    });
+  }
+  if (jsonByteLength(value) > 8 * 1024) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "The team operation receipt exceeds 8 KiB.",
+    });
+  }
+});
+
+export const TeamOperationPreviewResponseSchema = z.object({
+  schemaVersion: z.literal(1),
+  request: TeamOperationPreviewRequestSchema,
+  preview: teamPublicPreview,
+  receipt: TeamOperationReceiptSchema,
+}).strict().superRefine((value, context) => {
+  if (jsonByteLength(value) > HUB_LIMITS.maxMutationBodyBytes) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "The team operation preview exceeds 64 KiB.",
+    });
+  }
+});
+
+export const TeamOperationApplyRequestSchema = TeamOperationPreviewResponseSchema;
+
+export const TeamActivityEventSchema = z.object({
+  schemaVersion: z.literal(1),
+  id: teamEventId,
+  timestamp: isoTimestamp,
+  actor: TeamActorRefSchema,
+  action: teamActivityAction,
+  subjects: z.array(TeamActivitySubjectInputSchema).max(64),
+  workstream: teamWorkstreamRef.nullable(),
+  repoState: teamRepositoryState,
+}).strict();
+
+export const TeamOperationApplyResponseSchema = z.object({
+  operationId: teamOperationId,
+  previewRevision: revision,
+  applied: z.literal(true),
+  idempotentReplay: z.boolean(),
+  changes: z.array(TeamFileChangeSchema).max(16),
+  localChanges: z.array(TeamLocalChangeSchema).max(16),
+  members: z.array(TeamMemberSchema).max(1),
+  events: z.array(TeamActivityEventSchema).max(1),
 }).strict();
 
 export const GraphSymbolIdSchema = z.string().min(1).max(128)
@@ -1068,6 +1438,22 @@ export type CapabilityStatus = z.infer<typeof CapabilityStatusSchema>;
 export type HubCapabilities = z.infer<typeof HubCapabilitiesSchema>;
 export type HubActor = z.infer<typeof HubActorSchema>;
 export type HomeResponse = z.infer<typeof HomeResponseSchema>;
+export type TeamMemberId = z.infer<typeof TeamMemberIdSchema>;
+export type TeamGitAlias = z.infer<typeof TeamGitAliasSchema>;
+export type TeamMember = z.infer<typeof TeamMemberSchema>;
+export type TeamMemberListRequest = z.infer<typeof TeamMemberListRequestSchema>;
+export type TeamMemberListResponse = z.infer<typeof TeamMemberListResponseSchema>;
+export type TeamActorRef = z.infer<typeof TeamActorRefSchema>;
+export type TeamCurrentActorResponse = z.infer<typeof TeamCurrentActorResponseSchema>;
+export type TeamActivitySubjectInput = z.infer<typeof TeamActivitySubjectInputSchema>;
+export type TeamOperationPreviewRequest = z.infer<typeof TeamOperationPreviewRequestSchema>;
+export type TeamFileChange = z.infer<typeof TeamFileChangeSchema>;
+export type TeamLocalChange = z.infer<typeof TeamLocalChangeSchema>;
+export type TeamOperationReceipt = z.infer<typeof TeamOperationReceiptSchema>;
+export type TeamOperationPreviewResponse = z.infer<typeof TeamOperationPreviewResponseSchema>;
+export type TeamOperationApplyRequest = z.infer<typeof TeamOperationApplyRequestSchema>;
+export type TeamActivityEvent = z.infer<typeof TeamActivityEventSchema>;
+export type TeamOperationApplyResponse = z.infer<typeof TeamOperationApplyResponseSchema>;
 export type GraphSymbolId = z.infer<typeof GraphSymbolIdSchema>;
 export type GraphSymbol = z.infer<typeof GraphSymbolSchema>;
 export type WikiEntityId = z.infer<typeof WikiEntityIdSchema>;

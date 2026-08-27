@@ -25,6 +25,7 @@ import { HubJobManager } from "../src/hub/jobs/index.js";
 import { createGraphJobExecutors } from "../src/hub/jobs/graph.js";
 import { HubSessionManager } from "../src/hub/security/session.js";
 import { createLocalHubReadServices } from "../src/hub/services.js";
+import { createRepositoryTeamWorkflowPort } from "../src/team/workflow/repository-team-workflow-port.js";
 import { TeamLocalState } from "../src/team/local-state/index.js";
 
 const ORIGIN = "http://127.0.0.1:48481";
@@ -181,10 +182,13 @@ async function createHarness(root: string): Promise<Harness> {
     shutdownTimeoutMs: 60_000,
   });
   jobs.initialize();
+  const team = await createRepositoryTeamWorkflowPort(root);
+  team.initializeIdentityActivitySigner();
   const services = createLocalHubReadServices({
     projectRoot: root,
     scaffoldId: "hub-graph-integration",
     jobs,
+    team,
     graph,
   });
   const security = new HubSessionManager({
@@ -245,6 +249,7 @@ async function prepareProject(): Promise<string> {
   write(root, "src/service.ts", originalSource());
   write(root, ".mex/wiki.db", "wiki sentinel private body\n");
   write(root, ".mex/events/decisions.jsonl", "");
+  write(root, ".mex/config.json", `${JSON.stringify({ scaffold_id: "hub-graph-integration" }, null, 2)}\n`);
   git(root, "init", "-q", "-b", "main");
   git(root, "config", "user.name", "Hub Graph Test");
   git(root, "config", "user.email", "hub-graph@example.invalid");

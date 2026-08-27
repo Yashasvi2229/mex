@@ -13,7 +13,13 @@ import {
 } from "lucide-react";
 import { Link, useOutletContext } from "react-router-dom";
 import { useHubApi } from "../api/context";
-import type { CapabilitiesResponse, HomeResponse, JobSummary, Tone } from "../api/types";
+import type {
+  CapabilitiesResponse,
+  HomeResponse,
+  JobSummary,
+  TeamCurrentActorResponse,
+  Tone,
+} from "../api/types";
 import {
   ErrorState,
   formatDate,
@@ -132,6 +138,12 @@ function actorName(actor: HomeResponse["actor"]): string {
   return "Unknown actor";
 }
 
+function currentActorName(actor: TeamCurrentActorResponse["actor"]): string {
+  if (actor.kind === "member") return actor.displayName ?? actor.memberId;
+  if (actor.kind === "git") return actor.name ?? actor.email ?? "Git identity";
+  return "Unknown actor";
+}
+
 function attentionTone(tone: HomeResponse["attention"][number]["tone"]): Tone {
   if (tone === "critical") return "danger";
   return tone;
@@ -142,6 +154,12 @@ export function HomePage() {
   const { capabilities } = useOutletContext<{ capabilities?: CapabilitiesResponse }>();
   const home = useQuery({ queryKey: ["home"], queryFn: () => api.getHome(), retry: false });
   const jobs = useQuery({ queryKey: ["jobs", "home"], queryFn: () => api.getJobs(), retry: false });
+  const currentActor = useQuery({
+    queryKey: ["actor", "current"],
+    queryFn: () => api.getCurrentActor(),
+    enabled: capabilities?.members.read.availability === "available",
+    retry: false,
+  });
 
   if (home.isPending) {
     return (
@@ -259,10 +277,22 @@ export function HomePage() {
           <CardHeader className={`${homeStyles.cardHeader} border-b`}>
             <CardTitle><h2 id="home-coverage-heading">Project sections</h2></CardTitle>
             <CardAction>
-              <Badge variant="outline">
-                <UserRound data-icon="inline-start" aria-hidden="true" />
-                {actorName(data.actor)}
-              </Badge>
+              {capabilities?.members.read.availability === "available" ? (
+                <Link
+                  aria-label={`Open member identity for ${currentActor.data ? currentActorName(currentActor.data.actor) : actorName(data.actor)}`}
+                  className={buttonVariants({ size: "sm", variant: "ghost" })}
+                  to="/members"
+                >
+                  <UserRound data-icon="inline-start" aria-hidden="true" />
+                  {currentActor.data ? currentActorName(currentActor.data.actor) : actorName(data.actor)}
+                  <ArrowRight data-icon="inline-end" aria-hidden="true" />
+                </Link>
+              ) : (
+                <Badge variant="outline">
+                  <UserRound data-icon="inline-start" aria-hidden="true" />
+                  {actorName(data.actor)}
+                </Badge>
+              )}
             </CardAction>
           </CardHeader>
           <CardContent className={homeStyles.cardListContent}>

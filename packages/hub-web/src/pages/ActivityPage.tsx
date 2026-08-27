@@ -12,11 +12,12 @@ import {
   GitBranch,
   GitCommitHorizontal,
   History,
+  Plus,
   RotateCcw,
   ScrollText,
   ShieldCheck,
 } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import { HubApiError } from "../api/client";
 import { useHubApi } from "../api/context";
@@ -47,6 +48,7 @@ import styles from "../styles/activity.module.css";
 type ActivityFilter = "all" | ActivitySource;
 
 const ACTIVITY_PAGE_SIZE = 25;
+const ActivityRecordDialog = lazy(() => import("./ActivityRecordDialog"));
 
 function validDate(value: string | null): value is string {
   if (value === null || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -314,6 +316,10 @@ export function ActivityPage() {
   const { capabilities } = useOutletContext<{ capabilities?: CapabilitiesResponse }>();
   const [params, setParams] = useSearchParams();
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [recordOpen, setRecordOpen] = useState(false);
+  const [recordStatus, setRecordStatus] = useState("");
+  const recordTriggerRef = useRef<HTMLButtonElement>(null);
+  const recordWasOpen = useRef(false);
   const focusAfterLoad = useRef(false);
   const resultStatusRef = useRef<HTMLDivElement>(null);
   const paramsString = params.toString();
@@ -324,7 +330,15 @@ export function ActivityPage() {
   const sinceValues = params.getAll("since");
   const since = sinceValues.length === 1 && validDate(sinceValues[0]) ? sinceValues[0] : "";
   const activityAvailable = capabilities?.activity.availability === "available";
+  const recordAvailable = capabilities?.activityRecord.availability === "available";
   const queryKey = ["activity", source, since] as const;
+
+  useEffect(() => {
+    if (recordWasOpen.current && !recordOpen) {
+      recordTriggerRef.current?.focus({ preventScroll: true });
+    }
+    recordWasOpen.current = recordOpen;
+  }, [recordOpen]);
 
   useEffect(() => {
     const normalized = new URLSearchParams(paramsString);
@@ -426,8 +440,18 @@ export function ActivityPage() {
     <div className={styles.page}>
       <PageHeader
         title="Activity"
-        actions={<Badge className={styles.readOnlyBadge} variant="outline"><ShieldCheck aria-hidden="true" /> Read only</Badge>}
+        actions={(
+          <div className={styles.activityHeaderActions}>
+            <Badge className={styles.appendOnlyBadge} variant="outline"><ShieldCheck aria-hidden="true" /> Append only</Badge>
+            {recordAvailable ? (
+              <Button ref={recordTriggerRef} onClick={() => setRecordOpen(true)} size="sm" type="button">
+                <Plus aria-hidden="true" /> Record Activity
+              </Button>
+            ) : null}
+          </div>
+        )}
       />
+      <div className="sr-only" aria-live="polite" role="status">{recordStatus}</div>
 
       {capabilities === undefined ? (
         <StatePanel state="loading" title="Checking activity capability" detail="Confirming that the local timeline reader is connected." />
@@ -565,6 +589,16 @@ export function ActivityPage() {
           </Card>
         </section>
       )}
+
+      {recordOpen ? (
+        <Suspense fallback={<span className="sr-only" role="status">Opening Activity recorder</span>}>
+          <ActivityRecordDialog
+            onApplied={setRecordStatus}
+            onOpenChange={setRecordOpen}
+            open={recordOpen}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

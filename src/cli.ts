@@ -10,6 +10,19 @@ import { readMachineId, setGlobalConfigKey } from "./global-config.js";
 import { runFeedback, maybeShowInvite, dismissInvite, enableInvite } from "./feedback/index.js";
 import type { MexConfig } from "./types.js";
 import type { RunHubCommandOptions } from "./hub/command.js";
+import { capabilitiesInvalidRequestEnvelope } from "./capabilities.js";
+import {
+  buildTeamIdentityActivityCommands,
+  exitCodeForTeamEnvelope,
+  locateTeamRepositoryRoot,
+  processTeamCommandIo,
+  renderTeamEnvelope,
+  teamProblemEnvelope,
+  TeamCliUsageError,
+  type TeamCliCommandName,
+  type TeamCliMode,
+  type TeamIdentityActivityCliServiceFactory,
+} from "./team/cli/index.js";
 
 /**
  * Load config for a CLI command and backfill scaffold identity on the way.
@@ -77,13 +90,18 @@ export function isTelemetryExemptCommand(
 ): boolean {
   return parentName === "telemetry"
     || parentName === "config"
+    || parentName === "member"
+    || parentName === "activity"
     || commandName === "hub"
     || commandName === "capabilities";
 }
 
 /** Commands whose machine/read-only contract must precede any global notice. */
 export function isFirstRunNoticeExemptCommand(commandName?: string): boolean {
-  return commandName === "hub" || commandName === "capabilities";
+  return commandName === "hub"
+    || commandName === "capabilities"
+    || commandName === "member"
+    || commandName === "activity";
 }
 
 async function runTuiCommand(): Promise<void> {
@@ -177,6 +195,24 @@ program
     const { runCapabilities } = await import("./capabilities.js");
     await runCapabilities();
   });
+
+const teamIdentityActivityService: TeamIdentityActivityCliServiceFactory = async () => {
+  // Team reads and previews must not backfill scaffold identity. The concrete
+  // repository port independently attests that config.json is tracked at the
+  // current HEAD before it exposes any Team surface.
+  const projectRoot = locateTeamRepositoryRoot();
+  const { createRepositoryTeamWorkflowPort } = await import(
+    "./team/workflow/repository-team-workflow-port.js"
+  );
+  return createRepositoryTeamWorkflowPort(projectRoot);
+};
+
+for (const command of buildTeamIdentityActivityCommands({
+  service: teamIdentityActivityService,
+  io: processTeamCommandIo(),
+})) {
+  program.addCommand(command);
+}
 
 // ── Setup (npx entry point) ──
 program
@@ -902,6 +938,11 @@ program
     console.log("  mex setup              First-time setup — create .mex/ scaffold");
     console.log("  mex setup --dry-run    Preview setup without making changes");
     console.log("  mex capabilities --json  Discover structured agent capabilities");
+    console.log("  mex member list --json  List canonical team members");
+    console.log("  mex member current --json  Show the effective local/Git actor");
+    console.log("  mex member <add|update|deactivate|select> <request.json> --json  Preview an identity change");
+    console.log("  mex activity list --json  Read canonical Activity events");
+    console.log("  mex activity record <request.json> --json  Preview canonical Activity recording");
     console.log("  mex check              Drift score — are scaffold files still accurate?");
     console.log("  mex check --quiet      One-liner drift score");
     console.log("  mex check --json       Full drift report as JSON");
@@ -957,15 +998,95 @@ if (process.argv[1]) {
 }
 if (isMainModule) {
   if (!isFirstRunNoticeExemptCommand(process.argv[2])) showFirstRunNotice();
-  program.parseAsync().catch((err: Error) => {
-    console.error(err.message);
-    process.exit(1);
-  });
+  const commandArgv = process.argv.slice(2);
+  const teamJsonContext = inspectTeamJsonInvocation(commandArgv);
+  if (teamJsonContext !== null && hasMissingTeamApplyValue(commandArgv)) {
+    emitTeamJsonParseProblem(teamJsonContext);
+  } else if (isInvalidCapabilitiesJsonInvocation(commandArgv)) {
+    console.log(JSON.stringify(capabilitiesInvalidRequestEnvelope()));
+    process.exitCode = 2;
+  } else {
+    if (teamJsonContext !== null) configureTeamJsonParseErrors(program);
+    program.parseAsync().catch((err: Error) => {
+      if (teamJsonContext !== null) {
+        emitTeamJsonParseProblem(teamJsonContext);
+        return;
+      }
+      console.error(err.message);
+      process.exitCode = 1;
+    });
+  }
+}
+
+interface TeamJsonInvocationContext {
+  command: TeamCliCommandName;
+  mode: TeamCliMode;
+}
+
+function inspectTeamJsonInvocation(argv: readonly string[]): TeamJsonInvocationContext | null {
+  if (!argv.includes("--json") || argv.includes("--help") || argv.includes("-h")) return null;
+  const family = argv[0];
+  if (family !== "member" && family !== "activity") return null;
+  const leaf = argv[1];
+  const applyRequested = argv.some((value) => value === "--apply" || value.startsWith("--apply="));
+  if (family === "member") {
+    if (leaf === "list" || leaf === "show" || leaf === "current") {
+      return { command: `member.${leaf}`, mode: "read" };
+    }
+    if (leaf === "add" || leaf === "update" || leaf === "deactivate" || leaf === "select") {
+      return {
+        command: `member.${leaf}`,
+        mode: applyRequested ? "apply" : "preview",
+      };
+    }
+    return { command: "member", mode: "read" };
+  }
+  if (leaf === "list" || leaf === "show") {
+    return { command: `activity.${leaf}`, mode: "read" };
+  }
+  if (leaf === "record") {
+    return { command: "activity.record", mode: applyRequested ? "apply" : "preview" };
+  }
+  return { command: "activity", mode: "read" };
+}
+
+function configureTeamJsonParseErrors(root: Command): void {
+  const visit = (command: Command): void => {
+    command.exitOverride();
+    command.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+    for (const child of command.commands) visit(child);
+  };
+  visit(root);
+}
+
+function hasMissingTeamApplyValue(argv: readonly string[]): boolean {
+  return argv.some((value, index) => (
+    value === "--apply"
+    && (argv[index + 1] === undefined || argv[index + 1]!.startsWith("-"))
+  ));
+}
+
+function emitTeamJsonParseProblem(context: TeamJsonInvocationContext): void {
+  const envelope = teamProblemEnvelope(
+    context.command,
+    context.mode,
+    new TeamCliUsageError("The Team command arguments are invalid. Review the command help and retry."),
+  );
+  console.log(renderTeamEnvelope(envelope));
+  process.exitCode = exitCodeForTeamEnvelope(envelope);
+}
+
+function isInvalidCapabilitiesJsonInvocation(argv: readonly string[]): boolean {
+  return argv[0] === "capabilities"
+    && argv.includes("--json")
+    && !argv.includes("--help")
+    && !argv.includes("-h")
+    && (argv.length !== 2 || argv[1] !== "--json");
 }
 
 function buildCompletion(shell: string): string {
   const commands = [
-    "setup", "capabilities", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
+    "setup", "capabilities", "member", "activity", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
     "heartbeat", "doctor", "watch", "tui", "commands", "completion",
     "telemetry", "config", "feedback", "hub",
   ];

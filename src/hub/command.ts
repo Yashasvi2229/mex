@@ -10,6 +10,7 @@ import { createLocalHubReadServices } from "./services.js";
 import { TeamLocalState } from "../team/local-state/index.js";
 import { createRepositoryGraphPort } from "../graph/application-adapter.js";
 import { createRepositoryWikiPort } from "../wiki/application-adapter.js";
+import { createRepositoryTeamWorkflowPort } from "../team/workflow/repository-team-workflow-port.js";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,6 +28,9 @@ export interface RunHubCommandOptions {
  * boundary for local schema migration and interrupted-job reconciliation.
  */
 export async function runHubCommand(options: RunHubCommandOptions): Promise<void> {
+  // Bind and verify the tracked scaffold identity before the explicit Hub
+  // startup boundary creates or migrates any local state.
+  const team = await createRepositoryTeamWorkflowPort(options.projectRoot);
   const localState = new TeamLocalState({
     projectRoot: options.projectRoot,
     scaffoldId: options.scaffoldId,
@@ -54,10 +58,12 @@ export async function runHubCommand(options: RunHubCommandOptions): Promise<void
       bootstrapToken,
       expectedOrigin: () => expectedOrigin,
     });
+    team.initializeIdentityActivitySigner();
     const services = createLocalHubReadServices({
       projectRoot: options.projectRoot,
       scaffoldId: options.scaffoldId,
       jobs,
+      team,
       graph,
       wiki,
     });

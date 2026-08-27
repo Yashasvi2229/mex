@@ -20,6 +20,15 @@ import {
   SearchRequestSchema,
   SearchResponseSchema,
   SessionResponseSchema,
+  TeamCurrentActorResponseSchema,
+  TeamMemberIdSchema,
+  TeamMemberListRequestSchema,
+  TeamMemberListResponseSchema,
+  TeamMemberSchema,
+  TeamOperationApplyRequestSchema,
+  TeamOperationApplyResponseSchema,
+  TeamOperationPreviewRequestSchema,
+  TeamOperationPreviewResponseSchema,
   WikiBacklinksRequestSchema,
   WikiBacklinksResponseSchema,
   WikiEntityDetailResponseSchema,
@@ -42,6 +51,14 @@ import {
   type JobPageRequest,
   type SearchRequest,
   type SearchResponse,
+  type TeamCurrentActorResponse,
+  type TeamMember,
+  type TeamMemberListRequest,
+  type TeamMemberListResponse,
+  type TeamOperationApplyRequest,
+  type TeamOperationApplyResponse,
+  type TeamOperationPreviewRequest,
+  type TeamOperationPreviewResponse,
   type WikiBacklinksRequest,
   type WikiBacklinksResponse,
   type WikiEntityDetailResponse,
@@ -106,6 +123,17 @@ export interface HubReadServices {
   capabilities(): Promise<HubCapabilities> | HubCapabilities;
   home(): Promise<HomeResponse> | HomeResponse;
   activity(request: ActivityRequest): Promise<ActivityResponse> | ActivityResponse;
+  members?(
+    request: TeamMemberListRequest,
+  ): Promise<TeamMemberListResponse> | TeamMemberListResponse;
+  member?(memberId: string): Promise<TeamMember | null> | TeamMember | null;
+  currentActor?(): Promise<TeamCurrentActorResponse> | TeamCurrentActorResponse;
+  previewTeamOperation?(
+    request: TeamOperationPreviewRequest,
+  ): Promise<TeamOperationPreviewResponse> | TeamOperationPreviewResponse;
+  applyTeamOperation?(
+    request: TeamOperationApplyRequest,
+  ): Promise<TeamOperationApplyResponse> | TeamOperationApplyResponse;
   search(request: SearchRequest): Promise<SearchResponse> | SearchResponse;
   codeSymbol?(
     symbolId: string,
@@ -239,6 +267,63 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
     HomeResponseSchema,
     await options.services.home(),
   ));
+
+  app.get("/api/v1/members", async (context) => {
+    const request = parseInput(
+      TeamMemberListRequestSchema,
+      readStrictQuery(context.req.raw, ["active", "cursor", "limit"]),
+    );
+    const members = options.services.members;
+    if (members === undefined) {
+      throw unavailable("Member reads are not connected in this build.");
+    }
+    return resourceResponse(TeamMemberListResponseSchema, await members(request));
+  });
+
+  app.get("/api/v1/members/:id", async (context) => {
+    readStrictQuery(context.req.raw, []);
+    const memberId = parseInput(TeamMemberIdSchema, context.req.param("id"));
+    const readMember = options.services.member;
+    if (readMember === undefined) {
+      throw unavailable("Member reads are not connected in this build.");
+    }
+    const member = await readMember(memberId);
+    if (member === null) throw notFound("The requested member does not exist.");
+    return resourceResponse(TeamMemberSchema, member);
+  });
+
+  app.get("/api/v1/actor/current", async (context) => {
+    readStrictQuery(context.req.raw, []);
+    const currentActor = options.services.currentActor;
+    if (currentActor === undefined) {
+      throw unavailable("Current actor resolution is not connected in this build.");
+    }
+    return resourceResponse(TeamCurrentActorResponseSchema, await currentActor());
+  });
+
+  app.post("/api/v1/team/operations/preview", async (context) => {
+    const request = parseInput(
+      TeamOperationPreviewRequestSchema,
+      await readBoundedJson(context.req.raw),
+    );
+    const preview = options.services.previewTeamOperation;
+    if (preview === undefined) {
+      throw unavailable("Member and Activity mutations are not connected in this build.");
+    }
+    return resourceResponse(TeamOperationPreviewResponseSchema, await preview(request));
+  });
+
+  app.post("/api/v1/team/operations/apply", async (context) => {
+    const request = parseInput(
+      TeamOperationApplyRequestSchema,
+      await readBoundedJson(context.req.raw),
+    );
+    const apply = options.services.applyTeamOperation;
+    if (apply === undefined) {
+      throw unavailable("Member and Activity mutations are not connected in this build.");
+    }
+    return resourceResponse(TeamOperationApplyResponseSchema, await apply(request));
+  });
 
   app.get("/api/v1/activity", async (context) => {
     const request = parseInput(

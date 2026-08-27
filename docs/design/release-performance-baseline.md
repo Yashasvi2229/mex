@@ -3,6 +3,18 @@
 Status: Checkpoint A benchmark contract. Built-asset and runtime budgets are
 frozen. Runtime budgets were characterized by pinned CI run
 [`33005876613`](https://github.com/mex-memory/mex/actions/runs/33005876613).
+Checkpoint C's bundle and route assets, including Members and Activity, were
+characterized by pinned CI run
+[`33083122092`](https://github.com/mex-memory/mex/actions/runs/33083122092),
+then copied from that retained report using the same formulas before the
+enforcing rerun. The retained `release-performance-1` artifact (ID
+`9651219193`, report SHA-256
+`f83a69133fa916bfd15deed8c107a561b885c0170abb1d44d8820825a76c7c83`)
+measured PR head `76cbd154def06dec29325a2ed67687aee0fc7805` through GitHub's synthetic
+merge commit `e50116100c9461032e77ba47704248bdb4923df2`. Its request audit recorded
+zero outbound requests for every fixture. The exact asset candidates and the
+Home, Members, and Activity heap candidates were copied; unrelated runtime
+budgets remain calibrated from the original pinned run.
 
 ## Runner contract
 
@@ -30,16 +42,17 @@ Each profile records:
 
 Every profile additionally records five Chromium heap samples after every
 registered Hub route: Home, Search, Knowledge browse/detail, Code search/symbol,
-the five honest unavailable capability routes, Activity, Jobs, Health, and the
-wildcard not-found route. Every browser context begins empty. Its request audit
+the five honest unavailable capability routes, Members, Activity, Jobs, Health,
+and the wildcard not-found route. Every browser context begins empty. Its request audit
 fails if a route contacts any origin other than the exact loopback Hub origin.
 
 Production asset accounting starts from Vite's manifest. It records the
 initial static import closure and the incremental JavaScript, CSS, and font
 bytes for every registered route. Fonts referenced from global CSS are counted
 as initial assets even when Vite does not attach them to a manifest entry.
-Home must not statically close over Code, Knowledge, Activity, or setup code,
-and the largest JavaScript chunk is checked explicitly.
+Home must not statically close over Code, Knowledge, Members, Activity, its
+nested recorder, or setup code, and the largest JavaScript chunk is checked
+explicitly.
 
 ## Enforcement
 
@@ -63,10 +76,19 @@ database-to-input ratios, and any unknown runtime metric never receive a retry.
 The read and maintenance nonmutation contracts likewise remain ordinary hard
 tests. A first pass containing only wall-clock, RSS, CPU, or browser-heap
 breaches triggers one independent full benchmark pass on the same pinned
-runner and exact repository HEAD. CI fails a noisy metric only when that exact
-metric breaches again and both measurements exceed its material threshold. The
-committed p95 budgets remain the raw alert/crossing line and are not
-recalibrated. For each exact metric key, the blocking threshold is
+runner and exact repository HEAD only when at least one crossing could still
+become material. A crossing is potentially material when its p95 is strictly
+above the material threshold and at least two of its raw samples are also
+strictly above that threshold. If every first-pass crossing is below the
+threshold or has fewer than two supporting samples, enforcement records the
+advisories and passes without spending another full benchmark run. CI fails a
+noisy metric only when that exact metric breaches again, both p95 measurements
+exceed its material threshold, and both attempts have at least two supporting
+raw samples. This avoids treating the single maximum selected by nearest-rank
+p95 over either ten timing samples or five memory samples as
+distribution-level evidence. The committed p95 budgets remain the raw
+alert/crossing line and are not recalibrated. For each exact metric key, the
+blocking threshold is
 `budget + max(15% of budget, minimum excess)`:
 
 | Runtime category | Minimum excess |
@@ -80,18 +102,23 @@ recalibrated. For each exact metric key, the blocking threshold is
 
 Crossings from both attempts remain bounded in `firstPassViolations` and
 `secondPassViolations`. Repeated exact keys remain in `confirmedViolations`.
-`advisoryAssessments` records one-off crossings and repeated crossings where
-either measurement is at or below the material threshold;
-`materialAssessments` records only repeated crossings where both measurements
-are strictly above it. The final `runtimeViolations` list contains only those
-material crossings plus immediate hard failures. Operational benchmark failures
-are never retried as budget noise. Enforcement exits 0 for a pass, 1 for a
-budget failure, and 2 when a pass cannot produce a valid bounded report.
+`advisoryAssessments` records one-off crossings, threshold misses, and
+crossings with insufficient raw-sample support. Each generated assessment
+records the required support count and the bounded sample/support counts for
+the attempts that observed the metric; raw sample arrays remain in the
+retained attempt reports. `materialAssessments` records only repeated crossings
+where both measurements and both raw-sample distributions satisfy the rule.
+The final `runtimeViolations` list contains only those material crossings plus
+immediate hard failures. Operational benchmark failures, including missing or
+inconsistent raw sample evidence, are never retried as budget noise.
+Enforcement exits 0 for a pass, 1 for a budget failure, and 2 when a pass cannot
+produce a valid bounded report.
 
 The dedicated `release-performance` CI job installs Chromium on the pinned
 runner, enforces the budgets, and retains the final report plus both attempt
-reports when confirmation was required. Runtime candidates in
-that report are `ceil(p95 * 1.15)` independently for each fixture profile,
+reports when confirmation was required. It also retains the first raw attempt
+when advisory sample support makes a second pass unnecessary. Runtime
+candidates in that report are `ceil(p95 * 1.15)` independently for each fixture profile,
 route, read, and maintenance operation. The committed values are copied exactly
 from the first healthy retained pinned report; its enforcing rerun must pass
 before Checkpoint A is considered green. Future recalibration uses the same
@@ -112,16 +139,18 @@ Expected missing/stale/migration and corpus-policy states are successful
 discovery results; unexpected inspection failures use one redacted problem and
 exit 2.
 
-The installed-capability inventory includes the secure Project Hub and
-canonical Activity read surface alongside Graph and Wiki. The command catalog
-advertises only registered structured Graph and Wiki commands because Activity
-does not yet have a structured CLI. Read, preview, and apply invocations are
-separate fixed arrays, Graph's existing protocol-v3 commands remain JSONL
-byte-compatible, and unavailable states carry static safe reasons plus the next
-initialization action. Synthesis commands whose current adapters can open
-writable storage are deliberately omitted. Workstreams, Inbox, Relays,
-Playbooks, Catch Up, and Activity creation remain absent until their application
-services and structured CLI contracts exist.
+The installed-capability inventory includes the secure Project Hub, Team
+identity, canonical Activity read/record, Graph, and Wiki surfaces. Checkpoint C
+adds registered structured Member and Activity commands to the existing Graph
+and Wiki catalog. Every Team mutation advertises distinct preview and apply
+invocations plus a bounded machine-readable request schema, complete examples,
+the exact preview-envelope apply rule, and the typed process-exit table. Read,
+preview, and apply invocations remain separate fixed arrays, Graph's existing
+protocol-v3 commands remain JSONL byte-compatible, and unavailable states carry
+static safe reasons plus the next initialization action. Writable legacy Wiki
+synthesis commands remain omitted from the governed agent surface. Workstreams,
+Inbox, Relays, Playbooks, Catch Up, and future team actions remain absent until
+their application services and structured CLI contracts exist.
 
 Generated agent anchors direct supported tools to discover this manifest,
 prefer its structured reads, preview mutations, and wait for explicit human

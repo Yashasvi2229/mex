@@ -38,6 +38,10 @@ export interface GitIdentityReader {
   getIdentity(): Promise<GitIdentity>;
 }
 
+const MAX_GIT_ACTOR_NAME_BYTES = 200;
+const MAX_GIT_ACTOR_EMAIL_BYTES = 320;
+const MAX_ACTOR_DIAGNOSTIC_IDS = 100;
+
 /** Resolve configured human identity first, then Git identity, then unknown. */
 export class ActorResolver {
   readonly #members: MemberReader;
@@ -80,7 +84,51 @@ export class ActorResolver {
       };
     }
 
-    const identityResult = await this.#readIdentity(request.gitIdentity);
+    return this.#resolveUnconfigured(request.gitIdentity);
+  }
+
+  /**
+   * Read projection for a persisted local selection. A stale selection remains
+   * visible to the caller while actor authority falls back to bounded Git
+   * resolution so the user can explicitly clear it.
+   */
+  async resolveCurrentDetailed(
+    request: ActorResolutionRequest = {},
+  ): Promise<ActorResolution> {
+    if (request.configuredMemberId === undefined) {
+      return this.#resolveUnconfigured(request.gitIdentity);
+    }
+    const configured = await this.#members.get(request.configuredMemberId);
+    if (configured?.active === true) {
+      return {
+        actor: memberActor(configured),
+        source: "configured-member",
+        diagnostics: [],
+      };
+    }
+    const fallback = await this.#resolveUnconfigured(request.gitIdentity);
+    const diagnostic: Diagnostic = configured === null
+      ? {
+          code: "ACTOR_MEMBER_MISSING",
+          severity: "warning",
+          message: `Configured member ${request.configuredMemberId} no longer exists; clear the stale local selection.`,
+        }
+      : {
+          code: "ACTOR_MEMBER_INACTIVE",
+          severity: "warning",
+          message: `Configured member ${request.configuredMemberId} is inactive; clear the stale local selection.`,
+          path: configured.sourcePath,
+        };
+    return {
+      ...fallback,
+      diagnostics: [diagnostic, ...fallback.diagnostics],
+    };
+  }
+
+  async #resolveUnconfigured(
+    gitIdentity: MemberGitAlias | undefined,
+  ): Promise<ActorResolution> {
+    const identityResult = await this.#readIdentity(gitIdentity);
     if (identityResult.identity === null) {
       return {
         actor: { kind: "unknown" },
@@ -158,18 +206,18 @@ export class ActorResolver {
     supplied: MemberGitAlias | undefined,
   ): Promise<{ identity: GitIdentity | null; diagnostics: readonly Diagnostic[] }> {
     if (supplied !== undefined) {
-      return { identity: normalizeGitIdentity(supplied), diagnostics: [] };
+      return boundedIdentityResult(supplied);
     }
     if (this.#git === null) return { identity: null, diagnostics: [] };
     try {
-      return { identity: normalizeGitIdentity(await this.#git.getIdentity()), diagnostics: [] };
-    } catch (error) {
+      return boundedIdentityResult(await this.#git.getIdentity());
+    } catch {
       return {
         identity: null,
         diagnostics: [{
           code: "GIT_IDENTITY_UNAVAILABLE",
           severity: "warning",
-          message: `Git identity could not be inspected: ${error instanceof Error ? error.message : String(error)}`,
+          message: "Git identity could not be inspected.",
         }],
       };
     }
@@ -193,12 +241,43 @@ function gitFallback(identity: GitIdentity, diagnostics: readonly Diagnostic[]):
 }
 
 function ambiguousDiagnostic(matches: readonly TeamMember[]): Diagnostic {
+  const memberIds = matches.slice(0, MAX_ACTOR_DIAGNOSTIC_IDS).map((member) => member.ref.id);
   return {
     code: "ACTOR_ALIAS_AMBIGUOUS",
     severity: "warning",
     message: "Git identity matches multiple active members; preserving the Git fallback identity.",
-    detail: { memberIds: matches.map((member) => member.ref.id) },
+    detail: {
+      memberIds,
+      ...(matches.length > memberIds.length ? { truncated: true } : {}),
+    },
   };
+}
+
+function boundedIdentityResult(
+  value: GitIdentity | MemberGitAlias,
+): { identity: GitIdentity | null; diagnostics: readonly Diagnostic[] } {
+  const identity = normalizeGitIdentity(value);
+  if (identity === null) return { identity: null, diagnostics: [] };
+  if (
+    !boundedIdentityField(identity.name, MAX_GIT_ACTOR_NAME_BYTES)
+    || !boundedIdentityField(identity.email, MAX_GIT_ACTOR_EMAIL_BYTES)
+  ) {
+    return {
+      identity: null,
+      diagnostics: [{
+        code: "GIT_IDENTITY_INVALID",
+        severity: "warning",
+        message: "Git identity exceeds the bounded actor contract and was ignored.",
+      }],
+    };
+  }
+  return { identity, diagnostics: [] };
+}
+
+function boundedIdentityField(value: string | null, maxBytes: number): boolean {
+  return value === null
+    || (!/[\u0000-\u001f\u007f]/u.test(value)
+      && Buffer.byteLength(value, "utf8") <= maxBytes);
 }
 
 function mergeMemberMatches(

@@ -18,6 +18,16 @@ import type {
   SearchResponse,
   SessionResponse,
   StartJobRequest,
+  TeamActivityEvent,
+  TeamActivitySubjectInput,
+  TeamCurrentActorResponse,
+  TeamMember,
+  TeamMemberListRequest,
+  TeamMemberListResponse,
+  TeamOperationApplyRequest,
+  TeamOperationApplyResponse,
+  TeamOperationPreviewRequest,
+  TeamOperationPreviewResponse,
   WikiBacklinksRequest,
   WikiBacklinksResponse,
   WikiEntityDetailResponse,
@@ -31,6 +41,41 @@ import type {
 const now = new Date("2026-08-23T08:45:00.000Z");
 const timestamp = (minutesAgo: number) => new Date(now.getTime() - minutesAgo * 60_000).toISOString();
 const revision = (character: string) => character.repeat(64);
+const fixtureMemberIds = [
+  "member_01K36WVM6H7JK8M9NPQRSTVVWX",
+  "member_01K36R3X4A5BC6DE7FGHJKMNPQ",
+  "member_01K35Z2A3B4C5D6E7FGHJKMNPQ",
+] as const;
+
+const fixtureMembers: TeamMember[] = [
+  {
+    schemaVersion: 1,
+    id: fixtureMemberIds[0],
+    displayName: "Ada Lovelace",
+    gitAliases: [{ name: "Ada", email: "ada@example.test" }],
+    active: true,
+    sourcePath: `.mex/team/members/${fixtureMemberIds[0]}.md`,
+    revision: revision("a"),
+  },
+  {
+    schemaVersion: 1,
+    id: fixtureMemberIds[1],
+    displayName: "Grace Hopper",
+    gitAliases: [{ name: "Grace", email: "grace@example.test" }],
+    active: true,
+    sourcePath: `.mex/team/members/${fixtureMemberIds[1]}.md`,
+    revision: revision("b"),
+  },
+  {
+    schemaVersion: 1,
+    id: fixtureMemberIds[2],
+    displayName: "Lin Chen",
+    gitAliases: [],
+    active: false,
+    sourcePath: `.mex/team/members/${fixtureMemberIds[2]}.md`,
+    revision: revision("c"),
+  },
+];
 
 const jobs: JobSummary[] = [
   {
@@ -244,6 +289,12 @@ const capabilities: CapabilitiesResponse = {
   apiVersion: "v1",
   git: available,
   activity: available,
+  activityRecord: available,
+  members: {
+    read: available,
+    canonicalMutation: available,
+    localSelection: available,
+  },
   jobs: available,
   graph: { read: available, refresh: available, rebuild: available },
   wiki: {
@@ -616,16 +667,320 @@ function codeWorkspace(id: string, request: CodeWorkspaceRequest): CodeWorkspace
   };
 }
 
+function fixtureOperationId(prefix: "event" | "member", sequence: number): string {
+  const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  return `${prefix}_01K37WVM6H7JK8M9NPQRSTVVW${alphabet[sequence % alphabet.length]}`;
+}
+
+function fixtureCurrentActor(
+  members: readonly TeamMember[],
+  selection: TeamCurrentActorResponse["selection"],
+): TeamCurrentActorResponse {
+  if (selection === null) return {
+    actor: { kind: "git", name: "Ada", email: "ada@example.test" },
+    source: "git-fallback",
+    selection: null,
+    diagnostics: [],
+    diagnosticsTruncated: false,
+  };
+  const candidate = members.find((member) => member.id === selection.memberId) ?? null;
+  if (candidate?.active !== true) return {
+    actor: { kind: "git", name: "Ada", email: "ada@example.test" },
+    source: "git-fallback",
+    selection,
+    diagnostics: [{
+      code: candidate === null ? "ACTOR_MEMBER_MISSING" : "ACTOR_MEMBER_INACTIVE",
+      severity: "warning",
+      message: candidate === null
+        ? "The referenced member no longer exists."
+        : "The referenced member is currently inactive.",
+    }],
+    diagnosticsTruncated: false,
+  };
+  return {
+    actor: { kind: "member", memberId: candidate.id, displayName: candidate.displayName },
+    source: "configured-member",
+    selection,
+    diagnostics: [],
+    diagnosticsTruncated: false,
+  };
+}
+
+function fixtureTeamSubject(
+  subject: TeamActivitySubjectInput,
+): ActivityItem["subjects"][number] {
+  if (subject.kind === "entity") {
+    return {
+      kind: "entity",
+      entity: {
+        id: subject.entity.id,
+        entityKind: subject.entity.kind,
+        title: subject.entity.title ?? null,
+      },
+    };
+  }
+  if (subject.kind === "code") {
+    return subject.code.kind === "symbol"
+      ? { kind: "symbol", symbolId: subject.code.symbolId }
+      : { kind: "file", path: subject.code.path };
+  }
+  return subject;
+}
+
+function fixtureTimelineEvent(event: TeamActivityEvent): ActivityItem {
+  const subjects = event.subjects.map(fixtureTeamSubject);
+  const recordedActor = event.actor.kind === "member"
+    ? { ...event.actor, displayName: event.actor.displayName ?? event.actor.memberId }
+    : event.actor;
+  return {
+    source: "activity",
+    id: event.id,
+    timestamp: event.timestamp,
+    action: event.action,
+    subjects,
+    subjectCount: subjects.length,
+    subjectsTruncated: false,
+    sourcePath: `.mex/events/activity/${event.timestamp.slice(0, 7)}/${event.id}.md`,
+    recordedActor,
+    effectiveActor: recordedActor,
+    actorDiagnostics: [],
+    workstream: event.workstream === null ? null : {
+      id: event.workstream.id,
+      entityKind: "workstream",
+      title: event.workstream.title ?? null,
+    },
+    repository: event.repoState,
+    revision: revision("9"),
+  };
+}
+
 class FixtureHubApi implements HubApi {
   readonly #jobs = structuredClone(jobs);
+  readonly #members = structuredClone(fixtureMembers);
+  readonly #activityItems = structuredClone(activityItems);
+  #selection: TeamCurrentActorResponse["selection"] = {
+    memberId: fixtureMemberIds[0],
+    updatedAt: timestamp(12),
+    revision: revision("d"),
+  };
+  #previewSequence = 0;
 
   bootstrap() { return Promise.resolve({ expiresAt: session.expiresAt }); }
   getSession() { return Promise.resolve(session); }
   getCapabilities() { return Promise.resolve(capabilities); }
-  getHome() { return Promise.resolve(home); }
+  getHome() {
+    const actor = fixtureCurrentActor(this.#members, this.#selection).actor;
+    return Promise.resolve({
+      ...home,
+      actor: actor.kind === "member"
+        ? { ...actor, displayName: actor.displayName ?? actor.memberId }
+        : actor,
+      sections: {
+        ...home.sections,
+        activity: {
+          availability: "available" as const,
+          count: this.#activityItems.filter((item) => item.source === "activity").length,
+        },
+      },
+    });
+  }
+  getMembers(request: TeamMemberListRequest): Promise<TeamMemberListResponse> {
+    const filtered = this.#members.filter((member) => (
+      request.active === undefined || member.active === request.active
+    ));
+    const offset = request.cursor === "fixture_members_2" ? 2 : 0;
+    const items = filtered.slice(offset, offset + request.limit);
+    const nextCursor = offset + items.length < filtered.length ? "fixture_members_2" : null;
+    return Promise.resolve({
+      items: structuredClone(items),
+      nextCursor,
+      truncated: nextCursor !== null,
+      sourceTruncated: false,
+      deterministicRevision: revision("8"),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    });
+  }
+  getMember(id: string): Promise<TeamMember> {
+    const member = this.#members.find((candidate) => candidate.id === id);
+    return member === undefined
+      ? Promise.reject(new Error("Fixture member not found."))
+      : Promise.resolve(structuredClone(member));
+  }
+  getCurrentActor(): Promise<TeamCurrentActorResponse> {
+    return Promise.resolve(fixtureCurrentActor(this.#members, this.#selection));
+  }
+  previewTeamOperation(
+    request: TeamOperationPreviewRequest,
+  ): Promise<TeamOperationPreviewResponse> {
+    const sequence = this.#previewSequence++;
+    const eventId = fixtureOperationId("event", sequence);
+    const memberId = request.action.kind === "member.add"
+      ? fixtureOperationId("member", sequence)
+      : request.action.kind === "member.update"
+        || request.action.kind === "member.deactivate"
+        || request.action.kind === "member.select"
+        ? request.action.memberId
+        : null;
+    const currentMember = memberId === null
+      ? null
+      : this.#members.find((member) => member.id === memberId) ?? null;
+    const canonical = request.action.kind === "member.add"
+      || request.action.kind === "member.update"
+      || request.action.kind === "member.deactivate"
+      || request.action.kind === "activity.record";
+    const sourcePath = request.action.kind === "activity.record"
+      ? `.mex/events/activity/${timestamp(0).slice(0, 7)}/${eventId}.md`
+      : memberId === null ? null : `.mex/team/members/${memberId}.md`;
+    const afterRevision = request.action.kind === "member.add" ? revision("e")
+      : request.action.kind === "member.update" || request.action.kind === "member.deactivate"
+        ? revision("f") : revision("9");
+    const createsArtifact = request.action.kind === "member.add"
+      || request.action.kind === "activity.record";
+    const diff = request.action.kind === "activity.record"
+      ? `--- /dev/null\n+++ b/${sourcePath}\n+action: ${request.action.activity.action}\n`
+      : `--- a/${sourcePath}\n+++ b/${sourcePath}\n+reviewed member change\n`;
+    const changes: TeamOperationPreviewResponse["preview"]["changes"] = !canonical || sourcePath === null
+      ? []
+      : createsArtifact
+        ? [{ kind: "create", path: sourcePath, beforeRevision: null, afterRevision, diff }]
+        : [{
+          kind: "update",
+          path: sourcePath,
+          beforeRevision: currentMember?.revision ?? revision("0"),
+          afterRevision,
+          diff,
+        }];
+    const localChanges = request.action.kind === "member.select" ? [{
+      namespace: "member-selection" as const,
+      id: "current" as const,
+      beforeRevision: this.#selection?.revision ?? null,
+      afterRevision: revision("e"),
+      summary: `Select ${currentMember?.displayName ?? memberId} for this checkout`,
+    }] : request.action.kind === "member.clear" ? [{
+      namespace: "member-selection" as const,
+      id: "current" as const,
+      beforeRevision: this.#selection?.revision ?? null,
+      afterRevision: null,
+      summary: "Clear the configured member for this checkout",
+    }] : [];
+    const purposeIds = [
+      ...(canonical ? [{ purpose: "activity" as const, id: eventId }] : []),
+      ...(request.action.kind === "member.add" && memberId !== null
+        ? [{ purpose: "member" as const, id: memberId }] : []),
+    ];
+    return Promise.resolve({
+      schemaVersion: 1,
+      request: structuredClone(request),
+      preview: {
+        valid: true,
+        scope: canonical ? "canonical" : "local",
+        changes,
+        localChanges,
+        diagnostics: [],
+      },
+      receipt: {
+        schemaVersion: 1,
+        authority: {
+          actor: fixtureCurrentActor(this.#members, this.#selection).actor,
+          occurredAt: timestamp(0),
+          repoState: {
+            branch: home.repository.branch,
+            head: home.repository.head,
+            dirty: home.repository.dirty,
+            observedAt: timestamp(0),
+          },
+        },
+        purposeIds,
+        requestRevision: revision("1"),
+        presentationRevision: revision("2"),
+        previewRevision: revision("3"),
+      },
+    });
+  }
+  applyTeamOperation(
+    envelope: TeamOperationApplyRequest,
+  ): Promise<TeamOperationApplyResponse> {
+    const { action } = envelope.request;
+    const memberPurpose = envelope.receipt.purposeIds.find((item) => item.purpose === "member");
+    const eventPurpose = envelope.receipt.purposeIds.find((item) => item.purpose === "activity");
+    let member: TeamMember | null = null;
+    if (action.kind === "member.add" && memberPurpose?.purpose === "member") {
+      member = {
+        schemaVersion: 1,
+        id: memberPurpose.id,
+        displayName: action.member.displayName,
+        gitAliases: action.member.gitAliases,
+        active: true,
+        sourcePath: `.mex/team/members/${memberPurpose.id}.md`,
+        revision: envelope.preview.changes[0]?.afterRevision ?? revision("e"),
+      };
+      this.#members.push(member);
+    } else if (action.kind === "member.update" || action.kind === "member.deactivate") {
+      const index = this.#members.findIndex((candidate) => candidate.id === action.memberId);
+      const current = this.#members[index];
+      if (current !== undefined) {
+        member = {
+          ...current,
+          ...(action.kind === "member.update" ? action.patch : { active: false }),
+          revision: envelope.preview.changes[0]?.afterRevision ?? revision("f"),
+        };
+        this.#members[index] = member;
+      }
+    } else if (action.kind === "member.select") {
+      this.#selection = {
+        memberId: action.memberId,
+        updatedAt: envelope.receipt.authority.occurredAt,
+        revision: envelope.preview.localChanges[0]?.afterRevision ?? revision("e"),
+      };
+    } else if (action.kind === "member.clear") {
+      this.#selection = null;
+    }
+
+    let event: TeamActivityEvent | null = null;
+    if (eventPurpose?.purpose === "activity") {
+      const direct = action.kind === "activity.record" ? action.activity : null;
+      const eventMember = member ?? (
+        action.kind === "member.update" || action.kind === "member.deactivate"
+          ? this.#members.find((candidate) => candidate.id === action.memberId) ?? null
+          : null
+      );
+      const eventAction = action.kind === "member.add" ? "member.added"
+        : action.kind === "member.update" ? "member.updated"
+          : action.kind === "member.deactivate" ? "member.deactivated"
+            : direct?.action ?? "activity.recorded";
+      const eventSubjects: TeamActivitySubjectInput[] = direct?.subjects ?? (
+        eventMember === null ? [] : [{
+          kind: "entity",
+          entity: { id: eventMember.id, kind: "member", title: eventMember.displayName },
+        }]
+      );
+      event = {
+        schemaVersion: 1,
+        id: eventPurpose.id,
+        timestamp: envelope.receipt.authority.occurredAt,
+        actor: envelope.receipt.authority.actor,
+        action: eventAction,
+        subjects: eventSubjects,
+        workstream: direct?.workstream ?? null,
+        repoState: envelope.receipt.authority.repoState,
+      };
+      this.#activityItems.unshift(fixtureTimelineEvent(event));
+    }
+    return Promise.resolve({
+      operationId: envelope.request.operationId,
+      previewRevision: envelope.receipt.previewRevision,
+      applied: true,
+      idempotentReplay: false,
+      changes: envelope.preview.changes,
+      localChanges: envelope.preview.localChanges,
+      members: member === null ? [] : [member],
+      events: event === null ? [] : [event],
+    });
+  }
   getActivity(request: ActivityRequest): Promise<ActivityResponse> {
     const since = request.since ? Date.parse(request.since) : null;
-    const filtered = activityItems.filter((item) => (
+    const filtered = this.#activityItems.filter((item) => (
       (request.source === undefined || item.source === request.source)
       && (since === null || Date.parse(item.timestamp) >= since)
     ));

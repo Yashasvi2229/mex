@@ -608,6 +608,17 @@ export interface ActivityWorkflowEffect {
   metadata?: Readonly<Record<string, JsonValue>>;
 }
 
+/**
+ * Body-free attestation of the exact portable C preview envelope accepted by
+ * the caller. This lets journal-backed replay remain available after a local
+ * receipt key is lost without trusting altered presentation or authority
+ * fields supplied by a later process.
+ */
+export interface IdentityActivityReceiptWorkflowEffect {
+  kind: "identity_activity_receipt";
+  envelopeRevision: Revision;
+}
+
 export interface LocalWorkflowEffect {
   kind: "local";
   namespace: string;
@@ -633,6 +644,7 @@ export interface WikiRecoveryWorkflowEffect {
 export type TeamWorkflowJournalEffect =
   | CanonicalWorkflowEffect
   | ActivityWorkflowEffect
+  | IdentityActivityReceiptWorkflowEffect
   | LocalWorkflowEffect
   | LocalCleanupWorkflowEffect
   | WikiRecoveryWorkflowEffect;
@@ -729,6 +741,22 @@ export class TeamLocalState {
     });
   }
 
+  /** Pure projection used by workflow preview; never creates or migrates storage. */
+  previewConfigureMember(request: ConfigureMemberRequest): ConfiguredMemberSelection {
+    const memberId = validateMemberId(request.memberId);
+    const expectedRevision = validateExpectedRevision(request.expectedRevision);
+    const updatedAt = validateTimestamp(request.updatedAt ?? this.now(), "updatedAt");
+    this.assertExistingRevisionCanMatch(expectedRevision, "configured member");
+    const current = this.getConfiguredMember();
+    assertExpectedRevision(current?.revision ?? null, expectedRevision, "configured member");
+    return {
+      scaffoldId: this.scaffoldId,
+      memberId,
+      updatedAt,
+      revision: configuredMemberRevision(this.scaffoldId, memberId, updatedAt),
+    };
+  }
+
   configureMember(request: ConfigureMemberRequest): ConfiguredMemberSelection {
     const memberId = validateMemberId(request.memberId);
     const expectedRevision = validateExpectedRevision(request.expectedRevision);
@@ -777,6 +805,23 @@ export class TeamLocalState {
         "DELETE FROM configured_member_selections WHERE scaffold_id = ?",
       ).run(this.scaffoldId);
     });
+  }
+
+  /** Pure validation used by workflow preview; never creates or migrates storage. */
+  previewClearConfiguredMember(
+    request: ClearConfiguredMemberRequest,
+  ): ConfiguredMemberSelection {
+    const expectedRevision = validateExpectedRevision(request.expectedRevision);
+    if (expectedRevision === null) {
+      throw validationError("Clearing a configured member requires its current revision.");
+    }
+    this.assertExistingRevisionCanMatch(expectedRevision, "configured member");
+    const current = this.getConfiguredMember();
+    assertExpectedRevision(current?.revision ?? null, expectedRevision, "configured member");
+    if (current === null) {
+      throw revisionConflict("The configured member no longer exists.");
+    }
+    return current;
   }
 
   getCatchUpCursor(actor: ActorRef): StoredCatchUpCursor | null {
@@ -2242,6 +2287,20 @@ function normalizeWorkflowEffect(value: unknown, index: number): TeamWorkflowJou
         : { metadata: normalizeActivityMetadata(value.metadata) }),
     };
   }
+  if (value.kind === "identity_activity_receipt") {
+    assertOnlyKeys(
+      value,
+      ["kind", "envelopeRevision"],
+      `Workflow effect ${index}`,
+    );
+    return {
+      kind: "identity_activity_receipt",
+      envelopeRevision: validateRequiredRevision(
+        value.envelopeRevision,
+        `workflow effect ${index} envelope revision`,
+      ),
+    };
+  }
   if (value.kind === "wiki_recovery") {
     assertOnlyKeys(value, ["kind", "manifest"], `Workflow effect ${index}`);
     return {
@@ -2254,6 +2313,7 @@ function normalizeWorkflowEffect(value: unknown, index: number): TeamWorkflowJou
 
 function workflowEffectKey(effect: TeamWorkflowJournalEffect): string {
   if (effect.kind === "activity") return `activity:${effect.id}`;
+  if (effect.kind === "identity_activity_receipt") return effect.kind;
   if (effect.kind === "local_cleanup") return `cleanup:${effect.draftKind}:${effect.draftId}`;
   if (effect.kind === "wiki_recovery") {
     return `wiki-recovery:${effect.manifest.operationId}`;

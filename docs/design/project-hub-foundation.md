@@ -46,9 +46,12 @@ and `X-MEX-CSRF` value.
   manifest-only static serving, honest read projections, and job orchestration.
 - `packages/hub-web` owns the React shell, route states, shared-contract client,
   and development-only visual fixture.
-- `.mex/local/team.db` owns per-user job summaries and the repository Hub lease.
-  Its schema v2 transactionally preserves Lane C member selection and Catch Up
-  cursor rows. Canonical Markdown is never written by the Hub foundation.
+- `.mex/local/team.db` owns per-user job summaries, the repository Hub lease,
+  and bounded schema-v4 Team workflow state. A separate mode-0600 local signing
+  key authenticates exact identity/Activity previews across CLI and Hub
+  processes. Checkpoint C Hub startup provisions that key and creates/migrates
+  local state through the shared write-side initializer; pure service reads do
+  not initialize either surface.
 
 The browser receives direct resource bodies. Failures use RFC-style
 `application/problem+json` with stable MEX codes and request IDs. Adapter error
@@ -86,10 +89,13 @@ transcripts, diffs, arbitrary commands, or secrets.
 ## Browser experience
 
 The shell represents every planned route, with complete Home, Search, Health,
-Jobs, and read-only Activity states. Activity is a date-grouped canonical and
-legacy feed with bounded provenance, revision-safe pagination, and explicit
-partial-read diagnostics. Knowledge, Code, Workstreams, Specs, Playbooks,
-Inbox, and Relays remain capability-aware foundations rather than fake CRUD.
+Jobs, Members, and Activity states. Members exposes bounded canonical reads,
+effective actor resolution, local selection, and exact preview/apply for the
+Checkpoint C mutations. Activity is a date-grouped canonical and legacy feed
+with bounded provenance, revision-safe pagination, explicit partial-read
+diagnostics, and an append-only reviewed record flow. Knowledge, Code,
+Workstreams, Specs, Playbooks, Inbox, and Relays remain capability-aware
+foundations rather than fake CRUD.
 Search keeps Wiki, symbol, and source groups independent, including independent
 partial failure, and never fuses their scores.
 
@@ -108,6 +114,9 @@ the production bundle.
 - No Workstream, Inbox, Relay, Spec, or Playbook mutation in Lane B.
 - No Activity creation or Catch Up cursor advancement in the read-only Hub slice.
 - No change to `src/index.ts`, graph retrieval/ranking, protocol-v3 JSONL, or `mex tui`.
+
+Checkpoint C supersedes only the historical Activity-creation and member-UI
+boundaries above. Catch Up and every later team workbench remain unavailable.
 
 ## Verification
 

@@ -44,6 +44,27 @@ describe("ActorResolver", () => {
     });
   });
 
+  it("projects stale configured selections through bounded Git fallback without hiding them", async () => {
+    const resolver = new ActorResolver(reader([ADA, INACTIVE]), {
+      getIdentity: async () => ({ name: "Ada Fallback", email: "fallback@example.com" }),
+    });
+
+    await expect(resolver.resolveCurrentDetailed({
+      configuredMemberId: memberId(9),
+    })).resolves.toMatchObject({
+      source: "git-fallback",
+      actor: { kind: "git", name: "Ada Fallback", email: "fallback@example.com" },
+      diagnostics: [{ code: "ACTOR_MEMBER_MISSING", severity: "warning" }],
+    });
+    await expect(resolver.resolveCurrentDetailed({
+      configuredMemberId: INACTIVE.ref.id,
+    })).resolves.toMatchObject({
+      source: "git-fallback",
+      actor: { kind: "git", name: "Ada Fallback", email: "fallback@example.com" },
+      diagnostics: [{ code: "ACTOR_MEMBER_INACTIVE", severity: "warning" }],
+    });
+  });
+
   it("matches a single active member across case-insensitive email and exact name", async () => {
     const resolver = new ActorResolver(reader([ADA, GRACE]));
     const result = await resolver.resolveDetailed({
@@ -127,6 +148,32 @@ describe("ActorResolver", () => {
     await expect(empty.resolve({ gitIdentity: { name: null, email: null } })).resolves.toEqual({
       kind: "unknown",
     });
+  });
+
+  it("keeps Git actor fields within the canonical 200/320-byte boundaries", async () => {
+    const resolver = new ActorResolver(reader([]));
+    await expect(resolver.resolveDetailed({
+      gitIdentity: { name: "n".repeat(200), email: "e".repeat(320) },
+    })).resolves.toMatchObject({
+      source: "git-fallback",
+      actor: { kind: "git", name: "n".repeat(200), email: "e".repeat(320) },
+      diagnostics: [],
+    });
+
+    for (const gitIdentity of [
+      { name: "n".repeat(201), email: null },
+      { name: null, email: "e".repeat(321) },
+    ]) {
+      await expect(resolver.resolveDetailed({ gitIdentity })).resolves.toEqual({
+        source: "unknown",
+        actor: { kind: "unknown" },
+        diagnostics: [{
+          code: "GIT_IDENTITY_INVALID",
+          severity: "warning",
+          message: "Git identity exceeds the bounded actor contract and was ignored.",
+        }],
+      });
+    }
   });
 
   it("projects historical actors through current members without rewriting recorded identity", async () => {

@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Command } from "commander";
+import Ajv2020 from "ajv/dist/2020.js";
 import {
   CAPABILITIES_MAX_BYTES,
   CAPABILITY_COMMAND_CATALOG,
@@ -31,6 +32,10 @@ import { createGraphEngine } from "../src/graph/engine-impl.js";
 import { GRAPH_CORPUS_LIMITS } from "../src/graph/corpus-policy.js";
 import { WIKI_CORPUS_LIMITS } from "../src/wiki/index/corpus-policy.js";
 import { rebuildWikiIndex } from "../src/wiki/index/rebuild.js";
+import {
+  readTeamCommandFile,
+  type TeamMutationCommandName,
+} from "../src/team/cli/request-file.js";
 
 const roots: string[] = [];
 
@@ -43,12 +48,14 @@ afterEach(() => {
 describe("mex capabilities manifest", () => {
   it("matches the deterministic uninitialized golden without running index inspectors", async () => {
     const root = temporaryRoot();
+    const inspectTeam = vi.fn<CapabilityInspectionDependencies["inspectTeam"]>();
     const inspectGraphIndex = vi.fn<CapabilityInspectionDependencies["inspectGraphIndex"]>();
     const inspectWikiIndex = vi.fn<CapabilityInspectionDependencies["inspectWikiIndex"]>();
 
-    const envelope = await inspectCapabilities(root, { inspectGraphIndex, inspectWikiIndex });
+    const envelope = await inspectCapabilities(root, { inspectTeam, inspectGraphIndex, inspectWikiIndex });
 
     expect(JSON.stringify(envelope, null, 2) + "\n").toBe(golden("not-git.json"));
+    expect(inspectTeam).not.toHaveBeenCalled();
     expect(inspectGraphIndex).not.toHaveBeenCalled();
     expect(inspectWikiIndex).not.toHaveBeenCalled();
   });
@@ -56,8 +63,11 @@ describe("mex capabilities manifest", () => {
   it("matches the ready golden and honors bounded Wiki exclude configuration", async () => {
     const root = readyRoot();
     writeFileSync(join(root, ".mex", "config.json"), JSON.stringify({
+      scaffold_id: "scaffold-capabilities-001",
       wiki: { exclude: ["private/**", "generated/**"] },
     }));
+    execFileSync("git", ["add", ".mex/config.json"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "configure wiki"], { cwd: root });
     const inspectGraphIndex = vi.fn(async () => inspection("fresh"));
     const inspectWikiIndex = vi.fn(async () => inspection("fresh"));
 
@@ -68,6 +78,99 @@ describe("mex capabilities manifest", () => {
     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
     expect(inspectWikiIndex).toHaveBeenCalledWith(join(root, ".mex"), ["private/**", "generated/**"]);
     expect(Buffer.byteLength(JSON.stringify(first), "utf8")).toBeLessThanOrEqual(CAPABILITIES_MAX_BYTES);
+  });
+
+  it("publishes a complete machine-readable Team request and exit contract", async () => {
+    const root = readyRoot();
+    const envelope = await inspectCapabilities(root, {
+      inspectGraphIndex: async () => inspection("fresh"),
+      inspectWikiIndex: async () => inspection("fresh"),
+    });
+    const contract = envelope.data.teamCliContract;
+    const validate = new Ajv2020({ strict: true }).compile(contract.requestFile.schema);
+
+    expect(contract).toMatchObject({
+      schemaVersion: 1,
+      requestFile: {
+        contractId: "team.identity_activity.request.v1",
+        mediaType: "application/json",
+        encoding: "utf-8",
+        maxBytes: 65_536,
+        maxDepth: 32,
+        maxNodes: 4_096,
+        textPolicy: {
+          normalization: "NFC",
+          leadingOrTrailingWhitespace: "forbidden",
+          controlCharacters: "forbidden",
+        },
+        utf8ByteLimits: {
+          operationId: 128,
+          memberDisplayName: 200,
+          gitAliasName: 200,
+          gitAliasEmail: 320,
+          entityId: 256,
+          entityKind: 64,
+          entityTitle: 512,
+          activityAction: 128,
+          codeIdentifierOrFingerprint: 1_024,
+          repositoryPath: 4_096,
+        },
+      },
+      applyFile: {
+        contractId: "team.identity_activity.preview-envelope.v1",
+        maxBytes: 65_536,
+      },
+    });
+    expect(contract.exitCodes).toEqual([
+      { code: 0, name: "ok", meaning: "Success, including exact idempotent replay." },
+      {
+        code: 1,
+        name: "validation",
+        meaning: "Validation, invalid-preview, job, or internal command failure; inspect problem.code and diagnostics.",
+      },
+      { code: 2, name: "usage", meaning: "Arguments, request JSON, or preview-envelope input are invalid." },
+      { code: 3, name: "unavailable", meaning: "Repository state or the requested resource is unavailable." },
+      { code: 4, name: "conflict", meaning: "A revision, operation, or recovery conflict prevented the action." },
+      { code: 5, name: "refused", meaning: "A containment, authorization, or origin safety policy refused the action." },
+    ]);
+
+    const exampleRoot = temporaryRoot();
+    for (const example of contract.requestFile.examples) {
+      expect(validate(example.request), `${example.command}: ${JSON.stringify(validate.errors)}`).toBe(true);
+      const requestPath = join(exampleRoot, `${example.command}.json`);
+      writeFileSync(requestPath, JSON.stringify(example.request));
+      const parserCommand: TeamMutationCommandName = example.command === "member.clear"
+        ? "member.select"
+        : example.command;
+      expect(readTeamCommandFile(requestPath, parserCommand)).toEqual(example.request);
+      expect(example.usage).toContain("request.json --json");
+    }
+    expect(contract.requestFile.examples.map((entry) => entry.command)).toEqual([
+      "member.add",
+      "member.update",
+      "member.deactivate",
+      "member.select",
+      "member.clear",
+      "activity.record",
+    ]);
+
+    const teamPreviewIds = [
+      "member.add.preview",
+      "member.update.preview",
+      "member.deactivate.preview",
+      "member.select.preview",
+      "activity.record.preview",
+    ];
+    const teamApplyIds = teamPreviewIds.map((id) => id.replace(/\.preview$/u, ".apply"));
+    for (const descriptor of envelope.data.commands.preview.filter((entry) => teamPreviewIds.includes(entry.id))) {
+      expect(descriptor.inputContract).toMatch(/^team\.identity_activity\.request\.v1#\/\$defs\//u);
+    }
+    for (const descriptor of envelope.data.commands.apply.filter((entry) => teamApplyIds.includes(entry.id))) {
+      expect(descriptor.inputContract).toMatch(/^team\.identity_activity\.preview-envelope\.v1#/u);
+    }
+    expect(envelope.data.commands.preview.filter((entry) => teamPreviewIds.includes(entry.id))).toHaveLength(5);
+    expect(envelope.data.commands.apply.filter((entry) => teamApplyIds.includes(entry.id))).toHaveLength(5);
+    expect(Buffer.byteLength(JSON.stringify(envelope), "utf8")).toBeLessThanOrEqual(CAPABILITIES_MAX_BYTES);
   });
 
   it("returns success with safe missing-index states and a concrete next action", async () => {
@@ -199,6 +302,30 @@ describe("mex capabilities manifest", () => {
     expect(safe.data.nextInitializationAction?.command).toBe("mex graph rebuild --json");
   });
 
+  it("suppresses Team commands when the tracked scaffold identity has changed", async () => {
+    const root = readyRoot();
+    writeFileSync(join(root, ".mex", "config.json"), JSON.stringify({
+      scaffold_id: "scaffold-capabilities-changed",
+    }));
+
+    const envelope = await inspectCapabilities(root, {
+      inspectGraphIndex: async () => inspection("fresh"),
+      inspectWikiIndex: async () => inspection("fresh"),
+    });
+
+    for (const id of ["project_hub", "team_identity", "activity_read", "activity_record"] as const) {
+      expect(envelope.data.capabilities.find((entry) => entry.id === id)).toMatchObject({
+        availability: "unavailable",
+        unavailableReason: { code: "TEAM_SCAFFOLD_IDENTITY_CHANGED" },
+      });
+    }
+    expect(JSON.stringify(envelope.data.commands)).not.toMatch(/mex (?:member|activity) /u);
+    expect(envelope.data.nextInitializationAction).toEqual({
+      command: null,
+      reason: "Review and commit the intended .mex/config.json, then run mex capabilities --json again.",
+    });
+  });
+
   it("does not advertise Wiki rebuild for degraded, migration, corrupt, or unavailable states", async () => {
     const root = readyRoot();
     for (const state of ["degraded", "migration_required", "corrupt"] as const) {
@@ -253,7 +380,10 @@ describe("mex capabilities manifest", () => {
     execFileSync("git", ["config", "user.name", "Capabilities Contract"], { cwd: root });
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "src", "example.ts"), "export const example = 1;\n");
-    writeFileSync(join(root, ".mex", "config.json"), JSON.stringify({ aiTools: ["claude"] }));
+    writeFileSync(join(root, ".mex", "config.json"), JSON.stringify({
+      scaffold_id: "scaffold-capabilities-001",
+      aiTools: ["claude"],
+    }));
     execFileSync("git", ["add", "src/example.ts", ".mex/ROUTER.md", ".mex/config.json"], { cwd: root });
     execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
     const graph = createGraphEngine({ rootDir: root, dbPath: join(root, ".mex", "graph.db") });
@@ -366,12 +496,15 @@ describe("mex capabilities manifest", () => {
     });
     expect(envelope.data.capabilities.map((entry) => entry.id)).toEqual([
       "project_hub",
+      "team_identity",
       "activity_read",
+      "activity_record",
       "code_graph",
       "wiki",
     ]);
     const serializedCommands = JSON.stringify(envelope.data.commands);
-    expect(serializedCommands).not.toMatch(/workstream|inbox|relay|playbook|catch[-_ ]?up|activity/i);
+    expect(serializedCommands).not.toMatch(/workstream|inbox|relay|playbook|catch[-_ ]?up/i);
+    expect(serializedCommands).not.toMatch(/activity\.(?:create|update|delete)/i);
     expect(serializedCommands).not.toMatch(/wiki\.(?:build|prepare|propose)/i);
   });
 
@@ -379,7 +512,11 @@ describe("mex capabilities manifest", () => {
     const capabilities = program.commands.find((candidate) => candidate.name() === "capabilities");
     expect(capabilities?.options.map((option) => option.long)).toEqual(["--json"]);
     expect(isTelemetryExemptCommand("capabilities", "mex")).toBe(true);
+    expect(isTelemetryExemptCommand("list", "member")).toBe(true);
+    expect(isTelemetryExemptCommand("record", "activity")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("capabilities")).toBe(true);
+    expect(isFirstRunNoticeExemptCommand("member")).toBe(true);
+    expect(isFirstRunNoticeExemptCommand("activity")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("check")).toBe(false);
   });
 });
@@ -392,9 +529,16 @@ function temporaryRoot(): string {
 
 function readyRoot(): string {
   const root = temporaryRoot();
-  mkdirSync(join(root, ".git"));
   mkdirSync(join(root, ".mex"));
   writeFileSync(join(root, ".mex", "ROUTER.md"), "# Router\n");
+  writeFileSync(join(root, ".mex", "config.json"), JSON.stringify({
+    scaffold_id: "scaffold-capabilities-001",
+  }));
+  execFileSync("git", ["init", "--quiet"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "capabilities@example.invalid"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "Capabilities Contract"], { cwd: root });
+  execFileSync("git", ["add", ".mex/ROUTER.md", ".mex/config.json"], { cwd: root });
+  execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
   return root;
 }
 

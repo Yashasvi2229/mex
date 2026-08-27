@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { Command, InvalidArgumentError } from "commander";
-import { execSync, spawnSync } from "node:child_process";
+import { execFileSync, execSync, spawnSync } from "node:child_process";
 import { readFileSync, readdirSync, symlinkSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -222,8 +222,10 @@ describe("built CLI main-module guard", () => {
       cwd: repoRoot,
       env: { ...process.env, NODE_ENV: "test" },
       stdio: "pipe",
+      // execSync blocks Vitest's hook timer, so bound the child build itself.
+      timeout: 60_000,
     });
-  }, 30_000);
+  }, 65_000);
 
   it("parses argv when invoked through a symlinked bin (npm/npx layout)", () => {
     const binDir = mkdtempSync(join(tmpdir(), "mex-bin-"));
@@ -272,6 +274,42 @@ describe("built CLI main-module guard", () => {
       expect(readdirSync(userHome)).toEqual(homeEntries);
       expect(readFileSync(projectSentinel, "utf8")).toBe("project-before\n");
       expect(readFileSync(homeSentinel, "utf8")).toBe("home-before\n");
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the capability problem envelope for malformed JSON invocations", () => {
+    const project = mkdtempSync(join(tmpdir(), "mex-capability-cli-invalid-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-capability-invalid-home-"));
+    try {
+      for (const args of [
+        ["capabilities", "--json", "unexpected"],
+        ["capabilities", "--json", "--unknown"],
+      ] as const) {
+        const result = spawnSync(process.execPath, [cliPath, ...args], {
+          cwd: project,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+        });
+        expect(result.status, args.join(" ")).toBe(2);
+        expect(result.stderr, args.join(" ")).toBe("");
+        expect(JSON.parse(result.stdout)).toEqual({
+          schemaVersion: 1,
+          ok: false,
+          data: null,
+          diagnostics: [],
+          problem: {
+            title: "Invalid capability command",
+            status: 400,
+            code: "INVALID_REQUEST",
+            detail: "Use exactly: mex capabilities --json",
+          },
+        });
+      }
+      expect(readdirSync(project)).toEqual([]);
+      expect(readdirSync(userHome)).toEqual([]);
     } finally {
       rmSync(project, { recursive: true, force: true });
       rmSync(userHome, { recursive: true, force: true });
@@ -375,6 +413,205 @@ describe("built CLI main-module guard", () => {
       rmSync(userHome, { recursive: true, force: true });
     }
   }, 40_000);
+
+  it("keeps Team reads immutable and provisions only the signed preview key", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-team-cli-process-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-team-cli-home-"));
+    const requestRoot = mkdtempSync(join(tmpdir(), "mex-team-cli-request-"));
+    try {
+      const mexPath = join(fixture, ".mex");
+      mkdirSync(mexPath);
+      writeFileSync(join(mexPath, "ROUTER.md"), "# Router\n");
+      writeFileSync(join(mexPath, "config.json"), JSON.stringify({
+        scaffold_id: "scaffold-team-cli-process-001",
+      }));
+      execFileSync("git", ["init", "--quiet"], { cwd: fixture });
+      execFileSync("git", ["config", "user.email", "team-cli@example.invalid"], { cwd: fixture });
+      execFileSync("git", ["config", "user.name", "Team CLI Contract"], { cwd: fixture });
+      execFileSync("git", ["add", ".mex/ROUTER.md", ".mex/config.json"], { cwd: fixture });
+      execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: fixture });
+
+      const projectBefore = snapshotProcessTree(fixture);
+      const homeBefore = snapshotProcessTree(userHome);
+      for (const args of [
+        ["member", "list", "--json"],
+        ["member", "current", "--json"],
+        ["activity", "list", "--json"],
+      ] as const) {
+        const result = spawnSync(process.execPath, [cliPath, ...args], {
+          cwd: fixture,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+        });
+        expect(result.status, `${args.join(" ")}\n${result.stderr}`).toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({ schemaVersion: 1, ok: true });
+      }
+      expect(snapshotProcessTree(fixture)).toEqual(projectBefore);
+      expect(snapshotProcessTree(userHome)).toEqual(homeBefore);
+
+      const requestPath = join(requestRoot, "activity-record.json");
+      writeFileSync(requestPath, JSON.stringify({
+        operationId: "activity-record-process-001",
+        action: {
+          kind: "activity.record",
+          activity: {
+            action: "review.completed",
+            subjects: [{ kind: "file", path: "src/index.ts" }],
+          },
+        },
+        expectedRevisions: [],
+      }));
+      const preview = spawnSync(
+        process.execPath,
+        [cliPath, "activity", "record", requestPath, "--json"],
+        {
+          cwd: fixture,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+        },
+      );
+      expect(preview.status, preview.stderr).toBe(0);
+      expect(JSON.parse(preview.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "activity.record",
+        mode: "preview",
+        ok: true,
+      });
+      expect(readdirSync(join(mexPath, "local"))).toEqual([
+        "identity-activity-signing.key",
+      ]);
+      expect(snapshotProcessTree(userHome)).toEqual(homeBefore);
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+      rmSync(requestRoot, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  it("uses the Team JSON envelope for parser and repository-readiness failures", () => {
+    const outsideRepository = mkdtempSync(join(tmpdir(), "mex-team-cli-no-repo-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-team-cli-problem-home-"));
+    try {
+      const cases = [
+        {
+          args: ["member", "show", "--json"],
+          command: "member.show",
+          mode: "read",
+        },
+        {
+          args: ["member", "unknown", "--json"],
+          command: "member",
+          mode: "read",
+        },
+        {
+          args: ["activity", "record", "--apply", "--json"],
+          command: "activity.record",
+          mode: "apply",
+        },
+        {
+          args: ["member", "add", "--apply=preview.json", "--unknown", "--json"],
+          command: "member.add",
+          mode: "apply",
+        },
+      ] as const;
+
+      for (const testCase of cases) {
+        const result = spawnSync(process.execPath, [cliPath, ...testCase.args], {
+          cwd: outsideRepository,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+        });
+        expect(result.status, testCase.args.join(" ")).toBe(2);
+        expect(result.stderr, testCase.args.join(" ")).toBe("");
+        expect(JSON.parse(result.stdout)).toEqual({
+          command: testCase.command,
+          data: null,
+          diagnostics: [],
+          mode: testCase.mode,
+          ok: false,
+          problem: {
+            code: "INVALID_REQUEST",
+            detail: "The Team command arguments are invalid. Review the command help and retry.",
+            status: 400,
+            title: "Invalid Team command request",
+          },
+          schemaVersion: 1,
+        });
+      }
+
+      const unavailable = spawnSync(process.execPath, [cliPath, "member", "list", "--json"], {
+        cwd: outsideRepository,
+        encoding: "utf8",
+        env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+      });
+      expect(unavailable.status).toBe(3);
+      expect(unavailable.stderr).toBe("");
+      expect(JSON.parse(unavailable.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "member.list",
+        mode: "read",
+        ok: false,
+        problem: { code: "NOT_FOUND" },
+      });
+      expect(readdirSync(outsideRepository)).toEqual([]);
+      expect(readdirSync(userHome)).toEqual([]);
+    } finally {
+      rmSync(outsideRepository, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsafe or oversized Team config without following or initializing it", () => {
+    const userHome = mkdtempSync(join(tmpdir(), "mex-team-cli-config-home-"));
+    const outside = mkdtempSync(join(tmpdir(), "mex-team-cli-config-outside-"));
+    const outsideConfig = join(outside, "config.json");
+    writeFileSync(outsideConfig, JSON.stringify({ scaffold_id: "outside-secret" }));
+    try {
+      for (const fixtureKind of ["symlink", "oversized"] as const) {
+        const fixture = mkdtempSync(join(tmpdir(), `mex-team-cli-${fixtureKind}-`));
+        try {
+          mkdirSync(join(fixture, ".git"));
+          mkdirSync(join(fixture, ".mex"));
+          writeFileSync(join(fixture, ".mex", "ROUTER.md"), "# Router\n");
+          const configPath = join(fixture, ".mex", "config.json");
+          if (fixtureKind === "symlink") {
+            symlinkSync(outsideConfig, configPath);
+          } else {
+            writeFileSync(configPath, JSON.stringify({
+              scaffold_id: `scaffold-${"x".repeat(70 * 1024)}`,
+            }));
+          }
+          const before = snapshotProcessTree(fixture);
+          const result = spawnSync(process.execPath, [cliPath, "activity", "list", "--json"], {
+            cwd: fixture,
+            encoding: "utf8",
+            env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+          });
+          expect(result.status).toBe(fixtureKind === "symlink" ? 5 : 1);
+          expect(result.stderr).toBe("");
+          expect(JSON.parse(result.stdout)).toMatchObject({
+            schemaVersion: 1,
+            command: "activity.list",
+            mode: "read",
+            ok: false,
+            problem: {
+              code: fixtureKind === "symlink" ? "PATH_OUTSIDE_PROJECT" : "VALIDATION_FAILED",
+            },
+          });
+          expect(snapshotProcessTree(fixture)).toEqual(before);
+          expect(readFileSync(outsideConfig, "utf8")).toBe(
+            JSON.stringify({ scaffold_id: "outside-secret" }),
+          );
+        } finally {
+          rmSync(fixture, { recursive: true, force: true });
+        }
+      }
+      expect(readdirSync(userHome)).toEqual([]);
+    } finally {
+      rmSync(userHome, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("mex --version", () => {
@@ -390,3 +627,28 @@ describe("mex --version", () => {
     expect(program.version()).not.toBe("0.3.5"); // the original bug (#48)
   });
 });
+
+function snapshotProcessTree(root: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const visit = (directory: string, prefix: string): void => {
+    for (const name of readdirSync(directory).sort()) {
+      const absolute = join(directory, name);
+      const relative = prefix.length === 0 ? name : `${prefix}/${name}`;
+      const entry = readFileOrDirectory(absolute);
+      result[relative] = entry.kind === "file" ? entry.bytes : "directory";
+      if (entry.kind === "directory") visit(absolute, relative);
+    }
+  };
+  visit(root, "");
+  return result;
+}
+
+function readFileOrDirectory(path: string):
+  | { kind: "file"; bytes: string }
+  | { kind: "directory" } {
+  try {
+    return { kind: "file", bytes: readFileSync(path).toString("base64") };
+  } catch {
+    return { kind: "directory" };
+  }
+}

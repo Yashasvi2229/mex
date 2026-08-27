@@ -281,6 +281,32 @@ describe("TeamLocalState", () => {
     expect(store.getConfiguredMember()).toBeNull();
   });
 
+  it("previews configured-member selection revisions without initializing storage", () => {
+    const root = tempProject();
+    const store = state(root);
+
+    const preview = store.previewConfigureMember({
+      memberId: MEMBER_A,
+      expectedRevision: null,
+    });
+    expect(preview).toMatchObject({
+      scaffoldId: "scaffold-a",
+      memberId: MEMBER_A,
+      updatedAt: NOW,
+    });
+    expect(existsSync(join(root, ".mex"))).toBe(false);
+
+    const applied = store.configureMember({
+      memberId: MEMBER_A,
+      expectedRevision: null,
+    });
+    expect(applied).toEqual(preview);
+    expect(store.previewClearConfiguredMember({
+      expectedRevision: applied.revision,
+    })).toEqual(applied);
+    expect(store.getConfiguredMember()).toEqual(applied);
+  });
+
   it("isolates configured members and cursors by scaffold ID", () => {
     const root = tempProject();
     const first = state(root, "scaffold-a");
@@ -1132,6 +1158,47 @@ describe("TeamLocalState", () => {
       expectedRevision: boundary.revision,
     });
     expect(store.getIncompleteWorkflowOperation()).toBeNull();
+
+    const receiptEffect = {
+      kind: "identity_activity_receipt" as const,
+      envelopeRevision: "7".repeat(64),
+    };
+    const receiptEntry = store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-identity-receipt",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [receiptEffect],
+    }).entry;
+    expect(receiptEntry.effects).toEqual([receiptEffect]);
+    store.abandonWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: receiptEntry.operationId,
+      commandRevision: receiptEntry.commandRevision,
+      previewRevision: receiptEntry.previewRevision,
+      expectedRevision: receiptEntry.revision,
+    });
+    expectCode(() => store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-identity-receipt-private",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [{ ...receiptEffect, sourceBody: "private body" } as never],
+    }), "VALIDATION_FAILED");
+    expectCode(() => store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-identity-receipt-invalid",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [{ ...receiptEffect, envelopeRevision: "not-a-revision" }],
+    }), "VALIDATION_FAILED");
+    expectCode(() => store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-identity-receipt-duplicate",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [receiptEffect, receiptEffect],
+    }), "VALIDATION_FAILED");
 
     const wikiManifest = {
       schemaVersion: 1 as const,

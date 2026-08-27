@@ -540,7 +540,7 @@ function revisionExpectations(value: unknown, label: string): readonly RevisionE
     }
     if (target.kind === "local") {
       exactObject(target, ["kind", "namespace", "id"], [], `${label} ${index} local target`);
-      if (!(target.namespace === "inbox-draft" || target.namespace === "relay-draft" || target.namespace === "cursor" || target.namespace === "job")) invalid(`${label} ${index} local namespace is invalid.`);
+      if (!(target.namespace === "inbox-draft" || target.namespace === "relay-draft" || target.namespace === "cursor" || target.namespace === "job" || target.namespace === "member-selection")) invalid(`${label} ${index} local namespace is invalid.`);
       if (expectation.semanticRevision !== undefined) invalid(`${label} ${index} local target must not carry semanticRevision.`);
       return { target: { kind: "local" as const, namespace: target.namespace, id: text(target.id, `${label} ${index} local ID`, 256) }, revision: expectedRevision };
     }

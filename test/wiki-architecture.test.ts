@@ -762,6 +762,7 @@ describe("no unscoped scaffold writes", () => {
       "src/events.ts": "appends to events/decisions.jsonl",
       "src/pattern/index.ts": "creates a new pattern file from a template",
       "src/team/artifacts/filesystem.ts": "atomically publishes bounded team-owned canonical artifacts",
+      "src/team/local-state/receipt-signer.ts": "atomically provisions the bounded local-only C preview signing credential",
       "src/watch.ts": "installs and removes git hooks",
     };
 

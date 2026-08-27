@@ -28,6 +28,7 @@ import {
   atomicCreateArtifact,
   readContainedArtifact,
   tryReadContainedArtifact,
+  withContainedArtifactLock,
 } from "../artifacts/filesystem.js";
 import { revisionOf } from "../artifacts/revision.js";
 import { canonicalFileDiff } from "../artifacts/unified-diff.js";
@@ -43,9 +44,19 @@ import {
 const ACTIVITY_ROOT = ".mex/events/activity" as RepoRelativePath;
 const ACTIVITY_MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/;
 const ACTIVITY_FILE = /^(event_[0-9A-HJKMNP-TV-Z]{26})\.md$/;
-const MAX_ACTIVITY_MONTH_DIRECTORIES = 1_200;
-const MAX_ACTIVITY_SCAN_FILES = 2_048;
 const MAX_ISSUED_ACTIVITY_PREVIEWS = 256;
+const ACTIVITY_LOCK_NAME = ".activity.mex-lock";
+const ACTIVITY_INTERNAL_ROOT_ENTRIES = new Set([
+  ACTIVITY_LOCK_NAME,
+  `${ACTIVITY_LOCK_NAME}.recovery`,
+]);
+
+export const ACTIVITY_REPOSITORY_LIMITS = Object.freeze({
+  maxDirectoryEntries: 4_096,
+  maxRecords: 2_048,
+  maxCorpusBytes: 32 * 1024 * 1024,
+  maxDiagnostics: 100,
+});
 
 export interface ActivityCreateInput {
   actor: ActivityEvent["actor"];
@@ -77,13 +88,22 @@ export interface PreparedActivityAuthority {
  */
 export interface PreparedActivityPublication {
   previewRevision: Revision;
-  publish(): StoredActivityEvent;
+  publish(): Promise<StoredActivityEvent>;
 }
 
 export interface ActivityReadResult {
   events: readonly StoredActivityEvent[];
   diagnostics: readonly Diagnostic[];
   sourceTruncated: boolean;
+  /** IDs whose requested canonical candidates were malformed or conflicting. */
+  untrustedIds: readonly string[];
+}
+
+interface ActivityCorpusScan extends ActivityReadResult {
+  directoryEntries: number;
+  recordCount: number;
+  corpusBytes: number;
+  months: ReadonlySet<string>;
 }
 
 export interface ActivityListPage {
@@ -137,6 +157,7 @@ export class ActivityRepository {
   async previewCreateWithAuthority(
     input: ActivityCreateInput,
     authority: PreparedActivityAuthority,
+    eventId?: string,
   ): Promise<ActivityCreatePreview> {
     const timestampDate = new Date(authority.timestamp);
     if (
@@ -149,9 +170,17 @@ export class ActivityRepository {
         "Activity authority timestamp must be a canonical ISO timestamp.",
       );
     }
+    const id = eventId ?? this.generateId(timestampDate.getTime());
+    if (!isArtifactId(id, "event")) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Invalid activity event ID",
+        "The workflow-owned Activity event ID must be an event_ prefixed ULID.",
+      );
+    }
     const event: ActivityEvent = {
       schemaVersion: 1,
-      id: this.generateId(timestampDate.getTime()),
+      id,
       timestamp: authority.timestamp,
       actor: input.actor,
       action: input.action,
@@ -161,6 +190,7 @@ export class ActivityRepository {
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
     };
     const issued = previewFor(event);
+    this.#assertCapacityFor(issued.preview, issued.bytes);
     this.issuedPreviews.set(issued.preview.previewRevision, issued);
     if (this.issuedPreviews.size > MAX_ISSUED_ACTIVITY_PREVIEWS) {
       const oldest = this.issuedPreviews.keys().next().value as Revision | undefined;
@@ -216,11 +246,12 @@ export class ActivityRepository {
         preview.sourcePath,
       );
     }
+    this.#assertCapacityFor(issued.preview, issued.bytes);
 
     let consumed = false;
     return Object.freeze({
       previewRevision: expectedPreviewRevision,
-      publish: (): StoredActivityEvent => {
+      publish: async (): Promise<StoredActivityEvent> => {
         if (consumed) {
           throw artifactError(
             "REVISION_CONFLICT",
@@ -229,7 +260,7 @@ export class ActivityRepository {
             preview.sourcePath,
           );
         }
-        const stored = this.#publishExact(issued.preview, issued.bytes);
+        const stored = await this.#publishWithCapacity(issued.preview, issued.bytes);
         consumed = true;
         this.issuedPreviews.delete(expectedPreviewRevision);
         return stored;
@@ -242,10 +273,10 @@ export class ActivityRepository {
    * durable journal entry and all preceding canonical effects. This accepts no
    * caller-supplied path or bytes: both are derived from the strict event codec.
    */
-  recoverJournaledCreate(
+  async recoverJournaledCreate(
     event: ActivityEvent,
     expectedRevision: Revision,
-  ): StoredActivityEvent {
+  ): Promise<StoredActivityEvent> {
     const verified = previewFor(event);
     if (verified.preview.revision !== expectedRevision) {
       throw artifactError(
@@ -255,14 +286,23 @@ export class ActivityRepository {
         verified.preview.sourcePath,
       );
     }
-    return this.#publishExact(verified.preview, verified.bytes);
+    return this.#publishWithCapacity(verified.preview, verified.bytes);
   }
 
   get(id: string): StoredActivityEvent | null {
     if (!isArtifactId(id, "event")) {
       throw artifactError("INVALID_REQUEST", "Invalid activity ID", "Activity ID must be an event_ prefixed ULID.");
     }
-    return this.readAll().events.find((event) => event.id === id) ?? null;
+    const read = this.readAll();
+    if (read.sourceTruncated) throw activitySourceTruncated();
+    if (read.untrustedIds.includes(id)) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Activity record is untrusted",
+        "The requested canonical Activity ID has a malformed or conflicting record.",
+      );
+    }
+    return read.events.find((event) => event.id === id) ?? null;
   }
 
   list(request: TimelineRequest = {}): ActivityListPage {
@@ -285,33 +325,99 @@ export class ActivityRepository {
   }
 
   readAll(): ActivityReadResult {
+    const scan = this.#scanCorpus();
+    return {
+      events: scan.events,
+      diagnostics: scan.diagnostics,
+      sourceTruncated: scan.sourceTruncated,
+      untrustedIds: scan.untrustedIds,
+    };
+  }
+
+  #scanCorpus(ignoreInternalLockEntries = false): ActivityCorpusScan {
     const root = assertContainedArtifactDirectory(this.projectRoot, ACTIVITY_ROOT);
-    if (root === null) return { events: [], diagnostics: [], sourceTruncated: false };
+    if (root === null) {
+      return {
+        events: [],
+        diagnostics: [],
+        sourceTruncated: false,
+        untrustedIds: [],
+        directoryEntries: 0,
+        recordCount: 0,
+        corpusBytes: 0,
+        months: new Set(),
+      };
+    }
 
     const parsed: StoredActivityEvent[] = [];
     const diagnostics: Diagnostic[] = [];
+    const malformedIds = new Set<string>();
+    const months = new Set<string>();
     let sourceTruncated = false;
-    let scannedFiles = 0;
-    const monthDirectory = readDirectoryBounded(
-      root,
-      MAX_ACTIVITY_MONTH_DIRECTORIES,
-    );
-    if (monthDirectory.truncated) {
+    let directoryEntries = 0;
+    let recordCount = 0;
+    let corpusBytes = 0;
+    let diagnosticsTruncated = false;
+    const appendDiagnostic = (item: Diagnostic): void => {
+      if (diagnostics.length < ACTIVITY_REPOSITORY_LIMITS.maxDiagnostics) {
+        diagnostics.push(item);
+        return;
+      }
+      if (diagnosticsTruncated) return;
+      diagnosticsTruncated = true;
+      diagnostics[diagnostics.length - 1] = diagnostic(
+        "ACTIVITY_DIAGNOSTICS_TRUNCATED",
+        `Canonical Activity diagnostics exceed the ${ACTIVITY_REPOSITORY_LIMITS.maxDiagnostics}-item safety limit.`,
+        ACTIVITY_ROOT,
+      );
+    };
+    const truncate = (message: string): void => {
       sourceTruncated = true;
-      diagnostics.push(diagnostic(
+      appendDiagnostic(diagnostic(
         "ACTIVITY_SOURCE_TRUNCATED",
-        `Canonical activity exceeds the ${MAX_ACTIVITY_MONTH_DIRECTORIES}-month safety limit.`,
+        message,
         ACTIVITY_ROOT,
       ));
+    };
+
+    // The publication callback owns the fixed-name lock and may ignore its two
+    // bounded internal markers. Ordinary reads count those names so a planted
+    // lookalike can never weaken the 4,096-entry ceiling.
+    const monthDirectory = readDirectoryBounded(
+      root,
+      ACTIVITY_REPOSITORY_LIMITS.maxDirectoryEntries
+        + (ignoreInternalLockEntries ? ACTIVITY_INTERNAL_ROOT_ENTRIES.size : 0)
+        + 1,
+    );
+    if (monthDirectory.truncated) {
+      truncate(
+        `Canonical Activity exceeds the ${ACTIVITY_REPOSITORY_LIMITS.maxDirectoryEntries}-entry safety limit.`,
+      );
     }
     for (const monthEntry of monthDirectory.entries) {
+      if (sourceTruncated) break;
+      if (
+        ignoreInternalLockEntries
+        && ACTIVITY_INTERNAL_ROOT_ENTRIES.has(monthEntry.name)
+      ) continue;
+      directoryEntries += 1;
+      if (directoryEntries > ACTIVITY_REPOSITORY_LIMITS.maxDirectoryEntries) {
+        truncate(
+          `Canonical Activity exceeds the ${ACTIVITY_REPOSITORY_LIMITS.maxDirectoryEntries}-entry safety limit.`,
+        );
+        break;
+      }
       const monthPath = `${ACTIVITY_ROOT}/${monthEntry.name}` as RepoRelativePath;
       if (!monthEntry.isDirectory() || !ACTIVITY_MONTH.test(monthEntry.name)) {
-        diagnostics.push(diagnostic(
+        appendDiagnostic(diagnostic(
           "ACTIVITY_ARTIFACT_UNEXPECTED",
           "Unexpected item in the canonical activity directory.",
           monthPath,
         ));
+        if (ACTIVITY_MONTH.test(monthEntry.name)) {
+          truncate("A canonical Activity month path is not a safely readable directory.");
+          break;
+        }
         continue;
       }
 
@@ -320,33 +426,49 @@ export class ActivityRepository {
         const contained = assertContainedArtifactDirectory(this.projectRoot, monthPath);
         if (contained === null) continue;
         monthRoot = contained;
+        months.add(monthEntry.name);
       } catch (error) {
-        diagnostics.push(diagnosticFromError(error, monthPath));
-        continue;
+        appendDiagnostic(diagnosticFromError(error, monthPath));
+        truncate("A canonical Activity month directory could not be read safely.");
+        break;
       }
 
       const fileDirectory = readDirectoryBounded(
         monthRoot,
-        MAX_ACTIVITY_SCAN_FILES - scannedFiles,
+        ACTIVITY_REPOSITORY_LIMITS.maxDirectoryEntries - directoryEntries + 1,
       );
-      scannedFiles += fileDirectory.entries.length;
       if (fileDirectory.truncated) {
-        sourceTruncated = true;
-        diagnostics.push(diagnostic(
-          "ACTIVITY_SOURCE_TRUNCATED",
-          `Canonical activity exceeds the ${MAX_ACTIVITY_SCAN_FILES}-file safety limit.`,
-          ACTIVITY_ROOT,
-        ));
+        truncate(
+          `Canonical Activity exceeds the ${ACTIVITY_REPOSITORY_LIMITS.maxDirectoryEntries}-entry safety limit.`,
+        );
       }
       for (const fileEntry of fileDirectory.entries) {
+        directoryEntries += 1;
+        if (directoryEntries > ACTIVITY_REPOSITORY_LIMITS.maxDirectoryEntries) {
+          truncate(
+            `Canonical Activity exceeds the ${ACTIVITY_REPOSITORY_LIMITS.maxDirectoryEntries}-entry safety limit.`,
+          );
+          break;
+        }
         const sourcePath = `${monthPath}/${fileEntry.name}` as RepoRelativePath;
-        if (!fileEntry.isFile() || !ACTIVITY_FILE.test(fileEntry.name)) {
-          diagnostics.push(diagnostic(
+        const fileMatch = ACTIVITY_FILE.exec(fileEntry.name);
+        if (!fileEntry.isFile() || fileMatch === null) {
+          if (fileMatch !== null) malformedIds.add(fileMatch[1]!);
+          appendDiagnostic(diagnostic(
             "ACTIVITY_ARTIFACT_UNEXPECTED",
             "Unexpected item in a canonical activity month directory.",
             sourcePath,
           ));
           continue;
+        }
+        const candidateId = fileMatch[1]!;
+        recordCount += 1;
+        if (recordCount > ACTIVITY_REPOSITORY_LIMITS.maxRecords) {
+          malformedIds.add(candidateId);
+          truncate(
+            `Canonical Activity exceeds the ${ACTIVITY_REPOSITORY_LIMITS.maxRecords}-record safety limit.`,
+          );
+          break;
         }
         try {
           const read = readContainedArtifact(
@@ -354,17 +476,35 @@ export class ActivityRepository {
             sourcePath,
             ACTIVITY_ARTIFACT_MAX_BYTES,
           );
+          corpusBytes += read.bytes.byteLength;
+          if (corpusBytes > ACTIVITY_REPOSITORY_LIMITS.maxCorpusBytes) {
+            malformedIds.add(candidateId);
+            truncate(
+              `Canonical Activity exceeds the ${ACTIVITY_REPOSITORY_LIMITS.maxCorpusBytes}-byte safety limit.`,
+            );
+            break;
+          }
           parsed.push(parseActivityArtifact(read.bytes, sourcePath));
         } catch (error) {
-          diagnostics.push(diagnosticFromError(error, sourcePath));
+          malformedIds.add(candidateId);
+          appendDiagnostic(diagnosticFromError(error, sourcePath));
+          if (
+            error instanceof MexPortError
+            && error.problem.title === "Artifact is too large"
+          ) {
+            truncate(
+              `Canonical Activity contains a record beyond its bounded artifact size.`,
+            );
+            break;
+          }
         }
       }
-      if (fileDirectory.truncated) break;
+      if (sourceTruncated) break;
     }
 
     const events: StoredActivityEvent[] = [];
     const byId = new Map<string, StoredActivityEvent>();
-    const conflicted = new Set<string>();
+    const conflicted = new Set(malformedIds);
     for (const event of parsed) {
       if (conflicted.has(event.id)) continue;
       const previous = byId.get(event.id);
@@ -379,7 +519,7 @@ export class ActivityRepository {
       byId.delete(event.id);
       const previousIndex = events.findIndex((candidate) => candidate.id === event.id);
       if (previousIndex !== -1) events.splice(previousIndex, 1);
-      diagnostics.push(diagnostic(
+      appendDiagnostic(diagnostic(
         "ACTIVITY_ID_CONFLICT",
         `Conflicting canonical activity files reuse ID ${event.id}; both were excluded.`,
         event.sourcePath,
@@ -389,7 +529,68 @@ export class ActivityRepository {
     // A partial directory walk depends on filesystem enumeration order. Do not
     // surface those rows as a trusted canonical subset; retain only the safe
     // truncation diagnostic until the corpus can be read completely.
-    return { events: sourceTruncated ? [] : events, diagnostics, sourceTruncated };
+    return {
+      events: sourceTruncated
+        ? []
+        : events.filter((event) => !conflicted.has(event.id)),
+      diagnostics,
+      sourceTruncated,
+      untrustedIds: [...conflicted].sort(),
+      directoryEntries,
+      recordCount,
+      corpusBytes,
+      months,
+    };
+  }
+
+  #assertCapacityFor(
+    preview: ActivityCreatePreview,
+    bytes: string,
+    ignoreInternalLockEntries = false,
+  ): void {
+    const scan = this.#scanCorpus(ignoreInternalLockEntries);
+    if (scan.sourceTruncated) throw activityCapacityExceeded(preview.sourcePath);
+    const existing = tryReadContainedArtifact(
+      this.projectRoot,
+      preview.sourcePath,
+      ACTIVITY_ARTIFACT_MAX_BYTES,
+    );
+    if (existing !== null) {
+      if (existing.revision !== preview.revision) {
+        throw artifactError(
+          "REVISION_CONFLICT",
+          "Activity publication conflict",
+          "The canonical Activity path already contains different bytes.",
+          preview.sourcePath,
+        );
+      }
+      return;
+    }
+    const month = preview.sourcePath.split("/")[3]!;
+    const addedEntries = scan.months.has(month) ? 1 : 2;
+    if (
+      scan.recordCount + 1 > ACTIVITY_REPOSITORY_LIMITS.maxRecords
+      || scan.directoryEntries + addedEntries > ACTIVITY_REPOSITORY_LIMITS.maxDirectoryEntries
+      || scan.corpusBytes + Buffer.byteLength(bytes, "utf8")
+        > ACTIVITY_REPOSITORY_LIMITS.maxCorpusBytes
+    ) {
+      throw activityCapacityExceeded(preview.sourcePath);
+    }
+  }
+
+  async #publishWithCapacity(
+    preview: ActivityCreatePreview,
+    bytes: string,
+  ): Promise<StoredActivityEvent> {
+    return withContainedArtifactLock(
+      this.projectRoot,
+      ACTIVITY_ROOT,
+      ACTIVITY_LOCK_NAME,
+      () => {
+        this.#assertCapacityFor(preview, bytes, true);
+        return this.#publishExact(preview, bytes);
+      },
+    );
   }
 
   #publishExact(preview: ActivityCreatePreview, bytes: string): StoredActivityEvent {
@@ -564,7 +765,17 @@ function readDirectoryBounded(
   path: string,
   maximum: number,
 ): { entries: Dirent[]; truncated: boolean } {
-  const directory = opendirSync(path);
+  let directory;
+  try {
+    directory = opendirSync(path);
+  } catch {
+    throw artifactError(
+      "VALIDATION_FAILED",
+      "Canonical Activity directory is unreadable",
+      "A canonical Activity directory could not be opened safely.",
+      ACTIVITY_ROOT,
+    );
+  }
   const entries: Dirent[] = [];
   let truncated = false;
   try {
@@ -610,4 +821,22 @@ function diagnosticFromError(error: unknown, path: RepoRelativePath): Diagnostic
     message: error instanceof Error ? error.message : String(error),
     path,
   };
+}
+
+function activitySourceTruncated(): MexPortError {
+  return artifactError(
+    "VALIDATION_FAILED",
+    "Canonical Activity source is truncated",
+    "The canonical Activity corpus exceeds a bounded read limit and cannot be trusted.",
+    ACTIVITY_ROOT,
+  );
+}
+
+function activityCapacityExceeded(path: RepoRelativePath): MexPortError {
+  return artifactError(
+    "VALIDATION_FAILED",
+    "Canonical Activity capacity exceeded",
+    "Publishing this event would exceed the bounded Activity record, byte, or directory-entry limit.",
+    path,
+  );
 }

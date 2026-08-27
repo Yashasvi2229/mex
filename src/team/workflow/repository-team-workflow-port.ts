@@ -31,11 +31,20 @@ import type {
   Relay,
   RelayDraft,
   RelayDraftInput,
+  StoredActivityEvent,
   TeamArtifact,
   TeamArtifactKind,
   TeamArtifactListRequest,
   TeamArtifactState,
   TeamPage,
+  TeamActivityListRequest,
+  TeamCurrentActor,
+  TeamIdentityActivityCommand,
+  TeamIdentityActivityPreviewEnvelope,
+  TeamIdentityActivityPublicPreview,
+  TeamIdentityActivityPurposeId,
+  TeamMember,
+  TeamMemberListRequest,
   TeamWorkflowAction,
   TeamWorkflowApplyRequest,
   TeamWorkflowCommand,
@@ -44,7 +53,10 @@ import type {
   TeamWorkflowResult,
   Workstream,
 } from "../contracts/workflow.js";
-import { TEAM_READ_LIMITS } from "../contracts/workflow.js";
+import {
+  TEAM_IDENTITY_ACTIVITY_LIMITS,
+  TEAM_READ_LIMITS,
+} from "../contracts/workflow.js";
 import type {
   WikiOperationActor,
   WikiOperationPreview,
@@ -67,7 +79,7 @@ import {
 import { artifactError } from "../artifacts/errors.js";
 import { readContainedArtifact, tryReadContainedArtifact } from "../artifacts/filesystem.js";
 import { revisionOf } from "../artifacts/revision.js";
-import { generateArtifactId } from "../artifacts/ulid.js";
+import { generateArtifactId, isArtifactId } from "../artifacts/ulid.js";
 import {
   InboxProposalRepository,
   PlaybookRepository,
@@ -88,7 +100,10 @@ import {
   workstreamArtifactPath,
 } from "../artifacts/workflow-codecs.js";
 import { createRepositoryGitPort } from "../git/git-port.js";
-import { ActorResolver } from "../identity/actor-resolver.js";
+import {
+  ActorResolver,
+  type ActorResolution,
+} from "../identity/actor-resolver.js";
 import {
   MemberRepository,
   type MemberWritePlan,
@@ -100,6 +115,7 @@ import {
   type ActivityWorkflowEffect,
   type CanonicalWorkflowEffect,
   type HubLeaseProcessStatus,
+  type IdentityActivityReceiptWorkflowEffect,
   type LocalCleanupWorkflowEffect,
   type LocalWorkflowEffect,
   type StoredLocalDraft,
@@ -107,6 +123,7 @@ import {
   type TeamWorkflowJournalEntry,
   type WikiRecoveryWorkflowEffect,
 } from "../local-state/index.js";
+import { TeamReceiptSigner } from "../local-state/receipt-signer.js";
 import { RepositoryRootGuard } from "./repository-root.js";
 
 const MAX_ISSUED_PREVIEWS = 256;
@@ -116,6 +133,8 @@ const MAX_WIKI_OPERATION_LOG_BYTES = 2 * 1024 * 1024;
 const MAX_PREPARED_COMMAND_BYTES = 256 * 1024;
 const MAX_PREPARED_COMMAND_DEPTH = 32;
 const MAX_PREPARED_COMMAND_NODES = 8_192;
+const MEMBER_SELECTION_NAMESPACE = "member-selection" as const;
+const MEMBER_SELECTION_ID = "current" as const;
 const OPERATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 const ARTIFACT_KIND_ORDER = [
@@ -213,6 +232,13 @@ interface ArtifactCursor {
   filterRevision: Revision;
 }
 
+interface MemberCursor {
+  v: 1;
+  offset: number;
+  corpusRevision: Revision;
+  filterRevision: Revision;
+}
+
 /** Internal repository-bound implementation; intentionally absent from package-root exports. */
 export class RepositoryTeamWorkflowPort<
   TWikiPayload extends JsonValue,
@@ -232,6 +258,7 @@ export class RepositoryTeamWorkflowPort<
   readonly #playbooks: PlaybookRepository;
   readonly #runs: PlaybookRunRepository;
   readonly #local: TeamLocalState;
+  readonly #receiptSigner: TeamReceiptSigner;
   readonly #actors: ActorResolver;
   readonly #activity: ActivityRepository;
   readonly #localDraftId: (kind: "inbox" | "relay") => string;
@@ -275,6 +302,10 @@ export class RepositoryTeamWorkflowPort<
       now: () => this.#nowIso(),
       ...(options.processStatus === undefined ? {} : { processStatus: options.processStatus }),
     });
+    this.#receiptSigner = new TeamReceiptSigner(
+      this.#root.path,
+      options.scaffoldId,
+    );
     this.#actors = new ActorResolver(this.#members, this.#git);
     this.#activity = new ActivityRepository({
       projectRoot: this.#root.path,
@@ -294,6 +325,220 @@ export class RepositoryTeamWorkflowPort<
     this.#root.assertCurrent();
     const configured = this.#local.getConfiguredMember();
     return this.#actors.resolve(configured === null ? {} : { configuredMemberId: configured.memberId });
+  }
+
+  /** Explicit Hub-startup preparation; ordinary reads never call this. */
+  initializeIdentityActivitySigner(): void {
+    this.#root.assertCurrent();
+    this.#receiptSigner.initialize();
+  }
+
+  async getMember(memberId: string): Promise<TeamMember | null> {
+    this.#root.assertCurrent();
+    return this.#members.get(memberId);
+  }
+
+  async listMembers(
+    request: TeamMemberListRequest = {},
+  ): Promise<TeamPage<TeamMember>> {
+    this.#root.assertCurrent();
+    if (request.active !== undefined && typeof request.active !== "boolean") {
+      throw invalidMemberList();
+    }
+    const limit = normalizeLimit(request.limit);
+    const all = await this.#members.list();
+    const corpusRevision = hashJson(all.map((member) => [member.sourcePath, member.revision]));
+    const filterRevision = hashJson({ active: request.active ?? null });
+    const cursor = decodeMemberCursor(
+      request.cursor,
+      corpusRevision,
+      filterRevision,
+    );
+    const filtered = request.active === undefined
+      ? all
+      : all.filter((member) => member.active === request.active);
+    if (cursor !== null && cursor.offset >= filtered.length) {
+      throw invalidMemberList();
+    }
+    const offset = cursor?.offset ?? 0;
+    const items = filtered.slice(offset, offset + limit);
+    const nextOffset = offset + items.length;
+    const nextCursor = nextOffset < filtered.length
+      ? encodeMemberCursor({
+          v: 1,
+          offset: nextOffset,
+          corpusRevision,
+          filterRevision,
+        })
+      : null;
+    return {
+      items,
+      nextCursor,
+      truncated: nextCursor !== null,
+      sourceTruncated: false,
+      deterministicRevision: hashJson({ corpusRevision, filterRevision }),
+      diagnostics: [],
+    };
+  }
+
+  async getCurrentActor(): Promise<TeamCurrentActor> {
+    this.#root.assertCurrent();
+    const configured = this.#local.getConfiguredMember();
+    const resolution = await this.#resolveCurrentActorDetailed(configured);
+    return {
+      actor: resolution.actor,
+      source: resolution.source,
+      selection: configured === null
+        ? null
+        : {
+            memberId: configured.memberId,
+            updatedAt: configured.updatedAt,
+            revision: configured.revision,
+          },
+      diagnostics: resolution.diagnostics,
+    };
+  }
+
+  async getActivity(id: string): Promise<StoredActivityEvent | null> {
+    this.#root.assertCurrent();
+    return this.#activity.get(id);
+  }
+
+  async listActivity(
+    request: TeamActivityListRequest = {},
+  ): Promise<TeamPage<StoredActivityEvent>> {
+    this.#root.assertCurrent();
+    const page = this.#activity.list({
+      source: "activity",
+      ...(request.since === undefined ? {} : { since: request.since }),
+      ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+      ...(request.limit === undefined ? {} : { limit: request.limit }),
+    });
+    if (page.sourceTruncated) throw activitySourceTruncated();
+    return page;
+  }
+
+  async previewIdentityActivity(
+    command: TeamIdentityActivityCommand,
+  ): Promise<TeamIdentityActivityPreviewEnvelope> {
+    this.#root.assertCurrent();
+    assertIdentityActivityCommand(command);
+    let internal = await this.preview(
+      command as TeamWorkflowCommand<TWikiPayload>,
+    );
+    if (!this.#portablePreviewIsFresh(internal.command.authority.occurredAt)) {
+      this.#evictIssuedCommand(internal);
+      internal = await this.preview(command as TeamWorkflowCommand<TWikiPayload>);
+    }
+    const prepared = this.#issued.get(internal.previewRevision);
+    if (prepared === undefined) throw previewConflict();
+    const request = commandFromPrepared(internal.command) as TeamIdentityActivityCommand;
+    const publicPreview = publicPreviewFrom(internal);
+    const purposeIds = purposeIdsFromEffects(command.action.kind, prepared.effects);
+    const requestRevision = hashText(boundedIdentityEnvelopeJson(request));
+    const presentationRevision = hashText(
+      boundedIdentityEnvelopeJson(publicPreview),
+    );
+    const receiptBase = {
+      schemaVersion: 1 as const,
+      authority: internal.command.authority,
+      purposeIds,
+      requestRevision,
+      presentationRevision,
+    };
+    const signingPayload = receiptSigningPayload(receiptBase);
+    // Prove the complete envelope bound before the one allowed local signer
+    // preparation. A failed/oversized mutation preview therefore cannot create
+    // any local credential.
+    assertIdentityActivityEnvelope({
+      schemaVersion: 1,
+      request,
+      preview: publicPreview,
+      receipt: { ...receiptBase, previewRevision: "0".repeat(64) },
+    });
+    this.#receiptSigner.initialize();
+    const previewRevision = this.#receiptSigner.sign(signingPayload);
+    const envelope = deepFreeze({
+      schemaVersion: 1 as const,
+      request,
+      preview: publicPreview,
+      receipt: { ...receiptBase, previewRevision },
+    });
+    assertIdentityActivityEnvelope(envelope);
+    const portable = withPortableEnvelopeAttestation(
+      prepared,
+      previewRevision,
+      identityActivityEnvelopeRevision(envelope),
+    );
+    this.#rememberIssued(previewRevision, portable, false);
+    return envelope;
+  }
+
+  async applyIdentityActivity(
+    envelopeValue: TeamIdentityActivityPreviewEnvelope,
+  ): Promise<TeamWorkflowResult<TWikiPayload>> {
+    this.#root.assertCurrent();
+    const envelope = parseIdentityActivityEnvelope(envelopeValue);
+    const command = deepFreeze({
+      ...envelope.request,
+      authority: envelope.receipt.authority,
+    }) as PreparedTeamWorkflowCommand<TWikiPayload>;
+
+    let existing: TeamWorkflowJournalEntry | null = null;
+    try {
+      existing = this.#local.getWorkflowOperation(command.operationId);
+    } catch (error) {
+      if (!(error instanceof MexPortError)) throw error;
+      if (error.problem.code === "MIGRATION_REQUIRED") {
+        existing = null;
+      } else if (error.problem.code === "OPERATION_INTERRUPTED") {
+        this.#local.initializeForMutation();
+        existing = this.#local.getWorkflowOperation(command.operationId);
+      } else {
+        throw error;
+      }
+    }
+    if (existing !== null) {
+      assertJournalEnvelopeAttestation(existing.effects, envelope);
+      return this.apply({
+        command,
+        expectedPreviewRevision: envelope.receipt.previewRevision,
+      });
+    }
+
+    this.#receiptSigner.verify(
+      receiptSigningPayload(envelope.receipt),
+      envelope.receipt.previewRevision,
+    );
+    this.#assertPortablePreviewFresh(envelope.receipt.authority.occurredAt);
+    await this.#assertAuthorityCurrent(
+      envelope.receipt.authority,
+      envelope.request.action.kind === "member.clear",
+    );
+    const replanned = await this.#plan(
+      command,
+      envelope.receipt.requestRevision,
+      envelope.receipt.purposeIds,
+    );
+    if (
+      boundedIdentityEnvelopeJson(publicPreviewFrom(replanned.preview))
+        !== boundedIdentityEnvelopeJson(envelope.preview)
+      || boundedIdentityEnvelopeJson(
+        purposeIdsFromEffects(envelope.request.action.kind, replanned.effects),
+      ) !== boundedIdentityEnvelopeJson(envelope.receipt.purposeIds)
+    ) {
+      throw previewConflict();
+    }
+    const portable = withPortableEnvelopeAttestation(
+      replanned,
+      envelope.receipt.previewRevision,
+      identityActivityEnvelopeRevision(envelope),
+    );
+    this.#rememberIssued(envelope.receipt.previewRevision, portable, false);
+    return this.apply({
+      command,
+      expectedPreviewRevision: envelope.receipt.previewRevision,
+    });
   }
 
   async getArtifact(ref: EntityRef): Promise<TeamArtifact<TWikiPayload> | null> {
@@ -383,10 +628,15 @@ export class RepositoryTeamWorkflowPort<
       ? undefined
       : this.#issued.get(cachedRevision);
     if (cached !== undefined) {
-      await this.#assertAuthorityCurrent(cached.preview.command.authority);
+      await this.#assertAuthorityCurrent(
+        cached.preview.command.authority,
+        cached.preview.command.action.kind === "member.clear",
+      );
       return cached.preview;
     }
-    const actor = await this.resolveActor();
+    const actor = callerCommand.action.kind === "member.clear"
+      ? (await this.#resolveCurrentActorDetailed()).actor
+      : await this.resolveActor();
     const occurredAt = this.#nowIso();
     const repoState = await this.#git.getRepoState();
     const preparedCommand = deepFreeze({
@@ -394,19 +644,47 @@ export class RepositoryTeamWorkflowPort<
       authority: { actor, occurredAt, repoState },
     }) as PreparedTeamWorkflowCommand<TWikiPayload>;
     const prepared = await this.#plan(preparedCommand, commandRevision);
-    this.#issued.set(prepared.preview.previewRevision, prepared);
-    this.#issuedByCommand.set(commandRevision, prepared.preview.previewRevision);
-    if (this.#issued.size > MAX_ISSUED_PREVIEWS) {
+    this.#rememberIssued(prepared.preview.previewRevision, prepared, true);
+    return prepared.preview;
+  }
+
+  #rememberIssued(
+    revision: Revision,
+    prepared: PreparedOperation<TWikiPayload, TWikiPlan>,
+    bindCallerCommand: boolean,
+  ): void {
+    this.#issued.set(revision, prepared);
+    if (bindCallerCommand) {
+      this.#issuedByCommand.set(prepared.callerCommandRevision, revision);
+    }
+    while (this.#issued.size > MAX_ISSUED_PREVIEWS) {
       const oldest = this.#issued.keys().next().value as Revision | undefined;
-      if (oldest !== undefined) {
-        const removed = this.#issued.get(oldest);
-        this.#issued.delete(oldest);
-        if (removed !== undefined) {
-          this.#issuedByCommand.delete(removed.callerCommandRevision);
-        }
+      if (oldest === undefined) break;
+      const removed = this.#issued.get(oldest);
+      this.#issued.delete(oldest);
+      if (
+        removed !== undefined
+        && this.#issuedByCommand.get(removed.callerCommandRevision) === oldest
+      ) {
+        this.#issuedByCommand.delete(removed.callerCommandRevision);
       }
     }
-    return prepared.preview;
+  }
+
+  #evictIssuedCommand(preview: TeamWorkflowPreview<TWikiPayload>): void {
+    const prepared = this.#issued.get(preview.previewRevision);
+    if (prepared === undefined) return;
+    for (const [revision, candidate] of this.#issued) {
+      if (candidate.callerCommandRevision === prepared.callerCommandRevision) {
+        this.#issued.delete(revision);
+      }
+    }
+    if (
+      this.#issuedByCommand.get(prepared.callerCommandRevision)
+        === preview.previewRevision
+    ) {
+      this.#issuedByCommand.delete(prepared.callerCommandRevision);
+    }
   }
 
   async apply(
@@ -498,10 +776,18 @@ export class RepositoryTeamWorkflowPort<
     try {
       await this.#runPhaseHook("before-canonical-publication");
       this.#root.assertCurrent();
+      await this.#assertAuthorityCurrent(
+        prepared.preview.command.authority,
+        prepared.preview.command.action.kind === "member.clear",
+      );
       const primary = await prepared.applyPrimary();
       await this.#runPhaseHook("after-canonical-publication");
-      await this.#assertPostPrimaryRepository(prepared.preview.command.authority.repoState);
-      const event = activityPublication === null ? null : activityPublication.publish();
+      if (isAuditOnlyEffects(prepared.effects)) {
+        await this.#assertAuthorityCurrent(prepared.preview.command.authority);
+      } else {
+        await this.#assertPostPrimaryRepository(prepared.preview.command.authority.repoState);
+      }
+      const event = activityPublication === null ? null : await activityPublication.publish();
       await this.#runPhaseHook("after-activity-publication");
       journal = this.#advanceJournal(journal, leaseToken, "canonical_published");
       journal = this.#advanceJournal(
@@ -547,9 +833,11 @@ export class RepositoryTeamWorkflowPort<
               && this.#primaryEffectState(current.effects) === "none";
           }
         } else if (current?.phase === "intent" && prepared.wiki === undefined) {
-          mayAbandon = this.#primaryEffectState(current.effects) === "none";
+          mayAbandon = this.#primaryEffectState(current.effects) === "none"
+            || this.#isAuditOnlyPending(current.effects);
         } else if (current?.phase === "intent" && recovery === undefined) {
-          mayAbandon = this.#primaryEffectState(current.effects) === "none";
+          mayAbandon = this.#primaryEffectState(current.effects) === "none"
+            || this.#isAuditOnlyPending(current.effects);
         }
         if (
           current?.phase === "intent"
@@ -575,8 +863,9 @@ export class RepositoryTeamWorkflowPort<
   async #plan(
     command: PreparedTeamWorkflowCommand<TWikiPayload>,
     callerCommandRevision: Revision,
+    purposeIds?: readonly TeamIdentityActivityPurposeId[],
   ): Promise<PreparedOperation<TWikiPayload, TWikiPlan>> {
-    const planned = await this.#planPrimary(command);
+    const planned = await this.#planPrimary(command, undefined, purposeIds);
     if (planned.wiki?.preview.recoveryManifest !== undefined) {
       assertWikiRecoveryManifestMatchesChanges(
         planned.wiki.preview.recoveryManifest,
@@ -591,7 +880,7 @@ export class RepositoryTeamWorkflowPort<
         }, {
           timestamp: command.authority.occurredAt,
           repoState: command.authority.repoState,
-        });
+        }, purposeId(purposeIds, "activity"));
     const changes = [
       ...planned.changes,
       ...(activity?.changes ?? []),
@@ -656,6 +945,7 @@ export class RepositoryTeamWorkflowPort<
   async #planPrimary(
     command: PreparedTeamWorkflowCommand<TWikiPayload>,
     recoveryEffects?: readonly TeamWorkflowJournalEffect[],
+    purposeIds?: readonly TeamIdentityActivityPurposeId[],
   ): Promise<{
     changes: readonly FileChange[];
     localChanges: readonly LocalStateChange[];
@@ -670,9 +960,12 @@ export class RepositoryTeamWorkflowPort<
     const { action, expectedRevisions, authority } = command;
     switch (action.kind) {
       case "member.add": {
-        const recoveryId = recoveryCanonicalId(recoveryEffects, "member");
+        const recoveryId = recoveryCanonicalId(recoveryEffects, "member")
+          ?? purposeId(purposeIds, "member");
         const plan = await this.#members.previewCreate({
-          ...(recoveryId === null ? {} : { id: recoveryId }),
+          ...(recoveryId === null || recoveryId === undefined
+            ? {}
+            : { id: recoveryId }),
           displayName: action.member.displayName,
           gitAliases: action.member.gitAliases,
           active: action.member.active ?? true,
@@ -697,6 +990,134 @@ export class RepositoryTeamWorkflowPort<
           return primary([applied.member], [applied.change]);
         });
       }
+      case "member.deactivate": {
+        const current = await required(this.#members.get(action.memberId), "Member");
+        requireArtifactExpectation(expectedRevisions, current.sourcePath, current.revision);
+        if (!current.active) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Member is already inactive",
+            `Member ${action.memberId} is already inactive.`,
+            current.sourcePath,
+          );
+        }
+        this.#assertMemberIsNotSelected(action.memberId);
+        const plan = await this.#members.previewUpdate(
+          action.memberId,
+          { active: false },
+          current.revision,
+        );
+        return canonicalPlan<TWikiPayload>(plan, "member", action.memberId, {
+          action: "member.deactivated",
+          subjects: [entitySubject(plan.member.ref)],
+        }, async () => {
+          const applied = await this.#members.apply(plan, plan.previewRevision);
+          return primary([applied.member], [applied.change]);
+        });
+      }
+      case "member.select": {
+        const member = await required(this.#members.get(action.memberId), "Member");
+        requireArtifactExpectation(expectedRevisions, member.sourcePath, member.revision);
+        if (!member.active) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Inactive member cannot be selected",
+            `Member ${action.memberId} is inactive.`,
+            member.sourcePath,
+          );
+        }
+        const current = this.#local.getConfiguredMember();
+        requireLocalExpectation(
+          expectedRevisions,
+          MEMBER_SELECTION_NAMESPACE,
+          MEMBER_SELECTION_ID,
+          current?.revision ?? null,
+        );
+        const selected = this.#local.previewConfigureMember({
+          memberId: action.memberId,
+          expectedRevision: current?.revision ?? null,
+          updatedAt: authority.occurredAt,
+        });
+        const change = memberSelectionChange(
+          current?.revision ?? null,
+          selected.revision,
+          "Select current member",
+        );
+        return {
+          changes: [],
+          localChanges: [change],
+          diagnostics: [],
+          effects: [{
+            kind: "local",
+            namespace: MEMBER_SELECTION_NAMESPACE,
+            id: MEMBER_SELECTION_ID,
+            beforeRevision: current?.revision ?? null,
+            afterRevision: selected.revision,
+          }],
+          cleanup: [],
+          innerRevisions: [member.revision, selected.revision],
+          activityInput: null,
+          applyPrimary: async () => {
+            const applied = this.#local.configureMember({
+              memberId: action.memberId,
+              expectedRevision: current?.revision ?? null,
+              updatedAt: authority.occurredAt,
+            });
+            return primary([], [], [memberSelectionChange(
+              current?.revision ?? null,
+              applied.revision,
+              "Select current member",
+            )]);
+          },
+        };
+      }
+      case "member.clear": {
+        const currentRevision = requiredLocalRevision(
+          expectedRevisions,
+          MEMBER_SELECTION_NAMESPACE,
+          MEMBER_SELECTION_ID,
+        );
+        const current = this.#local.previewClearConfiguredMember({
+          expectedRevision: currentRevision,
+        });
+        const change = memberSelectionChange(
+          current.revision,
+          null,
+          "Clear current member",
+        );
+        return {
+          changes: [],
+          localChanges: [change],
+          diagnostics: [],
+          effects: [{
+            kind: "local",
+            namespace: MEMBER_SELECTION_NAMESPACE,
+            id: MEMBER_SELECTION_ID,
+            beforeRevision: current.revision,
+            afterRevision: null,
+          }],
+          cleanup: [],
+          innerRevisions: [current.revision],
+          activityInput: null,
+          applyPrimary: async () => {
+            this.#local.clearConfiguredMember({
+              expectedRevision: current.revision,
+            });
+            return primary([], [], [change]);
+          },
+        };
+      }
+      case "activity.record":
+        return {
+          changes: [],
+          localChanges: [],
+          diagnostics: [],
+          effects: [],
+          cleanup: [],
+          innerRevisions: [],
+          activityInput: action.activity,
+          applyPrimary: async () => primary([], []),
+        };
       case "workstream.create": {
         const recoveryId = recoveryCanonicalId(recoveryEffects, "workstream");
         const plan = await this.#workstreams.previewCreate({
@@ -1022,12 +1443,29 @@ export class RepositoryTeamWorkflowPort<
       if (
         expectation.target.namespace !== "inbox-draft"
         && expectation.target.namespace !== "relay-draft"
+        && expectation.target.namespace !== MEMBER_SELECTION_NAMESPACE
       ) {
         throw artifactError(
           "VALIDATION_FAILED",
           "Unsupported proposal target",
           "Inbox approval cannot safely validate this local target namespace.",
         );
+      }
+      if (expectation.target.namespace === MEMBER_SELECTION_NAMESPACE) {
+        if (expectation.target.id !== MEMBER_SELECTION_ID) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Unsupported member selection target",
+            "The current member selection must use its fixed local target.",
+          );
+        }
+        const selection = this.#local.getConfiguredMember();
+        if ((selection?.revision ?? null) !== expectation.revision) {
+          throw targetRevisionChanged(
+            `${MEMBER_SELECTION_NAMESPACE}:${MEMBER_SELECTION_ID}`,
+          );
+        }
+        continue;
       }
       const draft = this.#local.getLocalDraft(expectation.target.id);
       const expectedKind = expectation.target.namespace === "inbox-draft"
@@ -1064,12 +1502,89 @@ export class RepositoryTeamWorkflowPort<
     return playbook;
   }
 
-  async #assertAuthorityCurrent(authority: { actor: ActorRef; repoState: RepoState }): Promise<void> {
-    if (stableJson(await this.resolveActor()) !== stableJson(authority.actor)) {
+  async #assertAuthorityCurrent(
+    authority: { actor: ActorRef; repoState: RepoState },
+    allowStaleSelectionFallback = false,
+  ): Promise<void> {
+    const actor = allowStaleSelectionFallback
+      ? (await this.#resolveCurrentActorDetailed()).actor
+      : await this.resolveActor();
+    if (stableJson(actor) !== stableJson(authority.actor)) {
       throw artifactError("REVISION_CONFLICT", "Workflow actor changed", "The resolved actor changed after preview. Preview the workflow again.");
     }
     const current = await this.#git.getRepoState();
     if (!sameRepoCheckpoint(current, authority.repoState)) throw repositoryChanged();
+  }
+
+  async #resolveCurrentActorDetailed(
+    configured = this.#local.getConfiguredMember(),
+  ): Promise<ActorResolution> {
+    return this.#actors.resolveCurrentDetailed(
+      configured === null ? {} : { configuredMemberId: configured.memberId },
+    );
+  }
+
+  #assertPortablePreviewFresh(occurredAt: string): void {
+    const issued = Date.parse(occurredAt);
+    if (
+      Number.isNaN(issued)
+      || new Date(issued).toISOString() !== occurredAt
+    ) {
+      throw invalidIdentityActivityEnvelope();
+    }
+    const now = this.#now().getTime();
+    if (Number.isNaN(now)) {
+      throw artifactError(
+        "INTERNAL_ERROR",
+        "Workflow clock is invalid",
+        "The Team workflow clock could not validate the approved preview.",
+      );
+    }
+    if (issued - now > TEAM_IDENTITY_ACTIVITY_LIMITS.maxFutureClockSkewMs) {
+      throw artifactError(
+        "REVISION_CONFLICT",
+        "Workflow preview is from the future",
+        "The approved workflow preview has a timestamp beyond the allowed clock skew. Preview again.",
+      );
+    }
+    if (now - issued > TEAM_IDENTITY_ACTIVITY_LIMITS.maxPreviewAgeMs) {
+      throw artifactError(
+        "REVISION_CONFLICT",
+        "Workflow preview expired",
+        "The approved workflow preview is older than 30 minutes. Preview again.",
+      );
+    }
+  }
+
+  #portablePreviewIsFresh(occurredAt: string): boolean {
+    const issued = Date.parse(occurredAt);
+    if (
+      Number.isNaN(issued)
+      || new Date(issued).toISOString() !== occurredAt
+    ) {
+      return false;
+    }
+    const now = this.#now().getTime();
+    if (Number.isNaN(now)) {
+      throw artifactError(
+        "INTERNAL_ERROR",
+        "Workflow clock is invalid",
+        "The Team workflow clock could not validate the approved preview.",
+      );
+    }
+    return issued - now <= TEAM_IDENTITY_ACTIVITY_LIMITS.maxFutureClockSkewMs
+      && now - issued <= TEAM_IDENTITY_ACTIVITY_LIMITS.maxPreviewAgeMs;
+  }
+
+  #assertMemberIsNotSelected(memberId: string): void {
+    const selection = this.#local.getConfiguredMember();
+    if (selection?.memberId === memberId) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Current member cannot be deactivated",
+        "Clear or change the current local member selection before deactivating this member.",
+      );
+    }
   }
 
   async #assertPostPrimaryRepository(before: RepoState): Promise<void> {
@@ -1106,10 +1621,18 @@ export class RepositoryTeamWorkflowPort<
     prepared: PreparedOperation<TWikiPayload, TWikiPlan>,
     prepareActivity: boolean,
   ): Promise<PreparedActivityPublication | null> {
-    await this.#assertAuthorityCurrent(prepared.preview.command.authority);
+    await this.#assertAuthorityCurrent(
+      prepared.preview.command.authority,
+      prepared.preview.command.action.kind === "member.clear",
+    );
     await this.#assertExpectationsCurrent(
       prepared.preview.command.expectedRevisions,
     );
+    if (prepared.preview.command.action.kind === "member.deactivate") {
+      this.#assertMemberIsNotSelected(
+        prepared.preview.command.action.memberId,
+      );
+    }
     if (prepared.preview.command.action.kind === "inbox.approve") {
       const proposal = await required(
         this.#proposals.get(prepared.preview.command.action.proposalId),
@@ -1195,6 +1718,10 @@ export class RepositoryTeamWorkflowPort<
     command: PreparedTeamWorkflowCommand<TWikiPayload>,
   ): Promise<TeamWorkflowResult<TWikiPayload>> {
     if (entry.phase === "complete") {
+      // Completed replay trusts the durable journal only after attesting the
+      // immutable audit artifact. Mutable member state may legitimately have
+      // advanced in a later operation and is intentionally not revalidated.
+      this.#assertActivityPublished(entry.effects);
       return this.#resultFromEffects(entry, true);
     }
     const wikiRecovery = entry.effects.find(
@@ -1203,7 +1730,13 @@ export class RepositoryTeamWorkflowPort<
     if (wikiRecovery !== undefined) {
       return this.#recoverWikiExisting(entry, command, wikiRecovery);
     }
-    if (entry.phase !== "intent" || this.#primaryEffectState(entry.effects) !== "none") {
+    if (
+      entry.phase !== "intent"
+      || (
+        this.#primaryEffectState(entry.effects) !== "none"
+        && !this.#isAuditOnlyPending(entry.effects)
+      )
+    ) {
       await this.#assertRecoveryCheckpoint(entry.effects);
     }
     // An interrupted journal can legitimately contain a bounded prefix of
@@ -1215,7 +1748,7 @@ export class RepositoryTeamWorkflowPort<
     let current = this.#local.getWorkflowOperation(entry.operationId) ?? entry;
     if (current.phase === "intent") {
       let primary = this.#primaryEffectState(current.effects);
-      if (primary === "none") {
+      if (primary === "none" || this.#isAuditOnlyPending(current.effects)) {
         if (current.effects.some((effect) => effect.kind === "canonical" && effect.namespace === "wiki")) {
           this.#abandonUnpublished(current, leaseToken);
           throw artifactError(
@@ -1228,7 +1761,10 @@ export class RepositoryTeamWorkflowPort<
           await this.#publishUnpublished(command, current.effects);
         } catch (error) {
           if (error instanceof WorkflowPhaseInterruption) throw error;
-          if (this.#primaryEffectState(current.effects) === "none") {
+          if (
+            this.#primaryEffectState(current.effects) === "none"
+            || this.#isAuditOnlyPending(current.effects)
+          ) {
             this.#abandonUnpublished(current, leaseToken);
           }
           throw error;
@@ -1241,7 +1777,7 @@ export class RepositoryTeamWorkflowPort<
       if (primary !== "all") {
         throw incompleteRecovery();
       }
-      this.#recoverActivity(current.effects);
+      await this.#recoverActivity(current.effects);
       this.#assertActivityPublished(current.effects);
       current = this.#advanceJournal(current, leaseToken, "canonical_published");
     }
@@ -1332,7 +1868,7 @@ export class RepositoryTeamWorkflowPort<
       await this.#refreshRecoveredWikiIndex(current.effects);
       await this.#completeInterruptedProposalApproval(current.effects, true);
       this.#assertNonAuditPrimaryEffectsPublished(current.effects);
-      this.#recoverActivity(current.effects);
+      await this.#recoverActivity(current.effects);
       this.#assertActivityPublished(current.effects);
       current = this.#advanceJournal(current, leaseToken, "canonical_published");
     }
@@ -1398,7 +1934,16 @@ export class RepositoryTeamWorkflowPort<
     command: PreparedTeamWorkflowCommand<TWikiPayload>,
     effects: readonly TeamWorkflowJournalEffect[],
   ): Promise<void> {
-    await this.#assertAuthorityCurrent(command.authority);
+    // An intent with no published primary bytes is still only an authorization
+    // to attempt the reviewed operation. Before the first canonical/audit byte
+    // is written, revalidate all service-owned authority and preview freshness.
+    // Once an exact effect exists, the journaled recovery path below may finish
+    // without depending on mutable current identity.
+    this.#assertPortablePreviewFresh(command.authority.occurredAt);
+    await this.#assertAuthorityCurrent(
+      command.authority,
+      command.action.kind === "member.clear",
+    );
     await this.#assertExpectationsCurrent(command.expectedRevisions);
     const activity = effects.find(
       (effect): effect is ActivityWorkflowEffect => effect.kind === "activity",
@@ -1424,10 +1969,20 @@ export class RepositoryTeamWorkflowPort<
     assertRecoveryActivityIntent(planned.activityInput, command.authority, activity);
     await this.#runPhaseHook("before-canonical-publication");
     this.#root.assertCurrent();
+    this.#assertPortablePreviewFresh(command.authority.occurredAt);
+    await this.#assertAuthorityCurrent(
+      command.authority,
+      command.action.kind === "member.clear",
+    );
+    await this.#assertExpectationsCurrent(command.expectedRevisions);
     await planned.applyPrimary();
     await this.#runPhaseHook("after-canonical-publication");
-    await this.#assertPostPrimaryRepository(command.authority.repoState);
-    this.#recoverActivity(effects);
+    if (isAuditOnlyEffects(effects)) {
+      await this.#assertAuthorityCurrent(command.authority);
+    } else {
+      await this.#assertPostPrimaryRepository(command.authority.repoState);
+    }
+    await this.#recoverActivity(effects);
     await this.#runPhaseHook("after-activity-publication");
   }
 
@@ -1692,6 +2247,21 @@ export class RepositoryTeamWorkflowPort<
     if (stored?.revision !== activity.revision) throw incompleteRecovery();
   }
 
+  #isAuditOnlyPending(effects: readonly TeamWorkflowJournalEffect[]): boolean {
+    if (effects.some((effect) => effect.kind === "canonical" || effect.kind === "local")) {
+      return false;
+    }
+    const activity = effects.find(
+      (effect): effect is ActivityWorkflowEffect => effect.kind === "activity",
+    );
+    if (activity === undefined) return false;
+    return tryReadContainedArtifact(
+      this.#root.path,
+      activity.path,
+      ACTIVITY_ARTIFACT_MAX_BYTES,
+    )?.revision !== activity.revision;
+  }
+
   #assertCleanupPending(effects: readonly TeamWorkflowJournalEffect[]): void {
     for (const effect of effects) {
       if (effect.kind !== "local_cleanup") continue;
@@ -1711,10 +2281,10 @@ export class RepositoryTeamWorkflowPort<
     }
   }
 
-  #recoverActivity(effects: readonly TeamWorkflowJournalEffect[]): void {
+  async #recoverActivity(effects: readonly TeamWorkflowJournalEffect[]): Promise<void> {
     const effect = effects.find((item): item is ActivityWorkflowEffect => item.kind === "activity");
     if (effect === undefined) return;
-    this.#activity.recoverJournaledCreate({
+    await this.#activity.recoverJournaledCreate({
       schemaVersion: 1,
       id: effect.id,
       timestamp: effect.occurredAt,
@@ -1750,6 +2320,13 @@ export class RepositoryTeamWorkflowPort<
         recoveryFileByteLimit(effect.path),
       );
       const revision = read?.revision ?? null;
+      if (revision === effect.afterRevision) return "after";
+      if (revision === effect.beforeRevision) return "before";
+      return "divergent";
+    }
+    if (effect.namespace === MEMBER_SELECTION_NAMESPACE) {
+      if (effect.id !== MEMBER_SELECTION_ID) return "divergent";
+      const revision = this.#local.getConfiguredMember()?.revision ?? null;
       if (revision === effect.afterRevision) return "after";
       if (revision === effect.beforeRevision) return "before";
       return "divergent";
@@ -2008,6 +2585,450 @@ export class WorkflowPhaseInterruption extends MexPortError {
   }
 }
 
+function publicPreviewFrom(
+  preview: TeamWorkflowPreview<JsonValue>,
+): TeamIdentityActivityPublicPreview;
+function publicPreviewFrom<TWikiPayload extends JsonValue>(
+  preview: TeamWorkflowPreview<TWikiPayload>,
+): TeamIdentityActivityPublicPreview;
+function publicPreviewFrom<TWikiPayload extends JsonValue>(
+  preview: TeamWorkflowPreview<TWikiPayload>,
+): TeamIdentityActivityPublicPreview {
+  return deepFreeze({
+    valid: preview.valid,
+    scope: preview.scope,
+    changes: preview.changes,
+    localChanges: preview.localChanges,
+    diagnostics: preview.diagnostics,
+  });
+}
+
+function commandFromPrepared<TWikiPayload extends JsonValue>(
+  command: PreparedTeamWorkflowCommand<TWikiPayload>,
+): TeamWorkflowCommand<TWikiPayload> {
+  const { authority: _authority, ...request } = command;
+  return deepFreeze(request) as TeamWorkflowCommand<TWikiPayload>;
+}
+
+function withPortableEnvelopeAttestation<
+  TWikiPayload extends JsonValue,
+  TWikiPlan,
+>(
+  prepared: PreparedOperation<TWikiPayload, TWikiPlan>,
+  previewRevision: Revision,
+  envelopeRevision: Revision,
+): PreparedOperation<TWikiPayload, TWikiPlan> {
+  return {
+    ...prepared,
+    preview: deepFreeze({
+      ...prepared.preview,
+      previewRevision,
+    }),
+    effects: normalizeTeamWorkflowJournalEffects([
+      ...prepared.effects,
+      {
+        kind: "identity_activity_receipt",
+        envelopeRevision,
+      } satisfies IdentityActivityReceiptWorkflowEffect,
+    ]),
+  };
+}
+
+function identityActivityEnvelopeRevision(
+  envelope: TeamIdentityActivityPreviewEnvelope,
+): Revision {
+  return hashText(boundedIdentityEnvelopeJson(envelope));
+}
+
+function assertJournalEnvelopeAttestation(
+  effects: readonly TeamWorkflowJournalEffect[],
+  envelope: TeamIdentityActivityPreviewEnvelope,
+): void {
+  const receipts = effects.filter(
+    (effect): effect is IdentityActivityReceiptWorkflowEffect =>
+      effect.kind === "identity_activity_receipt",
+  );
+  if (
+    receipts.length !== 1
+    || receipts[0]!.envelopeRevision !== identityActivityEnvelopeRevision(envelope)
+  ) {
+    throw previewConflict();
+  }
+}
+
+function isAuditOnlyEffects(effects: readonly TeamWorkflowJournalEffect[]): boolean {
+  return effects.some((effect) => effect.kind === "activity")
+    && !effects.some((effect) => effect.kind === "canonical" || effect.kind === "local");
+}
+
+function purposeIdsFromEffects(
+  action: TeamIdentityActivityCommand["action"]["kind"],
+  effects: readonly TeamWorkflowJournalEffect[],
+): readonly TeamIdentityActivityPurposeId[] {
+  const purposes: TeamIdentityActivityPurposeId[] = [];
+  if (action === "member.add") {
+    const members = effects.filter(
+      (effect): effect is CanonicalWorkflowEffect =>
+        effect.kind === "canonical" && effect.namespace === "member",
+    );
+    if (members.length !== 1) throw previewConflict();
+    purposes.push({ purpose: "member", id: members[0]!.id });
+  }
+  if (
+    action === "member.add"
+    || action === "member.update"
+    || action === "member.deactivate"
+    || action === "activity.record"
+  ) {
+    const activities = effects.filter(
+      (effect): effect is ActivityWorkflowEffect => effect.kind === "activity",
+    );
+    if (activities.length !== 1) throw previewConflict();
+    purposes.push({ purpose: "activity", id: activities[0]!.id });
+  } else if (effects.some((effect) => effect.kind === "activity")) {
+    throw previewConflict();
+  }
+  purposes.sort((left, right) => compareCodePoints(left.purpose, right.purpose));
+  return deepFreeze(purposes);
+}
+
+function purposeId(
+  purposes: readonly TeamIdentityActivityPurposeId[] | undefined,
+  purpose: TeamIdentityActivityPurposeId["purpose"],
+): string | undefined {
+  if (purposes === undefined) return undefined;
+  return purposes.find((item) => item.purpose === purpose)?.id;
+}
+
+function assertIdentityActivityCommand(
+  value: unknown,
+): asserts value is TeamIdentityActivityCommand {
+  assertCommandShape(value);
+  assertOperationId(value.operationId);
+  assertNoCallerAuthority(value);
+  normalizeWorkflowRevisionExpectations(value.expectedRevisions);
+  const action = value.action;
+  switch (action.kind) {
+    case "member.add": {
+      if (!isPlainObject(action.member)) invalidIdentityActivityCommand();
+      if (Object.hasOwn(action.member, "active")) invalidIdentityActivityCommand();
+      exactIdentityKeys(action.member, ["displayName", "gitAliases"]);
+      break;
+    }
+    case "member.update": {
+      if (!isPlainObject(action.patch)) invalidIdentityActivityCommand();
+      exactIdentityKeys(action.patch, [], ["displayName", "gitAliases"]);
+      if (Object.keys(action.patch).length === 0) invalidIdentityActivityCommand();
+      break;
+    }
+    case "member.deactivate":
+    case "member.select":
+    case "member.clear":
+      break;
+    case "activity.record": {
+      if (!isPlainObject(action.activity)) invalidIdentityActivityCommand();
+      exactIdentityKeys(
+        action.activity,
+        ["action", "subjects"],
+        ["workstream"],
+      );
+      break;
+    }
+    default:
+      invalidIdentityActivityCommand();
+  }
+  boundedIdentityEnvelopeJson(value);
+}
+
+function assertIdentityActivityEnvelope(
+  value: unknown,
+): asserts value is TeamIdentityActivityPreviewEnvelope {
+  parseIdentityActivityEnvelope(value);
+}
+
+function parseIdentityActivityEnvelope(
+  value: unknown,
+): TeamIdentityActivityPreviewEnvelope {
+  const serialized = boundedIdentityEnvelopeJson(value);
+  const envelope = JSON.parse(serialized) as unknown;
+  if (!isPlainObject(envelope)) throw invalidIdentityActivityEnvelope();
+  exactIdentityKeys(envelope, ["schemaVersion", "request", "preview", "receipt"]);
+  if (envelope.schemaVersion !== 1) throw invalidIdentityActivityEnvelope();
+  assertIdentityActivityCommand(envelope.request);
+  assertPublicIdentityPreview(envelope.preview);
+  assertIdentityReceipt(envelope.receipt, envelope.request, envelope.preview);
+  return deepFreeze(envelope as unknown as TeamIdentityActivityPreviewEnvelope);
+}
+
+function assertPublicIdentityPreview(
+  value: unknown,
+): asserts value is TeamIdentityActivityPublicPreview {
+  if (!isPlainObject(value)) throw invalidIdentityActivityEnvelope();
+  exactIdentityKeys(
+    value,
+    ["valid", "scope", "changes", "localChanges", "diagnostics"],
+  );
+  if (
+    typeof value.valid !== "boolean"
+    || (value.scope !== "canonical" && value.scope !== "local" && value.scope !== "mixed")
+    || !Array.isArray(value.changes)
+    || !Array.isArray(value.localChanges)
+    || !Array.isArray(value.diagnostics)
+  ) {
+    throw invalidIdentityActivityEnvelope();
+  }
+}
+
+function assertIdentityReceipt(
+  value: unknown,
+  request: TeamIdentityActivityCommand,
+  preview: TeamIdentityActivityPublicPreview,
+): void {
+  boundedReceiptJson(value);
+  if (!isPlainObject(value)) throw invalidIdentityActivityEnvelope();
+  exactIdentityKeys(value, [
+    "schemaVersion",
+    "authority",
+    "purposeIds",
+    "requestRevision",
+    "presentationRevision",
+    "previewRevision",
+  ]);
+  if (
+    value.schemaVersion !== 1
+    || !isRevisionValue(value.requestRevision)
+    || !isRevisionValue(value.presentationRevision)
+    || !isRevisionValue(value.previewRevision)
+  ) {
+    throw invalidIdentityActivityEnvelope();
+  }
+  assertReceiptAuthority(value.authority);
+  const purposeIds = normalizeReceiptPurposeIds(value.purposeIds, request.action.kind);
+  const requestRevision = hashText(boundedIdentityEnvelopeJson(request));
+  const presentationRevision = hashText(boundedIdentityEnvelopeJson(preview));
+  if (
+    value.requestRevision !== requestRevision
+    || value.presentationRevision !== presentationRevision
+  ) {
+    throw previewConflict();
+  }
+  // The receipt signature is verified against the repository-local signer at
+  // apply. Structural parsing deliberately cannot reproduce that secret-bound
+  // value, but still validates every signed field and its deterministic hashes.
+  void purposeIds;
+}
+
+function assertReceiptAuthority(value: unknown): void {
+  if (!isPlainObject(value)) throw invalidIdentityActivityEnvelope();
+  exactIdentityKeys(value, ["actor", "occurredAt", "repoState"]);
+  if (typeof value.occurredAt !== "string") throw invalidIdentityActivityEnvelope();
+  const occurredAt = new Date(value.occurredAt);
+  if (
+    Number.isNaN(occurredAt.getTime())
+    || occurredAt.toISOString() !== value.occurredAt
+  ) {
+    throw invalidIdentityActivityEnvelope();
+  }
+  assertReceiptActor(value.actor);
+  if (!isPlainObject(value.repoState)) throw invalidIdentityActivityEnvelope();
+  exactIdentityKeys(value.repoState, ["branch", "head", "dirty", "observedAt"]);
+  if (
+    (value.repoState.branch !== null && typeof value.repoState.branch !== "string")
+    || (value.repoState.head !== null && typeof value.repoState.head !== "string")
+    || typeof value.repoState.dirty !== "boolean"
+    || typeof value.repoState.observedAt !== "string"
+  ) {
+    throw invalidIdentityActivityEnvelope();
+  }
+  const observedAt = new Date(value.repoState.observedAt);
+  if (
+    Number.isNaN(observedAt.getTime())
+    || observedAt.toISOString() !== value.repoState.observedAt
+  ) {
+    throw invalidIdentityActivityEnvelope();
+  }
+}
+
+function assertReceiptActor(value: unknown): void {
+  if (!isPlainObject(value) || typeof value.kind !== "string") {
+    throw invalidIdentityActivityEnvelope();
+  }
+  if (value.kind === "unknown") {
+    exactIdentityKeys(value, ["kind"]);
+    return;
+  }
+  if (value.kind === "member") {
+    exactIdentityKeys(value, ["kind", "memberId"], ["displayName"]);
+    if (
+      typeof value.memberId !== "string"
+      || (value.displayName !== undefined && typeof value.displayName !== "string")
+    ) {
+      throw invalidIdentityActivityEnvelope();
+    }
+    return;
+  }
+  if (value.kind === "git") {
+    exactIdentityKeys(value, ["kind", "name", "email"]);
+    if (
+      (value.name !== null && typeof value.name !== "string")
+      || (value.email !== null && typeof value.email !== "string")
+    ) {
+      throw invalidIdentityActivityEnvelope();
+    }
+    return;
+  }
+  throw invalidIdentityActivityEnvelope();
+}
+
+function normalizeReceiptPurposeIds(
+  value: unknown,
+  action: TeamIdentityActivityCommand["action"]["kind"],
+): readonly TeamIdentityActivityPurposeId[] {
+  if (
+    !Array.isArray(value)
+    || value.length > TEAM_IDENTITY_ACTIVITY_LIMITS.maxPurposeIds
+  ) {
+    throw invalidIdentityActivityEnvelope();
+  }
+  const purposes = value.map((item): TeamIdentityActivityPurposeId => {
+    if (!isPlainObject(item)) throw invalidIdentityActivityEnvelope();
+    exactIdentityKeys(item, ["purpose", "id"]);
+    if (item.purpose !== "activity" && item.purpose !== "member") {
+      throw invalidIdentityActivityEnvelope();
+    }
+    if (
+      typeof item.id !== "string"
+      || !isArtifactId(item.id, item.purpose === "activity" ? "event" : "member")
+    ) {
+      throw invalidIdentityActivityEnvelope();
+    }
+    return { purpose: item.purpose, id: item.id };
+  });
+  const expected = action === "member.add"
+    ? ["activity", "member"]
+    : action === "member.update"
+      || action === "member.deactivate"
+      || action === "activity.record"
+      ? ["activity"]
+      : [];
+  if (
+    purposes.some((item, index) => item.purpose !== expected[index])
+    || purposes.length !== expected.length
+  ) {
+    throw invalidIdentityActivityEnvelope();
+  }
+  return purposes;
+}
+
+function exactIdentityKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): void {
+  const keys = Object.keys(value);
+  if (
+    required.some((key) => !Object.hasOwn(value, key))
+    || keys.some((key) => !required.includes(key) && !optional.includes(key))
+  ) {
+    throw invalidIdentityActivityEnvelope();
+  }
+}
+
+function isRevisionValue(value: unknown): value is Revision {
+  return typeof value === "string" && isRevision(value);
+}
+
+function boundedIdentityEnvelopeJson(value: unknown): string {
+  return boundedCanonicalJson(value, {
+    maxBytes: TEAM_IDENTITY_ACTIVITY_LIMITS.maxEnvelopeBytes,
+    maxDepth: MAX_PREPARED_COMMAND_DEPTH,
+    maxNodes: MAX_PREPARED_COMMAND_NODES,
+  });
+}
+
+function boundedReceiptJson(value: unknown): string {
+  return boundedCanonicalJson(value, {
+    maxBytes: TEAM_IDENTITY_ACTIVITY_LIMITS.maxReceiptBytes,
+    maxDepth: TEAM_IDENTITY_ACTIVITY_LIMITS.maxReceiptDepth,
+    maxNodes: TEAM_IDENTITY_ACTIVITY_LIMITS.maxReceiptNodes,
+  });
+}
+
+function receiptSigningPayload(
+  receipt: Omit<TeamIdentityActivityPreviewEnvelope["receipt"], "previewRevision">
+    | TeamIdentityActivityPreviewEnvelope["receipt"],
+): string {
+  return boundedReceiptJson({
+    schemaVersion: receipt.schemaVersion,
+    authority: receipt.authority,
+    purposeIds: receipt.purposeIds,
+    requestRevision: receipt.requestRevision,
+    presentationRevision: receipt.presentationRevision,
+  });
+}
+
+function boundedCanonicalJson(
+  value: unknown,
+  limits: { maxBytes: number; maxDepth: number; maxNodes: number },
+): string {
+  const active = new Set<object>();
+  let nodes = 0;
+  const visit = (current: unknown, depth: number): unknown => {
+    nodes += 1;
+    if (nodes > limits.maxNodes || depth > limits.maxDepth) {
+      throw invalidIdentityActivityEnvelope();
+    }
+    if (
+      current === null
+      || typeof current === "string"
+      || typeof current === "boolean"
+    ) return current;
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) throw invalidIdentityActivityEnvelope();
+      return current;
+    }
+    if (typeof current !== "object" || active.has(current)) {
+      throw invalidIdentityActivityEnvelope();
+    }
+    active.add(current);
+    let normalized: unknown;
+    if (Array.isArray(current)) {
+      normalized = current.map((item) => visit(item, depth + 1));
+    } else {
+      if (!isPlainObject(current)) throw invalidIdentityActivityEnvelope();
+      const record: Record<string, unknown> = {};
+      for (const key of Object.keys(current).sort()) {
+        if (current[key] === undefined) throw invalidIdentityActivityEnvelope();
+        record[key] = visit(current[key], depth + 1);
+      }
+      normalized = record;
+    }
+    active.delete(current);
+    return normalized;
+  };
+  const serialized = JSON.stringify(visit(value, 0));
+  if (Buffer.byteLength(serialized, "utf8") > limits.maxBytes) {
+    throw invalidIdentityActivityEnvelope();
+  }
+  return serialized;
+}
+
+function invalidIdentityActivityCommand(): never {
+  throw artifactError(
+    "VALIDATION_FAILED",
+    "Invalid identity or Activity command",
+    "Only the bounded member and direct Activity fields supported by this checkpoint are accepted.",
+  );
+}
+
+function invalidIdentityActivityEnvelope(): MexPortError {
+  return artifactError(
+    "INVALID_REQUEST",
+    "Invalid identity or Activity preview",
+    "The portable preview envelope is malformed or exceeds its bounded contract.",
+  );
+}
+
 function canonicalPlan<TWikiPayload extends JsonValue>(
   plan: MemberWritePlan,
   namespace: string,
@@ -2201,6 +3222,20 @@ function localChange(kind: "inbox" | "relay", id: string, beforeRevision: Revisi
   return { namespace: `${kind}-draft`, id, beforeRevision, afterRevision, summary };
 }
 
+function memberSelectionChange(
+  beforeRevision: Revision | null,
+  afterRevision: Revision | null,
+  summary: string,
+): LocalStateChange {
+  return {
+    namespace: MEMBER_SELECTION_NAMESPACE,
+    id: MEMBER_SELECTION_ID,
+    beforeRevision,
+    afterRevision,
+    summary,
+  };
+}
+
 function recoveryFileByteLimit(path: RepoRelativePath): number {
   return path === ".mex/events/operations.jsonl"
     ? MAX_WIKI_OPERATION_LOG_BYTES
@@ -2331,13 +3366,22 @@ function requireArtifactExpectation(expectations: readonly RevisionExpectation[]
   if (matches[0]!.revision !== revision) throw targetRevisionChanged(path);
 }
 
-function requireLocalExpectation(expectations: readonly RevisionExpectation[], namespace: "inbox-draft" | "relay-draft", id: string, revision: Revision | null): void {
+function requireLocalExpectation(
+  expectations: readonly RevisionExpectation[],
+  namespace: "inbox-draft" | "relay-draft" | "member-selection",
+  id: string,
+  revision: Revision | null,
+): void {
   const matches = expectations.filter((item) => item.target.kind === "local" && item.target.namespace === namespace && item.target.id === id);
   if (matches.length !== 1) throw missingExpectation(`${namespace}:${id}`);
   if (matches[0]!.revision !== revision) throw targetRevisionChanged(`${namespace}:${id}`);
 }
 
-function requiredLocalRevision(expectations: readonly RevisionExpectation[], namespace: "inbox-draft" | "relay-draft", id: string): Revision {
+function requiredLocalRevision(
+  expectations: readonly RevisionExpectation[],
+  namespace: "inbox-draft" | "relay-draft" | "member-selection",
+  id: string,
+): Revision {
   const match = expectations.find((item) => item.target.kind === "local" && item.target.namespace === namespace && item.target.id === id);
   if (match === undefined || match.revision === null) throw missingExpectation(`${namespace}:${id}`);
   return match.revision;
@@ -2404,6 +3448,10 @@ function assertActionShape(action: unknown): void {
   const actionKeys: Readonly<Record<string, readonly [readonly string[], readonly string[]]>> = {
     "member.add": [["kind", "member"], []],
     "member.update": [["kind", "memberId", "patch"], []],
+    "member.deactivate": [["kind", "memberId"], []],
+    "member.select": [["kind", "memberId"], []],
+    "member.clear": [["kind"], []],
+    "activity.record": [["kind", "activity"], []],
     "workstream.create": [["kind", "workstream"], []],
     "workstream.update": [["kind", "workstreamId", "patch"], []],
     "workstream.archive": [["kind", "workstreamId"], []],
@@ -2428,6 +3476,15 @@ function assertActionShape(action: unknown): void {
   const keys = actionKeys[action.kind];
   if (keys === undefined) invalidCommandShape();
   exactObjectKeys(action, keys[0], keys[1]);
+  if (action.kind === "member.update") {
+    if (!isPlainObject(action.patch)) invalidCommandShape();
+    exactObjectKeys(action.patch, [], ["displayName", "gitAliases"]);
+    if (Object.keys(action.patch).length === 0) invalidCommandShape();
+  }
+  if (action.kind === "activity.record") {
+    if (!isPlainObject(action.activity)) invalidCommandShape();
+    exactObjectKeys(action.activity, ["action", "subjects"], ["workstream"]);
+  }
 }
 
 function exactObjectKeys(
@@ -2619,6 +3676,64 @@ function encodeArtifactCursor(cursor: ArtifactCursor): string {
   return encoded;
 }
 
+function encodeMemberCursor(cursor: MemberCursor): string {
+  const encoded = Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+  if (Buffer.byteLength(encoded, "utf8") > MAX_CURSOR_BYTES) {
+    throw artifactError(
+      "INTERNAL_ERROR",
+      "Member cursor is too large",
+      "The bounded member cursor exceeded its limit.",
+    );
+  }
+  return encoded;
+}
+
+function decodeMemberCursor(
+  value: string | undefined,
+  corpusRevision: Revision,
+  filterRevision: Revision,
+): MemberCursor | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_CURSOR_BYTES) {
+    throw invalidMemberList();
+  }
+  let parsed: MemberCursor;
+  try {
+    const bytes = Buffer.from(value, "base64url");
+    if (bytes.toString("base64url") !== value || bytes.byteLength > MAX_CURSOR_BYTES) {
+      throw new Error("invalid member cursor");
+    }
+    const candidate: unknown = JSON.parse(
+      new TextDecoder("utf8", { fatal: true }).decode(bytes),
+    );
+    if (!isPlainObject(candidate)) throw new Error("invalid member cursor");
+    exactIdentityKeys(candidate, ["v", "offset", "corpusRevision", "filterRevision"]);
+    if (
+      candidate.v !== 1
+      || !Number.isInteger(candidate.offset)
+      || (candidate.offset as number) < 1
+      || !isRevisionValue(candidate.corpusRevision)
+      || !isRevisionValue(candidate.filterRevision)
+    ) {
+      throw new Error("invalid member cursor");
+    }
+    parsed = candidate as unknown as MemberCursor;
+  } catch {
+    throw invalidMemberList();
+  }
+  if (
+    parsed.corpusRevision !== corpusRevision
+    || parsed.filterRevision !== filterRevision
+  ) {
+    throw artifactError(
+      "REVISION_CONFLICT",
+      "Member cursor is stale",
+      "The member corpus or active filter changed. Restart pagination.",
+    );
+  }
+  return parsed;
+}
+
 function decodeArtifactCursor(value: string | undefined, corpusRevision: Revision, filterRevision: Revision, kindCount: number): ArtifactCursor | null {
   if (value === undefined) return null;
   if (Buffer.byteLength(value, "utf8") > MAX_CURSOR_BYTES) throw invalidArtifactCursor();
@@ -2645,8 +3760,32 @@ function invalidArtifactCursor() {
   );
 }
 
+function invalidMemberList() {
+  return artifactError(
+    "INVALID_REQUEST",
+    "Invalid member list request",
+    "Member active filter, page size, or cursor is invalid.",
+  );
+}
+
+function activitySourceTruncated() {
+  return artifactError(
+    "VALIDATION_FAILED",
+    "Activity source is truncated",
+    "Canonical Activity exceeded its bounded scan limits; no partial result is trusted.",
+  );
+}
+
 function effectToLocalChange(effect: TeamWorkflowJournalEffect): LocalStateChange[] {
-  if (effect.kind !== "local" || (effect.namespace !== "inbox-draft" && effect.namespace !== "relay-draft")) return [];
+  if (effect.kind !== "local") return [];
+  if (effect.namespace === MEMBER_SELECTION_NAMESPACE && effect.id === MEMBER_SELECTION_ID) {
+    return [memberSelectionChange(
+      effect.beforeRevision,
+      effect.afterRevision,
+      "Recovered current member selection",
+    )];
+  }
+  if (effect.namespace !== "inbox-draft" && effect.namespace !== "relay-draft") return [];
   return [{ namespace: effect.namespace, id: effect.id, beforeRevision: effect.beforeRevision, afterRevision: effect.afterRevision, summary: "Recovered local draft change" }];
 }
 

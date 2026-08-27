@@ -13,7 +13,10 @@ export function summarize(values, expectedSamples) {
   if (!Array.isArray(values) || values.length !== expectedSamples) {
     throw new Error(`Expected exactly ${expectedSamples} samples; received ${values?.length ?? 0}.`);
   }
-  const samples = values.map(finiteNonNegative).map(round).sort((left, right) => left - right);
+  const samples = values
+    .map(finiteNonNegative)
+    .map((value) => round(value))
+    .sort((left, right) => left - right);
   return {
     samples,
     min: samples[0],

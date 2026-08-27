@@ -10,6 +10,7 @@ import {
   ListChecks,
   Search,
   Send,
+  UsersRound,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
@@ -49,6 +50,7 @@ export const navigation: NavigationGroup[] = [
   {
     label: "Team",
     items: [
+      { label: "Members", path: "/members", icon: UsersRound, capability: "members" },
       { label: "Inbox", path: "/inbox", icon: Inbox, capability: "team" },
       { label: "Relays", path: "/relays", icon: Send, capability: "team" },
       { label: "Activity", path: "/activity", icon: Activity, capability: "activity" },

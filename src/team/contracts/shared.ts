@@ -176,7 +176,7 @@ export type RevisionTarget =
     }
   | {
       kind: "local";
-      namespace: "inbox-draft" | "relay-draft" | "cursor" | "job";
+      namespace: "inbox-draft" | "relay-draft" | "cursor" | "job" | "member-selection";
       id: string;
     };
 

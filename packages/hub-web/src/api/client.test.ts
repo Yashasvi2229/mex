@@ -145,6 +145,62 @@ describe("HttpHubApi shared-contract boundary", () => {
     expect(init.method).toBeUndefined();
   });
 
+  it("uses strict member reads and applies the exact reviewed team envelope", async () => {
+    const fixture = createFixtureApi();
+    const memberPage = await fixture.getMembers({ active: true, limit: 25 });
+    const member = memberPage.items[0]!;
+    const actor = await fixture.getCurrentActor();
+    const request = {
+      operationId: "hub_member_update_client_contract",
+      action: {
+        kind: "member.update" as const,
+        memberId: member.id,
+        patch: { displayName: "Ada Byron", gitAliases: member.gitAliases },
+      },
+      expectedRevisions: [{
+        target: { kind: "artifact" as const, path: member.sourcePath },
+        revision: member.revision,
+      }],
+    };
+    const preview = await fixture.previewTeamOperation(request);
+    const applied = await fixture.applyTeamOperation(preview);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json(session))
+      .mockResolvedValueOnce(json(memberPage))
+      .mockResolvedValueOnce(json(member))
+      .mockResolvedValueOnce(json(actor))
+      .mockResolvedValueOnce(json(preview))
+      .mockResolvedValueOnce(json(applied));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpHubApi();
+
+    await api.getSession();
+    await api.getMembers({ active: true, cursor: "member-page-2", limit: 25 });
+    await api.getMember(member.id);
+    await api.getCurrentActor();
+    await api.previewTeamOperation(request);
+    await api.applyTeamOperation(preview);
+
+    const calls = fetchMock.mock.calls as [string, RequestInit][];
+    expect(new URL(calls[1]![0], "http://127.0.0.1").pathname).toBe("/api/v1/members");
+    expect(Object.fromEntries(new URL(calls[1]![0], "http://127.0.0.1").searchParams)).toEqual({
+      limit: "25",
+      active: "true",
+      cursor: "member-page-2",
+    });
+    expect(new URL(calls[2]![0], "http://127.0.0.1").pathname).toBe(`/api/v1/members/${member.id}`);
+    expect(new URL(calls[3]![0], "http://127.0.0.1").pathname).toBe("/api/v1/actor/current");
+    expect(new URL(calls[4]![0], "http://127.0.0.1").pathname).toBe("/api/v1/team/operations/preview");
+    expect(JSON.parse(calls[4]![1].body as string)).toEqual(request);
+    expect(new URL(calls[5]![0], "http://127.0.0.1").pathname).toBe("/api/v1/team/operations/apply");
+    expect(JSON.parse(calls[5]![1].body as string)).toEqual(preview);
+    expect((calls[4]![1].headers as Headers).get("X-MEX-CSRF")).toBe(session.csrfToken);
+    expect((calls[5]![1].headers as Headers).get("X-MEX-CSRF")).toBe(session.csrfToken);
+
+    await expect(api.getMember("../../private/member")).rejects.toBeInstanceOf(HubApiError);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
   it("retains CSRF only in memory and adds it to JSON mutations", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(json(session))

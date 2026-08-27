@@ -1,6 +1,6 @@
 # Human-Team Memory Contract Lock
 
-Status: Checkpoint B closed; repository workflow foundation verified
+Status: Checkpoint C identity and canonical Activity surfaces verified
 
 This brief records the application boundary for the MEX OSS human-team memory
 program. The contract remains an internal, provisional API until a separate
@@ -182,6 +182,36 @@ by the existing CLI suites; they are not represented as full-process goldens.
 The new tests do not change graph retrieval, ranking, token budgets, or existing
 CLI serialization.
 
+## Identity and canonical Activity product boundary
+
+Checkpoint C exposes the first repository workflow surfaces without widening
+the package root:
+
+- `mex member list|show|current` and `mex activity list|show` are bounded,
+  structured reads that do not initialize local state, write global state, or
+  invoke the Hub;
+- member add/update/deactivate/select and direct Activity record are previewed
+  from strict 64 KiB request files and applied only from the exact complete
+  schema-v1 preview envelope;
+- selecting or clearing the current member is checkout-local and emits no
+  Activity; each successful canonical member mutation and direct record emits
+  exactly one immutable canonical Activity event;
+- the service captures actor, timestamp, branch, HEAD, and dirty state. A
+  repository-local 32-byte HMAC key authenticates cross-process preview
+  receipts. The first explicit identity/Activity preview, or Hub startup,
+  creates only that mode-0600 key under `.mex/local`; ordinary reads and generic
+  workflow previews remain noninitializing;
+- missing/lost signer state requires re-preview. Once a journal intent exists,
+  exact bounded journal effects authenticate recovery while branch, HEAD,
+  revision, and canonical Activity integrity still fail closed;
+- canonical Activity is capped at 64 KiB per event, 2,048 records, 32 MiB
+  aggregate, 4,096 directory entries, and 100 diagnostics. Requested corrupt
+  events are typed failures rather than false `not found` results;
+- the authenticated private Hub adds member/current-actor reads, exact Team
+  preview/apply routes, a lazy Members workbench, and explicit Activity append.
+  No Workstream, Inbox, Relay, Playbook, Catch Up, or Wiki editing route is made
+  available.
+
 ## Explicit exclusions
 
 Do not implement as part of this program:
@@ -233,8 +263,12 @@ suite covers filtering and bounds, preview/apply, authority capture, exact
 revision coverage, idempotent replay, all four journal phase boundaries,
 tamper/root/containment failures, lease contention, journal privacy, two-clone
 portability, real Wiki approval, and interrupted Wiki batch recovery. Product
-member, Workstream, Activity, Inbox, Relay, and Playbook surfaces remain assigned
-to later checkpoints.
+Checkpoint C adds a second consumer-owned conformance suite for member and
+Activity reads, signed cross-process preview/apply, v1-v4 apply-side migration,
+actor fallback, local-selection privacy, immutable recorded actors, exact
+replay, contention, two-clone convergence, and source truncation. Workstream,
+Inbox, Relay, Playbook, and Catch Up product surfaces remain assigned to later
+checkpoints.
 
 ## Verification commands
 
@@ -242,6 +276,7 @@ to later checkpoints.
 npx vitest run test/wiki-port-mock.contract.test.ts
 npx vitest run test/wiki-port-real.contract.test.ts
 npx vitest run test/team-workflow-port-real.contract.test.ts
+npx vitest run test/team-identity-activity-real.contract.test.ts
 npx vitest run src/graph/__tests__/protocol-v3-golden.test.ts
 npm run typecheck
 npm test
