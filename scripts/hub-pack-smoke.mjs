@@ -14,14 +14,17 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmCli = process.env.npm_execpath;
+if (!npmCli) {
+  throw new Error("The packed Hub smoke must run through npm so its CLI entry is known.");
+}
 const work = mkdtempSync(join(tmpdir(), "mex-hub-pack-smoke-"));
 const npmCache = join(work, "npm-cache");
 mkdirSync(npmCache, { recursive: true });
 let child;
 
 try {
-  const packed = run(npm, [
+  const packed = runNpm([
     "pack",
     "--silent",
     "--cache",
@@ -67,7 +70,7 @@ try {
   run("git", ["config", "user.email", "packed@example.test"], project);
   run("git", ["add", ".gitignore", "package.json", ".mex", "src"], project);
   run("git", ["commit", "--quiet", "-m", "test fixture"], project);
-  run(npm, [
+  runNpm([
     "install",
     tarball,
     "--ignore-scripts",
@@ -731,12 +734,24 @@ function run(command, args, cwd) {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
+  if (result.error !== undefined) {
+    throw new Error(
+      `${command} ${args.join(" ")} could not start: ${result.error.message}`,
+      { cause: result.error },
+    );
+  }
   if (result.status !== 0) {
     throw new Error(
-      `${command} ${args.join(" ")} failed:\n${result.stderr || result.stdout}`,
+      `${command} ${args.join(" ")} failed with exit ${String(result.status)}`
+      + `${result.signal === null ? "" : ` (signal ${result.signal})`}:\n`
+      + `${result.stderr || result.stdout || "The command produced no output."}`,
     );
   }
   return result.stdout;
+}
+
+function runNpm(args, cwd) {
+  return run(process.execPath, [npmCli, ...args], cwd);
 }
 
 function readBootstrapUrl(processHandle) {
