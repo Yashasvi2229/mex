@@ -543,7 +543,8 @@ export class RepositoryTeamWorkflowPort<
         if (current?.phase === "intent" && prepared.wiki !== undefined && recovery !== undefined) {
           const port = asRecoverableWikiPort(this.#wiki);
           if (port !== null) {
-            mayAbandon = port.inspectOperationRecovery(prepared.wiki.request).state === "none";
+            mayAbandon = port.inspectOperationRecovery(prepared.wiki.request).state === "none"
+              && this.#primaryEffectState(current.effects) === "none";
           }
         } else if (current?.phase === "intent" && prepared.wiki === undefined) {
           mayAbandon = this.#primaryEffectState(current.effects) === "none";
@@ -1287,12 +1288,12 @@ export class RepositoryTeamWorkflowPort<
             (effect.kind === "canonical" || effect.kind === "local")
             && this.#effectState(effect) !== "before",
         );
-        this.#abandonUnpublished(current, leaseToken);
         if (changed !== undefined) {
           throw targetRevisionChanged(
             changed.kind === "canonical" ? changed.path : `${changed.namespace}:${changed.id}`,
           );
         }
+        this.#abandonUnpublished(current, leaseToken);
         throw artifactError(
           "OPERATION_INTERRUPTED",
           "Wiki approval requires a new preview",

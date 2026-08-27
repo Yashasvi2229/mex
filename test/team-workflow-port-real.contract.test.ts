@@ -252,6 +252,110 @@ describe("repository TeamWorkflowPort durable Wiki recovery", () => {
       rmSync(container, { recursive: true, force: true });
     }
   });
+
+  it("retains the journal when Wiki audit is absent but canonical effects changed", async () => {
+    const container = mkdtempSync(join(tmpdir(), "mex-team-wiki-audit-loss-"));
+    const root = join(container, "repository");
+    mkdirSync(root);
+    try {
+      initGit(root);
+      write(root, ".gitignore", ".mex/local/\n.mex/wiki.db*\n.mex/graph.db*\n");
+      write(root, ".mex/config.json", `${JSON.stringify({ scaffold_id: SCAFFOLD_ID }, null, 2)}\n`);
+      const document = realWikiDocument();
+      write(root, ".mex/context/architecture.md", document);
+      write(root, ".mex/events/operations.jsonl", "");
+
+      const wiki = createRepositoryWikiPort(root, { now: () => NOW });
+      await wiki.rebuildIndex();
+      const entity = await wiki.getEntity(REAL_WIKI_ENTITY);
+      if (entity === null) throw new Error("real Wiki audit-loss fixture entity is missing");
+      const wikiRequest = portableWikiUpdate(
+        "wiki_team_audit_loss",
+        REAL_WIKI_ENTITY,
+        entity.version,
+        {
+          operations: [{
+            type: "update-entry",
+            entityId: REAL_WIKI_ENTITY,
+            summary: "The canonical effect landed before its audit disappeared.",
+          }],
+        },
+      );
+      const targetRevisions: readonly RevisionExpectation[] = [
+        entityExpectation(REAL_WIKI_ENTITY, entity.version),
+      ];
+      await seedCanonicalTeamArtifacts(root, wikiRequest, targetRevisions);
+      git(root, ["add", "--", "."]);
+      git(root, ["commit", "-q", "-m", "Wiki audit-loss recovery baseline"]);
+
+      const proposal = await requiredArtifact(
+        new InboxProposalRepository<JsonValue>(root).get(PROPOSAL_ID),
+      );
+      const command: TeamWorkflowCommand<JsonValue> = {
+        operationId: "team_wiki_audit_loss",
+        action: { kind: "inbox.approve", proposalId: PROPOSAL_ID },
+        expectedRevisions: [artifactExpectation(proposal.sourcePath, proposal.revision)],
+      };
+      let failedAfterPrimary = false;
+      const interrupted = createRepositoryTeamWorkflowPortWithDependencies<JsonValue, unknown>(root, {
+        scaffoldId: SCAFFOLD_ID,
+        wiki: wiki as unknown as WikiPort<unknown, JsonValue, unknown, unknown>,
+        git: createRepositoryGitPort(root, { now: () => new Date(NOW) }),
+        now: () => new Date(NOW),
+        pid: 42_001,
+        processStatus: () => "alive",
+        afterPrimaryApply: () => {
+          if (failedAfterPrimary) return;
+          failedAfterPrimary = true;
+          write(root, ".mex/events/operations.jsonl", "");
+          throw new Error("simulated Wiki audit loss after canonical publication");
+        },
+        idFactories: {
+          activity: () => generateArtifactId("event", {
+            now: Date.parse(NOW),
+            random: new Uint8Array(10).fill(92),
+          }),
+          leaseToken: () => hash("interrupted-team-wiki-audit-loss-lease"),
+        },
+      });
+      const preview = await interrupted.preview(command);
+      const applyRequest = {
+        command: preview.command,
+        expectedPreviewRevision: preview.previewRevision,
+      };
+
+      await expect(interrupted.apply(applyRequest)).rejects.toThrow(
+        "simulated Wiki audit loss after canonical publication",
+      );
+      expect((await new InboxProposalRepository<JsonValue>(root).get(PROPOSAL_ID))?.state)
+        .toBe("approved");
+      expect(readFileSync(join(root, ".mex/context/architecture.md"), "utf8"))
+        .toContain("The canonical effect landed before its audit disappeared.");
+      expect(activityEvents(root)).toHaveLength(0);
+      expect(new TeamLocalState(localOptions(root)).getIncompleteWorkflowOperation())
+        .toMatchObject({ operationId: command.operationId, phase: "intent" });
+
+      const restarted = createRepositoryTeamWorkflowPortWithDependencies<JsonValue, unknown>(root, {
+        scaffoldId: SCAFFOLD_ID,
+        wiki: createRepositoryWikiPort(root, { now: () => NOW }) as unknown as WikiPort<unknown, JsonValue, unknown, unknown>,
+        git: createRepositoryGitPort(root, { now: () => new Date(NOW) }),
+        now: () => new Date(NOW),
+        pid: 42_002,
+        processStatus: (pid) => pid === 42_001 ? "dead" : "alive",
+        idFactories: {
+          leaseToken: () => hash("restarted-team-wiki-audit-loss-lease"),
+        },
+      });
+      await expect(restarted.apply(applyRequest)).rejects.toMatchObject({
+        problem: { code: "REVISION_CONFLICT" },
+      });
+      expect(new TeamLocalState(localOptions(root)).getIncompleteWorkflowOperation())
+        .toMatchObject({ operationId: command.operationId, phase: "intent" });
+      expect(activityEvents(root)).toHaveLength(0);
+    } finally {
+      rmSync(container, { recursive: true, force: true });
+    }
+  });
 });
 
 class RepositoryContractHarness implements TeamWorkflowPortContractHarness<JsonValue> {
