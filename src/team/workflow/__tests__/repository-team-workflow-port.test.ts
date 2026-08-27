@@ -379,6 +379,46 @@ describe("RepositoryTeamWorkflowPort", () => {
     expect(activityFiles(root)).toHaveLength(1);
   });
 
+  it("retains recovery state when primary publication lands before its call throws", async () => {
+    const root = temporaryRoot();
+    const git = fakeGit();
+    let failAfterPrimary = true;
+    const interrupted = createPort(root, git, {
+      pid: 191,
+      afterPrimaryApply() {
+        if (!failAfterPrimary) return;
+        failAfterPrimary = false;
+        throw new Error("simulated post-publication lock cleanup failure");
+      },
+      processStatus: () => "alive",
+    });
+    const preview = await interrupted.preview(
+      createWorkstreamCommand("operation_recover_post_publication_throw"),
+    );
+    const request = {
+      command: preview.command,
+      expectedPreviewRevision: preview.previewRevision,
+    };
+
+    await expect(interrupted.apply(request)).rejects.toThrow(
+      "simulated post-publication lock cleanup failure",
+    );
+    expect(existsSync(join(root, preview.changes[0]!.path))).toBe(true);
+    expect(activityFiles(root)).toEqual([]);
+
+    const restarted = createPort(root, git, {
+      pid: 192,
+      processStatus: (pid) => pid === 191 ? "dead" : "alive",
+      leaseToken: "e".repeat(64),
+    });
+    await expect(restarted.apply(request)).resolves.toMatchObject({
+      operationId: "operation_recover_post_publication_throw",
+      idempotentReplay: true,
+      events: [expect.objectContaining({ id: EVENT_IDS[0] })],
+    });
+    expect(activityFiles(root)).toHaveLength(1);
+  });
+
   it("returns a terminal conflict when an interrupted published proposal is tampered", async () => {
     const root = temporaryRoot();
     const git = fakeGit();
@@ -565,6 +605,7 @@ function createPort(
   overrides: {
     pid?: number;
     phaseHook?: RepositoryTeamWorkflowPortOptions<JsonValue>["phaseHook"];
+    afterPrimaryApply?: RepositoryTeamWorkflowPortOptions<JsonValue>["afterPrimaryApply"];
     processStatus?: RepositoryTeamWorkflowPortOptions<JsonValue>["processStatus"];
     leaseToken?: string;
     memberIds?: string[];
@@ -583,6 +624,7 @@ function createPort(
     pid: overrides.pid ?? 100,
     processStatus: overrides.processStatus ?? (() => "alive"),
     phaseHook: overrides.phaseHook,
+    afterPrimaryApply: overrides.afterPrimaryApply,
     idFactories: {
       member: queueFactory(memberIds),
       workstream: () => WORKSTREAM_ID,

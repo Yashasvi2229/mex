@@ -150,6 +150,8 @@ export interface RepositoryTeamWorkflowPortOptions<
   pid?: number;
   processStatus?: (pid: number) => HubLeaseProcessStatus;
   phaseHook?: (boundary: TeamWorkflowPhaseBoundary) => void | Promise<void>;
+  /** @internal Fault seam after durable primary storage returns to the workflow layer. */
+  afterPrimaryApply?: () => void | Promise<void>;
   idFactories?: {
     member?: () => string;
     workstream?: () => string;
@@ -222,6 +224,7 @@ export class RepositoryTeamWorkflowPort<
   readonly #now: () => Date;
   readonly #pid: number;
   readonly #phaseHook: (boundary: TeamWorkflowPhaseBoundary) => void | Promise<void>;
+  readonly #afterPrimaryApply: () => void | Promise<void>;
   readonly #members: MemberRepository;
   readonly #workstreams: WorkstreamRepository;
   readonly #proposals: InboxProposalRepository<TWikiPayload>;
@@ -247,6 +250,7 @@ export class RepositoryTeamWorkflowPort<
     this.#now = options.now ?? (() => new Date());
     this.#pid = options.pid ?? process.pid;
     this.#phaseHook = options.phaseHook ?? (() => undefined);
+    this.#afterPrimaryApply = options.afterPrimaryApply ?? (() => undefined);
     this.#members = new MemberRepository(this.#root.path, {
       ...(options.idFactories?.member === undefined ? {} : { idFactory: options.idFactories.member }),
     });
@@ -491,12 +495,10 @@ export class RepositoryTeamWorkflowPort<
       }
       throw error;
     }
-    let primaryReturned = false;
     try {
       await this.#runPhaseHook("before-canonical-publication");
       this.#root.assertCurrent();
       const primary = await prepared.applyPrimary();
-      primaryReturned = true;
       await this.#runPhaseHook("after-canonical-publication");
       await this.#assertPostPrimaryRepository(prepared.preview.command.authority.repoState);
       const event = activityPublication === null ? null : activityPublication.publish();
@@ -534,9 +536,7 @@ export class RepositoryTeamWorkflowPort<
       if (error instanceof WorkflowPhaseInterruption) throw error;
       try {
         const current = this.#local.getWorkflowOperation(journal.operationId);
-        let mayAbandon = current?.phase === "intent"
-          && prepared.wiki === undefined
-          && !primaryReturned;
+        let mayAbandon = false;
         const recovery = current?.effects.find(
           (effect): effect is WikiRecoveryWorkflowEffect => effect.kind === "wiki_recovery",
         );
@@ -546,9 +546,9 @@ export class RepositoryTeamWorkflowPort<
             mayAbandon = port.inspectOperationRecovery(prepared.wiki.request).state === "none";
           }
         } else if (current?.phase === "intent" && prepared.wiki === undefined) {
-          mayAbandon = !primaryReturned || !this.#anyPrimaryEffectPublished(current.effects);
+          mayAbandon = this.#primaryEffectState(current.effects) === "none";
         } else if (current?.phase === "intent" && recovery === undefined) {
-          mayAbandon = !this.#anyPrimaryEffectPublished(current.effects);
+          mayAbandon = this.#primaryEffectState(current.effects) === "none";
         }
         if (
           current?.phase === "intent"
@@ -642,7 +642,11 @@ export class RepositoryTeamWorkflowPort<
       preview,
       effects,
       activity,
-      applyPrimary: planned.applyPrimary,
+      applyPrimary: async () => {
+        const result = await planned.applyPrimary();
+        await this.#afterPrimaryApply();
+        return result;
+      },
       cleanup: planned.cleanup,
       ...(planned.wiki === undefined ? {} : { wiki: planned.wiki }),
     };
@@ -1729,14 +1733,6 @@ export class RepositoryTeamWorkflowPort<
     if (states.every((state) => state === "after")) return "all";
     if (states.every((state) => state === "before")) return "none";
     return "some";
-  }
-
-  #anyPrimaryEffectPublished(effects: readonly TeamWorkflowJournalEffect[]): boolean {
-    return effects.some(
-      (effect) =>
-        (effect.kind === "canonical" || effect.kind === "local")
-        && this.#effectState(effect) !== "before",
-    );
   }
 
   #effectApplied(effect: CanonicalWorkflowEffect | LocalWorkflowEffect): boolean {
