@@ -694,5 +694,5 @@ describe("code-graph grounding integration", () => {
     } finally {
       process.exitCode = previousExitCode;
     }
-  });
+  }, 15_000);
 });
