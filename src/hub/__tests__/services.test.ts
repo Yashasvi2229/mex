@@ -2,9 +2,17 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HUB_LIMITS } from "@mex/hub-contracts";
 import type { GitPort } from "../../team/contracts/git.js";
+import type { Revision } from "../../team/contracts/shared.js";
+import type {
+  TeamMember,
+  TeamMemberListRequest,
+  TeamPage,
+} from "../../team/contracts/workflow.js";
 import {
   createLocalHubReadServices as createLocalHubReadServicesBase,
+  type HubTeamIdentityActivityService,
   type HubGraphReadService,
   type HubWikiReadService,
   type LocalHubReadServicesOptions,
@@ -74,6 +82,69 @@ function createLocalHubReadServices(
 }
 
 describe("createLocalHubReadServices", () => {
+  it("shrinks a valid maximal member page without breaking its continuation cursor", async () => {
+    const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    const members: TeamMember[] = Array.from({ length: 50 }, (_, index) => {
+      const high = alphabet[Math.floor(index / alphabet.length)]!;
+      const low = alphabet[index % alphabet.length]!;
+      const id = `member_01ARZ3NDEKTSV4RRFFQ69G5F${high}${low}`;
+      return {
+        schemaVersion: 1,
+        ref: { id, kind: "member" as const },
+        kind: "member" as const,
+        sourcePath: `.mex/team/members/${id}.md` as const,
+        revision: String(index + 1).padStart(64, "a") as Revision,
+        displayName: `Member ${index}`,
+        gitAliases: Array.from({ length: 32 }, () => ({
+          // Backslashes are valid canonical text but expand in JSON, making
+          // the response budget—not the record schema—the limiting resource.
+          name: "\\".repeat(200),
+          email: `${"\\".repeat(310)}@test.dev`,
+        })),
+        active: true,
+      } as TeamMember;
+    });
+    const listMembers = vi.fn(async (
+      request: TeamMemberListRequest = {},
+    ): Promise<TeamPage<TeamMember>> => {
+      const limit = request.limit ?? 100;
+      const items = members.slice(0, limit);
+      return {
+        items,
+        nextCursor: items.length < members.length ? `cursor-${items.length}` : null,
+        truncated: items.length < members.length,
+        sourceTruncated: false,
+        deterministicRevision: "d".repeat(64),
+        diagnostics: [],
+      };
+    });
+    const unused = async (): Promise<never> => { throw new Error("unused"); };
+    const team = {
+      listMembers,
+      getMember: unused,
+      getCurrentActor: unused,
+      getActivity: unused,
+      listActivity: unused,
+      previewIdentityActivity: unused,
+      applyIdentityActivity: unused,
+    } satisfies HubTeamIdentityActivityService;
+    const services = createLocalHubReadServicesBase({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      team,
+      git,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+
+    const response = await services.members?.({ limit: 50 });
+    expect(response?.items).toHaveLength(25);
+    expect(response).toMatchObject({ nextCursor: "cursor-25", truncated: true });
+    expect(Buffer.byteLength(JSON.stringify(response), "utf8"))
+      .toBeLessThanOrEqual(HUB_LIMITS.maxJsonResponseBytes);
+    expect(listMembers.mock.calls.map(([request]) => request?.limit)).toEqual([50, 25]);
+  });
+
   it("projects real bounded Wiki browse, detail, relations, search, Code links, and health", async () => {
     const entity = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
     const target = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJE";

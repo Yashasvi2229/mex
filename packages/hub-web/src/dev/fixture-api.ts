@@ -676,17 +676,29 @@ function fixtureCurrentActor(
   members: readonly TeamMember[],
   selection: TeamCurrentActorResponse["selection"],
 ): TeamCurrentActorResponse {
-  const selected = selection === null
-    ? null
-    : members.find((member) => member.id === selection.memberId && member.active) ?? null;
-  return selected === null ? {
+  if (selection === null) return {
     actor: { kind: "git", name: "Ada", email: "ada@example.test" },
     source: "git-fallback",
     selection: null,
     diagnostics: [],
     diagnosticsTruncated: false,
-  } : {
-    actor: { kind: "member", memberId: selected.id, displayName: selected.displayName },
+  };
+  const candidate = members.find((member) => member.id === selection.memberId) ?? null;
+  if (candidate?.active !== true) return {
+    actor: { kind: "git", name: "Ada", email: "ada@example.test" },
+    source: "git-fallback",
+    selection,
+    diagnostics: [{
+      code: candidate === null ? "ACTOR_MEMBER_MISSING" : "ACTOR_MEMBER_INACTIVE",
+      severity: "warning",
+      message: candidate === null
+        ? "The referenced member no longer exists."
+        : "The referenced member is currently inactive.",
+    }],
+    diagnosticsTruncated: false,
+  };
+  return {
+    actor: { kind: "member", memberId: candidate.id, displayName: candidate.displayName },
     source: "configured-member",
     selection,
     diagnostics: [],
@@ -899,7 +911,7 @@ class FixtureHubApi implements HubApi {
         id: memberPurpose.id,
         displayName: action.member.displayName,
         gitAliases: action.member.gitAliases,
-        active: action.member.active ?? true,
+        active: true,
         sourcePath: `.mex/team/members/${memberPurpose.id}.md`,
         revision: envelope.preview.changes[0]?.afterRevision ?? revision("e"),
       };

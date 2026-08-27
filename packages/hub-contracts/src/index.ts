@@ -414,7 +414,6 @@ const teamMemberAddAction = z.object({
   member: z.object({
     displayName: teamText(200),
     gitAliases: z.array(TeamGitAliasSchema).max(32),
-    active: z.boolean().optional(),
   }).strict(),
 }).strict();
 

@@ -11,7 +11,7 @@ import {
   AlertDialogMedia,
   AlertDialogTitle,
 } from "./primitives/alert-dialog";
-import { StatusPill, formatDate } from "./ui";
+import { ErrorState, StatusPill, formatDate } from "./ui";
 import styles from "../styles/team-operation.module.css";
 
 function actorLabel(actor: TeamOperationPreviewResponse["receipt"]["authority"]["actor"]): string {
@@ -83,6 +83,7 @@ export function ApplyTeamOperationDialog({
   onOpenChange,
   onApply,
   pending,
+  error,
   envelope,
   consequence,
 }: {
@@ -90,6 +91,7 @@ export function ApplyTeamOperationDialog({
   onOpenChange(open: boolean): void;
   onApply(): void;
   pending: boolean;
+  error?: unknown;
   envelope: TeamOperationPreviewResponse;
   consequence: string;
 }) {
@@ -103,6 +105,7 @@ export function ApplyTeamOperationDialog({
             {consequence} The operation is bound to preview <span className={styles.mono}>{envelope.receipt.previewRevision.slice(0, 12)}</span>.
           </AlertDialogDescription>
         </AlertDialogHeader>
+        {error !== undefined ? <ErrorState error={error} /> : null}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={pending}>Keep reviewing</AlertDialogCancel>
           <AlertDialogAction disabled={pending || !envelope.preview.valid} onClick={onApply}>

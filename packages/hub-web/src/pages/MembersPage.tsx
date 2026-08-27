@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   Check,
   ChevronRight,
   CircleUserRound,
@@ -262,7 +263,6 @@ function MemberOperationDialog({
 
         {preview.isError ? <ErrorState error={preview.error} retry={() => preview.mutate()} /> : null}
         {envelope ? <TeamOperationPreviewPanel envelope={envelope} /> : null}
-        {apply.isError ? <ErrorState error={apply.error} /> : null}
         <div className="sr-only" aria-live="polite" role="status">
           {preview.isPending ? "Preparing preview" : envelope ? "Preview ready for approval" : ""}
           {apply.isPending ? "Applying approved preview" : ""}
@@ -287,6 +287,7 @@ function MemberOperationDialog({
           <ApplyTeamOperationDialog
             consequence={operationConsequence(operation)}
             envelope={envelope}
+            error={apply.isError ? apply.error : undefined}
             onApply={() => apply.mutate()}
             onOpenChange={setApplyOpen}
             open={applyOpen}
@@ -307,6 +308,7 @@ function CurrentActorCard({
   canSelect: boolean;
   onClear(event: MouseEvent<HTMLButtonElement>): void;
 }) {
+  const staleSelection = current.selection !== null && current.source !== "configured-member";
   return (
     <Card aria-label="Current actor identity" className={styles.actorCard} role="region">
       <div className={styles.actorGlyph}><CircleUserRound aria-hidden="true" /></div>
@@ -316,8 +318,8 @@ function CurrentActorCard({
         <span>{sourceLabel(current.source)}</span>
       </div>
       <div className={styles.actorMeta}>
-        <StatusPill tone={current.selection ? "success" : "neutral"}>
-          {current.selection ? "Local selection" : "Fallback"}
+        <StatusPill tone={staleSelection ? "warning" : current.selection ? "success" : "neutral"}>
+          {staleSelection ? "Stale local selection" : current.selection ? "Local selection" : "Fallback"}
         </StatusPill>
         {current.selection && canSelect ? (
           <Button onClick={onClear} size="sm" type="button" variant="ghost">
@@ -325,6 +327,11 @@ function CurrentActorCard({
           </Button>
         ) : null}
       </div>
+      {staleSelection && current.diagnostics[0] ? (
+        <p className={styles.actorWarning} role="status">
+          <AlertTriangle aria-hidden="true" /> {current.diagnostics[0].message}
+        </p>
+      ) : null}
     </Card>
   );
 }

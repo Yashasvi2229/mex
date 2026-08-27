@@ -142,6 +142,14 @@ describe("Hub API contracts", () => {
       }],
     }).success).toBe(false);
     expect(TeamOperationPreviewRequestSchema.safeParse({
+      operationId: "contract_member_inactive_create",
+      action: {
+        kind: "member.add",
+        member: { displayName: "Ada", gitAliases: [], active: false },
+      },
+      expectedRevisions: [],
+    }).success).toBe(false);
+    expect(TeamOperationPreviewRequestSchema.safeParse({
       operationId: "contract_future_action",
       action: { kind: "workstream.create", workstream: {} },
       expectedRevisions: [],

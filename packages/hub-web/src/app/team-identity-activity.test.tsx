@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import type { HubApi } from "../api/client";
+import { HubApiError } from "../api/client";
 import { HubApiProvider } from "../api/context";
 import { createFixtureApi } from "../dev/fixture-api";
 import { AppRoutes } from "./App";
@@ -90,6 +91,35 @@ describe("member workflow workbench", () => {
     expect(invalidated).not.toContainEqual(["activity"]);
   });
 
+  it("labels a stale local selection and keeps its clear recovery reachable", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    vi.spyOn(api, "getCurrentActor").mockResolvedValue({
+      actor: { kind: "git", name: "Ada", email: "ada@example.test" },
+      source: "git-fallback",
+      selection: {
+        memberId: "member_01K37WVM6H7JK8M9NPQRSTVVW0",
+        updatedAt: "2026-08-27T04:05:06.000Z",
+        revision: "d".repeat(64),
+      },
+      diagnostics: [{
+        code: "ACTOR_MEMBER_MISSING",
+        severity: "warning",
+        message: "The referenced member no longer exists.",
+      }],
+      diagnosticsTruncated: false,
+    });
+    renderRoute("/members", api);
+
+    const card = await screen.findByRole("region", { name: "Current actor identity" });
+    expect(within(card).getByText("Stale local selection")).toBeVisible();
+    expect(within(card).getByText("The referenced member no longer exists.")).toBeVisible();
+    await user.click(within(card).getByRole("button", { name: "Clear selection" }));
+    const dialog = await screen.findByRole("dialog", { name: "Clear current member" });
+    await user.click(within(dialog).getByRole("button", { name: "Preview change" }));
+    expect(await within(dialog).findByText("Checkout-local change")).toBeVisible();
+  });
+
   it("closes on Escape and restores focus to the operation trigger", async () => {
     const user = userEvent.setup();
     renderRoute("/members");
@@ -100,6 +130,35 @@ describe("member workflow workbench", () => {
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add member" })).not.toBeInTheDocument());
     expect(trigger).toHaveFocus();
+  });
+
+  it("keeps a rejected apply visible and announced inside the active confirmation", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    vi.spyOn(api, "applyTeamOperation").mockRejectedValue(new HubApiError({
+      type: "about:blank",
+      title: "Repository changed",
+      status: 409,
+      code: "REVISION_CONFLICT",
+      detail: "Preview again against the current repository revision.",
+      requestId: "8cf02241-46aa-45e0-b328-9cb2560a4510",
+    }));
+    renderRoute("/members", api);
+
+    await user.click(await screen.findByRole("button", { name: "Add member" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add member" });
+    await user.type(within(dialog).getByRole("textbox", { name: "Display name" }), "Katherine Johnson");
+    await user.click(within(dialog).getByRole("button", { name: "Preview change" }));
+    await user.click(await within(dialog).findByRole("button", { name: "Review apply" }));
+    const confirmation = await screen.findByRole("alertdialog", { name: "Apply this exact preview?" });
+    const applyButton = within(confirmation).getByRole("button", { name: "Apply approved preview" });
+    await user.click(applyButton);
+
+    const alert = await within(confirmation).findByRole("alert");
+    expect(within(alert).getByText("Repository changed")).toBeVisible();
+    expect(within(alert).getByText("Preview again against the current repository revision.")).toBeVisible();
+    expect(confirmation).toBeVisible();
+    expect(applyButton).toHaveFocus();
   });
 });
 

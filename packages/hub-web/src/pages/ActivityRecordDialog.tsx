@@ -188,7 +188,6 @@ export function ActivityRecordDialog({
 
         {preview.isError ? <ErrorState error={preview.error} retry={() => preview.mutate()} /> : null}
         {envelope ? <TeamOperationPreviewPanel envelope={envelope} /> : null}
-        {apply.isError ? <ErrorState error={apply.error} /> : null}
         <div className="sr-only" aria-live="polite" role="status">
           {preview.isPending ? "Preparing Activity preview" : envelope ? "Activity preview ready for approval" : ""}
           {apply.isPending ? "Appending approved Activity" : ""}
@@ -213,6 +212,7 @@ export function ActivityRecordDialog({
           <ApplyTeamOperationDialog
             consequence="This appends one immutable canonical Activity event."
             envelope={envelope}
+            error={apply.isError ? apply.error : undefined}
             onApply={() => apply.mutate()}
             onOpenChange={setApplyOpen}
             open={applyOpen}

@@ -252,21 +252,31 @@ export function createLocalHubReadServices(
     },
 
     async members(request: HubTeamMemberListRequest): Promise<TeamMemberListResponse> {
-      const page = await team.listMembers({
-        active: request.active,
-        limit: request.limit,
-        ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
-      });
-      const diagnostics = page.diagnostics.map(projectDiagnostic);
-      return {
-        items: page.items.map(projectTeamMember),
-        nextCursor: page.nextCursor,
-        truncated: page.truncated,
-        sourceTruncated: page.sourceTruncated,
-        deterministicRevision: page.deterministicRevision,
-        diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
-        diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
-      };
+      let pageLimit = request.limit;
+      while (true) {
+        const page = await team.listMembers({
+          active: request.active,
+          limit: pageLimit,
+          ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+        });
+        const diagnostics = page.diagnostics.map(projectDiagnostic);
+        const response: TeamMemberListResponse = {
+          items: page.items.map(projectTeamMember),
+          nextCursor: page.nextCursor,
+          truncated: page.truncated,
+          sourceTruncated: page.sourceTruncated,
+          deterministicRevision: page.deterministicRevision,
+          diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+          diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+        };
+        if (Buffer.byteLength(JSON.stringify(response), "utf8") <= HUB_LIMITS.maxJsonResponseBytes) {
+          return response;
+        }
+        // Recompute the cursor and rows together at a smaller maximum. Trimming
+        // an already-built page would make its continuation cursor skip data.
+        if (pageLimit <= 1) return response;
+        pageLimit = Math.max(1, Math.floor(pageLimit / 2));
+      }
     },
 
     async member(memberId: string): Promise<HubTeamMember | null> {
@@ -1454,7 +1464,6 @@ function cloneIdentityActivityAction(
         member: {
           displayName: action.member.displayName,
           gitAliases: action.member.gitAliases.map((alias) => ({ ...alias })),
-          ...(action.member.active === undefined ? {} : { active: action.member.active }),
         },
       };
     case "member.update":
@@ -1733,13 +1742,15 @@ function safeDiagnosticMessage(code: string): string {
     case "LEGACY_ACTIVITY_LIMIT_EXCEEDED":
       return "Legacy activity exceeded its safe read bound.";
     case "ACTOR_MEMBER_MISSING":
-      return "The recorded member no longer exists; the recorded actor was preserved.";
+      return "The referenced member no longer exists.";
     case "ACTOR_MEMBER_INACTIVE":
-      return "The recorded member is currently inactive.";
+      return "The referenced member is currently inactive.";
     case "ACTOR_ALIAS_AMBIGUOUS":
       return "The recorded Git identity matches multiple active members and was not remapped.";
     case "GIT_IDENTITY_UNAVAILABLE":
       return "Git identity could not be inspected safely.";
+    case "GIT_IDENTITY_INVALID":
+      return "Git identity exceeded the bounded actor contract and was ignored.";
     default:
       return "Activity history reported a local diagnostic.";
   }
