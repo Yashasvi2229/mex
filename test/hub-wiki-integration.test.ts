@@ -32,6 +32,7 @@ import { HubJobManager } from "../src/hub/jobs/index.js";
 import { createWikiJobExecutors } from "../src/hub/jobs/wiki.js";
 import { HubSessionManager } from "../src/hub/security/session.js";
 import { createLocalHubReadServices } from "../src/hub/services.js";
+import { createRepositoryTeamWorkflowPort } from "../src/team/workflow/repository-team-workflow-port.js";
 import { TeamLocalState } from "../src/team/local-state/index.js";
 import { createRepositoryWikiPort } from "../src/wiki/application-adapter.js";
 
@@ -388,10 +389,13 @@ async function createHarness(prepared: PreparedProject): Promise<Harness> {
     shutdownTimeoutMs: 60_000,
   });
   jobs.initialize();
+  const team = await createRepositoryTeamWorkflowPort(prepared.root);
+  team.initializeIdentityActivitySigner();
   const services = createLocalHubReadServices({
     projectRoot: prepared.root,
     scaffoldId: "hub-wiki-integration",
     jobs,
+    team,
     graph: prepared.graph,
     wiki: prepared.wiki,
   });
@@ -453,6 +457,7 @@ async function prepareProject(): Promise<PreparedProject> {
     "",
   ].join("\n"));
   write(root, ".mex/events/decisions.jsonl", "");
+  write(root, ".mex/config.json", `${JSON.stringify({ scaffold_id: "hub-wiki-integration" }, null, 2)}\n`);
   write(root, ".mex/events/activity/2026-08/sentinel.md", "activity sentinel\n");
   write(root, ".mex/team/members/sentinel.md", "member sentinel\n");
   git(root, "init", "-q", "-b", "main");

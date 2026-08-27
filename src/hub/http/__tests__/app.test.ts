@@ -8,6 +8,10 @@ import type {
   HubJobSnapshot,
   SearchRequest,
   SearchResponse,
+  TeamMember,
+  TeamOperationApplyResponse,
+  TeamOperationPreviewRequest,
+  TeamOperationPreviewResponse,
 } from "@mex/hub-contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -23,6 +27,9 @@ const ORIGIN = "http://127.0.0.1:48123";
 const HOST = "127.0.0.1:48123";
 const BOOTSTRAP = Buffer.alloc(32, 7).toString("base64url");
 const JOB_ID = "job_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const TEAM_MEMBER_ID = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const TEAM_EVENT_ID = "event_01ARZ3NDEKTSV4RRFFQ69G5FAB";
+const TEAM_NOW = "2026-08-27T04:05:06.000Z";
 
 describe("Project Hub HTTP application", () => {
   it("exchanges the bootstrap once and protects every ordinary API route", async () => {
@@ -387,6 +394,278 @@ describe("Project Hub HTTP application", () => {
     }
   });
 
+  it("authenticates and strictly validates bounded member and current-actor reads", async () => {
+    const services = teamReadServices();
+    const members = vi.fn(services.members!);
+    const member = vi.fn(services.member!);
+    const currentActor = vi.fn(services.currentActor!);
+    const app = fixtureApp({ services: { ...services, members, member, currentActor } });
+
+    for (const path of [
+      "/api/v1/members",
+      `/api/v1/members/${TEAM_MEMBER_ID}`,
+      "/api/v1/actor/current",
+    ]) {
+      const response = await app.request(`${ORIGIN}${path}`, { headers: { host: HOST } });
+      expect(response.status, path).toBe(401);
+    }
+
+    const { cookie } = await bootstrapSession(app);
+    const headers = { host: HOST, cookie };
+    expect(await (await app.request(`${ORIGIN}/api/v1/capabilities`, { headers })).json())
+      .toMatchObject({
+        activityRecord: { availability: "available" },
+        members: {
+          read: { availability: "available" },
+          canonicalMutation: { availability: "available" },
+          localSelection: { availability: "available" },
+        },
+      });
+    const list = await app.request(`${ORIGIN}/api/v1/members?active=false&limit=1`, { headers });
+    expect(list.status).toBe(200);
+    expect(list.headers.get("cache-control")).toBe("no-store");
+    expect(members).toHaveBeenCalledWith({ active: false, limit: 1 });
+    expect(await list.json()).toMatchObject({
+      items: [{ id: TEAM_MEMBER_ID }],
+      truncated: false,
+    });
+
+    const detail = await app.request(`${ORIGIN}/api/v1/members/${TEAM_MEMBER_ID}`, { headers });
+    expect(detail.status).toBe(200);
+    expect(member).toHaveBeenCalledWith(TEAM_MEMBER_ID);
+    expect(await detail.json()).toMatchObject({ id: TEAM_MEMBER_ID });
+
+    const actor = await app.request(`${ORIGIN}/api/v1/actor/current`, { headers });
+    expect(actor.status).toBe(200);
+    expect(currentActor).toHaveBeenCalledTimes(1);
+    expect(await actor.json()).toMatchObject({
+      source: "configured-member",
+      selection: { memberId: TEAM_MEMBER_ID },
+    });
+
+    members.mockClear();
+    member.mockClear();
+    currentActor.mockClear();
+    for (const path of [
+      "/api/v1/members?active=yes",
+      "/api/v1/members?active=true&active=false",
+      "/api/v1/members?limit=101",
+      "/api/v1/members?unexpected=true",
+      "/api/v1/members/not-a-member",
+      `/api/v1/members/${TEAM_MEMBER_ID}?unexpected=true`,
+      "/api/v1/actor/current?unexpected=true",
+    ]) {
+      const invalid = await app.request(`${ORIGIN}${path}`, { headers });
+      expect(invalid.status, path).toBe(400);
+    }
+    expect(members).not.toHaveBeenCalled();
+    expect(member).not.toHaveBeenCalled();
+    expect(currentActor).not.toHaveBeenCalled();
+  });
+
+  it("protects team preview/apply and never invokes services for invalid authority", async () => {
+    const services = teamReadServices();
+    const previewTeamOperation = vi.fn(services.previewTeamOperation!);
+    const applyTeamOperation = vi.fn(services.applyTeamOperation!);
+    const app = fixtureApp({
+      services: { ...services, previewTeamOperation, applyTeamOperation },
+    });
+    const request = teamPreviewRequest();
+
+    expect((await app.request(`${ORIGIN}/api/v1/team/operations/preview`, mutation(request))).status)
+      .toBe(401);
+
+    const { cookie, csrfToken } = await authenticatedSession(app);
+    const authenticatedHeaders = {
+      ...mutationHeaders(),
+      cookie,
+      "x-mex-csrf": csrfToken,
+    };
+    const noOrigin = await app.request(`${ORIGIN}/api/v1/team/operations/preview`, {
+      method: "POST",
+      headers: {
+        host: HOST,
+        cookie,
+        "content-type": "application/json",
+        "x-mex-csrf": csrfToken,
+      },
+      body: JSON.stringify(request),
+    });
+    expect(noOrigin.status).toBe(403);
+    const wrongCsrf = await app.request(`${ORIGIN}/api/v1/team/operations/preview`, {
+      method: "POST",
+      headers: { ...mutationHeaders(), cookie, "x-mex-csrf": "wrong" },
+      body: JSON.stringify(request),
+    });
+    expect(wrongCsrf.status).toBe(403);
+    const wrongType = await app.request(`${ORIGIN}/api/v1/team/operations/preview`, {
+      method: "POST",
+      headers: { ...authenticatedHeaders, "content-type": "text/plain" },
+      body: JSON.stringify(request),
+    });
+    expect(wrongType.status).toBe(400);
+    expect(previewTeamOperation).not.toHaveBeenCalled();
+
+    for (const invalid of [
+      { ...request, actor: { kind: "unknown" } },
+      { ...request, occurredAt: TEAM_NOW },
+      { ...request, repoState: { branch: null, head: null, dirty: false } },
+      { ...request, unexpected: true },
+      {
+        operationId: "hub_activity_metadata",
+        action: {
+          kind: "activity.record",
+          activity: {
+            action: "review.completed",
+            subjects: [],
+            metadata: { prompt: "must not cross" },
+          },
+        },
+        expectedRevisions: [],
+      },
+    ]) {
+      const response = await app.request(`${ORIGIN}/api/v1/team/operations/preview`, {
+        method: "POST",
+        headers: authenticatedHeaders,
+        body: JSON.stringify(invalid),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(previewTeamOperation).not.toHaveBeenCalled();
+
+    const preview = await app.request(`${ORIGIN}/api/v1/team/operations/preview`, {
+      method: "POST",
+      headers: authenticatedHeaders,
+      body: JSON.stringify(request),
+    });
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("cache-control")).toBe("no-store");
+    expect(previewTeamOperation).toHaveBeenCalledWith(request);
+    const envelope = await preview.json();
+
+    const invalidApply = await app.request(`${ORIGIN}/api/v1/team/operations/apply`, {
+      method: "POST",
+      headers: authenticatedHeaders,
+      body: JSON.stringify({ ...(envelope as object), unexpected: true }),
+    });
+    expect(invalidApply.status).toBe(400);
+    expect(applyTeamOperation).not.toHaveBeenCalled();
+
+    const applied = await app.request(`${ORIGIN}/api/v1/team/operations/apply`, {
+      method: "POST",
+      headers: authenticatedHeaders,
+      body: JSON.stringify(envelope),
+    });
+    expect(applied.status).toBe(200);
+    expect(applied.headers.get("cache-control")).toBe("no-store");
+    expect(applyTeamOperation).toHaveBeenCalledWith(envelope);
+    expect(await applied.json()).toMatchObject({
+      operationId: request.operationId,
+      applied: true,
+      members: [{ id: TEAM_MEMBER_ID }],
+      events: [{ action: "member.added" }],
+    });
+  });
+
+  it("bounds team mutation bodies and exposes absent seams as unavailable", async () => {
+    const unavailableApp = fixtureApp();
+    const unavailableSession = await authenticatedSession(unavailableApp);
+    expect(await (await unavailableApp.request(`${ORIGIN}/api/v1/capabilities`, {
+      headers: { host: HOST, cookie: unavailableSession.cookie },
+    })).json()).toMatchObject({
+      activityRecord: { availability: "unavailable" },
+      members: {
+        read: { availability: "unavailable" },
+        canonicalMutation: { availability: "unavailable" },
+        localSelection: { availability: "unavailable" },
+      },
+    });
+    const read = await unavailableApp.request(`${ORIGIN}/api/v1/members`, {
+      headers: { host: HOST, cookie: unavailableSession.cookie },
+    });
+    expect(read.status).toBe(503);
+    expect(await read.json()).toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
+    const previewUnavailable = await unavailableApp.request(
+      `${ORIGIN}/api/v1/team/operations/preview`,
+      {
+        method: "POST",
+        headers: {
+          ...mutationHeaders(),
+          cookie: unavailableSession.cookie,
+          "x-mex-csrf": unavailableSession.csrfToken,
+        },
+        body: JSON.stringify(teamPreviewRequest()),
+      },
+    );
+    expect(previewUnavailable.status).toBe(503);
+    expect(await previewUnavailable.json()).toMatchObject({ code: "CAPABILITY_UNAVAILABLE" });
+
+    const services = teamReadServices();
+    const previewTeamOperation = vi.fn(services.previewTeamOperation!);
+    const app = fixtureApp({ services: { ...services, previewTeamOperation } });
+    const { cookie, csrfToken } = await authenticatedSession(app);
+    const oversized = await app.request(`${ORIGIN}/api/v1/team/operations/preview`, {
+      method: "POST",
+      headers: { ...mutationHeaders(), cookie, "x-mex-csrf": csrfToken },
+      body: JSON.stringify({ ...teamPreviewRequest(), padding: "x".repeat(70_000) }),
+    });
+    expect(oversized.status).toBe(400);
+    expect((await oversized.json() as { detail: string }).detail).toContain("64 KiB");
+    expect(previewTeamOperation).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on invalid team responses and projects team failures safely", async () => {
+    const services = teamReadServices();
+    const invalidResponseApp = fixtureApp({
+      services: {
+        ...services,
+        member: () => ({ ...teamMember(), secret: "/Users/alice/private" }) as never,
+      },
+    });
+    const invalidSession = await authenticatedSession(invalidResponseApp);
+    const invalid = await invalidResponseApp.request(
+      `${ORIGIN}/api/v1/members/${TEAM_MEMBER_ID}`,
+      { headers: { host: HOST, cookie: invalidSession.cookie } },
+    );
+    expect(invalid.status).toBe(500);
+    expect(await invalid.text()).not.toContain("/Users/alice");
+
+    const safeFailureApp = fixtureApp({
+      services: {
+        ...services,
+        previewTeamOperation: () => {
+          const error = new Error("stale /Users/alice/private member body") as Error & {
+            problem: Record<string, unknown>;
+          };
+          error.problem = {
+            status: 409,
+            code: "REVISION_CONFLICT",
+            title: "unsafe",
+            detail: error.message,
+          };
+          throw error;
+        },
+      },
+    });
+    const safeSession = await authenticatedSession(safeFailureApp);
+    const response = await safeFailureApp.request(`${ORIGIN}/api/v1/team/operations/preview`, {
+      method: "POST",
+      headers: {
+        ...mutationHeaders(),
+        cookie: safeSession.cookie,
+        "x-mex-csrf": safeSession.csrfToken,
+      },
+      body: JSON.stringify(teamPreviewRequest()),
+    });
+    const problem = await response.json() as { code: string; detail: string };
+    expect(response.status).toBe(409);
+    expect(problem).toEqual(expect.objectContaining({
+      code: "REVISION_CONFLICT",
+      detail: "The local state changed before the operation completed; refresh and retry.",
+    }));
+    expect(JSON.stringify(problem)).not.toContain("/Users/");
+  });
+
   it("projects stale Activity cursors as a safe revision conflict", async () => {
     const services = readServices();
     const app = fixtureApp({
@@ -699,6 +978,16 @@ async function bootstrapSession(app: ReturnType<typeof fixtureApp>) {
   return { response, cookie };
 }
 
+async function authenticatedSession(app: ReturnType<typeof fixtureApp>) {
+  const { response, cookie } = await bootstrapSession(app);
+  if (response.status !== 201) throw new Error("bootstrap failed");
+  const session = await app.request(`${ORIGIN}/api/v1/session`, {
+    headers: { host: HOST, cookie },
+  });
+  const { csrfToken } = await session.json() as { csrfToken: string };
+  return { cookie, csrfToken };
+}
+
 function mutation(body: unknown): RequestInit {
   return {
     method: "POST",
@@ -717,6 +1006,12 @@ function readServices(): HubReadServices {
     apiVersion: "v1",
     git: { availability: "available" },
     activity: { availability: "available" },
+    activityRecord: unavailable,
+    members: {
+      read: unavailable,
+      canonicalMutation: unavailable,
+      localSelection: unavailable,
+    },
     jobs: { availability: "available" },
     graph: { read: unavailable, refresh: unavailable, rebuild: unavailable },
     wiki: { read: unavailable, refresh: unavailable, rebuild: unavailable },
@@ -824,6 +1119,137 @@ function readServices(): HubReadServices {
           : { view: "overview" },
     }),
     health: () => health,
+  };
+}
+
+function teamReadServices(): HubReadServices {
+  const base = readServices();
+  return {
+    ...base,
+    capabilities: async () => ({
+      ...await base.capabilities(),
+      activityRecord: { availability: "available" },
+      members: {
+        read: { availability: "available" },
+        canonicalMutation: { availability: "available" },
+        localSelection: { availability: "available" },
+      },
+    }),
+    members: () => ({
+      items: [teamMember()],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "b".repeat(64),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    }),
+    member: (memberId) => memberId === TEAM_MEMBER_ID ? teamMember() : null,
+    currentActor: () => ({
+      actor: { kind: "member", memberId: TEAM_MEMBER_ID, displayName: "Ada Lovelace" },
+      source: "configured-member",
+      selection: {
+        memberId: TEAM_MEMBER_ID,
+        updatedAt: TEAM_NOW,
+        revision: "c".repeat(64),
+      },
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    }),
+    previewTeamOperation: (request) => teamPreviewEnvelope(request),
+    applyTeamOperation: (request) => teamApplyResult(request),
+  };
+}
+
+function teamMember(): TeamMember {
+  return {
+    schemaVersion: 1,
+    id: TEAM_MEMBER_ID,
+    displayName: "Ada Lovelace",
+    gitAliases: [{ name: "Ada", email: "ada@example.test" }],
+    active: true,
+    sourcePath: `.mex/team/members/${TEAM_MEMBER_ID}.md`,
+    revision: "a".repeat(64),
+  };
+}
+
+function teamPreviewRequest(): TeamOperationPreviewRequest {
+  return {
+    operationId: "hub_member_add",
+    action: {
+      kind: "member.add",
+      member: {
+        displayName: "Ada Lovelace",
+        gitAliases: [{ name: "Ada", email: "ada@example.test" }],
+      },
+    },
+    expectedRevisions: [],
+  };
+}
+
+function teamPreviewEnvelope(
+  request: TeamOperationPreviewRequest = teamPreviewRequest(),
+): TeamOperationPreviewResponse {
+  return {
+    schemaVersion: 1,
+    request,
+    preview: {
+      valid: true,
+      scope: "canonical",
+      changes: [{
+        kind: "create",
+        path: teamMember().sourcePath,
+        diff: "--- /dev/null\n+++ member\n",
+        beforeRevision: null,
+        afterRevision: teamMember().revision,
+      }],
+      localChanges: [],
+      diagnostics: [],
+    },
+    receipt: {
+      schemaVersion: 1,
+      authority: {
+        actor: { kind: "unknown" },
+        occurredAt: TEAM_NOW,
+        repoState: {
+          branch: "feature/team-identity",
+          head: "d".repeat(40),
+          dirty: false,
+          observedAt: TEAM_NOW,
+        },
+      },
+      purposeIds: [
+        { purpose: "activity", id: TEAM_EVENT_ID },
+        { purpose: "member", id: TEAM_MEMBER_ID },
+      ],
+      requestRevision: "e".repeat(64),
+      presentationRevision: "f".repeat(64),
+      previewRevision: "1".repeat(64),
+    },
+  };
+}
+
+function teamApplyResult(
+  request: TeamOperationPreviewResponse = teamPreviewEnvelope(),
+): TeamOperationApplyResponse {
+  return {
+    operationId: request.request.operationId,
+    previewRevision: request.receipt.previewRevision,
+    applied: true,
+    idempotentReplay: false,
+    changes: request.preview.changes,
+    localChanges: request.preview.localChanges,
+    members: [teamMember()],
+    events: [{
+      schemaVersion: 1,
+      id: TEAM_EVENT_ID,
+      timestamp: TEAM_NOW,
+      actor: request.receipt.authority.actor,
+      action: "member.added",
+      subjects: [{ kind: "entity", entity: { id: TEAM_MEMBER_ID, kind: "member" } }],
+      workstream: null,
+      repoState: request.receipt.authority.repoState,
+    }],
   };
 }
 

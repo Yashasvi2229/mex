@@ -3,14 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitPort } from "../../team/contracts/git.js";
-import { TeamIdentityActivityFoundation } from "../../team/foundation.js";
 import {
-  createLocalHubReadServices,
+  createLocalHubReadServices as createLocalHubReadServicesBase,
   type HubGraphReadService,
   type HubWikiReadService,
+  type LocalHubReadServicesOptions,
 } from "../services.js";
 import { createRepositoryWikiPort } from "../../wiki/application-adapter.js";
 import type { WikiIndexStatus } from "../../team/contracts/wiki.js";
+import { createRepositoryTeamWorkflowPortWithDependencies } from "../../team/workflow/repository-team-workflow-port.js";
+import { ActivityRepository } from "../../team/activity/repository.js";
+import { MemberRepository } from "../../team/identity/member-repository.js";
 
 const EVENT = "event_01ARZ3NDEKTSV4RRFFQ69G5FAB";
 const MEMBER = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -54,6 +57,20 @@ function wikiWithStatus(state: WikiIndexStatus["state"]): HubWikiReadService {
     readKnowledgeWorkspace: unused,
     knowledgeForCode: unused,
   };
+}
+
+function createLocalHubReadServices(
+  options: Omit<LocalHubReadServicesOptions, "team">,
+): ReturnType<typeof createLocalHubReadServicesBase> {
+  const team = createRepositoryTeamWorkflowPortWithDependencies(options.projectRoot, {
+    scaffoldId: options.scaffoldId,
+    wiki: createRepositoryWikiPort(options.projectRoot, {
+      now: () => (options.now ?? (() => new Date()))().toISOString(),
+    }),
+    ...(options.git === undefined ? {} : { git: options.git }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
+  return createLocalHubReadServicesBase({ ...options, team });
 }
 
 describe("createLocalHubReadServices", () => {
@@ -659,15 +676,15 @@ The worker drains the durable queue.
   });
 
   it("projects canonical and legacy activity without exposing private fields", async () => {
-    const writer = new TeamIdentityActivityFoundation({
+    const activity = new ActivityRepository({
       projectRoot,
-      scaffoldId: "scaffold-local",
       git,
       now: () => new Date(NOW),
-      activityIdFactory: () => EVENT,
+      generateId: () => EVENT,
     });
     const longPath = `src/${"x".repeat(390)}.ts`;
-    const preview = await writer.previewActivity({
+    const preview = await activity.previewCreate({
+      actor: { kind: "git", name: "Daksh", email: "daksh@example.test" },
       action: "member.updated",
       subjects: [
         { kind: "entity", entity: { id: "workstream_alpha", kind: "workstream", title: "Alpha" } },
@@ -684,8 +701,8 @@ The worker drains the durable queue.
       workstream: { id: "workstream_alpha", kind: "workstream", title: "Alpha" },
       metadata: { reason: "private projection detail" },
     });
-    await writer.applyActivity(preview, preview.activity.previewRevision);
-    await writer.members.create({
+    await activity.applyCreate(preview, preview.previewRevision);
+    await new MemberRepository(projectRoot).create({
       id: MEMBER,
       displayName: "Daksh Current",
       gitAliases: [{ name: "Daksh", email: "daksh@example.test" }],

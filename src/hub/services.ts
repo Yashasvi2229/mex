@@ -21,6 +21,14 @@ import {
   type HubJobSnapshot,
   type SearchRequest,
   type SearchResponse,
+  type TeamCurrentActorResponse,
+  type TeamMember as HubTeamMember,
+  type TeamMemberListRequest as HubTeamMemberListRequest,
+  type TeamMemberListResponse,
+  type TeamOperationApplyRequest,
+  type TeamOperationApplyResponse,
+  type TeamOperationPreviewRequest,
+  type TeamOperationPreviewResponse,
   type WikiBacklinksRequest,
   type WikiBacklinksResponse,
   type WikiEntityDetailResponse,
@@ -43,8 +51,26 @@ import type {
   CodeSymbol,
 } from "../team/contracts/graph.js";
 import type { GitPort } from "../team/contracts/git.js";
-import { isRepoRelativePath, type ActorRef, type Diagnostic, type EntityRef } from "../team/contracts/shared.js";
-import type { ActivitySubjectRef } from "../team/contracts/workflow.js";
+import {
+  isRepoRelativePath,
+  type ActorRef,
+  type Diagnostic,
+  type EntityRef,
+  type JsonValue,
+} from "../team/contracts/shared.js";
+import type {
+  ActivityEvent,
+  ActivitySubjectRef,
+  StoredActivityEvent,
+  TeamActivityListRequest,
+  TeamCurrentActor,
+  TeamIdentityActivityCommand,
+  TeamIdentityActivityPreviewEnvelope,
+  TeamMember,
+  TeamMemberListRequest,
+  TeamPage,
+  TeamWorkflowResult,
+} from "../team/contracts/workflow.js";
 import type {
   WikiEntity,
   WikiEntitySummary,
@@ -56,9 +82,14 @@ import type {
   WikiRelationHit,
   WikiSource,
 } from "../team/contracts/wiki.js";
-import type { ResolvedTimelineEntry } from "../team/activity/repository.js";
-import { TeamIdentityActivityFoundation } from "../team/foundation.js";
+import {
+  ActivityRepository,
+  TimelineReader,
+  type ResolvedTimelineEntry,
+} from "../team/activity/repository.js";
 import { createRepositoryGitPort } from "../team/git/git-port.js";
+import { ActorResolver } from "../team/identity/actor-resolver.js";
+import { MemberRepository } from "../team/identity/member-repository.js";
 import type { HubReadServices } from "./app.js";
 import { HubHttpError } from "./http/errors.js";
 import type {
@@ -99,10 +130,26 @@ export interface HubWikiReadService {
   knowledgeForCode(request: RepositoryCodeKnowledgeRequest): Promise<RepositoryCodeKnowledgeResult>;
 }
 
+/** Exact internal C0 application facade used by the private Hub. */
+export interface HubTeamIdentityActivityService {
+  getMember(memberId: string): Promise<TeamMember | null>;
+  listMembers(request?: TeamMemberListRequest): Promise<TeamPage<TeamMember>>;
+  getCurrentActor(): Promise<TeamCurrentActor>;
+  getActivity(id: string): Promise<StoredActivityEvent | null>;
+  listActivity(request?: TeamActivityListRequest): Promise<TeamPage<StoredActivityEvent>>;
+  previewIdentityActivity(
+    command: TeamIdentityActivityCommand,
+  ): Promise<TeamIdentityActivityPreviewEnvelope>;
+  applyIdentityActivity(
+    envelope: TeamIdentityActivityPreviewEnvelope,
+  ): Promise<TeamWorkflowResult<JsonValue>>;
+}
+
 export interface LocalHubReadServicesOptions {
   readonly projectRoot: string;
   readonly scaffoldId: string;
   readonly jobs: HubJobReader;
+  readonly team: HubTeamIdentityActivityService;
   readonly git?: GitPort;
   readonly graph?: HubGraphReadService;
   readonly wiki?: HubWikiReadService;
@@ -123,12 +170,18 @@ export function createLocalHubReadServices(
   const git = options.git ?? createRepositoryGitPort(options.projectRoot, { now });
   const graph = options.graph;
   const wiki = options.wiki;
-  const team = new TeamIdentityActivityFoundation({
+  const team = options.team;
+  // Activity's existing workbench includes bounded legacy JSONL alongside
+  // canonical events and resolves today's effective member separately from the
+  // immutable recorded actor. Keep that read model independent from C0 writes.
+  const members = new MemberRepository(options.projectRoot);
+  const actors = new ActorResolver(members, git);
+  const canonicalActivity = new ActivityRepository({
     projectRoot: options.projectRoot,
-    scaffoldId: options.scaffoldId,
     git,
     now,
   });
+  const timeline = new TimelineReader(options.projectRoot, canonicalActivity, actors);
 
   return {
     async capabilities(): Promise<HubCapabilities> {
@@ -137,6 +190,12 @@ export function createLocalHubReadServices(
         apiVersion: "v1",
         git: gitStatus,
         activity: available(),
+        activityRecord: available(),
+        members: {
+          read: available(),
+          canonicalMutation: available(),
+          localSelection: available(),
+        },
         jobs: available(),
         graph: {
           read: graph ? available() : unavailable("The GraphPort is not connected in this build."),
@@ -154,7 +213,7 @@ export function createLocalHubReadServices(
     async home(): Promise<HomeResponse> {
       const [repository, actorResolution] = await Promise.all([
         git.getRepoState(),
-        team.resolveCurrentActor(),
+        team.getCurrentActor(),
       ]);
       const jobs = options.jobs.list({ limit: 100 }).items;
       const active = jobs.filter((job) => job.state === "queued" || job.state === "running");
@@ -164,7 +223,9 @@ export function createLocalHubReadServices(
         .map((job) => jobAttention(job));
       let activity: HomeResponse["sections"]["activity"];
       try {
-        activity = { availability: "available", count: team.getActivitySummary().count };
+        const read = canonicalActivity.readAll();
+        if (read.sourceTruncated) throw new Error("Canonical Activity source was truncated.");
+        activity = { availability: "available", count: read.events.length };
       } catch {
         activity = unavailableSection("Canonical activity could not be read safely.");
       }
@@ -190,10 +251,76 @@ export function createLocalHubReadServices(
       };
     },
 
+    async members(request: HubTeamMemberListRequest): Promise<TeamMemberListResponse> {
+      const page = await team.listMembers({
+        active: request.active,
+        limit: request.limit,
+        ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+      });
+      const diagnostics = page.diagnostics.map(projectDiagnostic);
+      return {
+        items: page.items.map(projectTeamMember),
+        nextCursor: page.nextCursor,
+        truncated: page.truncated,
+        sourceTruncated: page.sourceTruncated,
+        deterministicRevision: page.deterministicRevision,
+        diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+        diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+      };
+    },
+
+    async member(memberId: string): Promise<HubTeamMember | null> {
+      const member = await team.getMember(memberId);
+      return member === null ? null : projectTeamMember(member);
+    },
+
+    async currentActor(): Promise<TeamCurrentActorResponse> {
+      const current = await team.getCurrentActor();
+      const diagnostics = current.diagnostics.map(projectDiagnostic);
+      return {
+        actor: cloneActor(current.actor),
+        source: current.source,
+        selection: current.selection === null ? null : { ...current.selection },
+        diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+        diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+      };
+    },
+
+    async previewTeamOperation(
+      request: TeamOperationPreviewRequest,
+    ): Promise<TeamOperationPreviewResponse> {
+      return projectTeamOperationEnvelope(
+        await team.previewIdentityActivity(toIdentityActivityCommand(request)),
+      );
+    },
+
+    async applyTeamOperation(
+      request: TeamOperationApplyRequest,
+    ): Promise<TeamOperationApplyResponse> {
+      const result = await team.applyIdentityActivity(
+        toIdentityActivityEnvelope(request),
+      );
+      if (result.artifacts.some((artifact) => artifact.kind !== "member")) {
+        throw invalidTeamProjection();
+      }
+      return {
+        operationId: result.operationId,
+        previewRevision: result.previewRevision,
+        applied: true,
+        idempotentReplay: result.idempotentReplay,
+        changes: result.changes.map((change) => ({ ...change })),
+        localChanges: projectIdentityLocalChanges(result.localChanges),
+        members: result.artifacts
+          .filter((artifact): artifact is TeamMember => artifact.kind === "member")
+          .map(projectTeamMember),
+        events: result.events.map(projectTeamActivityEvent),
+      };
+    },
+
     async activity(request: ActivityRequest): Promise<ActivityResponse> {
       let pageLimit = request.limit;
       while (true) {
-        const page = await team.timeline.listResolved({ ...request, limit: pageLimit });
+        const page = await timeline.listResolved({ ...request, limit: pageLimit });
         const diagnostics = page.diagnostics.map(projectDiagnostic);
         const response: ActivityResponse = {
           items: page.items.map(projectTimelineEntry),
@@ -1238,6 +1365,251 @@ function invalidGraphProjection(): HubHttpError {
     "Invalid graph projection",
     "The graph adapter returned an invalid bounded workspace result.",
   );
+}
+
+function projectTeamMember(member: TeamMember): HubTeamMember {
+  return {
+    schemaVersion: 1,
+    id: member.ref.id,
+    displayName: member.displayName,
+    gitAliases: member.gitAliases.map((alias) => ({ ...alias })),
+    active: member.active,
+    sourcePath: member.sourcePath,
+    revision: member.revision,
+  };
+}
+
+function projectTeamActivityEvent(event: ActivityEvent): TeamOperationApplyResponse["events"][number] {
+  if (
+    event.metadata !== undefined
+    || (event.workstream !== undefined && event.workstream.kind !== "workstream")
+  ) {
+    throw invalidTeamProjection();
+  }
+  return {
+    schemaVersion: 1,
+    id: event.id,
+    timestamp: event.timestamp,
+    actor: cloneActor(event.actor),
+    action: event.action,
+    subjects: event.subjects.map(cloneActivitySubject),
+    workstream: event.workstream === undefined
+      ? null
+      : { ...event.workstream, kind: "workstream" },
+    repoState: { ...event.repoState },
+  };
+}
+
+function cloneActor(actor: ActorRef): ActorRef {
+  if (actor.kind === "unknown") return { kind: "unknown" };
+  if (actor.kind === "git") return { kind: "git", name: actor.name, email: actor.email };
+  return {
+    kind: "member",
+    memberId: actor.memberId,
+    ...(actor.displayName === undefined ? {} : { displayName: actor.displayName }),
+  };
+}
+
+function cloneActivitySubject(subject: ActivitySubjectRef): ActivitySubjectRef {
+  if (subject.kind === "entity") return { kind: "entity", entity: { ...subject.entity } };
+  if (subject.kind === "commit") return { kind: "commit", hash: subject.hash };
+  if (subject.kind === "file") return { kind: "file", path: subject.path };
+  if (subject.code.kind === "file") {
+    return { kind: "code", code: { ...subject.code } };
+  }
+  return { kind: "code", code: { ...subject.code } };
+}
+
+function toIdentityActivityCommand(
+  request: TeamOperationPreviewRequest,
+): TeamIdentityActivityCommand {
+  return {
+    operationId: request.operationId,
+    action: cloneIdentityActivityAction(request.action),
+    expectedRevisions: request.expectedRevisions.map((expectation) => (
+      expectation.target.kind === "artifact"
+        ? {
+            target: { kind: "artifact" as const, path: expectation.target.path },
+            revision: expectation.revision,
+          }
+        : {
+            target: {
+              kind: "local" as const,
+              namespace: "member-selection" as const,
+              id: "current" as const,
+            },
+            revision: expectation.revision,
+          }
+    )),
+  } as TeamIdentityActivityCommand;
+}
+
+function cloneIdentityActivityAction(
+  action: TeamOperationPreviewRequest["action"] | TeamIdentityActivityCommand["action"],
+): TeamOperationPreviewRequest["action"] {
+  switch (action.kind) {
+    case "member.add":
+      return {
+        kind: "member.add",
+        member: {
+          displayName: action.member.displayName,
+          gitAliases: action.member.gitAliases.map((alias) => ({ ...alias })),
+          ...(action.member.active === undefined ? {} : { active: action.member.active }),
+        },
+      };
+    case "member.update":
+      return {
+        kind: "member.update",
+        memberId: action.memberId,
+        patch: {
+          ...(action.patch.displayName === undefined
+            ? {}
+            : { displayName: action.patch.displayName }),
+          ...(action.patch.gitAliases === undefined
+            ? {}
+            : { gitAliases: action.patch.gitAliases.map((alias) => ({ ...alias })) }),
+        },
+      };
+    case "member.deactivate":
+      return { kind: "member.deactivate", memberId: action.memberId };
+    case "member.select":
+      return { kind: "member.select", memberId: action.memberId };
+    case "member.clear":
+      return { kind: "member.clear" };
+    case "activity.record": {
+      if (action.activity.workstream !== undefined
+        && action.activity.workstream.kind !== "workstream") {
+        throw invalidTeamProjection();
+      }
+      return {
+        kind: "activity.record",
+        activity: {
+          action: action.activity.action,
+          subjects: action.activity.subjects.map(cloneActivitySubject),
+          ...(action.activity.workstream === undefined
+            ? {}
+            : { workstream: { ...action.activity.workstream, kind: "workstream" as const } }),
+        },
+      };
+    }
+  }
+}
+
+function projectTeamOperationEnvelope(
+  envelope: TeamIdentityActivityPreviewEnvelope,
+): TeamOperationPreviewResponse {
+  return {
+    schemaVersion: 1,
+    request: {
+      operationId: envelope.request.operationId,
+      action: cloneIdentityActivityAction(envelope.request.action),
+      expectedRevisions: envelope.request.expectedRevisions.map((expectation) => (
+        expectation.target.kind === "artifact"
+          ? {
+              target: { kind: "artifact" as const, path: expectation.target.path },
+              revision: expectation.revision,
+            }
+          : {
+              target: {
+                kind: "local" as const,
+                namespace: "member-selection" as const,
+                id: "current" as const,
+              },
+              revision: expectation.revision,
+            }
+      )),
+    },
+    preview: {
+      valid: envelope.preview.valid,
+      scope: envelope.preview.scope,
+      changes: envelope.preview.changes.map((change) => ({ ...change })),
+      localChanges: projectIdentityLocalChanges(envelope.preview.localChanges),
+      diagnostics: envelope.preview.diagnostics.map(projectPortableTeamDiagnostic),
+    },
+    receipt: {
+      schemaVersion: 1,
+      authority: {
+        actor: cloneActor(envelope.receipt.authority.actor),
+        occurredAt: envelope.receipt.authority.occurredAt,
+        repoState: { ...envelope.receipt.authority.repoState },
+      },
+      purposeIds: envelope.receipt.purposeIds.map((purpose) => ({ ...purpose })),
+      requestRevision: envelope.receipt.requestRevision,
+      presentationRevision: envelope.receipt.presentationRevision,
+      previewRevision: envelope.receipt.previewRevision,
+    },
+  };
+}
+
+function projectIdentityLocalChanges(
+  changes: readonly TeamWorkflowResult<JsonValue>["localChanges"][number][],
+): TeamOperationApplyResponse["localChanges"] {
+  return changes.map((change) => {
+    if (change.namespace !== "member-selection" || change.id !== "current") {
+      throw invalidTeamProjection();
+    }
+    return {
+      namespace: "member-selection",
+      id: "current",
+      beforeRevision: change.beforeRevision,
+      afterRevision: change.afterRevision,
+      summary: change.summary,
+    };
+  });
+}
+
+function invalidTeamProjection(): HubHttpError {
+  return new HubHttpError(
+    500,
+    "INTERNAL_ERROR",
+    "Invalid Team projection",
+    "The Team workflow returned an invalid bounded identity result.",
+  );
+}
+
+function projectPortableTeamDiagnostic(diagnostic: Diagnostic): ActivityDiagnostic {
+  const projected = projectDiagnostic(diagnostic);
+  if (
+    diagnostic.code !== projected.code
+    || diagnostic.severity !== projected.severity
+    || diagnostic.message !== projected.message
+    || diagnostic.path !== projected.path
+    || diagnostic.location !== undefined
+    || diagnostic.entity !== undefined
+    || diagnostic.remediation !== undefined
+    || diagnostic.detail !== undefined
+  ) {
+    throw invalidTeamProjection();
+  }
+  return projected;
+}
+
+function toIdentityActivityEnvelope(
+  envelope: TeamOperationApplyRequest,
+): TeamIdentityActivityPreviewEnvelope {
+  return {
+    schemaVersion: 1,
+    request: toIdentityActivityCommand(envelope.request),
+    preview: {
+      valid: envelope.preview.valid,
+      scope: envelope.preview.scope,
+      changes: envelope.preview.changes.map((change) => ({ ...change })),
+      localChanges: envelope.preview.localChanges.map((change) => ({ ...change })),
+      diagnostics: envelope.preview.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+    },
+    receipt: {
+      schemaVersion: 1,
+      authority: {
+        actor: cloneActor(envelope.receipt.authority.actor),
+        occurredAt: envelope.receipt.authority.occurredAt,
+        repoState: { ...envelope.receipt.authority.repoState },
+      },
+      purposeIds: envelope.receipt.purposeIds.map((purpose) => ({ ...purpose })),
+      requestRevision: envelope.receipt.requestRevision,
+      presentationRevision: envelope.receipt.presentationRevision,
+      previewRevision: envelope.receipt.previewRevision,
+    },
+  };
 }
 
 function projectTimelineEntry(item: ResolvedTimelineEntry): ActivityResponse["items"][number] {

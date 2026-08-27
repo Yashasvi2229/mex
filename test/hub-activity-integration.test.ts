@@ -33,6 +33,7 @@ import {
 } from "../src/team/artifacts/codecs.js";
 import type { ActivityEvent } from "../src/team/contracts/workflow.js";
 import { TeamLocalState } from "../src/team/local-state/index.js";
+import { createRepositoryTeamWorkflowPort } from "../src/team/workflow/repository-team-workflow-port.js";
 
 const MEMBER_ID = "member_01K3Q080000000000000000001";
 const EVENT_ONE = "event_01K3Q080000000000000000001";
@@ -249,10 +250,13 @@ async function startHarness(projectRoot: string): Promise<Harness> {
     leaseToken: "a".repeat(64),
   });
   jobs.initialize();
+  const team = await createRepositoryTeamWorkflowPort(projectRoot);
+  team.initializeIdentityActivitySigner();
   const services = createLocalHubReadServices({
     projectRoot,
     scaffoldId: "activity-acceptance",
     jobs,
+    team,
     now: () => new Date(NOW),
   });
   let origin: string | null = null;
