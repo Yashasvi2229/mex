@@ -81,6 +81,19 @@ describe("Team CLI request files", () => {
     );
   });
 
+  it("reserves member deactivation for its dedicated action", () => {
+    const path = fixtureFile("member-active.json", {
+      ...memberAddRequest(),
+      action: {
+        kind: "member.add",
+        member: { displayName: "Ada", gitAliases: [], active: false },
+      },
+    });
+    expect(() => readTeamCommandFile(path, "member.add")).toThrow(
+      "member input contains missing, unsupported, or extra fields",
+    );
+  });
+
   it("rejects final-component symlinks and non-regular files", () => {
     const root = mkdtempSync(join(tmpdir(), "mex-team-cli-file-"));
     const target = join(root, "target.json");

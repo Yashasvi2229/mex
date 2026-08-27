@@ -235,12 +235,9 @@ function assertAction(
 
 function assertMemberInput(value: unknown): void {
   const member = record(value, "member input");
-  exactKeys(member, ["displayName", "gitAliases"], ["active"], "member input");
+  exactKeys(member, ["displayName", "gitAliases"], [], "member input");
   canonicalText(member.displayName, "member display name", 200);
   assertAliases(member.gitAliases);
-  if (member.active !== undefined && typeof member.active !== "boolean") {
-    fail("member active must be a boolean.");
-  }
 }
 
 function assertAliases(value: unknown): asserts value is readonly MemberGitAlias[] {

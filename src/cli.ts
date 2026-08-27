@@ -10,9 +10,17 @@ import { readMachineId, setGlobalConfigKey } from "./global-config.js";
 import { runFeedback, maybeShowInvite, dismissInvite, enableInvite } from "./feedback/index.js";
 import type { MexConfig } from "./types.js";
 import type { RunHubCommandOptions } from "./hub/command.js";
+import { capabilitiesInvalidRequestEnvelope } from "./capabilities.js";
 import {
   buildTeamIdentityActivityCommands,
+  exitCodeForTeamEnvelope,
+  locateTeamRepositoryRoot,
   processTeamCommandIo,
+  renderTeamEnvelope,
+  teamProblemEnvelope,
+  TeamCliUsageError,
+  type TeamCliCommandName,
+  type TeamCliMode,
   type TeamIdentityActivityCliServiceFactory,
 } from "./team/cli/index.js";
 
@@ -192,11 +200,11 @@ const teamIdentityActivityService: TeamIdentityActivityCliServiceFactory = async
   // Team reads and previews must not backfill scaffold identity. The concrete
   // repository port independently attests that config.json is tracked at the
   // current HEAD before it exposes any Team surface.
-  const config = findConfig();
+  const projectRoot = locateTeamRepositoryRoot();
   const { createRepositoryTeamWorkflowPort } = await import(
     "./team/workflow/repository-team-workflow-port.js"
   );
-  return createRepositoryTeamWorkflowPort(config.projectRoot);
+  return createRepositoryTeamWorkflowPort(projectRoot);
 };
 
 for (const command of buildTeamIdentityActivityCommands({
@@ -990,10 +998,90 @@ if (process.argv[1]) {
 }
 if (isMainModule) {
   if (!isFirstRunNoticeExemptCommand(process.argv[2])) showFirstRunNotice();
-  program.parseAsync().catch((err: Error) => {
-    console.error(err.message);
-    process.exit(1);
-  });
+  const commandArgv = process.argv.slice(2);
+  const teamJsonContext = inspectTeamJsonInvocation(commandArgv);
+  if (teamJsonContext !== null && hasMissingTeamApplyValue(commandArgv)) {
+    emitTeamJsonParseProblem(teamJsonContext);
+  } else if (isInvalidCapabilitiesJsonInvocation(commandArgv)) {
+    console.log(JSON.stringify(capabilitiesInvalidRequestEnvelope()));
+    process.exitCode = 2;
+  } else {
+    if (teamJsonContext !== null) configureTeamJsonParseErrors(program);
+    program.parseAsync().catch((err: Error) => {
+      if (teamJsonContext !== null) {
+        emitTeamJsonParseProblem(teamJsonContext);
+        return;
+      }
+      console.error(err.message);
+      process.exitCode = 1;
+    });
+  }
+}
+
+interface TeamJsonInvocationContext {
+  command: TeamCliCommandName;
+  mode: TeamCliMode;
+}
+
+function inspectTeamJsonInvocation(argv: readonly string[]): TeamJsonInvocationContext | null {
+  if (!argv.includes("--json") || argv.includes("--help") || argv.includes("-h")) return null;
+  const family = argv[0];
+  if (family !== "member" && family !== "activity") return null;
+  const leaf = argv[1];
+  const applyRequested = argv.some((value) => value === "--apply" || value.startsWith("--apply="));
+  if (family === "member") {
+    if (leaf === "list" || leaf === "show" || leaf === "current") {
+      return { command: `member.${leaf}`, mode: "read" };
+    }
+    if (leaf === "add" || leaf === "update" || leaf === "deactivate" || leaf === "select") {
+      return {
+        command: `member.${leaf}`,
+        mode: applyRequested ? "apply" : "preview",
+      };
+    }
+    return { command: "member", mode: "read" };
+  }
+  if (leaf === "list" || leaf === "show") {
+    return { command: `activity.${leaf}`, mode: "read" };
+  }
+  if (leaf === "record") {
+    return { command: "activity.record", mode: applyRequested ? "apply" : "preview" };
+  }
+  return { command: "activity", mode: "read" };
+}
+
+function configureTeamJsonParseErrors(root: Command): void {
+  const visit = (command: Command): void => {
+    command.exitOverride();
+    command.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+    for (const child of command.commands) visit(child);
+  };
+  visit(root);
+}
+
+function hasMissingTeamApplyValue(argv: readonly string[]): boolean {
+  return argv.some((value, index) => (
+    value === "--apply"
+    && (argv[index + 1] === undefined || argv[index + 1]!.startsWith("-"))
+  ));
+}
+
+function emitTeamJsonParseProblem(context: TeamJsonInvocationContext): void {
+  const envelope = teamProblemEnvelope(
+    context.command,
+    context.mode,
+    new TeamCliUsageError("The Team command arguments are invalid. Review the command help and retry."),
+  );
+  console.log(renderTeamEnvelope(envelope));
+  process.exitCode = exitCodeForTeamEnvelope(envelope);
+}
+
+function isInvalidCapabilitiesJsonInvocation(argv: readonly string[]): boolean {
+  return argv[0] === "capabilities"
+    && argv.includes("--json")
+    && !argv.includes("--help")
+    && !argv.includes("-h")
+    && (argv.length !== 2 || argv[1] !== "--json");
 }
 
 function buildCompletion(shell: string): string {

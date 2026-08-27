@@ -278,6 +278,42 @@ describe("built CLI main-module guard", () => {
     }
   });
 
+  it("uses the capability problem envelope for malformed JSON invocations", () => {
+    const project = mkdtempSync(join(tmpdir(), "mex-capability-cli-invalid-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-capability-invalid-home-"));
+    try {
+      for (const args of [
+        ["capabilities", "--json", "unexpected"],
+        ["capabilities", "--json", "--unknown"],
+      ] as const) {
+        const result = spawnSync(process.execPath, [cliPath, ...args], {
+          cwd: project,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+        });
+        expect(result.status, args.join(" ")).toBe(2);
+        expect(result.stderr, args.join(" ")).toBe("");
+        expect(JSON.parse(result.stdout)).toEqual({
+          schemaVersion: 1,
+          ok: false,
+          data: null,
+          diagnostics: [],
+          problem: {
+            title: "Invalid capability command",
+            status: 400,
+            code: "INVALID_REQUEST",
+            detail: "Use exactly: mex capabilities --json",
+          },
+        });
+      }
+      expect(readdirSync(project)).toEqual([]);
+      expect(readdirSync(userHome)).toEqual([]);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  });
+
   it("does not auto-parse when dist/cli.js is imported as a module", () => {
     const result = spawnSync(
       process.execPath,
@@ -449,6 +485,131 @@ describe("built CLI main-module guard", () => {
       rmSync(requestRoot, { recursive: true, force: true });
     }
   }, 40_000);
+
+  it("uses the Team JSON envelope for parser and repository-readiness failures", () => {
+    const outsideRepository = mkdtempSync(join(tmpdir(), "mex-team-cli-no-repo-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-team-cli-problem-home-"));
+    try {
+      const cases = [
+        {
+          args: ["member", "show", "--json"],
+          command: "member.show",
+          mode: "read",
+        },
+        {
+          args: ["member", "unknown", "--json"],
+          command: "member",
+          mode: "read",
+        },
+        {
+          args: ["activity", "record", "--apply", "--json"],
+          command: "activity.record",
+          mode: "apply",
+        },
+        {
+          args: ["member", "add", "--apply=preview.json", "--unknown", "--json"],
+          command: "member.add",
+          mode: "apply",
+        },
+      ] as const;
+
+      for (const testCase of cases) {
+        const result = spawnSync(process.execPath, [cliPath, ...testCase.args], {
+          cwd: outsideRepository,
+          encoding: "utf8",
+          env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+        });
+        expect(result.status, testCase.args.join(" ")).toBe(2);
+        expect(result.stderr, testCase.args.join(" ")).toBe("");
+        expect(JSON.parse(result.stdout)).toEqual({
+          command: testCase.command,
+          data: null,
+          diagnostics: [],
+          mode: testCase.mode,
+          ok: false,
+          problem: {
+            code: "INVALID_REQUEST",
+            detail: "The Team command arguments are invalid. Review the command help and retry.",
+            status: 400,
+            title: "Invalid Team command request",
+          },
+          schemaVersion: 1,
+        });
+      }
+
+      const unavailable = spawnSync(process.execPath, [cliPath, "member", "list", "--json"], {
+        cwd: outsideRepository,
+        encoding: "utf8",
+        env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+      });
+      expect(unavailable.status).toBe(3);
+      expect(unavailable.stderr).toBe("");
+      expect(JSON.parse(unavailable.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "member.list",
+        mode: "read",
+        ok: false,
+        problem: { code: "NOT_FOUND" },
+      });
+      expect(readdirSync(outsideRepository)).toEqual([]);
+      expect(readdirSync(userHome)).toEqual([]);
+    } finally {
+      rmSync(outsideRepository, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsafe or oversized Team config without following or initializing it", () => {
+    const userHome = mkdtempSync(join(tmpdir(), "mex-team-cli-config-home-"));
+    const outside = mkdtempSync(join(tmpdir(), "mex-team-cli-config-outside-"));
+    const outsideConfig = join(outside, "config.json");
+    writeFileSync(outsideConfig, JSON.stringify({ scaffold_id: "outside-secret" }));
+    try {
+      for (const fixtureKind of ["symlink", "oversized"] as const) {
+        const fixture = mkdtempSync(join(tmpdir(), `mex-team-cli-${fixtureKind}-`));
+        try {
+          mkdirSync(join(fixture, ".git"));
+          mkdirSync(join(fixture, ".mex"));
+          writeFileSync(join(fixture, ".mex", "ROUTER.md"), "# Router\n");
+          const configPath = join(fixture, ".mex", "config.json");
+          if (fixtureKind === "symlink") {
+            symlinkSync(outsideConfig, configPath);
+          } else {
+            writeFileSync(configPath, JSON.stringify({
+              scaffold_id: `scaffold-${"x".repeat(70 * 1024)}`,
+            }));
+          }
+          const before = snapshotProcessTree(fixture);
+          const result = spawnSync(process.execPath, [cliPath, "activity", "list", "--json"], {
+            cwd: fixture,
+            encoding: "utf8",
+            env: { ...process.env, HOME: userHome, MEX_TELEMETRY: "1", NO_COLOR: "1" },
+          });
+          expect(result.status).toBe(fixtureKind === "symlink" ? 5 : 1);
+          expect(result.stderr).toBe("");
+          expect(JSON.parse(result.stdout)).toMatchObject({
+            schemaVersion: 1,
+            command: "activity.list",
+            mode: "read",
+            ok: false,
+            problem: {
+              code: fixtureKind === "symlink" ? "PATH_OUTSIDE_PROJECT" : "VALIDATION_FAILED",
+            },
+          });
+          expect(snapshotProcessTree(fixture)).toEqual(before);
+          expect(readFileSync(outsideConfig, "utf8")).toBe(
+            JSON.stringify({ scaffold_id: "outside-secret" }),
+          );
+        } finally {
+          rmSync(fixture, { recursive: true, force: true });
+        }
+      }
+      expect(readdirSync(userHome)).toEqual([]);
+    } finally {
+      rmSync(userHome, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("mex --version", () => {

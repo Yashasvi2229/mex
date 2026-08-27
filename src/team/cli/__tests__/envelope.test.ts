@@ -67,4 +67,19 @@ describe("Team CLI envelope", () => {
     });
     expect(renderTeamEnvelope(envelope)).not.toContain("secret");
   });
+
+  it("sorts Unicode diagnostics by deterministic code-unit order", () => {
+    const envelope = teamEnvelope({
+      command: "member.list",
+      mode: "read",
+      data: null,
+      diagnostics: [
+        { code: "\u00c4", severity: "warning", message: "latin" },
+        { code: "Z", severity: "warning", message: "ascii" },
+        { code: "\u03a9", severity: "warning", message: "greek" },
+      ],
+    });
+
+    expect(envelope.diagnostics.map((entry) => entry.code)).toEqual(["Z", "\u00c4", "\u03a9"]);
+  });
 });

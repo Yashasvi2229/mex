@@ -23,6 +23,7 @@ export type TeamCliExitCode =
 export type TeamCliMode = "read" | "preview" | "apply";
 
 export type TeamCliCommandName =
+  | "member"
   | "member.list"
   | "member.show"
   | "member.current"
@@ -30,6 +31,7 @@ export type TeamCliCommandName =
   | "member.update"
   | "member.deactivate"
   | "member.select"
+  | "activity"
   | "activity.list"
   | "activity.show"
   | "activity.record";
@@ -189,7 +191,9 @@ function sortDiagnostics(entries: readonly Diagnostic[]): readonly Diagnostic[] 
 }
 
 function stableCompare(left: unknown, right: unknown): number {
-  return JSON.stringify(sortJson(left)).localeCompare(JSON.stringify(sortJson(right)));
+  const leftJson = JSON.stringify(sortJson(left));
+  const rightJson = JSON.stringify(sortJson(right));
+  return leftJson === rightJson ? 0 : leftJson < rightJson ? -1 : 1;
 }
 
 function sortJson(value: unknown): unknown {

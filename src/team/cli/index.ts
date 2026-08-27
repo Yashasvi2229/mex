@@ -44,3 +44,4 @@ export {
   type TeamIdentityActivityCliService,
   type TeamIdentityActivityCliServiceFactory,
 } from "./service.js";
+export { locateTeamRepositoryRoot } from "./repository-root.js";

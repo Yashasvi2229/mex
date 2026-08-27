@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Command } from "commander";
+import Ajv2020 from "ajv/dist/2020.js";
 import {
   CAPABILITIES_MAX_BYTES,
   CAPABILITY_COMMAND_CATALOG,
@@ -31,6 +32,10 @@ import { createGraphEngine } from "../src/graph/engine-impl.js";
 import { GRAPH_CORPUS_LIMITS } from "../src/graph/corpus-policy.js";
 import { WIKI_CORPUS_LIMITS } from "../src/wiki/index/corpus-policy.js";
 import { rebuildWikiIndex } from "../src/wiki/index/rebuild.js";
+import {
+  readTeamCommandFile,
+  type TeamMutationCommandName,
+} from "../src/team/cli/request-file.js";
 
 const roots: string[] = [];
 
@@ -73,6 +78,99 @@ describe("mex capabilities manifest", () => {
     expect(JSON.stringify(second)).toBe(JSON.stringify(first));
     expect(inspectWikiIndex).toHaveBeenCalledWith(join(root, ".mex"), ["private/**", "generated/**"]);
     expect(Buffer.byteLength(JSON.stringify(first), "utf8")).toBeLessThanOrEqual(CAPABILITIES_MAX_BYTES);
+  });
+
+  it("publishes a complete machine-readable Team request and exit contract", async () => {
+    const root = readyRoot();
+    const envelope = await inspectCapabilities(root, {
+      inspectGraphIndex: async () => inspection("fresh"),
+      inspectWikiIndex: async () => inspection("fresh"),
+    });
+    const contract = envelope.data.teamCliContract;
+    const validate = new Ajv2020({ strict: true }).compile(contract.requestFile.schema);
+
+    expect(contract).toMatchObject({
+      schemaVersion: 1,
+      requestFile: {
+        contractId: "team.identity_activity.request.v1",
+        mediaType: "application/json",
+        encoding: "utf-8",
+        maxBytes: 65_536,
+        maxDepth: 32,
+        maxNodes: 4_096,
+        textPolicy: {
+          normalization: "NFC",
+          leadingOrTrailingWhitespace: "forbidden",
+          controlCharacters: "forbidden",
+        },
+        utf8ByteLimits: {
+          operationId: 128,
+          memberDisplayName: 200,
+          gitAliasName: 200,
+          gitAliasEmail: 320,
+          entityId: 256,
+          entityKind: 64,
+          entityTitle: 512,
+          activityAction: 128,
+          codeIdentifierOrFingerprint: 1_024,
+          repositoryPath: 4_096,
+        },
+      },
+      applyFile: {
+        contractId: "team.identity_activity.preview-envelope.v1",
+        maxBytes: 65_536,
+      },
+    });
+    expect(contract.exitCodes).toEqual([
+      { code: 0, name: "ok", meaning: "Success, including exact idempotent replay." },
+      {
+        code: 1,
+        name: "validation",
+        meaning: "Validation, invalid-preview, job, or internal command failure; inspect problem.code and diagnostics.",
+      },
+      { code: 2, name: "usage", meaning: "Arguments, request JSON, or preview-envelope input are invalid." },
+      { code: 3, name: "unavailable", meaning: "Repository state or the requested resource is unavailable." },
+      { code: 4, name: "conflict", meaning: "A revision, operation, or recovery conflict prevented the action." },
+      { code: 5, name: "refused", meaning: "A containment, authorization, or origin safety policy refused the action." },
+    ]);
+
+    const exampleRoot = temporaryRoot();
+    for (const example of contract.requestFile.examples) {
+      expect(validate(example.request), `${example.command}: ${JSON.stringify(validate.errors)}`).toBe(true);
+      const requestPath = join(exampleRoot, `${example.command}.json`);
+      writeFileSync(requestPath, JSON.stringify(example.request));
+      const parserCommand: TeamMutationCommandName = example.command === "member.clear"
+        ? "member.select"
+        : example.command;
+      expect(readTeamCommandFile(requestPath, parserCommand)).toEqual(example.request);
+      expect(example.usage).toContain("request.json --json");
+    }
+    expect(contract.requestFile.examples.map((entry) => entry.command)).toEqual([
+      "member.add",
+      "member.update",
+      "member.deactivate",
+      "member.select",
+      "member.clear",
+      "activity.record",
+    ]);
+
+    const teamPreviewIds = [
+      "member.add.preview",
+      "member.update.preview",
+      "member.deactivate.preview",
+      "member.select.preview",
+      "activity.record.preview",
+    ];
+    const teamApplyIds = teamPreviewIds.map((id) => id.replace(/\.preview$/u, ".apply"));
+    for (const descriptor of envelope.data.commands.preview.filter((entry) => teamPreviewIds.includes(entry.id))) {
+      expect(descriptor.inputContract).toMatch(/^team\.identity_activity\.request\.v1#\/\$defs\//u);
+    }
+    for (const descriptor of envelope.data.commands.apply.filter((entry) => teamApplyIds.includes(entry.id))) {
+      expect(descriptor.inputContract).toMatch(/^team\.identity_activity\.preview-envelope\.v1#/u);
+    }
+    expect(envelope.data.commands.preview.filter((entry) => teamPreviewIds.includes(entry.id))).toHaveLength(5);
+    expect(envelope.data.commands.apply.filter((entry) => teamApplyIds.includes(entry.id))).toHaveLength(5);
+    expect(Buffer.byteLength(JSON.stringify(envelope), "utf8")).toBeLessThanOrEqual(CAPABILITIES_MAX_BYTES);
   });
 
   it("returns success with safe missing-index states and a concrete next action", async () => {
