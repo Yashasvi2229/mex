@@ -71,9 +71,10 @@ Then read this file fully before doing anything else in this session.
   pagination, query/mutation caches, terminal jobs, corpus scans, diagnostics,
   and maintenance working sets have hard bounds.
 - `mex capabilities --json` provides bounded, deterministic, read-only schema-v1
-  discovery for the installed Project Hub, canonical Activity read, Graph, and
-  Wiki surfaces, plus only the registered structured Graph/Wiki reads, previews,
-  and explicit apply/maintenance commands that are currently safe. Generated
+  discovery for the installed Project Hub, member identity, canonical Activity
+  read/record, Graph, and Wiki surfaces, plus only registered structured reads,
+  previews, and explicit apply/maintenance commands that are currently safe.
+  Team availability requires the exact tracked scaffold identity. Generated
   agent anchors require discovery first, structured reads, mutation preview,
   and explicit approval before apply.
 - Checkpoint B supplies the internal repository-bound `TeamWorkflowPort` and
@@ -87,13 +88,21 @@ Then read this file fully before doing anything else in this session.
   authority, exact revisions, Activity, local cleanup, and operation replay.
   Interrupted multi-file Wiki batches resume only from a bounded portable
   manifest after proving the exact durable audit prefix.
+- Checkpoint C exposes bounded `mex member` and structured `mex activity`
+  commands plus authenticated private Hub member/current-actor and Team
+  preview/apply APIs. Member selection is checkout-local; canonical member
+  mutations and direct Activity recording each emit one immutable event.
+- Cross-process identity/Activity previews are authenticated by one strict
+  repository-local HMAC key. Only the first explicit C preview or Hub startup
+  provisions it; pure reads remain noninitializing. Activity corpus, page, and
+  diagnostic bounds fail closed.
 
 **Not Built:**
 - Wiki creation/editing, migration and synthesis UI, grounding-drift/review
   workbenches, product Workstream/Inbox/Relay/Playbook commands and Hub routes,
-  Catch Up actions, direct activity creation, and later delivery checkpoints
-  from the human-team program. Checkpoint B persistence and the workflow port
-  remain internal until those later checkpoints bind real product surfaces.
+  Catch Up actions, and later delivery checkpoints from the human-team program.
+  The workflow port remains internal while Checkpoint C exposes only member and
+  Activity product surfaces.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
