@@ -19,6 +19,7 @@ const lazyWorkbenchSources = [
   "src/pages/KnowledgePage.tsx",
   "src/pages/SymbolPage.tsx",
   "src/pages/CapabilityPage.tsx",
+  "src/pages/MembersPage.tsx",
   "src/pages/ActivityPage.tsx",
   "src/pages/JobsPage.tsx",
   "src/pages/HealthPage.tsx",
@@ -50,6 +51,21 @@ for (const entry of workbenchEntries) {
     throw new Error(`The production Hub Home workbench eagerly imports ${entry.source}.`);
   }
 }
+const activityEntry = workbenchEntries.find((entry) => entry.source === "src/pages/ActivityPage.tsx");
+const activityRecorderKey = Object.keys(manifest).find((candidate) => (
+  candidate === "src/pages/ActivityRecordDialog.tsx"
+  || manifest[candidate].src === "src/pages/ActivityRecordDialog.tsx"
+));
+if (!activityEntry || !activityRecorderKey) {
+  throw new Error("The production Hub manifest has no lazy Activity recorder chunk.");
+}
+if (
+  !manifest[activityRecorderKey].isDynamicEntry
+  || !(manifest[activityEntry.key].dynamicImports ?? []).includes(activityRecorderKey)
+  || staticImportClosure(activityEntry.key).has(activityRecorderKey)
+) {
+  throw new Error("The production Hub Activity recorder is not isolated behind its open-on-demand boundary.");
+}
 for (const key of homeChunks) {
   const record = manifest[key] ?? {};
   const identity = [key, record.src, record.name, record.file].filter(Boolean).join("\n");
@@ -66,6 +82,7 @@ const forbiddenFixtureData = [
   "Keep activity immutable and preserve legacy history",
   "Project Hub read boundaries",
   "mx_01K36WVM6H7JK8M9NPQRSTVVWX",
+  "member_01K36WVM6H7JK8M9NPQRSTVVWX",
 ];
 
 for (const file of filesUnder(outputRoot)) {

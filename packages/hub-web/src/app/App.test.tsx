@@ -32,6 +32,7 @@ describe("Project Hub routes", () => {
     ["/playbooks", "Playbooks"],
     ["/inbox", "Inbox"],
     ["/relays", "Relays"],
+    ["/members", "Members"],
     ["/activity", "Activity"],
     ["/jobs", "Jobs"],
     ["/health", "Health"],
@@ -94,6 +95,8 @@ describe("Project Hub routes", () => {
       "/jobs?job=job_01K36WVM6H7JK8M9NPQRSTVVWX",
     );
     expect(screen.getByRole("link", { name: "Activity" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Members" })).toBeVisible();
+    expect(screen.getByRole("link", { name: /Open member identity for Ada Lovelace/ })).toHaveAttribute("href", "/members");
     expect(screen.getByRole("link", { name: "Inbox Unavailable" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Relays Unavailable" })).toBeVisible();
     expect(screen.queryByText("Wiki unavailable")).not.toBeInTheDocument();

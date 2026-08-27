@@ -12,6 +12,12 @@ import {
   JobPageResponseSchema,
   SearchResponseSchema,
   SessionResponseSchema,
+  TeamCurrentActorResponseSchema,
+  TeamMemberIdSchema,
+  TeamMemberListResponseSchema,
+  TeamMemberSchema,
+  TeamOperationApplyResponseSchema,
+  TeamOperationPreviewResponseSchema,
   WikiBacklinksResponseSchema,
   WikiEntityDetailResponseSchema,
   WikiEntityIdSchema,
@@ -37,6 +43,14 @@ import type {
   SearchResponse,
   SessionResponse,
   StartJobRequest,
+  TeamCurrentActorResponse,
+  TeamMember,
+  TeamMemberListRequest,
+  TeamMemberListResponse,
+  TeamOperationApplyRequest,
+  TeamOperationApplyResponse,
+  TeamOperationPreviewRequest,
+  TeamOperationPreviewResponse,
   WikiBacklinksRequest,
   WikiBacklinksResponse,
   WikiEntityDetailResponse,
@@ -71,6 +85,11 @@ export interface HubApi {
   getSession(): Promise<SessionResponse>;
   getCapabilities(): Promise<CapabilitiesResponse>;
   getHome(): Promise<HomeResponse>;
+  getMembers(request: TeamMemberListRequest): Promise<TeamMemberListResponse>;
+  getMember(id: string): Promise<TeamMember>;
+  getCurrentActor(): Promise<TeamCurrentActorResponse>;
+  previewTeamOperation(request: TeamOperationPreviewRequest): Promise<TeamOperationPreviewResponse>;
+  applyTeamOperation(request: TeamOperationApplyRequest): Promise<TeamOperationApplyResponse>;
   getActivity(request: ActivityRequest): Promise<ActivityResponse>;
   search(request: SearchRequest): Promise<SearchResponse>;
   getCodeSymbol(id: string, request: CodeWorkspaceRequest): Promise<CodeWorkspaceResponse>;
@@ -145,6 +164,14 @@ function assertSafeWikiEntityId(value: string): string {
   return parsed.data;
 }
 
+function assertSafeTeamMemberId(value: string): string {
+  const parsed = TeamMemberIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The member identifier is invalid."));
+  }
+  return parsed.data;
+}
+
 export function readBootstrapToken(hash = window.location.hash): string | null {
   if (!hash || hash === "#") return null;
   const fragment = hash.slice(1);
@@ -205,6 +232,46 @@ export class HttpHubApi implements HubApi {
 
   getHome(): Promise<HomeResponse> {
     return this.#request("/home", HomeResponseSchema);
+  }
+
+  getMembers(request: TeamMemberListRequest): Promise<TeamMemberListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.active !== undefined) params.set("active", String(request.active));
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/members?${params}`, TeamMemberListResponseSchema);
+  }
+
+  async getMember(id: string): Promise<TeamMember> {
+    return await this.#request(
+      `/members/${encodeURIComponent(assertSafeTeamMemberId(id))}`,
+      TeamMemberSchema,
+    );
+  }
+
+  getCurrentActor(): Promise<TeamCurrentActorResponse> {
+    return this.#request("/actor/current", TeamCurrentActorResponseSchema);
+  }
+
+  previewTeamOperation(
+    request: TeamOperationPreviewRequest,
+  ): Promise<TeamOperationPreviewResponse> {
+    return this.#request(
+      "/team/operations/preview",
+      TeamOperationPreviewResponseSchema,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+    );
+  }
+
+  applyTeamOperation(
+    request: TeamOperationApplyRequest,
+  ): Promise<TeamOperationApplyResponse> {
+    return this.#request(
+      "/team/operations/apply",
+      TeamOperationApplyResponseSchema,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+    );
   }
 
   getActivity(request: ActivityRequest): Promise<ActivityResponse> {

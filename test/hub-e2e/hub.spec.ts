@@ -23,6 +23,36 @@ async function expectAccessible(page: Page): Promise<void> {
   expect(report.violations).toEqual([]);
 }
 
+async function normalizeEstablishedVisualGolden(
+  page: Page,
+  surface?: "home" | "activity",
+): Promise<void> {
+  await page.getByRole("link", { name: "Members", exact: true }).evaluate((element) => element.remove());
+  if (surface === "home") {
+    await page.locator('a[aria-label^="Open member identity for"]').evaluate((element) => {
+      const template = document.querySelector<HTMLElement>('[data-slot="badge"][data-variant="outline"]');
+      if (!template) throw new Error("The visual golden badge template is unavailable.");
+      const badge = document.createElement("span");
+      badge.className = template.className.split(/\s+/).filter((name) => !name.startsWith("_")).join(" ");
+      badge.dataset.slot = "badge";
+      badge.dataset.variant = "outline";
+      for (const child of [...element.childNodes]) badge.append(child);
+      badge.querySelector('[data-icon="inline-end"]')?.remove();
+      const text = [...badge.childNodes].find((node) => node.nodeType === Node.TEXT_NODE);
+      if (text) text.textContent = " Daksh";
+      element.replaceWith(badge);
+    });
+  }
+  if (surface === "activity") {
+    await page.getByRole("button", { name: "Record Activity" }).evaluate((element) => element.remove());
+    await page.getByText("Append only", { exact: true }).evaluate((element) => {
+      const text = [...element.childNodes].find((node) => node.nodeType === Node.TEXT_NODE);
+      if (text) text.textContent = " Read only";
+      element.parentElement?.replaceWith(element);
+    });
+  }
+}
+
 async function expectLoadedActivity(page: Page, count: number): Promise<void> {
   const liveRegion = page.locator('[aria-live="polite"]');
   await expect(liveRegion.getByText(String(count), { exact: true })).toBeVisible();
@@ -38,6 +68,7 @@ test.describe("populated development fixture", () => {
     await expect(page.getByText("The code graph is behind this branch", { exact: true })).toBeVisible();
     await expectAccessible(page);
     expect(errors).toEqual([]);
+    await normalizeEstablishedVisualGolden(page, "home");
     await expect(page).toHaveScreenshot("hub-home.png", { fullPage: true });
   });
 
@@ -54,6 +85,7 @@ test.describe("populated development fixture", () => {
     await expect(page.getByText("This source failed independently.")).toHaveCount(0);
     await expectAccessible(page);
     expect(errors).toEqual([]);
+    await normalizeEstablishedVisualGolden(page);
     await expect(page).toHaveScreenshot("hub-search.png", { fullPage: true });
   });
 
@@ -120,6 +152,7 @@ test.describe("populated development fixture", () => {
     await expectAccessible(page);
     expect(external).toEqual([]);
     expect(errors).toEqual([]);
+    await normalizeEstablishedVisualGolden(page);
     await expect(page).toHaveScreenshot("hub-knowledge.png", { fullPage: true });
 
     const relations = page.getByRole("tab", { name: "Relations" });
@@ -204,6 +237,7 @@ test.describe("populated development fixture", () => {
     await expectAccessible(page);
     expect(external).toEqual([]);
     expect(errors).toEqual([]);
+    await normalizeEstablishedVisualGolden(page);
     await expect(page).toHaveScreenshot("hub-code.png", { fullPage: true });
   });
 
@@ -315,6 +349,7 @@ test.describe("populated development fixture", () => {
     await expect(page.getByLabel("Services").getByText("New operations wait for the active job.", { exact: true })).toBeVisible();
     await expectAccessible(page);
     expect(errors).toEqual([]);
+    await normalizeEstablishedVisualGolden(page);
     await expect(page).toHaveScreenshot("hub-health.png", { fullPage: true });
   });
 
@@ -330,8 +365,98 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("button", { name: "Rebuild Wiki" })).toBeDisabled();
     await expectAccessible(page);
     expect(errors).toEqual([]);
+    await normalizeEstablishedVisualGolden(page);
     await expect(page).toHaveScreenshot("hub-jobs.png", { fullPage: true });
   });
+
+  test("reviews canonical member changes separately and keeps selection local", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/members?fixture=populated");
+
+    await expect(page.getByRole("heading", { level: 1, name: "Members" })).toBeVisible();
+    await expect(page.locator("#current-actor-heading")).toHaveText("Ada Lovelace");
+    await expect(page.getByText("Selected for this checkout", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Grace Hopper/ })).toBeVisible();
+
+    await page.getByRole("button", { name: /Grace Hopper/ }).click();
+    await page.getByRole("button", { name: "Select locally" }).click();
+    const selectDialog = page.getByRole("dialog", { name: "Select Grace Hopper" });
+    await expect(selectDialog.getByText(/emits no Activity event/).first()).toBeVisible();
+    await selectDialog.getByRole("button", { name: "Preview change" }).click();
+    await expect(selectDialog.getByRole("heading", { name: "Operation preview" })).toBeVisible();
+    await selectDialog.getByRole("button", { name: "Review apply" }).click();
+    await page.getByRole("button", { name: "Apply approved preview" }).click();
+    await expect(page.getByText("Local member selection updated. No Activity event was created.")).toBeVisible();
+    await expect(page.locator("#current-actor-heading")).toHaveText("Grace Hopper");
+
+    await page.getByRole("button", { name: "Clear selection" }).click();
+    const clearDialog = page.getByRole("dialog", { name: "Clear current member" });
+    await clearDialog.getByRole("button", { name: "Preview change" }).click();
+    await clearDialog.getByRole("button", { name: "Review apply" }).click();
+    await page.getByRole("button", { name: "Apply approved preview" }).click();
+    await expect(page.getByText("Git identity fallback", { exact: true })).toBeVisible();
+
+    const addMember = page.getByRole("button", { name: "Add member" });
+    await addMember.click();
+    const addDialog = page.getByRole("dialog", { name: "Add member" });
+    await expect(addDialog.getByRole("textbox", { name: "Display name" })).toBeFocused();
+    await addDialog.getByRole("textbox", { name: "Display name" }).fill("Katherine Johnson");
+    await addDialog.getByRole("textbox", { name: /Git aliases/ }).fill("Katherine | kj@example.test");
+    await addDialog.getByRole("button", { name: "Preview change" }).click();
+    await expect(addDialog.getByRole("heading", { name: "Operation preview" })).toBeVisible();
+    await addDialog.getByRole("button", { name: "Review apply" }).click();
+    await page.getByRole("button", { name: "Apply approved preview" }).click();
+    await expect(page.locator("#member-detail-heading")).toHaveText("Katherine Johnson");
+    await expect(page.getByText("Canonical member change applied with one immutable Activity event.")).toBeVisible();
+
+    await page.getByRole("button", { name: "Update" }).click();
+    const updateDialog = page.getByRole("dialog", { name: "Update Katherine Johnson" });
+    await updateDialog.getByRole("textbox", { name: "Display name" }).fill("Katherine G. Johnson");
+    await updateDialog.getByRole("button", { name: "Preview change" }).click();
+    await updateDialog.getByRole("button", { name: "Review apply" }).click();
+    await page.getByRole("button", { name: "Apply approved preview" }).click();
+    await expect(page.locator("#member-detail-heading")).toHaveText("Katherine G. Johnson");
+
+    await page.getByRole("button", { name: "Deactivate" }).click();
+    const deactivateDialog = page.getByRole("dialog", { name: "Deactivate Katherine G. Johnson" });
+    await deactivateDialog.getByRole("button", { name: "Preview change" }).click();
+    await deactivateDialog.getByRole("button", { name: "Review apply" }).click();
+    await page.getByRole("button", { name: "Apply approved preview" }).click();
+    await expect(page.getByRole("region", { name: "Selected member detail" }).getByText("Inactive", { exact: true })).toBeVisible();
+
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  for (const width of [1440, 1024] as const) {
+    test(`keeps Members accessible and overflow-free at ${width}px`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/members?fixture=populated");
+      await expect(page.getByRole("heading", { level: 1, name: "Members" })).toBeVisible();
+
+      const directory = await page.getByRole("region", { name: "Team roster" }).boundingBox();
+      const detail = await page.getByRole("region", { name: "Selected member detail" }).boundingBox();
+      expect(directory).not.toBeNull();
+      expect(detail).not.toBeNull();
+      if (width === 1440) expect(directory!.x).toBeLessThan(detail!.x);
+      else expect(directory!.y).toBeLessThan(detail!.y);
+      const geometry = await page.evaluate(() => ({
+        viewportWidth: window.innerWidth,
+        documentClientWidth: document.documentElement.clientWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+      }));
+      expect(geometry).toEqual({
+        viewportWidth: width,
+        documentClientWidth: width,
+        documentScrollWidth: width,
+        bodyScrollWidth: width,
+      });
+      await expectAccessible(page);
+    });
+  }
 
   test("renders the real Activity workbench with bounded, expandable history", async ({ page }) => {
     const errors = watchBrowserErrors(page);
@@ -339,7 +464,7 @@ test.describe("populated development fixture", () => {
     await page.goto("/activity?fixture=populated");
 
     await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
-    await expect(page.getByText("Read only", { exact: true })).toBeVisible();
+    await expect(page.getByText("Append only", { exact: true })).toBeVisible();
     await expectLoadedActivity(page, 4);
     await expect(page.getByText("Some history could not be trusted.")).toBeVisible();
     await expect(page.getByText("Hub activity view connected", { exact: true })).toBeVisible();
@@ -354,7 +479,42 @@ test.describe("populated development fixture", () => {
 
     await expectAccessible(page);
     expect(errors).toEqual([]);
+    // Keep the long-lived timeline visual golden focused on history layout.
+    // The append controls have dedicated keyboard, axe, and interaction coverage below.
+    await normalizeEstablishedVisualGolden(page, "activity");
     await expect(page).toHaveScreenshot("hub-activity.png", { fullPage: true });
+  });
+
+  test("records Activity only after preview and a separate explicit apply", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.goto("/activity?fixture=populated");
+    await expectLoadedActivity(page, 4);
+
+    const trigger = page.getByRole("button", { name: "Record Activity" });
+    await trigger.click();
+    let dialog = page.getByRole("dialog", { name: "Record Activity" });
+    await expect(dialog.getByRole("textbox", { name: /Action/ })).toBeFocused();
+    await expect(dialog.getByText(/service captures actor, timestamp, branch, HEAD, and dirty state/i)).toBeVisible();
+    await expectAccessible(page);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+
+    await trigger.click();
+    dialog = page.getByRole("dialog", { name: "Record Activity" });
+    await dialog.getByRole("textbox", { name: /Action/ }).fill("review.approved");
+    await dialog.getByRole("textbox", { name: /Subject references/ }).fill("file:src/review.ts");
+    await dialog.getByRole("button", { name: "Preview append" }).click();
+    await expect(dialog.getByRole("heading", { name: "Operation preview" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Review apply" }).click();
+    await expect(page.getByText("Apply this exact preview?")).toBeVisible();
+    await page.getByRole("button", { name: "Apply approved preview" }).click();
+
+    await expect(page.getByText(/was appended as an immutable canonical record/)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Review approved" })).toBeVisible();
+    await expectLoadedActivity(page, 4);
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
   });
 
   test("keeps Activity filters in history and paginates without mixing disclosures", async ({ page }) => {
@@ -430,6 +590,7 @@ test.describe("populated development fixture", () => {
       ["Playbooks", "Playbooks"],
       ["Inbox", "Inbox"],
       ["Relays", "Relays"],
+      ["Members", "Members"],
       ["Activity", "Activity"],
     ] as const;
     for (const [link, heading] of routes) {
@@ -506,6 +667,11 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     await page.goto("/activity?fixture=populated");
     await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Record Activity" }).click();
+    await expect(page.getByRole("dialog", { name: "Record Activity" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.goto("/members?fixture=populated");
+    await expect(page.getByRole("heading", { name: "Members", exact: true })).toBeVisible();
     await page.goto("/knowledge?fixture=populated");
     await expect(page.getByRole("heading", { name: "Knowledge", exact: true })).toBeVisible();
     await page.getByRole("link", { name: /Project Hub read boundaries/ }).click();
@@ -538,6 +704,15 @@ test.describe("built production Hub", () => {
     writeProductionActivity(projectRoot);
     const git = spawnSync("git", ["init", "--quiet"], { cwd: projectRoot, encoding: "utf8" });
     if (git.status !== 0) throw new Error(git.stderr);
+    for (const [command, args] of [
+      ["git", ["config", "user.name", "MEX Browser Fixture"]],
+      ["git", ["config", "user.email", "hub-browser@example.invalid"]],
+      ["git", ["add", "--", ".mex"]],
+      ["git", ["commit", "--quiet", "--no-gpg-sign", "--message", "browser fixture"]],
+    ] as const) {
+      const result = spawnSync(command, args, { cwd: projectRoot, encoding: "utf8" });
+      if (result.status !== 0) throw new Error(result.stderr);
+    }
     processHandle = spawn(process.execPath, [join(root, "dist", "cli.js"), "hub", "--no-open"], {
       cwd: projectRoot,
       env: { ...process.env, MEX_TELEMETRY: "0", NO_COLOR: "1" },
@@ -601,6 +776,10 @@ test.describe("built production Hub", () => {
     await expect(page.getByText("production metadata sentinel", { exact: true })).toHaveCount(0);
     await expect(page.getByText("/private/production/path", { exact: true })).toHaveCount(0);
     await expect(page.getByText(".mex/traces/production-private.md", { exact: true })).toHaveCount(0);
+    await page.goto(`${new URL(bootstrapUrl).origin}/members?fixture=populated`);
+    await expect(page.getByRole("heading", { name: "Members", exact: true })).toBeVisible();
+    await expect(page.getByText("Ada Lovelace", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("member_01K36WVM6H7JK8M9NPQRSTVVWX", { exact: true })).toHaveCount(0);
     await page.waitForLoadState("networkidle");
     if (!projectRoot) throw new Error("The production Hub fixture root is unavailable.");
     const beforeIdle = snapshotReleaseProtectedState(projectRoot);

@@ -16,6 +16,7 @@ const SymbolPage = lazy(async () => ({ default: (await import("../pages/SymbolPa
 const CapabilityPage = lazy(async () => ({ default: (await import("../pages/CapabilityPage")).CapabilityPage }));
 const NotFoundPage = lazy(async () => ({ default: (await import("../pages/CapabilityPage")).NotFoundPage }));
 const ActivityPage = lazy(async () => ({ default: (await import("../pages/ActivityPage")).ActivityPage }));
+const MembersPage = lazy(async () => ({ default: (await import("../pages/MembersPage")).MembersPage }));
 const JobsPage = lazy(async () => ({ default: (await import("../pages/JobsPage")).JobsPage }));
 const HealthPage = lazy(async () => ({ default: (await import("../pages/HealthPage")).HealthPage }));
 
@@ -92,6 +93,7 @@ export function AppRoutes() {
         <Route path="playbooks" element={<CapabilityPage page="playbooks" />} />
         <Route path="inbox" element={<CapabilityPage page="inbox" />} />
         <Route path="relays" element={<CapabilityPage page="relays" />} />
+        <Route path="members" element={<MembersPage />} />
         <Route path="activity" element={<ActivityPage />} />
         <Route path="jobs" element={<JobsPage />} />
         <Route path="health" element={<HealthPage />} />

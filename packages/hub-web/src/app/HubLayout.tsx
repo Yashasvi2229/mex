@@ -15,13 +15,14 @@ import { JobLifecycleObserver } from "./JobLifecycleObserver";
 
 function capabilityAvailable(
   capabilities: CapabilitiesResponse | undefined,
-  name: "graph" | "wiki" | "jobs" | "activity" | "team" | undefined,
+  name: "graph" | "wiki" | "jobs" | "activity" | "members" | "team" | undefined,
 ): boolean | undefined {
   if (!name || !capabilities) return undefined;
   if (name === "graph") return capabilities.graph.read.availability === "available";
   if (name === "wiki") return capabilities.wiki.read.availability === "available";
   if (name === "jobs") return capabilities.jobs.availability === "available";
   if (name === "activity") return capabilities.activity.availability === "available";
+  if (name === "members") return capabilities.members.read.availability === "available";
   return false;
 }
 

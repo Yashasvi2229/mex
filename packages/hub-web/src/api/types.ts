@@ -38,6 +38,18 @@ export type {
   SourceSearchResult,
   SymbolSearchResult,
   SessionResponse,
+  TeamActivityEvent,
+  TeamActivitySubjectInput,
+  TeamActorRef,
+  TeamCurrentActorResponse,
+  TeamGitAlias,
+  TeamMember,
+  TeamMemberListRequest,
+  TeamMemberListResponse,
+  TeamOperationApplyRequest,
+  TeamOperationApplyResponse,
+  TeamOperationPreviewRequest,
+  TeamOperationPreviewResponse,
   WikiSearchResult,
   WikiBacklinksRequest,
   WikiBacklinksResponse,
@@ -59,5 +71,5 @@ export type {
   WikiSource,
 } from "@mex/hub-contracts";
 
-export type CapabilityName = "graph" | "wiki" | "jobs" | "activity" | "team";
+export type CapabilityName = "graph" | "wiki" | "jobs" | "activity" | "members" | "team";
 export type Tone = "neutral" | "info" | "success" | "warning" | "danger";

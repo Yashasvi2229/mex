@@ -35,6 +35,7 @@
       "playbooks": { "jsBytes": 7102, "cssBytes": 3510, "fontBytes": 0 },
       "inbox": { "jsBytes": 7102, "cssBytes": 3510, "fontBytes": 0 },
       "relays": { "jsBytes": 7102, "cssBytes": 3510, "fontBytes": 0 },
+      "members": { "jsBytes": 90462, "cssBytes": 11426, "fontBytes": 0 },
       "activity": { "jsBytes": 26842, "cssBytes": 18386, "fontBytes": 0 },
       "jobs": { "jsBytes": 29158, "cssBytes": 14641, "fontBytes": 0 },
       "health": { "jsBytes": 30307, "cssBytes": 16736, "fontBytes": 0 },
@@ -64,19 +65,19 @@
       "small": {
         "home": 4595594, "search": 5426602, "knowledge": 4769934, "knowledgeDetail": 4855696,
         "code": 5388496, "codeSymbol": 4845185, "workstreams": 4198499, "specs": 4198503,
-        "playbooks": 4203807, "inbox": 4198623, "relays": 4198669, "activity": 4562055,
+        "playbooks": 4203807, "inbox": 4198623, "relays": 4198669, "members": 4910523, "activity": 4562055,
         "jobs": 4567014, "health": 4510981, "notFound": 4185582
       },
       "medium": {
         "home": 4596840, "search": 5762301, "knowledge": 5013554, "knowledgeDetail": 4856552,
         "code": 5720349, "codeSymbol": 4849523, "workstreams": 4198213, "specs": 4202004,
-        "playbooks": 4199281, "inbox": 4203135, "relays": 4203204, "activity": 4806655,
+        "playbooks": 4199281, "inbox": 4203135, "relays": 4203204, "members": 4910523, "activity": 4806655,
         "jobs": 4564691, "health": 4511036, "notFound": 4185554
       },
       "large": {
         "home": 4597084, "search": 6027330, "knowledge": 5135808, "knowledgeDetail": 4858258,
         "code": 5989987, "codeSymbol": 4847729, "workstreams": 4198402, "specs": 4198296,
-        "playbooks": 4203858, "inbox": 4203287, "relays": 4203264, "activity": 4955792,
+        "playbooks": 4203858, "inbox": 4203287, "relays": 4203264, "members": 4910523, "activity": 4955792,
         "jobs": 4563113, "health": 4509017, "notFound": 4181773
       }
     },

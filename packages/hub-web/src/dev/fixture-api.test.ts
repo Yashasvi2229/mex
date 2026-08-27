@@ -9,6 +9,11 @@ import {
   JobPageResponseSchema,
   SearchResponseSchema,
   SessionResponseSchema,
+  TeamCurrentActorResponseSchema,
+  TeamMemberListResponseSchema,
+  TeamMemberSchema,
+  TeamOperationApplyResponseSchema,
+  TeamOperationPreviewResponseSchema,
   WikiBacklinksResponseSchema,
   WikiEntityDetailResponseSchema,
   WikiEntityListResponseSchema,
@@ -56,5 +61,32 @@ describe("development-only populated fixture", () => {
     expect(WikiRelationsResponseSchema.safeParse(relations).success).toBe(true);
     expect(WikiBacklinksResponseSchema.safeParse(backlinks).success).toBe(true);
     expect(CodeKnowledgeResponseSchema.safeParse(codeKnowledge).success).toBe(true);
+
+    const members = await api.getMembers({ limit: 25 });
+    const member = await api.getMember(members.items[0]!.id);
+    const currentActor = await api.getCurrentActor();
+    expect(TeamMemberListResponseSchema.safeParse(members).success).toBe(true);
+    expect(TeamMemberSchema.safeParse(member).success).toBe(true);
+    expect(TeamCurrentActorResponseSchema.safeParse(currentActor).success).toBe(true);
+
+    const preview = await api.previewTeamOperation({
+      operationId: "fixture_member_select_contract",
+      action: { kind: "member.select", memberId: members.items[1]!.id },
+      expectedRevisions: [
+        {
+          target: { kind: "artifact", path: members.items[1]!.sourcePath },
+          revision: members.items[1]!.revision,
+        },
+        {
+          target: { kind: "local", namespace: "member-selection", id: "current" },
+          revision: currentActor.selection?.revision ?? null,
+        },
+      ],
+    });
+    const applied = await api.applyTeamOperation(preview);
+    expect(TeamOperationPreviewResponseSchema.safeParse(preview).success).toBe(true);
+    expect(TeamOperationApplyResponseSchema.safeParse(applied).success).toBe(true);
+    expect(applied.events).toEqual([]);
+    expect((await api.getCurrentActor()).selection?.memberId).toBe(members.items[1]!.id);
   });
 });

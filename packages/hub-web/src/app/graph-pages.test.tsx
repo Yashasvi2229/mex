@@ -11,27 +11,7 @@ import { AppRoutes } from "./App";
 
 function apiWith(overrides: Partial<HubApi>): HubApi {
   const fixture = createFixtureApi();
-  return {
-    bootstrap: (token) => fixture.bootstrap(token),
-    getSession: () => fixture.getSession(),
-    getCapabilities: () => fixture.getCapabilities(),
-    getHome: () => fixture.getHome(),
-    getActivity: (request) => fixture.getActivity(request),
-    search: (request) => fixture.search(request),
-    getCodeSymbol: (id, request) => fixture.getCodeSymbol(id, request),
-    listWikiEntities: (request) => fixture.listWikiEntities(request),
-    getWikiEntity: (id) => fixture.getWikiEntity(id),
-    getWikiRelations: (id, request) => fixture.getWikiRelations(id, request),
-    getWikiBacklinks: (id, request) => fixture.getWikiBacklinks(id, request),
-    getCodeKnowledge: (id, request) => fixture.getCodeKnowledge(id, request),
-    getHealth: () => fixture.getHealth(),
-    getJobs: (cursor) => fixture.getJobs(cursor),
-    getJob: (id) => fixture.getJob(id),
-    startJob: (request) => fixture.startJob(request),
-    cancelJob: (id) => fixture.cancelJob(id),
-    subscribeToJob: (id, onSnapshot) => fixture.subscribeToJob(id, onSnapshot),
-    ...overrides,
-  };
+  return Object.assign(fixture, overrides);
 }
 
 function LocationProbe() {
