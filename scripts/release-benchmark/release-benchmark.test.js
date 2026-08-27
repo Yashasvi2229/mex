@@ -10,6 +10,8 @@ import {
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
 import { describe, expect, it } from "vitest";
 import { assertNoForbiddenWorkbench, evaluateAssetBudgets } from "./assets.mjs";
 import {
@@ -29,6 +31,7 @@ import { candidateRuntimeBudgets, evaluateRuntimeBudgets } from "./runtime-budge
 import {
   classifyRuntimeViolations,
   evaluateRuntimeConfirmation,
+  runtimeMaterialityPolicy,
 } from "./runtime-confirmation.mjs";
 import { assetBudgetCandidate, runtimeBudgetCandidate, summarize } from "./statistics.mjs";
 
@@ -77,6 +80,10 @@ describe("release benchmark contract", () => {
       "failed",
       "operational_failure",
     ]);
+    expect(reportSchema.$defs.runtimeConfirmation.required).not.toContain("advisoryAssessments");
+    expect(reportSchema.$defs.runtimeConfirmation.required).not.toContain("materialAssessments");
+    expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("advisoryAssessments");
+    expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("materialAssessments");
   });
 
   it("uses nearest-rank p95 and rejects the wrong sample count", () => {
@@ -90,6 +97,76 @@ describe("release benchmark contract", () => {
     expect(() => summarize([1, 2, 3, 4], 5)).toThrow(/exactly 5 samples/u);
     expect(runtimeBudgetCandidate(100.01)).toBe(116);
     expect(assetBudgetCandidate(100.01)).toBe(106);
+  });
+
+  it("strictly validates advisory and material final benchmark reports", () => {
+    const ajv = new Ajv2020({ strict: true });
+    addFormats(ajv);
+    const validate = ajv.compile(reportSchema);
+    const metric = "runtime.apiLatencyMs.small.code";
+    const legacyReport = representativeReleaseReport({
+      runtimeViolations: [],
+      passed: true,
+      confirmation: {
+        status: "passed",
+        repositoryHead: "a".repeat(40),
+        firstPassViolations: [],
+        secondPassViolations: [],
+        confirmedViolations: [],
+      },
+    });
+    expect(validate(legacyReport), JSON.stringify(validate.errors)).toBe(true);
+
+    const firstAdvisory = runtimeViolation(metric, 53);
+    const secondAdvisory = runtimeViolation(metric, 58);
+    const advisoryAssessment = materialityAssessment({
+      classification: "advisory",
+      reason: "below_material_threshold",
+      firstMeasured: 53,
+      secondMeasured: 58,
+    });
+    const advisoryReport = representativeReleaseReport({
+      runtimeViolations: [],
+      passed: true,
+      confirmation: {
+        status: "passed",
+        repositoryHead: "a".repeat(40),
+        firstPassViolations: [firstAdvisory],
+        secondPassViolations: [secondAdvisory],
+        confirmedViolations: [secondAdvisory],
+        advisoryAssessments: [advisoryAssessment],
+        materialAssessments: [],
+      },
+    });
+    expect(validate(advisoryReport), JSON.stringify(validate.errors)).toBe(true);
+
+    const firstMaterial = runtimeViolation(metric, 67);
+    const secondMaterial = runtimeViolation(metric, 70);
+    const materialAssessment = materialityAssessment({
+      classification: "material",
+      reason: "repeated_material_threshold",
+      firstMeasured: 67,
+      secondMeasured: 70,
+    });
+    const materialReport = representativeReleaseReport({
+      runtimeViolations: [secondMaterial],
+      passed: false,
+      confirmation: {
+        status: "failed",
+        repositoryHead: "a".repeat(40),
+        firstPassViolations: [firstMaterial],
+        secondPassViolations: [secondMaterial],
+        confirmedViolations: [secondMaterial],
+        advisoryAssessments: [],
+        materialAssessments: [materialAssessment],
+      },
+    });
+    expect(validate(materialReport), JSON.stringify(validate.errors)).toBe(true);
+
+    materialReport.budgetEvaluation.runtimeConfirmation.materialAssessments = [
+      advisoryAssessment,
+    ];
+    expect(validate(materialReport)).toBe(false);
   });
 
   it("fails deterministic asset bytes above the committed golden", () => {
@@ -153,7 +230,7 @@ describe("release benchmark contract", () => {
     });
   });
 
-  it("retries only noisy runtime metrics and requires the same metric twice", () => {
+  it("retries noisy crossings but blocks only repeated material crossings", () => {
     const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
     const activity = runtimeViolation("runtime.apiLatencyMs.medium.activity");
     const initial = evaluateRuntimeConfirmation([knowledge]);
@@ -166,10 +243,106 @@ describe("release benchmark contract", () => {
     });
     expect(evaluateRuntimeConfirmation([knowledge], [knowledge])).toMatchObject({
       retryRequired: false,
-      status: "failed",
-      finalViolations: [knowledge],
+      status: "passed",
+      finalViolations: [],
       confirmed: [knowledge],
+      advisoryAssessments: [{
+        metric: knowledge.metric,
+        classification: "advisory",
+        reason: "below_material_threshold",
+      }],
+      materialAssessments: [],
     });
+  });
+
+  it("applies every exact category policy and rejects unknown exact keys", () => {
+    const policyCases = [
+      ["runtime.coldHubReadyMs.small", "cold_readiness_ms", 100, 1082.15],
+      ["runtime.idleRssBytes.small", "rss_bytes", 32 * 1024 * 1024, 239304704],
+      ["runtime.idleCpuMs.large", "idle_cpu_ms", 25, 37],
+      ["runtime.apiLatencyMs.small.code", "api_latency_ms", 15, 66],
+      ["runtime.maintenanceMs.small.wiki_rebuild", "maintenance_ms", 50, 231],
+      ["runtime.maintenancePeakRssBytes.small.graph_refresh", "rss_bytes", 32 * 1024 * 1024, 541235558.4],
+      ["runtime.browserHeapBytes.small.home", "browser_heap_bytes", 2 * 1024 * 1024, 6692746],
+    ];
+    for (const [metric, category, minimumExcess, materialThreshold] of policyCases) {
+      const policy = runtimeMaterialityPolicy(metric);
+      expect(policy).toEqual({
+        budget: committedRuntimeBudget(metric),
+        category,
+        minimumExcess,
+        materialThreshold,
+      });
+      expect(evaluateRuntimeConfirmation(
+        [runtimeViolation(metric, policy.materialThreshold + 1)],
+        [runtimeViolation(metric, policy.materialThreshold + 2)],
+      )).toMatchObject({ status: "failed", materialAssessments: [{ metric }] });
+      expect(evaluateRuntimeConfirmation(
+        [runtimeViolation(metric, policy.materialThreshold)],
+        [runtimeViolation(metric, policy.materialThreshold + 2)],
+      )).toMatchObject({ status: "passed", materialAssessments: [] });
+    }
+
+    const exactMetrics = committedConfirmableRuntimeMetrics();
+    expect(exactMetrics).toHaveLength(90);
+    for (const metric of exactMetrics) {
+      expect(runtimeMaterialityPolicy(metric)).not.toBeNull();
+      const violation = runtimeViolation(metric);
+      expect(classifyRuntimeViolations([violation])).toEqual({
+        confirmable: [violation],
+        immediate: [],
+      });
+    }
+    expect(runtimeMaterialityPolicy("runtime.apiLatencyMs.unknown.future")).toBeNull();
+  });
+
+  it("keeps small repeated API crossings advisory and blocks material ones", () => {
+    const metric = "runtime.apiLatencyMs.small.code";
+    const advisory = evaluateRuntimeConfirmation(
+      [runtimeViolation(metric, 53)],
+      [runtimeViolation(metric, 58)],
+    );
+    expect(advisory).toMatchObject({
+      status: "passed",
+      finalViolations: [],
+      advisoryAssessments: [{
+        metric,
+        budget: 51,
+        minimumExcess: 15,
+        materialThreshold: 66,
+        firstMeasured: 53,
+        secondMeasured: 58,
+        classification: "advisory",
+        reason: "below_material_threshold",
+      }],
+      materialAssessments: [],
+    });
+
+    const material = evaluateRuntimeConfirmation(
+      [runtimeViolation(metric, 67)],
+      [runtimeViolation(metric, 70)],
+    );
+    expect(material).toMatchObject({
+      status: "failed",
+      finalViolations: [runtimeViolation(metric, 70)],
+      materialAssessments: [{
+        metric,
+        budget: 51,
+        materialThreshold: 66,
+        firstMeasured: 67,
+        secondMeasured: 70,
+        classification: "material",
+        reason: "repeated_material_threshold",
+      }],
+    });
+    expect(evaluateRuntimeConfirmation(
+      [runtimeViolation(metric, 67)],
+      [runtimeViolation(metric, 60)],
+    )).toMatchObject({ status: "passed", finalViolations: [] });
+    expect(evaluateRuntimeConfirmation(
+      [runtimeViolation(metric, 66)],
+      [runtimeViolation(metric, 70)],
+    )).toMatchObject({ status: "passed", finalViolations: [] });
   });
 
   it("keeps database ratios, outbound requests, and unknown metrics immediate", () => {
@@ -181,18 +354,27 @@ describe("release benchmark contract", () => {
       "runtime.maintenanceMs.small.graph_refresh",
       "runtime.maintenancePeakRssBytes.small.graph_refresh",
       "runtime.browserHeapBytes.small.home",
-    ].map(runtimeViolation);
+    ].map((metric) => runtimeViolation(metric));
     const database = runtimeViolation("runtime.databaseToInputRatio.small.graph");
     const outbound = runtimeViolation("runtime.outboundRequestCount.small");
     const unknown = runtimeViolation("runtime.apiLatencyMs.unknown.future");
-    expect(classifyRuntimeViolations([...noisy, database, outbound, unknown])).toEqual({
+    const mismatchedBudget = runtimeViolation("runtime.apiLatencyMs.small.code", 70, 52);
+    expect(classifyRuntimeViolations([
+      ...noisy,
+      database,
+      outbound,
+      unknown,
+      mismatchedBudget,
+    ])).toEqual({
       confirmable: noisy,
-      immediate: [database, outbound, unknown],
+      immediate: [database, outbound, unknown, mismatchedBudget],
     });
     expect(evaluateRuntimeConfirmation([noisy[0], database])).toMatchObject({
       retryRequired: false,
       status: "skipped_immediate_failure",
       finalViolations: [database],
+      advisoryAssessments: [{ metric: noisy[0].metric, reason: "not_repeated" }],
+      materialAssessments: [],
     });
   });
 
@@ -212,6 +394,8 @@ describe("release benchmark contract", () => {
           firstPassViolations: [],
           secondPassViolations: [],
           confirmedViolations: [],
+          advisoryAssessments: [],
+          materialAssessments: [],
         },
       });
       expect(existsSync(join(root, "report.attempt-1.json"))).toBe(false);
@@ -231,7 +415,7 @@ describe("release benchmark contract", () => {
       ]);
       expect(result.exitCode).toBe(0);
       expect(result.calls).toBe(2);
-      expect(result.report.budgetEvaluation).toEqual({
+      expect(result.report.budgetEvaluation).toMatchObject({
         assetViolations: [],
         runtimeViolations: [],
         passed: true,
@@ -241,6 +425,11 @@ describe("release benchmark contract", () => {
           firstPassViolations: [knowledge],
           secondPassViolations: [activity],
           confirmedViolations: [],
+          advisoryAssessments: [
+            { metric: knowledge.metric, reason: "not_repeated" },
+            { metric: activity.metric, reason: "not_repeated" },
+          ],
+          materialAssessments: [],
         },
       });
       expect(readRawAttempt(root, 1).budgetEvaluation.runtimeViolations).toEqual([knowledge]);
@@ -250,26 +439,66 @@ describe("release benchmark contract", () => {
     }
   });
 
-  it("fails when the same noisy metric breaches twice", () => {
+  it("fails when the same noisy metric is material in both attempts", () => {
     const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-same-"));
-    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    const metric = "runtime.apiLatencyMs.small.code";
+    const first = runtimeViolation(metric, 67);
+    const second = runtimeViolation(metric, 70);
     try {
       const result = runConfirmationHarness(root, [
-        benchmarkPass({ runtimeViolations: [knowledge] }),
-        benchmarkPass({ runtimeViolations: [knowledge] }),
+        benchmarkPass({ runtimeViolations: [first] }),
+        benchmarkPass({ runtimeViolations: [second] }),
       ]);
       expect(result.exitCode).toBe(1);
       expect(result.calls).toBe(2);
       expect(result.report.budgetEvaluation).toMatchObject({
-        runtimeViolations: [knowledge],
+        runtimeViolations: [second],
         passed: false,
         runtimeConfirmation: {
           status: "failed",
-          firstPassViolations: [knowledge],
-          secondPassViolations: [knowledge],
-          confirmedViolations: [knowledge],
+          firstPassViolations: [first],
+          secondPassViolations: [second],
+          confirmedViolations: [second],
+          advisoryAssessments: [],
+          materialAssessments: [{ metric, classification: "material" }],
         },
       });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("emits repeated nonmaterial crossings as advisory in the final report", () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-advisory-"));
+    const metric = "runtime.apiLatencyMs.small.code";
+    const first = runtimeViolation(metric, 53);
+    const second = runtimeViolation(metric, 58);
+    try {
+      const result = runConfirmationHarness(root, [
+        benchmarkPass({ runtimeViolations: [first] }),
+        benchmarkPass({ runtimeViolations: [second] }),
+      ]);
+      expect(result.exitCode).toBe(0);
+      expect(result.report.budgetEvaluation).toMatchObject({
+        runtimeViolations: [],
+        passed: true,
+        runtimeConfirmation: {
+          status: "passed",
+          firstPassViolations: [first],
+          secondPassViolations: [second],
+          confirmedViolations: [second],
+          advisoryAssessments: [{
+            metric,
+            classification: "advisory",
+            reason: "below_material_threshold",
+            firstMeasured: 53,
+            secondMeasured: 58,
+          }],
+          materialAssessments: [],
+        },
+      });
+      expect(readRawAttempt(root, 1).budgetEvaluation.runtimeViolations).toEqual([first]);
+      expect(readRawAttempt(root, 2).budgetEvaluation.runtimeViolations).toEqual([second]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -506,8 +735,78 @@ function runtimeProfile(value) {
   };
 }
 
-function runtimeViolation(metric) {
-  return { metric, measured: 101, budget: 100, reason: "budget_exceeded" };
+function runtimeViolation(metric, measured, budget) {
+  const committedBudget = runtimeMaterialityPolicy(metric)?.budget ?? 100;
+  return {
+    metric,
+    measured: measured ?? committedBudget + 1,
+    budget: budget ?? committedBudget,
+    reason: "budget_exceeded",
+  };
+}
+
+function materialityAssessment(overrides) {
+  return {
+    metric: "runtime.apiLatencyMs.small.code",
+    category: "api_latency_ms",
+    budget: 51,
+    relativeExcessRatio: 0.15,
+    minimumExcess: 15,
+    materialThreshold: 66,
+    ...overrides,
+  };
+}
+
+function representativeReleaseReport({ runtimeViolations, passed, confirmation }) {
+  const assetGroup = { jsBytes: 0, cssBytes: 0, fontBytes: 0, files: [] };
+  return {
+    schemaVersion: 1,
+    benchmark: "mex-release-performance",
+    generatedAt: "2026-08-27T00:00:00.000Z",
+    environment: {},
+    configuration: {},
+    assets: {
+      initial: assetGroup,
+      routes: Object.fromEntries(RELEASE_ROUTE_KEYS.map((route) => [route, assetGroup])),
+      largestJsChunk: {},
+      budgetCandidates: {},
+      violations: [],
+    },
+    profiles: {},
+    budgetEvaluation: {
+      assetViolations: [],
+      runtimeViolations,
+      runtimeConfirmation: confirmation,
+      passed,
+    },
+    budgetCandidates: {},
+  };
+}
+
+function committedRuntimeBudget(metric) {
+  return runtimeMaterialityPolicy(metric)?.budget;
+}
+
+function committedConfirmableRuntimeMetrics() {
+  const metrics = [];
+  for (const name of ["coldHubReadyMs", "idleRssBytes", "idleCpuMs"]) {
+    for (const profile of Object.keys(budgets.runtime[name])) {
+      metrics.push(`runtime.${name}.${profile}`);
+    }
+  }
+  for (const name of [
+    "apiLatencyMs",
+    "maintenanceMs",
+    "maintenancePeakRssBytes",
+    "browserHeapBytes",
+  ]) {
+    for (const [profile, entries] of Object.entries(budgets.runtime[name])) {
+      for (const metric of Object.keys(entries)) {
+        metrics.push(`runtime.${name}.${profile}.${metric}`);
+      }
+    }
+  }
+  return metrics;
 }
 
 function benchmarkPass({ assetViolations = [], runtimeViolations = [] } = {}) {

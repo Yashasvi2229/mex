@@ -64,12 +64,29 @@ The read and maintenance nonmutation contracts likewise remain ordinary hard
 tests. A first pass containing only wall-clock, RSS, CPU, or browser-heap
 breaches triggers one independent full benchmark pass on the same pinned
 runner and exact repository HEAD. CI fails a noisy metric only when that exact
-metric breaches again; unrelated one-off breaches across the two passes are
-retained in `runtimeConfirmation` but are not treated as a confirmed regression.
-The final `runtimeViolations` list contains only immediate or confirmed failures.
-Operational benchmark failures are never retried as budget noise. Enforcement
-exits 0 for a pass, 1 for a budget failure, and 2 when a pass cannot produce a
-valid bounded report.
+metric breaches again and both measurements exceed its material threshold. The
+committed p95 budgets remain the raw alert/crossing line and are not
+recalibrated. For each exact metric key, the blocking threshold is
+`budget + max(15% of budget, minimum excess)`:
+
+| Runtime category | Minimum excess |
+| --- | ---: |
+| API latency | 15 ms |
+| Cold readiness | 100 ms |
+| Maintenance elapsed time | 50 ms |
+| Idle CPU | 25 ms |
+| Idle and maintenance peak RSS | 32 MiB |
+| Browser heap | 2 MiB |
+
+Crossings from both attempts remain bounded in `firstPassViolations` and
+`secondPassViolations`. Repeated exact keys remain in `confirmedViolations`.
+`advisoryAssessments` records one-off crossings and repeated crossings where
+either measurement is at or below the material threshold;
+`materialAssessments` records only repeated crossings where both measurements
+are strictly above it. The final `runtimeViolations` list contains only those
+material crossings plus immediate hard failures. Operational benchmark failures
+are never retried as budget noise. Enforcement exits 0 for a pass, 1 for a
+budget failure, and 2 when a pass cannot produce a valid bounded report.
 
 The dedicated `release-performance` CI job installs Chromium on the pinned
 runner, enforces the budgets, and retains the final report plus both attempt

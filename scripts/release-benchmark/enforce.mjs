@@ -31,7 +31,7 @@ function main() {
       "Usage: node scripts/release-benchmark/enforce.mjs [--output <path>] [--assets-only]",
       "",
       "Runtime budgets are enforced only when MEX_ENFORCE_RELEASE_BUDGETS=1.",
-      "Noisy runtime-only breaches receive one independent confirmation pass.",
+      "Noisy runtime-only breaches receive one materiality-aware confirmation pass.",
       "Deterministic contract breaches and operational failures never receive a retry.",
       "",
     ].join("\n"));
@@ -80,6 +80,8 @@ export function enforceWithConfirmation(outputPath, dependencies = {}) {
       [],
       initialDecision.confirmed,
       repositoryHead,
+      initialDecision.advisoryAssessments,
+      initialDecision.materialAssessments,
     ), initialDecision.finalViolations, undefined, emitReport);
     rmSync(firstPath, { force: true });
     return initialDecision.finalViolations.length === 0 ? 0 : 1;
@@ -135,6 +137,8 @@ export function enforceWithConfirmation(outputPath, dependencies = {}) {
     secondReport.budgetEvaluation.runtimeViolations,
     decision.confirmed,
     repositoryHead,
+    decision.advisoryAssessments,
+    decision.materialAssessments,
   ), decision.finalViolations, passed, emitReport);
   return passed ? 0 : 1;
 }
@@ -197,6 +201,8 @@ function confirmationRecord(
   secondPassViolations,
   confirmedViolations,
   repositoryHead,
+  advisoryAssessments = [],
+  materialAssessments = [],
 ) {
   return {
     status,
@@ -204,6 +210,8 @@ function confirmationRecord(
     firstPassViolations: firstPassViolations.slice(0, 200),
     secondPassViolations: secondPassViolations.slice(0, 200),
     confirmedViolations: confirmedViolations.slice(0, 200),
+    advisoryAssessments: advisoryAssessments.slice(0, 400),
+    materialAssessments: materialAssessments.slice(0, 200),
   };
 }
 
