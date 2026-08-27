@@ -86,6 +86,11 @@ describe("release benchmark contract", () => {
     expect(reportSchema.$defs.runtimeConfirmation.required).not.toContain("materialAssessments");
     expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("advisoryAssessments");
     expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("materialAssessments");
+    expect(reportSchema.$defs.profile.properties.fixture.required).toContain("workstreams");
+    expect(reportSchema.$defs.profile.properties.fixture.properties.workstreams).toEqual({
+      type: "integer",
+      minimum: 1,
+    });
   });
 
   it("uses nearest-rank p95 and rejects the wrong sample count", () => {
@@ -124,6 +129,18 @@ describe("release benchmark contract", () => {
     const ajv = new Ajv2020({ strict: true });
     addFormats(ajv);
     const validate = ajv.compile(reportSchema);
+    const validateFixture = ajv.compile({
+      $defs: reportSchema.$defs,
+      ...reportSchema.$defs.profile.properties.fixture,
+    });
+    const generatedFixture = {
+      profile: "small",
+      ...RELEASE_FIXTURE_PROFILES.small,
+      input: { graphBytes: 1, graphFiles: 1, wikiBytes: 1, wikiFiles: 1 },
+    };
+    expect(validateFixture(generatedFixture), JSON.stringify(validateFixture.errors)).toBe(true);
+    const { workstreams: _workstreams, ...legacyFixture } = generatedFixture;
+    expect(validateFixture(legacyFixture)).toBe(false);
     const metric = "runtime.apiLatencyMs.small.code";
     const legacyReport = representativeReleaseReport({
       runtimeViolations: [],

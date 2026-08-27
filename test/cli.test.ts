@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { Command, InvalidArgumentError } from "commander";
 import { execFileSync, execSync, spawnSync } from "node:child_process";
-import { readFileSync, readdirSync, symlinkSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  symlinkSync,
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -755,13 +764,50 @@ describe("mex --version", () => {
   });
 });
 
+describe("snapshotProcessTree", () => {
+  it("skips an entry that disappears after listing without hiding a dangling-link error", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-snapshot-race-"));
+    try {
+      const transient = join(fixture, "maintenance.lock");
+      writeFileSync(transient, "locked");
+      expect(readdirSync(fixture)).toContain("maintenance.lock");
+      rmSync(transient);
+
+      expect(readFileOrDirectory(transient)).toBeUndefined();
+
+      const dangling = join(fixture, "dangling");
+      symlinkSync(join(fixture, "missing-target"), dangling);
+      let danglingError: unknown;
+      try {
+        readFileOrDirectory(dangling);
+      } catch (error) {
+        danglingError = error;
+      }
+      expect(danglingError).toMatchObject({ code: "ENOENT" });
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+});
+
 function snapshotProcessTree(root: string): Record<string, string> {
   const result: Record<string, string> = {};
   const visit = (directory: string, prefix: string): void => {
-    for (const name of readdirSync(directory).sort()) {
+    let names: string[];
+    try {
+      names = readdirSync(directory).sort();
+    } catch (error) {
+      // A child directory can disappear after it was classified below. The root
+      // itself must always remain readable, and no other filesystem error is safe
+      // to interpret as a transient Git-maintenance race.
+      if (prefix.length > 0 && isFileSystemError(error, "ENOENT")) return;
+      throw error;
+    }
+    for (const name of names) {
       const absolute = join(directory, name);
       const relative = prefix.length === 0 ? name : `${prefix}/${name}`;
       const entry = readFileOrDirectory(absolute);
+      if (entry === undefined) continue;
       result[relative] = entry.kind === "file" ? entry.bytes : "directory";
       if (entry.kind === "directory") visit(absolute, relative);
     }
@@ -772,10 +818,35 @@ function snapshotProcessTree(root: string): Record<string, string> {
 
 function readFileOrDirectory(path: string):
   | { kind: "file"; bytes: string }
-  | { kind: "directory" } {
+  | { kind: "directory" }
+  | undefined {
+  let stats: ReturnType<typeof lstatSync>;
+  try {
+    stats = lstatSync(path);
+  } catch (error) {
+    // The parent directory was just listed, so ENOENT here proves that this
+    // entry disappeared during the snapshot (for example Git's maintenance
+    // lock). Permission, I/O, and malformed-path errors must still fail loudly.
+    if (isFileSystemError(error, "ENOENT")) return undefined;
+    throw error;
+  }
+  if (stats.isDirectory()) return { kind: "directory" };
+
   try {
     return { kind: "file", bytes: readFileSync(path).toString("base64") };
-  } catch {
-    return { kind: "directory" };
+  } catch (error) {
+    if (isFileSystemError(error, "ENOENT")) {
+      try {
+        lstatSync(path);
+      } catch (currentError) {
+        if (isFileSystemError(currentError, "ENOENT")) return undefined;
+        throw currentError;
+      }
+    }
+    throw error;
   }
+}
+
+function isFileSystemError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
 }

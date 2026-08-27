@@ -139,11 +139,12 @@
         "fixture": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["profile", "sourceFiles", "wikiEntities", "activityEvents", "input"],
+          "required": ["profile", "sourceFiles", "wikiEntities", "workstreams", "activityEvents", "input"],
           "properties": {
             "profile": { "enum": ["small", "medium", "large"] },
             "sourceFiles": { "type": "integer", "minimum": 1 },
             "wikiEntities": { "type": "integer", "minimum": 1 },
+            "workstreams": { "type": "integer", "minimum": 1 },
             "activityEvents": { "type": "integer", "minimum": 1 },
             "input": {
               "type": "object",
