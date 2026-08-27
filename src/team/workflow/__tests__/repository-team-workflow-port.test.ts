@@ -1,3 +1,5 @@
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   existsSync,
   mkdtempSync,
@@ -50,9 +52,9 @@ afterEach(() => {
 });
 
 describe("RepositoryTeamWorkflowPort", () => {
-  it("derives one production composition from the guarded root without initializing local state", () => {
+  it("derives production composition only from exact tracked scaffold identity bytes", async () => {
     const root = temporaryRoot();
-    expect(() => createRepositoryTeamWorkflowPort(root)).toThrowError(
+    await expect(createRepositoryTeamWorkflowPort(root)).rejects.toThrowError(
       expect.objectContaining({
         problem: expect.objectContaining({ code: "MIGRATION_REQUIRED" }),
       }),
@@ -61,12 +63,30 @@ describe("RepositoryTeamWorkflowPort", () => {
     writeFileSync(join(root, ".mex/config.json"), JSON.stringify({
       scaffold_id: "tracked-scaffold-identity",
     }), "utf8");
+    initializeGitFixture(root);
+    writeFileSync(join(root, "README.md"), "# Workflow factory fixture\n", "utf8");
+    git(root, ["add", "--", "README.md"]);
+    git(root, ["commit", "-q", "-m", "factory fixture baseline"]);
 
-    const first = createRepositoryTeamWorkflowPort(root);
-    const second = createRepositoryTeamWorkflowPort(root);
+    await expect(createRepositoryTeamWorkflowPort(root)).rejects.toMatchObject({
+      problem: { code: "MIGRATION_REQUIRED" },
+    });
+
+    git(root, ["add", "--", ".mex/config.json"]);
+    git(root, ["commit", "-q", "-m", "track scaffold identity"]);
+
+    const first = await createRepositoryTeamWorkflowPort(root);
+    const second = await createRepositoryTeamWorkflowPort(root);
     expect(first).toBeInstanceOf(RepositoryTeamWorkflowPort);
     expect(second).toBeInstanceOf(RepositoryTeamWorkflowPort);
     expect(existsSync(join(root, ".mex/local/team.db"))).toBe(false);
+
+    writeFileSync(join(root, ".mex/config.json"), JSON.stringify({
+      scaffold_id: "checkout-only-scaffold-identity",
+    }), "utf8");
+    await expect(createRepositoryTeamWorkflowPort(root)).rejects.toMatchObject({
+      problem: { code: "MIGRATION_REQUIRED" },
+    });
   });
 
   it("captures service-owned actor, time, and repository state in a canonical Workstream and Activity event", async () => {
@@ -245,6 +265,44 @@ describe("RepositoryTeamWorkflowPort", () => {
       kind: "inbox",
       rationale: "Review the deterministic Wiki request.",
       updatedAt: NOW,
+    });
+  });
+
+  it("recovers a hot SQLite rollback journal only for an explicit apply", async () => {
+    const harness = createHarness();
+    const seed = await harness.port.preview(
+      createWorkstreamCommand("operation_seed_local_database"),
+    );
+    await harness.port.apply({
+      command: seed.command,
+      expectedPreviewRevision: seed.previewRevision,
+    });
+
+    const preview = await harness.port.preview(
+      createInboxDraftCommand("operation_recover_hot_rollback_journal"),
+    );
+    const database = join(harness.root, ".mex/local/team.db");
+    const journal = `${database}-journal`;
+    await leaveHotRollbackJournal(database);
+    expect(existsSync(journal)).toBe(true);
+
+    await expect(harness.port.getLocalDraft(LOCAL_DRAFT_ID)).rejects.toMatchObject({
+      problem: { code: "OPERATION_INTERRUPTED" },
+    });
+    expect(existsSync(journal)).toBe(true);
+
+    await expect(harness.port.apply({
+      command: preview.command,
+      expectedPreviewRevision: preview.previewRevision,
+    })).resolves.toMatchObject({
+      operationId: "operation_recover_hot_rollback_journal",
+      applied: true,
+      idempotentReplay: false,
+    });
+    expect(existsSync(journal)).toBe(false);
+    await expect(harness.port.getLocalDraft(LOCAL_DRAFT_ID)).resolves.toMatchObject({
+      id: LOCAL_DRAFT_ID,
+      kind: "inbox",
     });
   });
 
@@ -621,6 +679,43 @@ function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "mex-team-workflow-port-"));
   roots.push(root);
   return root;
+}
+
+function initializeGitFixture(root: string): void {
+  git(root, ["init", "-q", "-b", "main"]);
+  git(root, ["config", "user.name", "Workflow Factory"]);
+  git(root, ["config", "user.email", "workflow-factory@example.test"]);
+}
+
+function git(root: string, args: readonly string[]): void {
+  execFileSync("git", [...args], {
+    cwd: root,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+}
+
+async function leaveHotRollbackJournal(database: string): Promise<void> {
+  const script = `
+    const { DatabaseSync } = require("node:sqlite");
+    const database = new DatabaseSync(process.argv[1]);
+    database.exec("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; PRAGMA cache_size = 1; BEGIN IMMEDIATE");
+    database.exec("CREATE TABLE crash_recovery_probe (value BLOB) STRICT");
+    const insert = database.prepare("INSERT INTO crash_recovery_probe (value) VALUES (?)");
+    for (let index = 0; index < 32; index += 1) insert.run(Buffer.alloc(64 * 1024, index));
+    process.stdout.write("ready\\n");
+    setInterval(() => {}, 1_000);
+  `;
+  const child = spawn(process.execPath, ["-e", script, database], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  try {
+    const [chunk] = await once(child.stdout!, "data") as [Buffer];
+    expect(chunk.toString("utf8")).toContain("ready");
+    child.kill("SIGKILL");
+    await once(child, "exit");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
 }
 
 function artifactId(

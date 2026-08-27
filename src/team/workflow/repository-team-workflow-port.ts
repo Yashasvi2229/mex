@@ -420,11 +420,22 @@ export class RepositoryTeamWorkflowPort<
     try {
       existing = this.#local.getWorkflowOperation(request.command.operationId);
     } catch (error) {
-      if (!(error instanceof MexPortError) || error.problem.code !== "MIGRATION_REQUIRED") {
+      if (!(error instanceof MexPortError)) {
         throw error;
       }
-      requiresMigration = true;
-      existing = null;
+      if (error.problem.code === "MIGRATION_REQUIRED") {
+        requiresMigration = true;
+        existing = null;
+      } else if (error.problem.code === "OPERATION_INTERRUPTED") {
+        // This is an explicit write request, so opening the database writable
+        // may complete SQLite's own rollback-journal recovery. Re-read the
+        // operation only after that bounded recovery; immutable reads never do
+        // this and continue to fail closed on every sidecar.
+        this.#local.initializeForMutation();
+        existing = this.#local.getWorkflowOperation(request.command.operationId);
+      } else {
+        throw error;
+      }
     }
     if (existing !== null) {
       if (
@@ -1747,7 +1758,22 @@ export class RepositoryTeamWorkflowPort<
       return "divergent";
     }
     if (effect.namespace !== "inbox-draft" && effect.namespace !== "relay-draft") return "divergent";
-    const current = this.#local.getLocalDraft(effect.id);
+    let current: StoredLocalDraft<unknown> | null;
+    try {
+      current = this.#local.getLocalDraft(effect.id);
+    } catch (error) {
+      // Schemas v1-v3 predate local drafts. A create preview whose expected
+      // before revision is null can therefore prove absence without writing;
+      // the explicit apply migrates before the under-lease revalidation.
+      if (
+        error instanceof MexPortError
+        && error.problem.code === "MIGRATION_REQUIRED"
+        && effect.beforeRevision === null
+      ) {
+        return "before";
+      }
+      throw error;
+    }
     const expectedKind = effect.namespace === "inbox-draft" ? "inbox" : "relay";
     const revision = current === null || current.kind !== expectedKind
       ? null
@@ -1886,10 +1912,11 @@ export class RepositoryTeamWorkflowPort<
  * on this path so two callers cannot select different local-state namespaces
  * or mutate a different checkout.
  */
-export function createRepositoryTeamWorkflowPort(
+export async function createRepositoryTeamWorkflowPort(
   projectRoot: string,
-): RepositoryTeamWorkflowPort<RepositoryWikiOperationPayload, RepositoryWikiOperationPlan> {
+): Promise<RepositoryTeamWorkflowPort<RepositoryWikiOperationPayload, RepositoryWikiOperationPlan>> {
   const root = new RepositoryRootGuard(projectRoot);
+  const git = createRepositoryGitPort(root.path);
   const config = tryReadContainedArtifact(
     root.path,
     ".mex/config.json",
@@ -1898,9 +1925,41 @@ export function createRepositoryTeamWorkflowPort(
   if (config === null) {
     throw missingScaffoldIdentity();
   }
+
+  const authority = await git.getRepoState();
+  if (authority.head === null) {
+    throw missingScaffoldIdentity();
+  }
+  const trackedConfig = await git.readFileAtRevision({
+    revision: authority.head,
+    path: ".mex/config.json",
+    maxBytes: 64 * 1024,
+  });
+  if (
+    trackedConfig === null
+    || trackedConfig.truncated
+    || !Buffer.from(trackedConfig.content).equals(Buffer.from(config.bytes))
+  ) {
+    throw missingScaffoldIdentity();
+  }
+
+  root.assertCurrent();
+  const confirmedConfig = tryReadContainedArtifact(
+    root.path,
+    ".mex/config.json",
+    64 * 1024,
+  );
+  const confirmedAuthority = await git.getRepoState();
+  if (
+    confirmedConfig === null
+    || confirmedConfig.revision !== config.revision
+    || !sameRepoCheckpoint(authority, confirmedAuthority)
+  ) {
+    throw repositoryChanged();
+  }
   let scaffoldId: unknown;
   try {
-    const parsed = JSON.parse(Buffer.from(config.bytes).toString("utf8")) as unknown;
+    const parsed = JSON.parse(Buffer.from(confirmedConfig.bytes).toString("utf8")) as unknown;
     scaffoldId = isPlainObject(parsed) ? parsed.scaffold_id : undefined;
   } catch {
     throw missingScaffoldIdentity();
@@ -1915,7 +1974,7 @@ export function createRepositoryTeamWorkflowPort(
   }
   return new RepositoryTeamWorkflowPort(root.path, {
     scaffoldId,
-    git: createRepositoryGitPort(root.path),
+    git,
     wiki: createRepositoryWikiPort(root.path),
   });
 }
