@@ -59,8 +59,10 @@ spec establishes intent, but it does not establish type or runtime parity.
   CRLF/LF or BOM-only changes can preserve meaning while invalidating byte
   offsets and optimistic file expectations.
 - Opaque application plans should not serialize source or audit bodies. Store
-  the exact engine plan behind a bounded handle, make process lifetime explicit,
-  and require a new preview after restart.
+  the executable plan behind a bounded process-lifetime handle. If nothing was
+  published, restart requires a new preview. If a non-atomic writer can leave a
+  durable prefix, persist a separate bounded body-free manifest before apply and
+  resume only after operation-specific audit and exact current-byte proof.
 
 ## Verify
 

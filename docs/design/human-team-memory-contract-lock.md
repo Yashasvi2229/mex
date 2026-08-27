@@ -1,6 +1,6 @@
 # Human-Team Memory Contract Lock
 
-Status: Checkpoint 0 closed; mock and repository adapter verified
+Status: Checkpoint B closed; repository workflow foundation verified
 
 This brief records the application boundary for the MEX OSS human-team memory
 program. The contract remains an internal, provisional API until a separate
@@ -110,10 +110,41 @@ Hub or workflow consumers:
 Operation proposal and patch plan are separate types. The caller provides the
 authoritative typed envelope with an engine-owned payload; preview returns the
 engine-produced opaque patch plan plus exact diff. Apply requires that plan and
-preview hash, immediately revalidates revisions, and either applies the complete
-operation or performs no canonical write. An exact retry of an accepted
-operation ID is idempotent; reuse with a different payload is a validation
-failure.
+preview hash and immediately revalidates current canonical revisions. The Wiki
+engine may expose a durable multi-file prefix only at a simulated/process-death
+boundary. Before publication, it therefore also returns a bounded, body-free
+recovery manifest containing only operation IDs, generated entity IDs, paths,
+revisions, hashes, and audit transitions. A restart requires a new preview when
+nothing landed; otherwise it resumes only the exact operation-specific audit
+prefix and proves every final byte against that manifest. An exact accepted
+operation retry is idempotent; altered reuse is a validation failure.
+
+## Repository Team workflow foundation
+
+Checkpoint B makes the provisional workflow boundary concrete without exposing
+it from the package root or registering product commands/routes:
+
+- strict schema-v1 codecs and repositories own Workstreams, portable Inbox
+  proposals, Relays, Playbooks, and manual Playbook runs;
+- canonical files are limited to 64 KiB, 2,048 records and 32 MiB per kind,
+  4,096 directory entries, 100 diagnostics, 100 results per page, and 4 KiB
+  revision/filter-bound cursors; members use equivalent corpus ceilings;
+- `.mex/local/team.db` schema v4 adds bounded Inbox/Relay drafts, one attested
+  repository workflow lease, and a 256-row terminal operation journal with at
+  most 16 metadata-only effects per operation;
+- journal phases are `intent -> canonical_published -> local_finalized ->
+  complete`; pure reads never initialize/migrate storage, while the first
+  explicit local mutation or workflow apply does so transactionally;
+- the production factory derives one tracked scaffold identity and constructs
+  Git and Wiki adapters against one physically guarded repository root;
+- actor, timestamp, branch, HEAD, and dirty state are service-owned. Canonical
+  publication precedes local cleanup, exact replay is idempotent within the
+  documented bounded journal window, and altered reuse or divergent recovery
+  state fails closed;
+- Wiki authoring hard-reserves `team/**`, `workstreams/**`, `inbox/**`,
+  `relays/**`, `playbooks/**`, and `events/activity/**`. Wiki can read supported
+  team entity kinds and prefixes but still mints only existing `mx_` IDs and
+  never becomes their canonical writer.
 
 ## Consumer-owned verification
 
@@ -195,11 +226,22 @@ test double for consumer behavior, not an alternate storage or mutation
 implementation. Checkpoint 2's completed read-only Hub integration is recorded
 in [`hub-wiki-readonly.md`](hub-wiki-readonly.md).
 
+Checkpoint B is closed with a consumer-owned `TeamWorkflowPort` conformance
+suite registered against the real filesystem, Git adapter, SQLite local state,
+canonical repositories, behavioral Wiki, and repository Wiki adapter. The
+suite covers filtering and bounds, preview/apply, authority capture, exact
+revision coverage, idempotent replay, all four journal phase boundaries,
+tamper/root/containment failures, lease contention, journal privacy, two-clone
+portability, real Wiki approval, and interrupted Wiki batch recovery. Product
+member, Workstream, Activity, Inbox, Relay, and Playbook surfaces remain assigned
+to later checkpoints.
+
 ## Verification commands
 
 ```bash
 npx vitest run test/wiki-port-mock.contract.test.ts
 npx vitest run test/wiki-port-real.contract.test.ts
+npx vitest run test/team-workflow-port-real.contract.test.ts
 npx vitest run src/graph/__tests__/protocol-v3-golden.test.ts
 npm run typecheck
 npm test
