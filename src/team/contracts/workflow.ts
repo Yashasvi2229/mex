@@ -413,6 +413,11 @@ export type NonEmptyRevisionExpectations = readonly [
 ];
 
 interface TeamWorkflowCommandBase {
+  /**
+   * Globally unique caller-generated ID. Exact replay and altered-reuse
+   * rejection are retained for the bounded 256-operation local journal
+   * window; callers must never intentionally recycle an older ID.
+   */
   operationId: string;
   /** Service-owned authority must never be accepted at the caller boundary. */
   actor?: never;

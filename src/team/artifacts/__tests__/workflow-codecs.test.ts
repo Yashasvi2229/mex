@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ActorRef, RepoRelativePath } from "../../contracts/shared.js";
 import {
   inboxProposalArtifactPath,
+  normalizeInboxDraftInput,
   parseInboxProposalArtifact,
   parsePlaybookArtifact,
   parsePlaybookRunArtifact,
@@ -80,6 +81,35 @@ describe("workflow artifact codecs", () => {
       request: { operation: { opId: "wiki-op-2", type: "update-entry", payload: { compiledPlan: { handle: 7 } } }, expectedRevisions: [] },
       targetRevisions: [],
     })).toThrow(/process-local/);
+  });
+
+  it("rejects checkout-local revision targets before a draft can become canonical", () => {
+    const base = {
+      request: {
+        operation: {
+          opId: "wiki-op-portable",
+          type: "update-entry" as const,
+          payload: { summary: "Portable" },
+        },
+        expectedRevisions: [],
+      },
+      rationale: "Keep proposal preconditions clone-portable.",
+      evidence: [],
+    };
+    expect(() => normalizeInboxDraftInput({
+      ...base,
+      targetRevisions: [{
+        target: { kind: "local", namespace: "inbox-draft", id: "draft-private" },
+        revision: "a".repeat(64),
+      }],
+    })).toThrow(/checkout-local targets/);
+    expect(() => normalizeInboxDraftInput({
+      ...base,
+      targetRevisions: [{
+        target: { kind: "artifact", path: ".mex/local/private.json" },
+        revision: "b".repeat(64),
+      }],
+    })).toThrow(/checkout-local artifact paths/);
   });
 
   it("rejects wrong paths, noncanonical bytes, lifecycle contradictions, and bodies", () => {

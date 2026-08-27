@@ -16,12 +16,14 @@ import {
   RELAY_STATES,
   WORKSTREAM_STATES,
   type InboxProposal,
+  type InboxDraftInput,
   type Playbook,
   type PlaybookRun,
   type PlaybookRunStep,
   type PlaybookStepDefinition,
   type PortableWikiOperationRequest,
   type Relay,
+  type RelayDraftInput,
   type TeamArtifactBase,
   type TeamArtifactKind,
   type TeamEvidenceRef,
@@ -249,6 +251,62 @@ export function parsePlaybookRunArtifact(bytes: string | Uint8Array, sourcePath:
   return { ...base(value.id, "playbook_run", undefined, sourcePath, exactBytes), ...withoutId(value) };
 }
 
+/** Strict canonical projection used before a local Inbox draft is persisted. */
+export function normalizeInboxDraftInput<TPayload>(
+  input: InboxDraftInput<TPayload>,
+): InboxDraftInput<TPayload> {
+  const value = record(input, "Inbox draft");
+  exactObject(
+    value,
+    ["request", "rationale", "evidence", "targetRevisions"],
+    [],
+    "Inbox draft",
+  );
+  return {
+    request: portableWikiRequest<TPayload>(value.request),
+    rationale: text(value.rationale, "Inbox draft rationale", 8 * 1024),
+    evidence: evidenceList(value.evidence),
+    targetRevisions: portableWorkflowRevisionExpectations(
+      value.targetRevisions,
+      "Inbox draft target revisions",
+    ),
+  };
+}
+
+/** Strict canonical projection used before a local Relay draft is persisted. */
+export function normalizeRelayDraftInput(input: RelayDraftInput): RelayDraftInput {
+  const value = record(input, "Relay draft");
+  exactObject(value, [
+    "recipients", "workstream", "summary", "completed", "inProgress",
+    "decisions", "blockers", "unresolvedQuestions", "changedFiles",
+    "code", "evidence", "nextActions",
+  ], [], "Relay draft");
+  return {
+    recipients: actorSet(value.recipients, "Relay draft recipients", true),
+    workstream: entity(value.workstream, "Relay draft Workstream", "workstream"),
+    summary: text(value.summary, "Relay draft summary", 8 * 1024),
+    completed: textList(value.completed, "Relay draft completed items"),
+    inProgress: textList(value.inProgress, "Relay draft in-progress items"),
+    decisions: entitySet(value.decisions, "Relay draft decisions"),
+    blockers: textList(value.blockers, "Relay draft blockers"),
+    unresolvedQuestions: textList(
+      value.unresolvedQuestions,
+      "Relay draft unresolved questions",
+    ),
+    changedFiles: pathSet(value.changedFiles, "Relay draft changed files"),
+    code: codeSet(value.code, "Relay draft code references"),
+    evidence: evidenceList(value.evidence),
+    nextActions: textList(value.nextActions, "Relay draft next actions"),
+  };
+}
+
+/** Strict bounded optimistic preconditions for a workflow command. */
+export function normalizeWorkflowRevisionExpectations(
+  value: unknown,
+): readonly RevisionExpectation[] {
+  return revisionExpectations(value, "Workflow revision expectations");
+}
+
 function normalizeWorkstream(input: WorkstreamArtifactInput): WorkstreamArtifactInput {
   const value = record(input, "workstream");
   exactObject(value, [
@@ -299,13 +357,13 @@ function normalizeProposal<TPayload>(input: InboxProposalArtifactInput<TPayload>
   if ((reviewer === undefined) !== (reviewedAt === undefined)) {
     invalid("Proposal reviewer and review time must be recorded together.");
   }
-  if ((state === "approved" || state === "rejected") && reviewer === undefined) {
-    invalid("Approved and rejected proposals require reviewer authority and review time.");
+  if ((state === "approved" || state === "rejected" || state === "withdrawn") && reviewer === undefined) {
+    invalid("Approved, rejected, and withdrawn proposals require action authority and time.");
   }
   if (state === "rejected" && reviewRationale === undefined) {
     invalid("Rejected proposals require review rationale.");
   }
-  if ((state === "pending" || state === "stale" || state === "withdrawn") && reviewer !== undefined) {
+  if ((state === "pending" || state === "stale") && reviewer !== undefined) {
     invalid(`${state} proposals must not carry reviewer authority.`);
   }
   if (reviewRationale !== undefined && reviewer === undefined) {
@@ -318,7 +376,10 @@ function normalizeProposal<TPayload>(input: InboxProposalArtifactInput<TPayload>
     rationale: text(value.rationale, "proposal rationale", 8 * 1024),
     evidence: evidenceList(value.evidence),
     request: portableWikiRequest<TPayload>(value.request),
-    targetRevisions: revisionExpectations(value.targetRevisions, "proposal target revisions"),
+    targetRevisions: portableWorkflowRevisionExpectations(
+      value.targetRevisions,
+      "proposal target revisions",
+    ),
     ...(reviewer === undefined ? {} : { reviewer }),
     ...(reviewRationale === undefined ? {} : { reviewRationale }),
     ...(reviewedAt === undefined ? {} : { reviewedAt }),
@@ -485,6 +546,25 @@ function revisionExpectations(value: unknown, label: string): readonly RevisionE
     }
     invalid(`${label} ${index} target kind is invalid.`);
   });
+}
+
+function portableWorkflowRevisionExpectations(
+  value: unknown,
+  label: string,
+): readonly RevisionExpectation[] {
+  const expectations = revisionExpectations(value, label);
+  for (const expectation of expectations) {
+    if (expectation.target.kind === "local") {
+      invalid(`${label} must not contain checkout-local targets.`);
+    }
+    if (expectation.target.kind === "artifact") {
+      const path = expectation.target.path.toLowerCase();
+      if (path === ".mex/local" || path.startsWith(".mex/local/")) {
+        invalid(`${label} must not contain checkout-local artifact paths.`);
+      }
+    }
+  }
+  return expectations;
 }
 
 function evidenceList(value: unknown): readonly TeamEvidenceRef[] {
