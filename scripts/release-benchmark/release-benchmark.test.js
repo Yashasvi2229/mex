@@ -24,10 +24,17 @@ import {
   RELEASE_FIXTURE_PROFILES,
 } from "./fixtures.mjs";
 import { startHub } from "./hub.mjs";
+import { enforceWithConfirmation } from "./enforce.mjs";
 import { candidateRuntimeBudgets, evaluateRuntimeBudgets } from "./runtime-budgets.mjs";
+import {
+  classifyRuntimeViolations,
+  evaluateRuntimeConfirmation,
+} from "./runtime-confirmation.mjs";
 import { assetBudgetCandidate, runtimeBudgetCandidate, summarize } from "./statistics.mjs";
 
 const budgets = JSON.parse(readFileSync(new URL("./budgets.json", import.meta.url), "utf8"));
+const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+const reportSchema = JSON.parse(readFileSync(new URL("./report.schema.json", import.meta.url), "utf8"));
 
 describe("release benchmark contract", () => {
   it("locks the sample counts and deterministic route budget surface", () => {
@@ -60,6 +67,16 @@ describe("release benchmark contract", () => {
       runtimeFormula: "ceil(measured p95 * 1.15)",
       assetFormula: "ceil(built bytes * 1.05)",
     });
+    expect(packageJson.scripts["benchmark:release"]).toContain(
+      "scripts/release-benchmark/enforce.mjs",
+    );
+    expect(reportSchema.$defs.runtimeConfirmation.properties.status.enum).toEqual([
+      "not_required",
+      "skipped_immediate_failure",
+      "passed",
+      "failed",
+      "operational_failure",
+    ]);
   });
 
   it("uses nearest-rank p95 and rejects the wrong sample count", () => {
@@ -134,6 +151,228 @@ describe("release benchmark contract", () => {
       budget: 99,
       reason: "budget_exceeded",
     });
+  });
+
+  it("retries only noisy runtime metrics and requires the same metric twice", () => {
+    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    const activity = runtimeViolation("runtime.apiLatencyMs.medium.activity");
+    const initial = evaluateRuntimeConfirmation([knowledge]);
+    expect(initial).toMatchObject({ retryRequired: true, status: "required" });
+
+    expect(evaluateRuntimeConfirmation([knowledge], [activity])).toMatchObject({
+      retryRequired: false,
+      status: "passed",
+      finalViolations: [],
+    });
+    expect(evaluateRuntimeConfirmation([knowledge], [knowledge])).toMatchObject({
+      retryRequired: false,
+      status: "failed",
+      finalViolations: [knowledge],
+      confirmed: [knowledge],
+    });
+  });
+
+  it("keeps database ratios, outbound requests, and unknown metrics immediate", () => {
+    const noisy = [
+      "runtime.coldHubReadyMs.small",
+      "runtime.idleRssBytes.small",
+      "runtime.idleCpuMs.small",
+      "runtime.apiLatencyMs.small.search",
+      "runtime.maintenanceMs.small.graph_refresh",
+      "runtime.maintenancePeakRssBytes.small.graph_refresh",
+      "runtime.browserHeapBytes.small.home",
+    ].map(runtimeViolation);
+    const database = runtimeViolation("runtime.databaseToInputRatio.small.graph");
+    const outbound = runtimeViolation("runtime.outboundRequestCount.small");
+    const unknown = runtimeViolation("runtime.apiLatencyMs.unknown.future");
+    expect(classifyRuntimeViolations([...noisy, database, outbound, unknown])).toEqual({
+      confirmable: noisy,
+      immediate: [database, outbound, unknown],
+    });
+    expect(evaluateRuntimeConfirmation([noisy[0], database])).toMatchObject({
+      retryRequired: false,
+      status: "skipped_immediate_failure",
+      finalViolations: [database],
+    });
+  });
+
+  it("does not retry a clean first pass and emits a consistent final report", () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-clean-"));
+    try {
+      const result = runConfirmationHarness(root, [benchmarkPass()]);
+      expect(result.exitCode).toBe(0);
+      expect(result.calls).toBe(1);
+      expect(result.report.budgetEvaluation).toMatchObject({
+        assetViolations: [],
+        runtimeViolations: [],
+        passed: true,
+        runtimeConfirmation: {
+          status: "not_required",
+          repositoryHead: "a".repeat(40),
+          firstPassViolations: [],
+          secondPassViolations: [],
+          confirmedViolations: [],
+        },
+      });
+      expect(existsSync(join(root, "report.attempt-1.json"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("passes different noisy metrics across attempts and retains both raw reports", () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-different-"));
+    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    const activity = runtimeViolation("runtime.apiLatencyMs.medium.activity");
+    try {
+      const result = runConfirmationHarness(root, [
+        benchmarkPass({ runtimeViolations: [knowledge] }),
+        benchmarkPass({ runtimeViolations: [activity] }),
+      ]);
+      expect(result.exitCode).toBe(0);
+      expect(result.calls).toBe(2);
+      expect(result.report.budgetEvaluation).toEqual({
+        assetViolations: [],
+        runtimeViolations: [],
+        passed: true,
+        runtimeConfirmation: {
+          status: "passed",
+          repositoryHead: "a".repeat(40),
+          firstPassViolations: [knowledge],
+          secondPassViolations: [activity],
+          confirmedViolations: [],
+        },
+      });
+      expect(readRawAttempt(root, 1).budgetEvaluation.runtimeViolations).toEqual([knowledge]);
+      expect(readRawAttempt(root, 2).budgetEvaluation.runtimeViolations).toEqual([activity]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails when the same noisy metric breaches twice", () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-same-"));
+    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    try {
+      const result = runConfirmationHarness(root, [
+        benchmarkPass({ runtimeViolations: [knowledge] }),
+        benchmarkPass({ runtimeViolations: [knowledge] }),
+      ]);
+      expect(result.exitCode).toBe(1);
+      expect(result.calls).toBe(2);
+      expect(result.report.budgetEvaluation).toMatchObject({
+        runtimeViolations: [knowledge],
+        passed: false,
+        runtimeConfirmation: {
+          status: "failed",
+          firstPassViolations: [knowledge],
+          secondPassViolations: [knowledge],
+          confirmedViolations: [knowledge],
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails hard violations on either attempt without treating them as noise", () => {
+    const graphRatio = runtimeViolation("runtime.databaseToInputRatio.small.graph");
+    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    const asset = runtimeViolation("assets.routes.home.jsBytes");
+    for (const scenario of [
+      {
+        name: "first-runtime",
+        passes: [benchmarkPass({ runtimeViolations: [graphRatio] })],
+        calls: 1,
+        finalRuntime: [graphRatio],
+      },
+      {
+        name: "first-asset",
+        passes: [benchmarkPass({ assetViolations: [asset] })],
+        calls: 1,
+        finalRuntime: [],
+      },
+      {
+        name: "second-runtime",
+        passes: [
+          benchmarkPass({ runtimeViolations: [knowledge] }),
+          benchmarkPass({ runtimeViolations: [graphRatio] }),
+        ],
+        calls: 2,
+        finalRuntime: [graphRatio],
+      },
+    ]) {
+      const root = mkdtempSync(join(tmpdir(), `mex-release-confirm-${scenario.name}-`));
+      try {
+        const result = runConfirmationHarness(root, scenario.passes);
+        expect(result.exitCode).toBe(1);
+        expect(result.calls).toBe(scenario.calls);
+        expect(result.report.budgetEvaluation.passed).toBe(false);
+        expect(result.report.budgetEvaluation.runtimeViolations).toEqual(scenario.finalRuntime);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("uses exit 2 for unusable child reports", () => {
+    for (const pass of [null, "invalid", "oversized", "signaled", "inconsistent"]) {
+      const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-invalid-first-"));
+      try {
+        const result = runConfirmationHarness(root, [pass]);
+        expect(result.exitCode).toBe(2);
+        expect(result.calls).toBe(1);
+        expect(result.report).toBeUndefined();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+
+    const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-missing-second-"));
+    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    try {
+      const result = runConfirmationHarness(root, [
+        benchmarkPass({ runtimeViolations: [knowledge] }),
+        null,
+      ]);
+      expect(result.exitCode).toBe(2);
+      expect(result.calls).toBe(2);
+      expect(result.report.budgetEvaluation).toMatchObject({
+        runtimeViolations: [knowledge],
+        passed: false,
+        runtimeConfirmation: {
+          status: "operational_failure",
+          firstPassViolations: [knowledge],
+          secondPassViolations: [],
+          confirmedViolations: [],
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses exit 2 if repository HEAD changes between or during attempts", () => {
+    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    for (const heads of [
+      ["a".repeat(40), "b".repeat(40)],
+      ["a".repeat(40), "a".repeat(40), "b".repeat(40)],
+    ]) {
+      const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-head-change-"));
+      try {
+        const result = runConfirmationHarness(root, [
+          benchmarkPass({ runtimeViolations: [knowledge] }),
+          benchmarkPass(),
+        ], { heads });
+        expect(result.exitCode).toBe(2);
+        expect(result.report.budgetEvaluation).toMatchObject({
+          passed: false,
+          runtimeConfirmation: { status: "operational_failure" },
+        });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
   });
 
   it("counts Graph configuration files in the indexed-input denominator", () => {
@@ -265,6 +504,65 @@ function runtimeProfile(value) {
       wiki: { ratio: value },
     },
   };
+}
+
+function runtimeViolation(metric) {
+  return { metric, measured: 101, budget: 100, reason: "budget_exceeded" };
+}
+
+function benchmarkPass({ assetViolations = [], runtimeViolations = [] } = {}) {
+  return {
+    schemaVersion: 1,
+    budgetEvaluation: {
+      assetViolations,
+      runtimeViolations,
+      passed: assetViolations.length === 0 && runtimeViolations.length === 0,
+    },
+  };
+}
+
+function runConfirmationHarness(root, passes, options = {}) {
+  let calls = 0;
+  let headReads = 0;
+  const output = join(root, "report.json");
+  const exitCode = enforceWithConfirmation(output, {
+    executePass(path) {
+      const pass = passes[calls];
+      calls += 1;
+      if (pass === null) return { status: 1, signal: null };
+      if (pass === "invalid") {
+        writeFileSync(path, "not-json\n");
+        return { status: 1, signal: null };
+      }
+      if (pass === "oversized") {
+        writeFileSync(path, "x".repeat((2 * 1024 * 1024) + 1));
+        return { status: 1, signal: null };
+      }
+      if (pass === "signaled") return { status: null, signal: "SIGTERM" };
+      if (pass === "inconsistent") {
+        writeFileSync(path, `${JSON.stringify(benchmarkPass())}\n`);
+        return { status: 1, signal: null };
+      }
+      writeFileSync(path, `${JSON.stringify(pass)}\n`);
+      return { status: pass.budgetEvaluation.passed ? 0 : 1, signal: null };
+    },
+    resolveRepositoryHead() {
+      const heads = options.heads ?? ["a".repeat(40)];
+      const head = heads[Math.min(headReads, heads.length - 1)];
+      headReads += 1;
+      return head;
+    },
+    emitReport: () => undefined,
+  });
+  return {
+    calls,
+    exitCode,
+    report: existsSync(output) ? JSON.parse(readFileSync(output, "utf8")) : undefined,
+  };
+}
+
+function readRawAttempt(root, attempt) {
+  return JSON.parse(readFileSync(join(root, `report.attempt-${attempt}.json`), "utf8"));
 }
 
 function writeMinimalReleaseFixture(root) {

@@ -58,8 +58,22 @@ budget environment: Ubuntu 24.04, x64, and the pinned Node 22 patch release in
 machine variance into a release failure. Node 24 remains in the ordinary CI
 compatibility matrix, outside performance enforcement.
 
+Deterministic failures remain immediate: built-asset bytes, outbound requests,
+database-to-input ratios, and any unknown runtime metric never receive a retry.
+The read and maintenance nonmutation contracts likewise remain ordinary hard
+tests. A first pass containing only wall-clock, RSS, CPU, or browser-heap
+breaches triggers one independent full benchmark pass on the same pinned
+runner and exact repository HEAD. CI fails a noisy metric only when that exact
+metric breaches again; unrelated one-off breaches across the two passes are
+retained in `runtimeConfirmation` but are not treated as a confirmed regression.
+The final `runtimeViolations` list contains only immediate or confirmed failures.
+Operational benchmark failures are never retried as budget noise. Enforcement
+exits 0 for a pass, 1 for a budget failure, and 2 when a pass cannot produce a
+valid bounded report.
+
 The dedicated `release-performance` CI job installs Chromium on the pinned
-runner, enforces the budgets, and retains the report. Runtime candidates in
+runner, enforces the budgets, and retains the final report plus both attempt
+reports when confirmation was required. Runtime candidates in
 that report are `ceil(p95 * 1.15)` independently for each fixture profile,
 route, read, and maintenance operation. The committed values are copied exactly
 from the first healthy retained pinned report; its enforcing rerun must pass
