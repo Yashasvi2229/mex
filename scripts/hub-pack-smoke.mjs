@@ -188,14 +188,39 @@ try {
     redirect: "error",
   });
   const homeBody = await home.json();
-  if (!home.ok || homeBody.sections?.activity?.count !== 1) {
-    throw new Error("The packaged Hub did not report the exact canonical activity count.");
-  }
   const activity = await fetch(`${url.origin}/api/v1/activity`, {
     headers: { cookie },
     redirect: "error",
   });
   const activityBody = await activity.json();
+  if (!home.ok || homeBody.sections?.activity?.count !== 1) {
+    const diagnosticCodes = Array.isArray(activityBody?.diagnostics)
+      ? activityBody.diagnostics.slice(0, 10).map((item) => ({
+          code: typeof item?.code === "string" ? item.code : "UNKNOWN",
+          severity: typeof item?.severity === "string" ? item.severity : "unknown",
+        }))
+      : null;
+    const detail = JSON.stringify({
+      homeStatus: home.status,
+      homeActivity: homeBody.sections?.activity ?? null,
+      activityStatus: activity.status,
+      canonicalActivityCount: Array.isArray(activityBody?.items)
+        ? activityBody.items.filter((item) => item?.source === "activity").length
+        : null,
+      fixtureHasCarriageReturn: readFileSync(
+        join(
+          project,
+          ".mex",
+          "events",
+          "activity",
+          "2026-08",
+          "event_01K3Q080000000000000000001.md",
+        ),
+      ).includes(13),
+      diagnosticCodes,
+    });
+    throw new Error(`The packaged Hub did not report the exact canonical activity count: ${detail}`);
+  }
   if (
     !activity.ok
     || activityBody.items?.length !== 2
@@ -526,7 +551,11 @@ try {
   child.kill("SIGTERM");
   const exit = await waitForExit(child, 8_000);
   child = undefined;
-  if (exit.signal !== null || exit.code !== 0) {
+  const stoppedAsRequested = exit.code === 0 && exit.signal === null;
+  const terminatedAsRequestedOnWindows = process.platform === "win32"
+    && exit.code === null
+    && exit.signal === "SIGTERM";
+  if (!stoppedAsRequested && !terminatedAsRequestedOnWindows) {
     throw new Error(`The packaged Hub did not stop cleanly (${JSON.stringify(exit)}).`);
   }
   process.stdout.write("Packed Project Hub smoke test passed.\n");
