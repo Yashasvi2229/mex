@@ -69,7 +69,7 @@
     "eval:compare": "node evaluate/compare/index.mjs",
     "eval:compare:test": "node --test evaluate/compare/test/*.test.mjs",
     "benchmark:graph-status": "npm run build && node scripts/benchmark-graph-status.mjs",
-    "benchmark:release": "npm run build && node scripts/release-benchmark/run.mjs --output test-results/release-benchmark/report.json",
+    "benchmark:release": "npm run build && node scripts/release-benchmark/enforce.mjs --output test-results/release-benchmark/report.json",
     "typecheck": "npm run typecheck --workspace @mex/hub-contracts && tsc --noEmit && npm run typecheck --workspace @mex/hub-web",
     "prepare": "npm run build"
   },

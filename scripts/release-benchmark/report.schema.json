@@ -29,6 +29,7 @@
       "properties": {
         "assetViolations": { "$ref": "#/$defs/violations" },
         "runtimeViolations": { "$ref": "#/$defs/violations" },
+        "runtimeConfirmation": { "$ref": "#/$defs/runtimeConfirmation" },
         "passed": { "type": "boolean" }
       }
     },
@@ -275,6 +276,20 @@
           "budget": { "type": ["number", "null"] },
           "reason": { "type": "string", "maxLength": 100 }
         }
+      }
+    },
+    "runtimeConfirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "repositoryHead", "firstPassViolations", "secondPassViolations", "confirmedViolations"],
+      "properties": {
+        "status": {
+          "enum": ["not_required", "skipped_immediate_failure", "passed", "failed", "operational_failure"]
+        },
+        "repositoryHead": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "firstPassViolations": { "$ref": "#/$defs/violations" },
+        "secondPassViolations": { "$ref": "#/$defs/violations" },
+        "confirmedViolations": { "$ref": "#/$defs/violations" }
       }
     }
   }

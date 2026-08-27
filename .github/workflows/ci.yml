@@ -145,6 +145,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-performance-${{ github.run_attempt }}
-          path: test-results/release-benchmark/report.json
+          path: test-results/release-benchmark/
           if-no-files-found: ignore
           retention-days: 14
