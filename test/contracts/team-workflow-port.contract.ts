@@ -42,6 +42,8 @@ export type TeamWorkflowContractPhase =
 export type TeamWorkflowContractScenario =
   | "populated"
   | "uninitialized-local"
+  | "legacy-v3"
+  | "legacy-v3-invalid"
   | "source-bound"
   | "lease-contention"
   | "root-swap"
@@ -127,6 +129,13 @@ export interface TeamWorkflowJournalInspection {
   durableStorageForbiddenMatches: readonly string[];
 }
 
+/** Test-only exact projection of the repository-local SQLite schema. */
+export interface TeamWorkflowLocalSchemaInspection {
+  version: number | null;
+  /** Canonical sqlite_master rows, including exact table/index SQL. */
+  objects: readonly string[];
+}
+
 export interface TeamWorkflowContractOracle {
   configuredActor: ActorRef;
   fixedNow: string;
@@ -192,6 +201,9 @@ export interface TeamWorkflowPortContractHarness<TWikiOperationPlan> {
   inspectPeerJournal(): Promise<TeamWorkflowJournalInspection>;
   snapshot(): Promise<TeamWorkflowContractSnapshot>;
   inspectJournal(): Promise<TeamWorkflowJournalInspection>;
+  inspectLocalSchema(): Promise<TeamWorkflowLocalSchemaInspection>;
+  /** Makes the next explicit v3 migration fail after its v4 DDL has begun. */
+  armLegacyMigrationFailure(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -368,6 +380,74 @@ export function defineTeamWorkflowPortContract<TWikiOperationPlan>(
         await port.preview(await makeCommand("canonical-create"));
         expect(await snapshot()).toEqual(before);
         expect((await snapshot()).localStateDigest).toBeNull();
+      });
+    });
+
+    it("keeps legacy v3 reads and preview immutable, then migrates on the first local apply", async () => {
+      await withHarness("legacy-v3", async ({
+        port,
+        makeCommand,
+        snapshot,
+        inspectLocalSchema,
+      }) => {
+        const before = await snapshot();
+        const beforeSchema = await inspectLocalSchema();
+        expect(before.localStateDigest).not.toBeNull();
+        expect(beforeSchema.version).toBe(3);
+        expect(beforeSchema.objects.some((value) => value.includes("inbox_drafts"))).toBe(false);
+
+        await port.resolveActor();
+        await port.listArtifacts();
+        await expectCode(() => port.listLocalDrafts(), "MIGRATION_REQUIRED");
+        await expectCode(() => port.getLocalDraft("draft_missing"), "MIGRATION_REQUIRED");
+        const preview = await port.preview(await makeCommand("local-draft-create"));
+        expect(preview).toMatchObject({ valid: true, scope: "local", changes: [] });
+        expect(await snapshot()).toEqual(before);
+        expect(await inspectLocalSchema()).toEqual(beforeSchema);
+
+        const result = await port.apply({
+          command: preview.command,
+          expectedPreviewRevision: preview.previewRevision,
+        });
+        const after = await snapshot();
+        const afterSchema = await inspectLocalSchema();
+        expect(result).toMatchObject({ applied: true, idempotentReplay: false });
+        expect(result.changes).toEqual([]);
+        expect(result.events).toEqual([]);
+        expect(afterSchema.version).toBe(4);
+        expect(afterSchema.objects.some((value) => value.includes("inbox_drafts"))).toBe(true);
+        expect(after.localDraftIds.length).toBe(before.localDraftIds.length + 1);
+        expect(after.canonicalDigest).toBe(before.canonicalDigest);
+        expect(after.gitHead).toBe(before.gitHead);
+        expect(after.gitIndexDigest).toBe(before.gitIndexDigest);
+        expect(after.gitStatusDigest).toBe(before.gitStatusDigest);
+      });
+    });
+
+    it("rolls a failed post-preview v3 migration back to the exact v3 state", async () => {
+      await withHarness("legacy-v3-invalid", async ({
+        port,
+        makeCommand,
+        snapshot,
+        inspectLocalSchema,
+        armLegacyMigrationFailure,
+      }) => {
+        const preview = await port.preview(await makeCommand("local-draft-create"));
+        const before = await snapshot();
+        const beforeSchema = await inspectLocalSchema();
+        expect(beforeSchema.version).toBe(3);
+
+        await armLegacyMigrationFailure();
+        await expectCode(
+          () => port.apply({
+            command: preview.command,
+            expectedPreviewRevision: preview.previewRevision,
+          }),
+          "VALIDATION_FAILED",
+        );
+
+        expect(await inspectLocalSchema()).toEqual(beforeSchema);
+        expect(await snapshot()).toEqual(before);
       });
     });
 

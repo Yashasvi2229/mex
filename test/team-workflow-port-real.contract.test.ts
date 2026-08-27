@@ -27,6 +27,7 @@ import {
   type TeamWorkflowContractPhase,
   type TeamWorkflowContractScenario,
   type TeamWorkflowJournalInspection,
+  type TeamWorkflowLocalSchemaInspection,
   type TeamWorkflowPhasePause,
   type TeamWorkflowPortContractFactory,
   type TeamWorkflowPortContractHarness,
@@ -290,6 +291,7 @@ class RepositoryContractHarness implements TeamWorkflowPortContractHarness<JsonV
   peerRoot: string | null = null;
   peerWiki: MockWikiPort | null = null;
   peerWorkflowPort: ContractPort | null = null;
+  invalidClock = false;
   closed = false;
 
   private constructor(scenario: TeamWorkflowContractScenario) {
@@ -332,7 +334,10 @@ class RepositoryContractHarness implements TeamWorkflowPortContractHarness<JsonV
       this.wikiRequest,
       this.wikiTargetRevisions,
     );
-    if (this.scenario !== "uninitialized-local") {
+    const legacyV3 = this.scenario === "legacy-v3" || this.scenario === "legacy-v3-invalid";
+    if (legacyV3) {
+      seedLegacyV3State(this.root);
+    } else if (this.scenario !== "uninitialized-local") {
       seedLocalDraft(this.root, this.wikiRequest, this.wikiTargetRevisions);
     }
     if (this.realWiki !== null) await this.realWiki.rebuildIndex();
@@ -438,7 +443,7 @@ class RepositoryContractHarness implements TeamWorkflowPortContractHarness<JsonV
       scaffoldId: SCAFFOLD_ID,
       wiki,
       git: createRepositoryGitPort(root, { now: () => new Date(NOW) }),
-      now: () => new Date(NOW),
+      now: () => this.invalidClock ? new Date(Number.NaN) : new Date(NOW),
       pid,
       processStatus: (observedPid) => this.deadPids.has(observedPid) ? "dead" : "alive",
       phaseHook: (boundary) => this.onPhase(boundary),
@@ -784,6 +789,17 @@ class RepositoryContractHarness implements TeamWorkflowPortContractHarness<JsonV
     return inspectJournalAt(this.boundRoot, this.oracle);
   }
 
+  async inspectLocalSchema(): Promise<TeamWorkflowLocalSchemaInspection> {
+    return inspectLocalSchemaAt(this.boundRoot);
+  }
+
+  async armLegacyMigrationFailure(): Promise<void> {
+    if (this.scenario !== "legacy-v3-invalid") {
+      throw new Error("legacy migration failure is outside this conformance scenario");
+    }
+    this.invalidClock = true;
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -904,6 +920,32 @@ function seedLocalDraft(
     expectedRevision: null,
     updatedAt: NOW,
   });
+}
+
+function seedLegacyV3State(root: string): void {
+  new TeamLocalState(localOptions(root)).configureMember({
+    memberId: MEMBER_ID,
+    expectedRevision: null,
+    updatedAt: NOW,
+  });
+  const database = join(root, ".mex/local/team.db");
+  const db = new DatabaseSync(database);
+  try {
+    db.exec(`
+      BEGIN IMMEDIATE;
+      DROP TABLE inbox_drafts;
+      DROP TABLE relay_drafts;
+      DROP TABLE team_workflow_lease;
+      DROP TABLE team_workflow_operations;
+      UPDATE local_state_schema
+      SET version = 3, applied_at = '${NOW}'
+      WHERE singleton = 1;
+      COMMIT;
+      VACUUM;
+    `);
+  } finally {
+    db.close();
+  }
 }
 
 function localOptions(root: string) {
@@ -1051,7 +1093,7 @@ function inspectJournalAt(
   oracle: TeamWorkflowPortContractHarness<JsonValue>["oracle"],
 ): TeamWorkflowJournalInspection {
   const database = join(root, ".mex/local/team.db");
-  const durablePaths = [database, `${database}-wal`, `${database}-shm`]
+  const durablePaths = [database, `${database}-wal`, `${database}-shm`, `${database}-journal`]
     .filter((path) => existsSync(path));
   const durableStorageBytes = durablePaths.reduce((total, path) => total + statSync(path).size, 0);
   const forbidden = new Set<string>();
@@ -1109,6 +1151,33 @@ function inspectJournalAt(
       durableStorageBytes,
       durableStorageForbiddenMatches: [...forbidden].sort(compare),
     };
+  } finally {
+    db.close();
+  }
+}
+
+function inspectLocalSchemaAt(root: string): TeamWorkflowLocalSchemaInspection {
+  const database = join(root, ".mex/local/team.db");
+  if (!existsSync(database)) return { version: null, objects: [] };
+  const db = new DatabaseSync(database, { readOnly: true });
+  try {
+    const row = db.prepare(`
+      SELECT version
+      FROM local_state_schema
+      WHERE singleton = 1
+    `).get() as { version?: unknown } | undefined;
+    const version = typeof row?.version === "number" && Number.isSafeInteger(row.version)
+      ? row.version
+      : null;
+    const objects = (db.prepare(`
+      SELECT type, name, sql
+      FROM sqlite_master
+      WHERE name NOT LIKE 'sqlite_%'
+      ORDER BY type ASC, name ASC
+    `).all() as Array<{ type: unknown; name: unknown; sql: unknown }>).map((item) => (
+      JSON.stringify({ type: item.type, name: item.name, sql: item.sql })
+    ));
+    return { version, objects };
   } finally {
     db.close();
   }
@@ -1201,7 +1270,7 @@ function wikiFilesDigest(root: string): Revision {
 function databaseDigest(path: string, absentIsNull = false): Revision | null {
   if (!existsSync(path) || !lstatSync(path).isFile()) return absentIsNull ? null : hash("");
   const digest = createHash("sha256");
-  for (const candidate of [path, `${path}-wal`, `${path}-shm`]) {
+  for (const candidate of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
     if (!existsSync(candidate) || !lstatSync(candidate).isFile()) continue;
     digest.update(basename(candidate));
     digest.update(readFileSync(candidate));
