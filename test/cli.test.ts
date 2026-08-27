@@ -222,8 +222,10 @@ describe("built CLI main-module guard", () => {
       cwd: repoRoot,
       env: { ...process.env, NODE_ENV: "test" },
       stdio: "pipe",
+      // execSync blocks Vitest's hook timer, so bound the child build itself.
+      timeout: 60_000,
     });
-  }, 30_000);
+  }, 65_000);
 
   it("parses argv when invoked through a symlinked bin (npm/npx layout)", () => {
     const binDir = mkdtempSync(join(tmpdir(), "mex-bin-"));
