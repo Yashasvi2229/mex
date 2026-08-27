@@ -49,8 +49,20 @@ export {
 } from "./audit.js";
 export type { AuditEntry, AuditLog, AuditPhase, OperationRecord } from "./audit.js";
 
-export { locateEntity, locateEntityClaimants, locateFile } from "./locate.js";
-export type { LocateOptions, LocatedEntity, LocatedEntityClaimants, LocatedFile } from "./locate.js";
+export {
+  attestEntityClaimants,
+  locateEntity,
+  locateEntityClaimants,
+  locateFile,
+  WikiClaimantScanIncompleteError,
+} from "./locate.js";
+export type {
+  AttestedEntityClaimants,
+  LocateOptions,
+  LocatedEntity,
+  LocatedEntityClaimants,
+  LocatedFile,
+} from "./locate.js";
 
 export {
   assertWritablePath,

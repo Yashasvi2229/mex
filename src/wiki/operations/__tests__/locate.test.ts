@@ -13,7 +13,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WIKI_CORPUS_LIMITS, WikiCorpusLimitError } from "../../index/corpus-policy.js";
 import { rebuildWikiIndex } from "../../index/rebuild.js";
-import { locateEntity, locateEntityClaimants } from "../locate.js";
+import {
+  attestEntityClaimants,
+  locateEntity,
+  locateEntityClaimants,
+  WikiClaimantScanIncompleteError,
+} from "../locate.js";
 
 const ENTITY_ID = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
 const roots: string[] = [];
@@ -92,6 +97,23 @@ describe("current-filesystem entity claimant location", () => {
     expect(existsSync(join(root, "wiki.db"))).toBe(false);
   });
 
+  it("attests every discovered source while preserving tolerant ordinary lookup", () => {
+    const root = temporaryRoot();
+    writeFileSync(join(root, "a-claimant.md"), entityMarkdown("Readable claimant"), "utf8");
+    writeFileSync(join(root, "z-unreadable.md"), "# unreadable seam\n", "utf8");
+    const options = {
+      scaffoldRoot: root,
+      readFile: (absolutePath: string) => {
+        if (absolutePath.endsWith("z-unreadable.md")) throw new Error("injected read failure");
+        return readFileSync(absolutePath, "utf8");
+      },
+    };
+
+    expect(locateEntity(ENTITY_ID, options)?.path).toBe("a-claimant.md");
+    expect(() => attestEntityClaimants(ENTITY_ID, options))
+      .toThrowError(WikiClaimantScanIncompleteError);
+  });
+
   it("does not follow a Markdown leaf symlink to manufacture a claimant", () => {
     if (process.platform === "win32") return;
     const root = temporaryRoot();
@@ -103,6 +125,8 @@ describe("current-filesystem entity claimant location", () => {
       claimantCount: 0,
       ambiguous: false,
     });
+    expect(() => attestEntityClaimants(ENTITY_ID, { scaffoldRoot: root }))
+      .toThrowError(WikiClaimantScanIncompleteError);
     expect(existsSync(join(root, "wiki.db"))).toBe(false);
   });
 });

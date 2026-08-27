@@ -71,10 +71,16 @@ import { entityTextOf } from "../markdown/codec.js";
 import type { GroundingResolver } from "../index/write.js";
 import { refreshWikiIndex } from "../index/refresh.js";
 import { defaultIndexPath } from "../index/rebuild.js";
+import { WikiCorpusLimitError } from "../index/corpus-policy.js";
 import { readContainedSource } from "../index/source-read.js";
 import { acquireWikiMaintenanceLease, type WikiMaintenanceLease } from "../index/dbfile.js";
 import { assertWritablePath, checkContainment, isReadOnlyPath, readOnlyDiagnostic, WritePathError } from "./paths.js";
-import { locateEntity } from "./locate.js";
+import {
+  attestEntityClaimants,
+  locateEntity,
+  WikiClaimantScanIncompleteError,
+  type AttestedEntityClaimants,
+} from "./locate.js";
 import { applyEdits } from "../markdown/patch.js";
 import { payloadHashOf, planOperation, verifyPlan, writeScopeDiagnostic, type PlanOptions, type PlannedFileEdit, type RevisionChange, type WikiPatchPlan } from "./plan.js";
 import { previewHashOf, previewPlan, type WikiPreview } from "./preview.js";
@@ -305,7 +311,11 @@ function applyOperationHeld(envelope: unknown, options: ApplyOptions): ApplyResu
     ]);
   }
 
-  const stale = revalidate(plan, options);
+  const stale = revalidate(
+    plan,
+    planOptions,
+    resuming !== null && plan.type === "move-entry" ? resuming.files : undefined,
+  );
   if (stale.length > 0) return failure(opId, [...carried, ...stale]);
   const revision = previewHashOf(plan);
   const applied = applyPlannedOperationSequence([plan], {
@@ -461,6 +471,24 @@ function applyPlannedOperationSequenceHeld(
   const linked = validateSequenceLinks(plans, options);
   if (linked.length > 0) {
     return { ok: false, changedFiles: [], replayed: false, diagnostics: [...diagnostics, ...linked] };
+  }
+  const activeIntentFiles = inFlight
+    ? recordFor(log, plans[completed]!.opId).intent?.files
+    : undefined;
+  const claimantConflicts = validateSequenceClaimants(
+    plans,
+    options,
+    completed,
+    inFlight,
+    activeIntentFiles,
+  );
+  if (claimantConflicts.length > 0) {
+    return {
+      ok: false,
+      changedFiles: [],
+      replayed: false,
+      diagnostics: [...diagnostics, ...claimantConflicts],
+    };
   }
   const invocationAudit = readOperationLogExact(scaffoldRoot);
   const current = validateSequenceCurrent(plans, scaffoldRoot, completed, inFlight, invocationAudit.text);
@@ -663,6 +691,172 @@ function validateSequenceLinks(plans: readonly WikiPatchPlan[], options: ApplyOp
   return diagnostics;
 }
 
+/**
+ * Re-attest claimant ownership while the Wiki maintenance lease is held. Exact
+ * file checks alone cannot see a new second file claiming the same entity id.
+ * The one allowed ambiguous state is the recorded active half of a multi-file
+ * move recovery, whose exact reviewed file states are checked next.
+ */
+function validateSequenceClaimants(
+  plans: readonly WikiPatchPlan[],
+  options: ApplyOptions,
+  completed: number,
+  inFlight: boolean,
+  activeIntentFiles: readonly string[] | undefined,
+): WikiDiagnostic[] {
+  const diagnostics: WikiDiagnostic[] = [];
+  const observations = new Map<string, AttestedEntityClaimants>();
+  const failedObservations = new Set<string>();
+  const observe = (entityId: EntityId): AttestedEntityClaimants | null => {
+    const prior = observations.get(entityId);
+    if (prior !== undefined) return prior;
+    if (failedObservations.has(entityId)) return null;
+    try {
+      const observed = attestEntityClaimants(entityId, options);
+      observations.set(entityId, observed);
+      return observed;
+    } catch (error) {
+      if (
+        error instanceof WikiClaimantScanIncompleteError
+        || error instanceof WikiCorpusLimitError
+      ) {
+        failedObservations.add(entityId);
+        diagnostics.push(claimantScanConflict(entityId));
+        return null;
+      }
+      throw error;
+    }
+  };
+  const activeRecovery = inFlight && plans[completed]?.type === "move-entry"
+    ? plans[completed]
+    : undefined;
+  const preconditions = new Map<string, WikiPatchPlan["preconditions"][number]>();
+  for (const plan of plans) {
+    for (const precondition of plan.preconditions) {
+      if (!preconditions.has(precondition.entityId)) {
+        preconditions.set(precondition.entityId, precondition);
+      }
+    }
+  }
+  // When a completed prefix and the active move touch the same entity, recovery
+  // authority belongs to the active plan's reviewed source, not the earliest
+  // historical precondition in the batch.
+  for (const precondition of activeRecovery?.preconditions ?? []) {
+    preconditions.set(precondition.entityId, precondition);
+  }
+
+  for (const precondition of preconditions.values()) {
+    const claimants = observe(precondition.entityId);
+    if (claimants === null) continue;
+    if (
+      claimants.ambiguous
+      && !isExactMoveRecoveryClaimants(
+        claimants,
+        precondition,
+        activeRecovery?.preconditions.some((item) => item.entityId === precondition.entityId)
+          ? activeIntentFiles
+          : undefined,
+      )
+    ) {
+      diagnostics.push(diagnostic(
+        "CONTENT_HASH_CONFLICT",
+        `Entity ${precondition.entityId} has duplicate current claimants at apply time.`,
+        { entityId: precondition.entityId },
+      ));
+    }
+  }
+
+  const createdOrigins = new Map<EntityId, number>();
+  for (let index = 0; index < plans.length; index += 1) {
+    for (const createdId of plans[index]!.createdIds) {
+      if (createdOrigins.has(createdId)) {
+        diagnostics.push(diagnostic(
+          "INVALID_OPERATION_ENVELOPE",
+          `Entity ${createdId} is minted more than once in the reviewed batch.`,
+          { entityId: createdId },
+        ));
+        continue;
+      }
+      createdOrigins.set(createdId, index);
+    }
+  }
+
+  for (const [createdId, origin] of createdOrigins) {
+    const claimants = observe(createdId);
+    if (claimants === null) continue;
+    const originCompleted = origin < completed;
+    const originActive = inFlight && origin === completed;
+
+    // A preview-exposed generated id remains reserved by absence until its own
+    // durable intent is active. Any claimant before then is a collision.
+    if (!originCompleted && !originActive) {
+      if (claimants.claimantCount !== 0) diagnostics.push(createdClaimantConflict(
+        createdId,
+        "already has a current claimant before its reviewed create is applied",
+      ));
+      continue;
+    }
+
+    const activePrecondition = activeRecovery?.preconditions.find(
+      (precondition) => precondition.entityId === createdId,
+    );
+    if (
+      activePrecondition !== undefined
+      && claimants.ambiguous
+      && isExactMoveRecoveryClaimants(claimants, activePrecondition, activeIntentFiles)
+    ) {
+      continue;
+    }
+
+    // An active create may be either immediately before or immediately after
+    // its reviewed rename. Completed creates must have landed exactly once.
+    if (originActive && claimants.claimantCount === 0) continue;
+    const allowedPaths = reviewedCreatedClaimantPaths(
+      plans,
+      createdId,
+      completed,
+      inFlight,
+      activeIntentFiles,
+    );
+    const evidence = claimants.claimantEvidence;
+    if (
+      claimants.claimantCount !== 1
+      || evidence.length !== 1
+      || !allowedPaths.has(evidence[0]!.path)
+    ) {
+      diagnostics.push(createdClaimantConflict(
+        createdId,
+        "does not have exactly one claimant in its reviewed recovery files",
+      ));
+    }
+  }
+  return diagnostics;
+}
+
+function reviewedCreatedClaimantPaths(
+  plans: readonly WikiPatchPlan[],
+  createdId: EntityId,
+  completed: number,
+  inFlight: boolean,
+  activeIntentFiles: readonly string[] | undefined,
+): ReadonlySet<string> {
+  const paths = new Set<string>();
+  const last = Math.min(plans.length - 1, completed);
+  for (let index = 0; index <= last; index += 1) {
+    const plan = plans[index];
+    if (plan === undefined) continue;
+    const relevant = plan.createdIds.includes(createdId)
+      || plan.preconditions.some((precondition) => precondition.entityId === createdId);
+    if (!relevant) continue;
+    if (inFlight && index === completed) {
+      for (const path of activeIntentFiles ?? []) paths.add(path);
+    } else if (index < completed) {
+      for (const file of plan.files) paths.add(file.path);
+    }
+  }
+  return paths;
+}
+
 function validateSequenceCurrent(
   plans: readonly WikiPatchPlan[],
   scaffoldRoot: string,
@@ -828,10 +1022,38 @@ function alreadySettled(intent: AuditEntry, options: ApplyOptions): boolean {
  * because the two run at different moments in a concurrent world and the
  * second is the one that matters.
  */
-function revalidate(plan: WikiPatchPlan, options: ApplyOptions): WikiDiagnostic[] {
+function revalidate(
+  plan: WikiPatchPlan,
+  options: PlanOptions,
+  recoveryFiles?: readonly string[],
+): WikiDiagnostic[] {
   const diagnostics: WikiDiagnostic[] = [];
   for (const precondition of plan.preconditions) {
-    const located = locateEntity(precondition.entityId, options);
+    let claimants;
+    try {
+      claimants = attestEntityClaimants(precondition.entityId, options);
+    } catch (error) {
+      if (
+        error instanceof WikiClaimantScanIncompleteError
+        || error instanceof WikiCorpusLimitError
+      ) {
+        diagnostics.push(claimantScanConflict(precondition.entityId));
+        continue;
+      }
+      throw error;
+    }
+    if (
+      claimants.ambiguous
+      && !isExactMoveRecoveryClaimants(claimants, precondition, recoveryFiles)
+    ) {
+      diagnostics.push(diagnostic(
+        "CONTENT_HASH_CONFLICT",
+        `Entity ${precondition.entityId} has duplicate current claimants at apply time.`,
+        { entityId: precondition.entityId },
+      ));
+      continue;
+    }
+    const located = claimants.winner;
     if (located === null) {
       diagnostics.push(
         diagnostic("ENTITY_NOT_FOUND", `Entity ${precondition.entityId} vanished between planning and applying.`, {
@@ -851,6 +1073,41 @@ function revalidate(plan: WikiPatchPlan, options: ApplyOptions): WikiDiagnostic[
     }
   }
   return diagnostics;
+}
+
+/**
+ * A move crash may leave exactly one reviewed source claimant and one reviewed
+ * destination claimant. The attestation retains a third witness specifically
+ * so "2+" can never be mistaken for that exact two-file state.
+ */
+function isExactMoveRecoveryClaimants(
+  claimants: AttestedEntityClaimants,
+  precondition: WikiPatchPlan["preconditions"][number],
+  reviewedFiles: readonly string[] | undefined,
+): boolean {
+  if (reviewedFiles === undefined || reviewedFiles.length !== 2) return false;
+  const reviewed = new Set(reviewedFiles);
+  if (reviewed.size !== 2 || !reviewed.has(precondition.file)) return false;
+  if (claimants.claimantEvidence.length !== 2) return false;
+  const observed = new Set(claimants.claimantEvidence.map((claimant) => claimant.path));
+  if (observed.size !== 2) return false;
+  return observed.size === reviewed.size && [...observed].every((path) => reviewed.has(path));
+}
+
+function claimantScanConflict(entityId: EntityId): WikiDiagnostic {
+  return diagnostic(
+    "CONTENT_HASH_CONFLICT",
+    `The complete bounded claimant corpus for entity ${entityId} could not be observed at apply time.`,
+    { entityId },
+  );
+}
+
+function createdClaimantConflict(entityId: EntityId, detail: string): WikiDiagnostic {
+  return diagnostic(
+    "CONTENT_HASH_CONFLICT",
+    `Generated entity ${entityId} ${detail}.`,
+    { entityId },
+  );
 }
 
 /**

@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseWikiMarkdown } from "../../markdown/codec.js";
+import type { EntityId } from "../../model/ids.js";
 import { applyOperation, applyPlannedOperation, WikiWriteRecoveryError } from "../apply.js";
 import { planOperation } from "../plan.js";
 import { applyPlannedOperationBatch, planOperationBatch } from "../batch.js";
@@ -33,6 +34,7 @@ import { assertWritablePath, checkContainment, resolveThroughSymlinks, WritePath
 import { GATEWAY, JWT, PATTERN, codesOf, envelope, makeScaffold, type Scaffold } from "./helpers.js";
 
 const scaffolds: Scaffold[] = [];
+const CREATED_COLLISION = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJX" as EntityId;
 function scaffold(files?: Record<string, string>): Scaffold {
   const made = makeScaffold(files);
   scaffolds.push(made);
@@ -127,6 +129,50 @@ describe("a crash between two renames", () => {
     expect(again.replayed).toBe(true);
     expect(target.files()).toEqual(settled);
     expect(acceptedOperations(readAuditLog(target.root)).filter((entry) => entry.opId === "op-crashing-move")).toHaveLength(1);
+  });
+
+  it("rejects a third claimant instead of treating saturated ambiguity as exact move recovery", () => {
+    const compatibility = scaffold();
+    const compatibilityEnvelope = moveEnvelope(compatibility);
+    expect(() => applyOperation(compatibilityEnvelope, {
+      scaffoldRoot: compatibility.root,
+      onFileWritten: () => { throw new Error("SIGKILL"); },
+    })).toThrow("SIGKILL");
+    writeFileSync(
+      join(compatibility.root, "z-third-claimant.md"),
+      compatibility.read("context/architecture.md"),
+      "utf8",
+    );
+    const compatibilityBefore = compatibility.files();
+    const compatibilityResume = applyOperation(compatibilityEnvelope, {
+      scaffoldRoot: compatibility.root,
+    });
+    expect(compatibilityResume.ok).toBe(false);
+    expect(codesOf(compatibilityResume.diagnostics)).toContain("CONTENT_HASH_CONFLICT");
+    expect(compatibility.files()).toEqual(compatibilityBefore);
+
+    const planned = scaffold();
+    const batch = planOperationBatch([moveEnvelope(planned)], { scaffoldRoot: planned.root });
+    expect(batch.ok).toBe(true);
+    if (!batch.ok) return;
+    expect(() => applyPlannedOperationBatch(batch.plan, {
+      scaffoldRoot: planned.root,
+      expectedPreviewRevision: batch.plan.previewRevision,
+      onFileWritten: () => { throw new Error("SIGKILL"); },
+    })).toThrow("SIGKILL");
+    writeFileSync(
+      join(planned.root, "z-third-claimant.md"),
+      planned.read("context/architecture.md"),
+      "utf8",
+    );
+    const plannedBefore = planned.files();
+    const plannedResume = applyPlannedOperationBatch(batch.plan, {
+      scaffoldRoot: planned.root,
+      expectedPreviewRevision: batch.plan.previewRevision,
+    });
+    expect(plannedResume.ok).toBe(false);
+    expect(codesOf(plannedResume.diagnostics)).toContain("CONTENT_HASH_CONFLICT");
+    expect(planned.files()).toEqual(plannedBefore);
   });
 
   it("does not mint a second entity when an interrupted create is replayed", () => {
@@ -778,6 +824,77 @@ describe("preconditions and the preview binding", () => {
 });
 
 describe("the executable preview plan", () => {
+  it("reserves generated ids by complete claimant absence through apply and recovery", () => {
+    const request = (target: Scaffold, opId: string) => envelope(
+      target,
+      "create-entry",
+      {
+        file: "context/architecture.md",
+        insertAt: { at: "end-of-file" },
+        type: "convention",
+        title: "Generated ids stay unique",
+        body: "The complete claimant corpus is the authority.",
+        headingDepth: 2,
+      },
+      { opId },
+    );
+    const foreignClaimant = `<!-- mex:entity
+id: ${CREATED_COLLISION}
+type: convention
+status: promoted
+revision: 1
+-->
+## Foreign claimant
+
+This claimant was not part of the reviewed create.
+`;
+
+    const fresh = scaffold();
+    const freshPlan = planOperation(request(fresh, "op-created-id-fresh"), {
+      scaffoldRoot: fresh.root,
+      generateId: () => CREATED_COLLISION,
+    });
+    expect(freshPlan.ok).toBe(true);
+    if (!freshPlan.ok) return;
+    expect(freshPlan.plan.createdIds).toEqual([CREATED_COLLISION]);
+    expect(parseWikiMarkdown({ path: "z-foreign-created-id.md", text: foreignClaimant })
+      .entities.map((entry) => entry.entity.id)).toContain(CREATED_COLLISION);
+    writeFileSync(join(fresh.root, "z-foreign-created-id.md"), foreignClaimant, "utf8");
+    const freshBefore = fresh.files();
+    const freshResult = applyPlannedOperation(freshPlan.plan, {
+      scaffoldRoot: fresh.root,
+      expectedPreviewHash: previewHashOf(freshPlan.plan),
+    });
+    expect(freshResult.ok).toBe(false);
+    expect(codesOf(freshResult.diagnostics)).toContain("CONTENT_HASH_CONFLICT");
+    expect(fresh.files()).toEqual(freshBefore);
+    expect(existsSync(operationLogPath(fresh.root))).toBe(false);
+
+    const recovery = scaffold();
+    const recoveryPlan = planOperation(request(recovery, "op-created-id-recovery"), {
+      scaffoldRoot: recovery.root,
+      generateId: () => CREATED_COLLISION,
+    });
+    expect(recoveryPlan.ok).toBe(true);
+    if (!recoveryPlan.ok) return;
+    expect(() => applyPlannedOperation(recoveryPlan.plan, {
+      scaffoldRoot: recovery.root,
+      expectedPreviewHash: previewHashOf(recoveryPlan.plan),
+      onFileWritten: () => { throw new Error("SIGKILL"); },
+    })).toThrow("SIGKILL");
+    writeFileSync(join(recovery.root, "z-foreign-created-id.md"), foreignClaimant, "utf8");
+    const recoveryBefore = recovery.files();
+    const auditBefore = readFileSync(operationLogPath(recovery.root), "utf8");
+    const recoveryResult = applyPlannedOperation(recoveryPlan.plan, {
+      scaffoldRoot: recovery.root,
+      expectedPreviewHash: previewHashOf(recoveryPlan.plan),
+    });
+    expect(recoveryResult.ok).toBe(false);
+    expect(codesOf(recoveryResult.diagnostics)).toContain("CONTENT_HASH_CONFLICT");
+    expect(recovery.files()).toEqual(recoveryBefore);
+    expect(readFileSync(operationLogPath(recovery.root), "utf8")).toBe(auditBefore);
+  });
+
   it("holds the shared cross-process writer lease across revalidation and every write", async () => {
     const { acquireWikiMaintenanceLease, WikiMaintenanceLockedError } = await import("../../index/dbfile.js");
     const target = scaffold();
@@ -1271,6 +1388,44 @@ describe("atomic executable batches", () => {
     })).toThrow("resume completion failed");
     expect(target.files()).toEqual(invocationStart);
     expect(readFileSync(operationLogPath(target.root), "utf8")).toBe(ledgerStart);
+  });
+
+  it("resumes an exact move suffix after a completed same-entity prefix", () => {
+    const target = scaffold();
+    const planned = planOperationBatch([
+      envelope(target, "update-entry", { summary: "Completed prefix." }, {
+        entityId: GATEWAY,
+        opId: "op-same-entity-prefix",
+      }),
+      envelope(target, "move-entry", {
+        file: "patterns/problem-documents.md",
+        insertAt: { at: "end-of-file" },
+      }, {
+        entityId: GATEWAY,
+        opId: "op-same-entity-move",
+      }),
+    ], { scaffoldRoot: target.root });
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const first = planned.plan.operations[0]!;
+    expect(applyPlannedOperation(first, {
+      scaffoldRoot: target.root,
+      expectedPreviewHash: previewHashOf(first),
+    }).ok).toBe(true);
+
+    expect(() => applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+      onFileWritten: () => { throw new Error("SIGKILL"); },
+    })).toThrow("SIGKILL");
+
+    const resumed = applyPlannedOperationBatch(planned.plan, {
+      scaffoldRoot: target.root,
+      expectedPreviewRevision: planned.plan.previewRevision,
+    });
+    expect(resumed.ok).toBe(true);
+    expect(target.read("context/architecture.md")).not.toContain(GATEWAY);
+    expect(target.read("patterns/problem-documents.md").split(GATEWAY)).toHaveLength(2);
   });
 
   it("refuses to overwrite an external post-write edit and retains exact recovery artifacts", () => {

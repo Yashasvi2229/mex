@@ -7,9 +7,10 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  readSync,
   realpathSync,
 } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type { EntityTypeRegistry } from "./model/entity.js";
 import { generateEntityId, isEntityId, type EntityId as EngineEntityId } from "./model/ids.js";
 import type { GroundingGraph } from "./grounding/adapter.js";
@@ -33,17 +34,20 @@ import {
   batchPreviewRevisionOf,
   OPERATION_LOG_MAX_BYTES,
   OPERATION_LOG_MAX_ENTRIES,
+  attestEntityClaimants,
   payloadHashOf,
   planOperationBatch,
   readAuditLog,
   recordFor,
   locateEntity,
+  WikiClaimantScanIncompleteError,
   type AuditEntry,
   type WikiOperationBatchPlan,
   type WikiPatchPlan,
 } from "./operations/index.js";
 import { readOperationLogExact } from "./operations/audit.js";
-import { createParseCache, locateEntityClaimants } from "./operations/locate.js";
+import { createParseCache } from "./operations/locate.js";
+import { WIKI_CORPUS_LIMITS, WikiCorpusLimitError } from "./index/corpus-policy.js";
 import {
   inspectWikiContractIndex,
   WikiContractReadError,
@@ -303,6 +307,8 @@ interface AdapterTestSeams {
   onOperationFileWritten?: (path: string) => void;
   /** @internal Simulate process death after one batch child completes. */
   onOperationCompleted?: (opId: string) => void;
+  /** @internal Mutate an artifact after its descriptor-bound bytes are read. */
+  onCurrentRevisionArtifactRead?: (path: string) => void;
 }
 
 class GroundingWorkFailure {
@@ -771,7 +777,11 @@ export class RepositoryWikiPort implements WikiPort<
       targets.add(targetKey);
       if ("contentHash" in expectation) {
         const path = toScaffoldPath(expectation.target.path);
-        const actual = readContainedArtifactRevision(this.#scaffoldRoot, path);
+        const actual = readContainedArtifactRevision(
+          this.#scaffoldRoot,
+          path,
+          this.#options.__internal?.onCurrentRevisionArtifactRead,
+        );
         if (actual !== expectation.contentHash) {
           throw revisionConflict("A Wiki artifact changed after it was read.");
         }
@@ -781,7 +791,20 @@ export class RepositoryWikiPort implements WikiPort<
       if (!isEntityId(expectation.target.id)) {
         throw validationError("A Wiki entity revision expectation contains an invalid entity id.");
       }
-      const current = locateEntityClaimants(expectation.target.id, options);
+      let current;
+      try {
+        current = attestEntityClaimants(expectation.target.id, options);
+      } catch (error) {
+        if (
+          error instanceof WikiClaimantScanIncompleteError
+          || error instanceof WikiCorpusLimitError
+        ) {
+          throw revisionConflict(
+            "The complete bounded Wiki claimant corpus could not be observed safely.",
+          );
+        }
+        throw error;
+      }
       if (current.ambiguous || current.claimantCount === 2) {
         throw revisionConflict("A Wiki entity has duplicate canonical claimants.");
       }
@@ -2571,7 +2594,11 @@ function toScaffoldPath(path: string): RepoRelativePath {
   return relative;
 }
 
-function readContainedArtifactRevision(scaffoldRoot: string, path: string): Revision | null {
+function readContainedArtifactRevision(
+  scaffoldRoot: string,
+  path: string,
+  afterRead?: (path: string) => void,
+): Revision | null {
   try {
     const absolute = resolve(scaffoldRoot, path);
     const root = realpathSync(scaffoldRoot);
@@ -2592,14 +2619,130 @@ function readContainedArtifactRevision(scaffoldRoot: string, path: string): Revi
       if (!sameFileIdentity(before, opened) || !sameFileIdentity(opened, after)) {
         throw revisionConflict("A Wiki artifact changed while its revision was being observed.");
       }
-      return exactFileContentHash(readFileSync(fd));
+      const maxBytes = path === "events/operations.jsonl"
+        ? OPERATION_LOG_MAX_BYTES
+        : WIKI_CORPUS_LIMITS.maxFileBytes;
+      if (opened.size > maxBytes) {
+        throw revisionConflict("A Wiki artifact exceeds the bounded revision-observation limit.");
+      }
+      const bytes = readBoundedArtifactBytes(fd, maxBytes);
+      afterRead?.(path);
+      const observedAfterRead = fstatSync(fd);
+      const leafAfterRead = lstatSync(absolute);
+      if (
+        bytes.byteLength !== opened.size
+        || !sameFileIdentity(opened, observedAfterRead)
+        || !sameFileIdentity(observedAfterRead, leafAfterRead)
+      ) {
+        throw revisionConflict("A Wiki artifact changed while its revision was being observed.");
+      }
+      return exactFileContentHash(bytes);
     } finally {
       closeSync(fd);
     }
   } catch (error) {
     if (error instanceof MexPortError) throw error;
-    return null;
+    if (isMissingFilesystemEntry(error) && proveContainedArtifactAbsence(scaffoldRoot, path)) {
+      return null;
+    }
+    throw revisionConflict("A Wiki artifact could not be observed safely.");
   }
+}
+
+/**
+ * Consume at most one byte beyond the accepted artifact budget. A size check
+ * before reading is not a bound: another process can grow the open file after
+ * `fstat`, and `readFileSync(fd)` would then allocate for the new size. The
+ * extra byte distinguishes exact-budget EOF from concurrent/oversized input
+ * without ever retaining more than `maxBytes + 1` bytes.
+ */
+function readBoundedArtifactBytes(fd: number, maxBytes: number): Buffer {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  while (total <= maxBytes) {
+    const remaining = maxBytes + 1 - total;
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+    const bytesRead = readSync(fd, chunk, 0, chunk.byteLength, total);
+    if (bytesRead === 0) break;
+    chunks.push(chunk.subarray(0, bytesRead));
+    total += bytesRead;
+  }
+  if (total > maxBytes) {
+    throw revisionConflict("A Wiki artifact exceeds the bounded revision-observation limit.");
+  }
+  return Buffer.concat(chunks, total);
+}
+
+/**
+ * Treat `ENOENT` as absence only after binding the scaffold and the nearest
+ * extant directory on both sides of a second leaf probe. A dangling symlink,
+ * escaping/mutated ancestor, unreadable directory, and every non-ENOENT error
+ * remain observation failures rather than silently becoming `null`.
+ */
+function proveContainedArtifactAbsence(scaffoldRoot: string, path: string): boolean {
+  const root = resolve(scaffoldRoot);
+  const target = resolve(root, path);
+  const lexical = relative(root, target);
+  if (lexical === "" || lexical.startsWith("..") || isAbsolute(lexical)) return false;
+
+  try {
+    const realRoot = realpathSync(root);
+    const rootStats = lstatSync(realRoot);
+    if (!rootStats.isDirectory()) return false;
+
+    try {
+      lstatSync(target);
+      return false;
+    } catch (error) {
+      if (!isMissingFilesystemEntry(error)) return false;
+    }
+
+    let ancestor = dirname(target);
+    let realAncestor: string;
+    let ancestorStats: ReturnType<typeof lstatSync>;
+    for (;;) {
+      try {
+        const declaredStats = lstatSync(ancestor);
+        if (!declaredStats.isDirectory() || declaredStats.isSymbolicLink()) return false;
+        realAncestor = realpathSync(ancestor);
+        ancestorStats = lstatSync(realAncestor);
+        break;
+      } catch (error) {
+        if (!isMissingFilesystemEntry(error)) return false;
+        const parent = dirname(ancestor);
+        if (parent === ancestor) return false;
+        ancestor = parent;
+      }
+    }
+
+    const ancestorRelative = relative(realRoot, realAncestor);
+    if (ancestorRelative.startsWith("..") || isAbsolute(ancestorRelative)) return false;
+
+    try {
+      lstatSync(target);
+      return false;
+    } catch (error) {
+      if (!isMissingFilesystemEntry(error)) return false;
+    }
+
+    const realRootAfter = realpathSync(root);
+    const rootAfter = lstatSync(realRootAfter);
+    const realAncestorAfter = realpathSync(ancestor);
+    const ancestorAfter = lstatSync(realAncestorAfter);
+    return realRootAfter === realRoot
+      && sameFileIdentity(rootStats, rootAfter)
+      && realAncestorAfter === realAncestor
+      && sameFileIdentity(ancestorStats, ancestorAfter);
+  } catch {
+    return false;
+  }
+}
+
+function isMissingFilesystemEntry(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: unknown }).code === "ENOENT";
 }
 
 function stableObservationTime(session: WikiContractReadSession): string {

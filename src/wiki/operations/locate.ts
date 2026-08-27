@@ -291,6 +291,32 @@ export interface LocatedEntityClaimants {
   ambiguous: boolean;
 }
 
+export interface AttestedEntityClaimants extends LocatedEntityClaimants {
+  /**
+   * Deterministic evidence for at most three claimants. Two is the largest
+   * valid recovery set; a third entry is a bounded "three or more" witness.
+   */
+  claimantEvidence: readonly {
+    entityKey: string;
+    path: string;
+  }[];
+}
+
+/**
+ * The authoritative claimant view is useful only when every discoverable
+ * canonical source was observed. Ordinary locator compatibility still skips an
+ * unreadable source, but mutation preflights and apply revalidation use the
+ * strict attestation below and fail closed on an incomplete walk.
+ */
+export class WikiClaimantScanIncompleteError extends Error {
+  readonly code = "WIKI_CLAIMANT_SCAN_INCOMPLETE";
+
+  constructor(readonly reason: "discovery" | "read") {
+    super("The complete bounded Wiki claimant corpus could not be observed safely.");
+    this.name = "WikiClaimantScanIncompleteError";
+  }
+}
+
 /** Saturating increment for the only claimant cardinalities callers can use safely. */
 function incrementClaimantCount(count: 0 | 1 | 2): 1 | 2 {
   return count === 0 ? 1 : 2;
@@ -308,7 +334,11 @@ function claimantCountIsAmbiguous(count: 0 | 1 | 2): boolean {
  * to the source recorded by its durable intent. Ambiguity always reflects the
  * complete scan, including claimants outside that preferred file.
  */
-export function locateEntityClaimants(id: string, options: LocateOptions): LocatedEntityClaimants {
+function scanEntityClaimants(
+  id: string,
+  options: LocateOptions,
+  requireCompleteScan: boolean,
+): AttestedEntityClaimants {
   const root = resolve(options.scaffoldRoot);
   let corpusBytes = 0;
   const countedPaths = new Set<string>();
@@ -316,22 +346,40 @@ export function locateEntityClaimants(id: string, options: LocateOptions): Locat
   let winner: LocatedEntity | null = null;
   let preferredWinner: LocatedEntity | null = null;
   let claimantCount: 0 | 1 | 2 = 0;
+  const claimantEvidence: Array<{ entityKey: string; path: string }> = [];
 
   const account = (path: string, text: string): void => {
     if (countedPaths.has(path)) return;
     corpusBytes = addWikiCorpusBytes(corpusBytes, Buffer.byteLength(text, "utf8"));
     countedPaths.add(path);
   };
-  const inspect = (path: string, absolutePath: string, preferred: boolean): void => {
+  const inspect = (
+    path: string,
+    absolutePath: string,
+    preferred: boolean,
+    discovered: boolean,
+  ): void => {
     const absolute = resolve(absolutePath);
     if (scannedAbsolutePaths.has(absolute)) return;
-    scannedAbsolutePaths.add(absolute);
     const read = readParsed(options, path, absolute);
-    if (read === null) return;
+    if (read === null) {
+      if (requireCompleteScan && discovered) {
+        throw new WikiClaimantScanIncompleteError("read");
+      }
+      // Preserve the tolerant locator's historical single-attempt behavior.
+      // Strict attestation deliberately retries a failed optional replay hint
+      // when canonical discovery later proves that path is mandatory.
+      if (!requireCompleteScan) scannedAbsolutePaths.add(absolute);
+      return;
+    }
+    scannedAbsolutePaths.add(absolute);
     account(path, read.text);
     for (const claimant of claimantsIn(read.parsed, id)) {
       const candidate = located(path, absolute, read.text, read.parsed, claimant);
       claimantCount = incrementClaimantCount(claimantCount);
+      if (claimantEvidence.length < 3) {
+        claimantEvidence.push({ entityKey: candidate.entityKey, path: candidate.path });
+      }
       if (winner === null || candidate.entityKey < winner.entityKey) winner = candidate;
       if (preferred && (preferredWinner === null || candidate.entityKey < preferredWinner.entityKey)) {
         preferredWinner = candidate;
@@ -340,18 +388,42 @@ export function locateEntityClaimants(id: string, options: LocateOptions): Locat
   };
 
   if (options.preferFile !== undefined) {
-    inspect(options.preferFile, resolve(root, options.preferFile), true);
+    // A replay hint may name a source that an interrupted move already removed.
+    // Only files returned by canonical discovery are mandatory observations.
+    inspect(options.preferFile, resolve(root, options.preferFile), true, false);
   }
 
   const discovery = discoverMarkdownFiles({ root, exclude: options.exclude });
-  for (const file of discovery.files) inspect(file.path, file.absolutePath, false);
+  if (requireCompleteScan && discovery.diagnostics.length > 0) {
+    throw new WikiClaimantScanIncompleteError("discovery");
+  }
+  for (const file of discovery.files) inspect(file.path, file.absolutePath, false, true);
 
   const resolvedWinner = preferredWinner ?? winner;
   return {
     winner: resolvedWinner,
     claimantCount,
     ambiguous: claimantCountIsAmbiguous(claimantCount),
+    claimantEvidence,
   };
+}
+
+export function locateEntityClaimants(id: string, options: LocateOptions): LocatedEntityClaimants {
+  const scanned = scanEntityClaimants(id, options, false);
+  return {
+    winner: scanned.winner,
+    claimantCount: scanned.claimantCount,
+    ambiguous: scanned.ambiguous,
+  };
+}
+
+/**
+ * Complete bounded claimant attestation for optimistic mutation boundaries.
+ * Unlike the compatibility locator, this never turns an unreadable or
+ * diagnostically incomplete corpus into a trusted absence/unique answer.
+ */
+export function attestEntityClaimants(id: string, options: LocateOptions): AttestedEntityClaimants {
+  return scanEntityClaimants(id, options, true);
 }
 
 /**
@@ -361,7 +433,7 @@ export function locateEntityClaimants(id: string, options: LocateOptions): Locat
  * violation is surfaced so callers cannot trust a partial scan.
  */
 export function locateEntity(id: string, options: LocateOptions): LocatedEntity | null {
-  return locateEntityClaimants(id, options).winner;
+  return scanEntityClaimants(id, options, false).winner;
 }
 
 export interface LocatedFile {

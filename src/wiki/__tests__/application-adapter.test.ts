@@ -6,6 +6,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,6 +20,8 @@ import {
   type RepositoryWikiOperationPayload,
 } from "../application-adapter.js";
 import { prepareWikiRebuild } from "../index/rebuild.js";
+import { WIKI_CORPUS_LIMITS } from "../index/corpus-policy.js";
+import { OPERATION_LOG_MAX_BYTES } from "../operations/audit.js";
 
 const ENTITY = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
 const TARGET = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJE";
@@ -309,6 +312,114 @@ New bounded Wiki content.
       },
     ]), "REVISION_CONFLICT");
     expect(readFileSync(join(target.root, ".mex", "wiki.db"))).toEqual(indexBefore);
+    expect(readFileSync(auditPath)).toEqual(auditBefore);
+  });
+
+  it("bounds and post-read stabilizes direct artifact revision observations", async () => {
+    const target = project();
+    const oversizedPath = join(target.root, ".mex", "context", "oversized.md");
+    writeFileSync(oversizedPath, "", "utf8");
+    truncateSync(oversizedPath, WIKI_CORPUS_LIMITS.maxFileBytes + 1);
+    const bounded = createRepositoryWikiPort(target.root);
+    await expectCode(() => bounded.validateCurrentRevisionExpectations([{
+      target: { kind: "artifact", path: ".mex/context/oversized.md" },
+      contentHash: "0".repeat(64),
+    }]), "REVISION_CONFLICT");
+
+    const auditPath = join(target.root, ".mex", "events", "operations.jsonl");
+    truncateSync(auditPath, OPERATION_LOG_MAX_BYTES + 1);
+    await expectCode(() => bounded.validateCurrentRevisionExpectations([{
+      target: { kind: "artifact", path: ".mex/events/operations.jsonl" },
+      contentHash: "0".repeat(64),
+    }]), "REVISION_CONFLICT");
+
+    await expect(bounded.validateCurrentRevisionExpectations([{
+      target: { kind: "artifact", path: ".mex/context/absent.md" },
+      contentHash: null,
+    }])).resolves.toBeUndefined();
+    if (process.platform !== "win32") {
+      symlinkSync("missing-target.md", join(target.root, ".mex", "context", "dangling.md"));
+      await expectCode(() => bounded.validateCurrentRevisionExpectations([{
+        target: { kind: "artifact", path: ".mex/context/dangling.md" },
+        contentHash: null,
+      }]), "REVISION_CONFLICT");
+    }
+
+    const workerPath = join(target.root, ".mex", "context", "worker.md");
+    const expected = hash(readFileSync(workerPath));
+    const failing = createRepositoryWikiPort(target.root, {
+      __internal: {
+        onCurrentRevisionArtifactRead: () => { throw new Error("injected read failure"); },
+      },
+    });
+    await expectCode(() => failing.validateCurrentRevisionExpectations([{
+      target: { kind: "artifact", path: ".mex/context/worker.md" },
+      contentHash: null,
+    }]), "REVISION_CONFLICT");
+    let raced = false;
+    const racing = createRepositoryWikiPort(target.root, {
+      __internal: {
+        onCurrentRevisionArtifactRead: (path) => {
+          if (raced || path !== "context/worker.md") return;
+          raced = true;
+          writeFileSync(workerPath, `${readFileSync(workerPath, "utf8")}\nConcurrent edit.\n`, "utf8");
+        },
+      },
+    });
+    await expectCode(() => racing.validateCurrentRevisionExpectations([{
+      target: { kind: "artifact", path: ".mex/context/worker.md" },
+      contentHash: expected,
+    }]), "REVISION_CONFLICT");
+    expect(raced).toBe(true);
+  });
+
+  it("fails closed when canonical claimant discovery is incomplete", async () => {
+    if (process.platform === "win32") return;
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const entity = await port.getEntity(ENTITY);
+    if (!entity) throw new Error("fixture entity missing");
+    symlinkSync("missing-claimant.md", join(target.root, ".mex", "context", "broken.md"));
+
+    await expectCode(() => port.validateCurrentRevisionExpectations([{
+      target: { kind: "entity", id: ENTITY },
+      version: entity.version,
+    }]), "REVISION_CONFLICT");
+  });
+
+  it("re-attests duplicate claimant ownership inside the Wiki apply boundary", async () => {
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const entity = await port.getEntity(ENTITY);
+    if (!entity) throw new Error("fixture entity missing");
+    const request: WikiOperationRequest<RepositoryWikiOperationPayload> = {
+      operation: {
+        opId: "operation_adapter_apply_duplicate",
+        type: "update-entry",
+        entityId: ENTITY,
+        baseRevision: entity.version.semanticRevision,
+        baseContentHash: entity.version.contentHash,
+        actor: { kind: "human", id: "member_adapter_test" },
+        timestamp: "2026-08-27T04:00:00.000Z",
+        payload: { summary: "This must not land in an ambiguous corpus." },
+      },
+      expectedRevisions: [{ target: { kind: "entity", id: ENTITY }, version: entity.version }],
+    };
+    const preview = await port.previewOperations(request);
+    if (!preview.plan.valid) throw new Error("expected a valid preview");
+    const auditPath = join(target.root, ".mex", "events", "operations.jsonl");
+    const original = readFileSync(target.firstPath, "utf8");
+    writeFileSync(join(target.root, ".mex", "context", "z-duplicate.md"), original, "utf8");
+    const auditBefore = readFileSync(auditPath);
+
+    await expectCode(() => port.applyOperations({
+      ...request,
+      plan: preview.plan,
+      expectedPreviewRevision: preview.previewRevision,
+    }), "REVISION_CONFLICT");
+    expect(readFileSync(target.firstPath, "utf8")).toBe(original);
     expect(readFileSync(auditPath)).toEqual(auditBefore);
   });
 
