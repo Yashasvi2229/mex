@@ -66,7 +66,7 @@ describe("release benchmark contract", () => {
     expect(budgets.assets.routes.code).toEqual(budgets.assets.routes.search);
     expect(budgets.provisional).toBe(false);
     expect(budgets.calibration).toEqual({
-      status: "calibrated-from-pinned-run-33005876613",
+      status: "calibrated-from-pinned-runs-33005876613-and-33083122092",
       runtimeFormula: "ceil(measured p95 * 1.15)",
       assetFormula: "ceil(built bytes * 1.05)",
     });
@@ -263,7 +263,7 @@ describe("release benchmark contract", () => {
       ["runtime.apiLatencyMs.small.code", "api_latency_ms", 15, 66],
       ["runtime.maintenanceMs.small.wiki_rebuild", "maintenance_ms", 50, 231],
       ["runtime.maintenancePeakRssBytes.small.graph_refresh", "rss_bytes", 32 * 1024 * 1024, 541235558.4],
-      ["runtime.browserHeapBytes.small.home", "browser_heap_bytes", 2 * 1024 * 1024, 6692746],
+      ["runtime.browserHeapBytes.small.home", "browser_heap_bytes", 2 * 1024 * 1024, 7029484],
     ];
     for (const [metric, category, minimumExcess, materialThreshold] of policyCases) {
       const policy = runtimeMaterialityPolicy(metric);

@@ -3,6 +3,18 @@
 Status: Checkpoint A benchmark contract. Built-asset and runtime budgets are
 frozen. Runtime budgets were characterized by pinned CI run
 [`33005876613`](https://github.com/mex-memory/mex/actions/runs/33005876613).
+Checkpoint C's bundle and route assets, including Members and Activity, were
+characterized by pinned CI run
+[`33083122092`](https://github.com/mex-memory/mex/actions/runs/33083122092),
+then copied from that retained report using the same formulas before the
+enforcing rerun. The retained `release-performance-1` artifact (ID
+`9651219193`, report SHA-256
+`f83a69133fa916bfd15deed8c107a561b885c0170abb1d44d8820825a76c7c83`)
+measured PR head `76cbd154def06dec29325a2ed67687aee0fc7805` through GitHub's synthetic
+merge commit `e50116100c9461032e77ba47704248bdb4923df2`. Its request audit recorded
+zero outbound requests for every fixture. The exact asset candidates and the
+Home, Members, and Activity heap candidates were copied; unrelated runtime
+budgets remain calibrated from the original pinned run.
 
 ## Runner contract
 
@@ -30,16 +42,17 @@ Each profile records:
 
 Every profile additionally records five Chromium heap samples after every
 registered Hub route: Home, Search, Knowledge browse/detail, Code search/symbol,
-the five honest unavailable capability routes, Activity, Jobs, Health, and the
-wildcard not-found route. Every browser context begins empty. Its request audit
+the five honest unavailable capability routes, Members, Activity, Jobs, Health,
+and the wildcard not-found route. Every browser context begins empty. Its request audit
 fails if a route contacts any origin other than the exact loopback Hub origin.
 
 Production asset accounting starts from Vite's manifest. It records the
 initial static import closure and the incremental JavaScript, CSS, and font
 bytes for every registered route. Fonts referenced from global CSS are counted
 as initial assets even when Vite does not attach them to a manifest entry.
-Home must not statically close over Code, Knowledge, Activity, or setup code,
-and the largest JavaScript chunk is checked explicitly.
+Home must not statically close over Code, Knowledge, Members, Activity, its
+nested recorder, or setup code, and the largest JavaScript chunk is checked
+explicitly.
 
 ## Enforcement
 
@@ -112,16 +125,18 @@ Expected missing/stale/migration and corpus-policy states are successful
 discovery results; unexpected inspection failures use one redacted problem and
 exit 2.
 
-The installed-capability inventory includes the secure Project Hub and
-canonical Activity read surface alongside Graph and Wiki. The command catalog
-advertises only registered structured Graph and Wiki commands because Activity
-does not yet have a structured CLI. Read, preview, and apply invocations are
-separate fixed arrays, Graph's existing protocol-v3 commands remain JSONL
-byte-compatible, and unavailable states carry static safe reasons plus the next
-initialization action. Synthesis commands whose current adapters can open
-writable storage are deliberately omitted. Workstreams, Inbox, Relays,
-Playbooks, Catch Up, and Activity creation remain absent until their application
-services and structured CLI contracts exist.
+The installed-capability inventory includes the secure Project Hub, Team
+identity, canonical Activity read/record, Graph, and Wiki surfaces. Checkpoint C
+adds registered structured Member and Activity commands to the existing Graph
+and Wiki catalog. Every Team mutation advertises distinct preview and apply
+invocations plus a bounded machine-readable request schema, complete examples,
+the exact preview-envelope apply rule, and the typed process-exit table. Read,
+preview, and apply invocations remain separate fixed arrays, Graph's existing
+protocol-v3 commands remain JSONL byte-compatible, and unavailable states carry
+static safe reasons plus the next initialization action. Writable legacy Wiki
+synthesis commands remain omitted from the governed agent surface. Workstreams,
+Inbox, Relays, Playbooks, Catch Up, and future team actions remain absent until
+their application services and structured CLI contracts exist.
 
 Generated agent anchors direct supported tools to discover this manifest,
 prefer its structured reads, preview mutations, and wait for explicit human
