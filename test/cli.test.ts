@@ -788,6 +788,32 @@ describe("snapshotProcessTree", () => {
       rmSync(fixture, { recursive: true, force: true });
     }
   });
+
+  it("excludes only Git's transient maintenance lock", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-snapshot-git-lock-"));
+    try {
+      mkdirSync(join(fixture, ".git", "objects"), { recursive: true });
+      writeFileSync(join(fixture, ".git", "objects", "maintenance.lock"), "transient");
+      writeFileSync(join(fixture, ".git", "objects", "other.lock"), "object lock");
+      writeFileSync(join(fixture, ".git", "maintenance.lock"), "different path");
+      writeFileSync(join(fixture, "maintenance.lock"), "project file");
+
+      const snapshot = snapshotProcessTree(fixture);
+
+      expect(snapshot[".git/objects/maintenance.lock"]).toBeUndefined();
+      expect(snapshot[".git/objects/other.lock"]).toBe(
+        Buffer.from("object lock").toString("base64"),
+      );
+      expect(snapshot[".git/maintenance.lock"]).toBe(
+        Buffer.from("different path").toString("base64"),
+      );
+      expect(snapshot["maintenance.lock"]).toBe(
+        Buffer.from("project file").toString("base64"),
+      );
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
 });
 
 function snapshotProcessTree(root: string): Record<string, string> {
@@ -806,6 +832,11 @@ function snapshotProcessTree(root: string): Record<string, string> {
     for (const name of names) {
       const absolute = join(directory, name);
       const relative = prefix.length === 0 ? name : `${prefix}/${name}`;
+      // `git maintenance run --auto --detach` can outlive the fixture's Git
+      // command and create/remove this lock between the before/after snapshots.
+      // Exclude this one Git-owned transient path while retaining every other
+      // project, Git, and lock file in the non-mutation comparison.
+      if (relative === ".git/objects/maintenance.lock") continue;
       const entry = readFileOrDirectory(absolute);
       if (entry === undefined) continue;
       result[relative] = entry.kind === "file" ? entry.bytes : "directory";
