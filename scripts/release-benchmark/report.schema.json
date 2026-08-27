@@ -306,7 +306,7 @@
             "type": "object",
             "properties": {
               "classification": { "const": "advisory" },
-              "reason": { "enum": ["not_repeated", "below_material_threshold"] }
+              "reason": { "enum": ["not_repeated", "below_material_threshold", "insufficient_sample_support"] }
             }
           }
         ]
@@ -338,13 +338,18 @@
           "enum": ["api_latency_ms", "cold_readiness_ms", "maintenance_ms", "idle_cpu_ms", "rss_bytes", "browser_heap_bytes"]
         },
         "classification": { "enum": ["advisory", "material"] },
-        "reason": { "enum": ["not_repeated", "below_material_threshold", "repeated_material_threshold"] },
+        "reason": { "enum": ["not_repeated", "below_material_threshold", "insufficient_sample_support", "repeated_material_threshold"] },
         "budget": { "$ref": "#/$defs/number" },
         "relativeExcessRatio": { "const": 0.15 },
         "minimumExcess": { "$ref": "#/$defs/number" },
         "materialThreshold": { "$ref": "#/$defs/number" },
         "firstMeasured": { "type": ["number", "null"], "minimum": 0 },
-        "secondMeasured": { "type": ["number", "null"], "minimum": 0 }
+        "secondMeasured": { "type": ["number", "null"], "minimum": 0 },
+        "requiredSupportingSamples": { "const": 2 },
+        "firstSampleCount": { "type": "integer", "enum": [5, 10] },
+        "firstSupportingSamples": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "secondSampleCount": { "type": "integer", "enum": [5, 10] },
+        "secondSupportingSamples": { "type": "integer", "minimum": 0, "maximum": 10 }
       }
     }
   }

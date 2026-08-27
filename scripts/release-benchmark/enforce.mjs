@@ -11,7 +11,11 @@ import {
 } from "node:fs";
 import { dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluateRuntimeConfirmation } from "./runtime-confirmation.mjs";
+import {
+  classifyRuntimeViolations,
+  evaluateRuntimeConfirmation,
+  runtimeSampleSupport,
+} from "./runtime-confirmation.mjs";
 
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptRoot, "../..");
@@ -31,7 +35,7 @@ function main() {
       "Usage: node scripts/release-benchmark/enforce.mjs [--output <path>] [--assets-only]",
       "",
       "Runtime budgets are enforced only when MEX_ENFORCE_RELEASE_BUDGETS=1.",
-      "Noisy runtime-only breaches receive one materiality-aware confirmation pass.",
+      "Potentially material noisy runtime breaches receive one confirmation pass.",
       "Deterministic contract breaches and operational failures never receive a retry.",
       "",
     ].join("\n"));
@@ -44,6 +48,15 @@ function main() {
 }
 
 export function enforceWithConfirmation(outputPath, dependencies = {}) {
+  try {
+    return enforceWithConfirmationInternal(outputPath, dependencies);
+  } catch {
+    process.stderr.write("Release benchmark enforcement failed operationally.\n");
+    return 2;
+  }
+}
+
+function enforceWithConfirmationInternal(outputPath, dependencies) {
   const executePass = dependencies.executePass ?? runPass;
   const resolveRepositoryHead = dependencies.resolveRepositoryHead ?? readRepositoryHead;
   const emitReport = dependencies.emitReport ?? ((serialized) => process.stdout.write(serialized));
@@ -70,8 +83,34 @@ export function enforceWithConfirmation(outputPath, dependencies = {}) {
     return 1;
   }
 
+  const firstClassification = classifyRuntimeViolations(
+    firstReport.budgetEvaluation.runtimeViolations,
+  );
+  let firstSampleSupport;
+  if (firstClassification.confirmable.length > 0) {
+    try {
+      firstSampleSupport = runtimeSampleSupport(
+        firstReport,
+        firstClassification.confirmable,
+      );
+    } catch {
+      if (firstClassification.immediate.length === 0) {
+        writeFinalReport(resolvedOutput, firstReport, confirmationRecord(
+          "operational_failure",
+          firstReport.budgetEvaluation.runtimeViolations,
+          [],
+          [],
+          repositoryHead,
+        ), firstReport.budgetEvaluation.runtimeViolations, false, emitReport);
+        process.stderr.write("Release benchmark pass had invalid runtime sample evidence.\n");
+        return 2;
+      }
+    }
+  }
   const initialDecision = evaluateRuntimeConfirmation(
     firstReport.budgetEvaluation.runtimeViolations,
+    undefined,
+    { first: firstSampleSupport },
   );
   if (!initialDecision.retryRequired) {
     writeFinalReport(resolvedOutput, firstReport, confirmationRecord(
@@ -83,12 +122,14 @@ export function enforceWithConfirmation(outputPath, dependencies = {}) {
       initialDecision.advisoryAssessments,
       initialDecision.materialAssessments,
     ), initialDecision.finalViolations, undefined, emitReport);
-    rmSync(firstPath, { force: true });
+    if (initialDecision.advisoryAssessments.length === 0) {
+      rmSync(firstPath, { force: true });
+    }
     return initialDecision.finalViolations.length === 0 ? 0 : 1;
   }
 
   process.stderr.write(
-    "Only noisy runtime budgets breached; running one independent pinned confirmation pass.\n",
+    "A potentially material noisy runtime budget breached; running one independent pinned confirmation pass.\n",
   );
   if (resolveRepositoryHead() !== repositoryHead) {
     writeFinalReport(resolvedOutput, firstReport, confirmationRecord(
@@ -125,9 +166,28 @@ export function enforceWithConfirmation(outputPath, dependencies = {}) {
     return 2;
   }
 
+  let secondSampleSupport;
+  try {
+    secondSampleSupport = runtimeSampleSupport(
+      secondReport,
+      secondReport.budgetEvaluation.runtimeViolations,
+    );
+  } catch {
+    writeFinalReport(resolvedOutput, secondReport, confirmationRecord(
+      "operational_failure",
+      firstReport.budgetEvaluation.runtimeViolations,
+      secondReport.budgetEvaluation.runtimeViolations,
+      [],
+      repositoryHead,
+      initialDecision.advisoryAssessments,
+    ), secondReport.budgetEvaluation.runtimeViolations, false, emitReport);
+    process.stderr.write("Release benchmark confirmation had invalid runtime sample evidence.\n");
+    return 2;
+  }
   const decision = evaluateRuntimeConfirmation(
     firstReport.budgetEvaluation.runtimeViolations,
     secondReport.budgetEvaluation.runtimeViolations,
+    { first: firstSampleSupport, second: secondSampleSupport },
   );
   const secondAssetViolations = secondReport.budgetEvaluation.assetViolations;
   const passed = secondAssetViolations.length === 0 && decision.finalViolations.length === 0;

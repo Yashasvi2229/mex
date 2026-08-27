@@ -32,6 +32,7 @@ import {
   classifyRuntimeViolations,
   evaluateRuntimeConfirmation,
   runtimeMaterialityPolicy,
+  runtimeSampleSupport,
 } from "./runtime-confirmation.mjs";
 import { assetBudgetCandidate, runtimeBudgetCandidate, summarize } from "./statistics.mjs";
 
@@ -95,8 +96,27 @@ describe("release benchmark contract", () => {
       max: 10,
     });
     expect(() => summarize([1, 2, 3, 4], 5)).toThrow(/exactly 5 samples/u);
+    expect(summarize([
+      1.23456,
+      2.34567,
+      3.45678,
+      4.56789,
+      5.67891,
+    ], 5).samples).toEqual([1.235, 2.346, 3.457, 4.568, 5.679]);
     expect(runtimeBudgetCandidate(100.01)).toBe(116);
     expect(assetBudgetCandidate(100.01)).toBe(106);
+  });
+
+  it("accepts legacy raw precision when its rounded p95 matches the violation", () => {
+    const metric = "runtime.maintenanceMs.small.graph_rebuild";
+    const violation = runtimeViolation(metric, 580.769);
+    const report = benchmarkPass({ runtimeViolations: [violation] });
+    const summary = report.profiles.small.maintenance.graph_rebuild.elapsedMs;
+    summary.samples[summary.samples.length - 1] = 580.7687;
+    expect(runtimeSampleSupport(report, [violation]).get(metric)).toEqual({
+      sampleCount: 10,
+      supportingSamples: 2,
+    });
   });
 
   it("strictly validates advisory and material final benchmark reports", () => {
@@ -139,6 +159,32 @@ describe("release benchmark contract", () => {
       },
     });
     expect(validate(advisoryReport), JSON.stringify(validate.errors)).toBe(true);
+
+    const supportedAdvisory = representativeReleaseReport({
+      runtimeViolations: [],
+      passed: true,
+      confirmation: {
+        status: "passed",
+        repositoryHead: "a".repeat(40),
+        firstPassViolations: [runtimeViolation(metric, 67)],
+        secondPassViolations: [],
+        confirmedViolations: [],
+        advisoryAssessments: [materialityAssessment({
+          classification: "advisory",
+          reason: "insufficient_sample_support",
+          firstMeasured: 67,
+          secondMeasured: null,
+          requiredSupportingSamples: 2,
+          firstSampleCount: 10,
+          firstSupportingSamples: 1,
+        })],
+        materialAssessments: [],
+      },
+    });
+    expect(validate(supportedAdvisory), JSON.stringify(validate.errors)).toBe(true);
+    supportedAdvisory.budgetEvaluation.runtimeConfirmation
+      .advisoryAssessments[0].firstSampleCount = 6;
+    expect(validate(supportedAdvisory)).toBe(false);
 
     const firstMaterial = runtimeViolation(metric, 67);
     const secondMaterial = runtimeViolation(metric, 70);
@@ -230,18 +276,34 @@ describe("release benchmark contract", () => {
     });
   });
 
-  it("retries noisy crossings but blocks only repeated material crossings", () => {
-    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+  it("retries only potentially material crossings and blocks supported repeats", () => {
+    const knowledgePolicy = runtimeMaterialityPolicy("runtime.apiLatencyMs.medium.knowledge");
+    const knowledge = runtimeViolation(
+      "runtime.apiLatencyMs.medium.knowledge",
+      knowledgePolicy.materialThreshold + 1,
+    );
     const activity = runtimeViolation("runtime.apiLatencyMs.medium.activity");
-    const initial = evaluateRuntimeConfirmation([knowledge]);
+    const initial = evaluateRuntimeConfirmation(
+      [knowledge],
+      undefined,
+      confirmationSupport([[knowledge.metric, 2]]),
+    );
     expect(initial).toMatchObject({ retryRequired: true, status: "required" });
 
-    expect(evaluateRuntimeConfirmation([knowledge], [activity])).toMatchObject({
+    expect(evaluateRuntimeConfirmation(
+      [knowledge],
+      [activity],
+      confirmationSupport([[knowledge.metric, 2]], [[activity.metric, 0]]),
+    )).toMatchObject({
       retryRequired: false,
       status: "passed",
       finalViolations: [],
     });
-    expect(evaluateRuntimeConfirmation([knowledge], [knowledge])).toMatchObject({
+    expect(evaluateRuntimeConfirmation(
+      [knowledge],
+      [knowledge],
+      confirmationSupport([[knowledge.metric, 2]], [[knowledge.metric, 1]]),
+    )).toMatchObject({
       retryRequired: false,
       status: "passed",
       finalViolations: [],
@@ -249,37 +311,72 @@ describe("release benchmark contract", () => {
       advisoryAssessments: [{
         metric: knowledge.metric,
         classification: "advisory",
-        reason: "below_material_threshold",
+        reason: "insufficient_sample_support",
       }],
       materialAssessments: [],
     });
   });
 
+  it("requires two supporting samples for both timing and memory metrics", () => {
+    for (const metric of [
+      "runtime.maintenanceMs.small.graph_rebuild",
+      "runtime.idleRssBytes.small",
+      "runtime.browserHeapBytes.small.home",
+    ]) {
+      const policy = runtimeMaterialityPolicy(metric);
+      const violation = runtimeViolation(metric, policy.materialThreshold + 1);
+      expect(evaluateRuntimeConfirmation(
+        [violation],
+        undefined,
+        confirmationSupport([[metric, 1]]),
+      )).toMatchObject({
+        retryRequired: false,
+        status: "passed",
+        advisoryAssessments: [{
+          metric,
+          reason: "insufficient_sample_support",
+          requiredSupportingSamples: 2,
+          firstSampleCount: policy.sampleCount,
+          firstSupportingSamples: 1,
+        }],
+      });
+      expect(evaluateRuntimeConfirmation(
+        [violation],
+        undefined,
+        confirmationSupport([[metric, 2]]),
+      )).toMatchObject({ retryRequired: true, status: "required" });
+    }
+  });
+
   it("applies every exact category policy and rejects unknown exact keys", () => {
     const policyCases = [
-      ["runtime.coldHubReadyMs.small", "cold_readiness_ms", 100, 1082.15],
-      ["runtime.idleRssBytes.small", "rss_bytes", 32 * 1024 * 1024, 239304704],
-      ["runtime.idleCpuMs.large", "idle_cpu_ms", 25, 37],
-      ["runtime.apiLatencyMs.small.code", "api_latency_ms", 15, 66],
-      ["runtime.maintenanceMs.small.wiki_rebuild", "maintenance_ms", 50, 231],
-      ["runtime.maintenancePeakRssBytes.small.graph_refresh", "rss_bytes", 32 * 1024 * 1024, 541235558.4],
-      ["runtime.browserHeapBytes.small.home", "browser_heap_bytes", 2 * 1024 * 1024, 7029484],
+      ["runtime.coldHubReadyMs.small", "cold_readiness_ms", 100, 1082.15, 10],
+      ["runtime.idleRssBytes.small", "rss_bytes", 32 * 1024 * 1024, 239304704, 5],
+      ["runtime.idleCpuMs.large", "idle_cpu_ms", 25, 37, 5],
+      ["runtime.apiLatencyMs.small.code", "api_latency_ms", 15, 66, 10],
+      ["runtime.maintenanceMs.small.wiki_rebuild", "maintenance_ms", 50, 231, 10],
+      ["runtime.maintenancePeakRssBytes.small.graph_refresh", "rss_bytes", 32 * 1024 * 1024, 541235558.4, 5],
+      ["runtime.browserHeapBytes.small.home", "browser_heap_bytes", 2 * 1024 * 1024, 7029484, 5],
     ];
-    for (const [metric, category, minimumExcess, materialThreshold] of policyCases) {
+    for (const [metric, category, minimumExcess, materialThreshold, sampleCount] of policyCases) {
       const policy = runtimeMaterialityPolicy(metric);
       expect(policy).toEqual({
         budget: committedRuntimeBudget(metric),
         category,
         minimumExcess,
         materialThreshold,
+        sampleCount,
+        requiredSupportingSamples: 2,
       });
       expect(evaluateRuntimeConfirmation(
         [runtimeViolation(metric, policy.materialThreshold + 1)],
         [runtimeViolation(metric, policy.materialThreshold + 2)],
+        confirmationSupport([[metric, 2]], [[metric, 2]]),
       )).toMatchObject({ status: "failed", materialAssessments: [{ metric }] });
       expect(evaluateRuntimeConfirmation(
         [runtimeViolation(metric, policy.materialThreshold)],
         [runtimeViolation(metric, policy.materialThreshold + 2)],
+        confirmationSupport([[metric, 0]], [[metric, 2]]),
       )).toMatchObject({ status: "passed", materialAssessments: [] });
     }
 
@@ -296,11 +393,33 @@ describe("release benchmark contract", () => {
     expect(runtimeMaterialityPolicy("runtime.apiLatencyMs.unknown.future")).toBeNull();
   });
 
+  it("extracts support from all seven exact runtime summary path families", () => {
+    const cases = [
+      ["runtime.coldHubReadyMs.small", 10],
+      ["runtime.idleRssBytes.small", 5],
+      ["runtime.idleCpuMs.large", 5],
+      ["runtime.apiLatencyMs.small.code", 10],
+      ["runtime.maintenanceMs.small.wiki_rebuild", 10],
+      ["runtime.maintenancePeakRssBytes.small.graph_refresh", 5],
+      ["runtime.browserHeapBytes.small.home", 5],
+    ];
+    for (const [metric, sampleCount] of cases) {
+      const policy = runtimeMaterialityPolicy(metric);
+      const violation = runtimeViolation(metric, policy.materialThreshold + 1);
+      const report = benchmarkPass({ runtimeViolations: [violation] });
+      expect(runtimeSampleSupport(report, [violation]).get(metric)).toEqual({
+        sampleCount,
+        supportingSamples: 2,
+      });
+    }
+  });
+
   it("keeps small repeated API crossings advisory and blocks material ones", () => {
     const metric = "runtime.apiLatencyMs.small.code";
     const advisory = evaluateRuntimeConfirmation(
       [runtimeViolation(metric, 53)],
       [runtimeViolation(metric, 58)],
+      confirmationSupport([[metric, 0]], [[metric, 0]]),
     );
     expect(advisory).toMatchObject({
       status: "passed",
@@ -321,6 +440,7 @@ describe("release benchmark contract", () => {
     const material = evaluateRuntimeConfirmation(
       [runtimeViolation(metric, 67)],
       [runtimeViolation(metric, 70)],
+      confirmationSupport([[metric, 2]], [[metric, 2]]),
     );
     expect(material).toMatchObject({
       status: "failed",
@@ -333,15 +453,19 @@ describe("release benchmark contract", () => {
         secondMeasured: 70,
         classification: "material",
         reason: "repeated_material_threshold",
+        firstSupportingSamples: 2,
+        secondSupportingSamples: 2,
       }],
     });
     expect(evaluateRuntimeConfirmation(
       [runtimeViolation(metric, 67)],
       [runtimeViolation(metric, 60)],
+      confirmationSupport([[metric, 2]], [[metric, 0]]),
     )).toMatchObject({ status: "passed", finalViolations: [] });
     expect(evaluateRuntimeConfirmation(
       [runtimeViolation(metric, 66)],
       [runtimeViolation(metric, 70)],
+      confirmationSupport([[metric, 0]], [[metric, 2]]),
     )).toMatchObject({ status: "passed", finalViolations: [] });
   });
 
@@ -406,7 +530,11 @@ describe("release benchmark contract", () => {
 
   it("passes different noisy metrics across attempts and retains both raw reports", () => {
     const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-different-"));
-    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    const knowledgeMetric = "runtime.apiLatencyMs.medium.knowledge";
+    const knowledge = runtimeViolation(
+      knowledgeMetric,
+      runtimeMaterialityPolicy(knowledgeMetric).materialThreshold + 1,
+    );
     const activity = runtimeViolation("runtime.apiLatencyMs.medium.activity");
     try {
       const result = runConfirmationHarness(root, [
@@ -460,7 +588,15 @@ describe("release benchmark contract", () => {
           secondPassViolations: [second],
           confirmedViolations: [second],
           advisoryAssessments: [],
-          materialAssessments: [{ metric, classification: "material" }],
+          materialAssessments: [{
+            metric,
+            classification: "material",
+            requiredSupportingSamples: 2,
+            firstSampleCount: 10,
+            firstSupportingSamples: 2,
+            secondSampleCount: 10,
+            secondSupportingSamples: 2,
+          }],
         },
       });
     } finally {
@@ -468,7 +604,7 @@ describe("release benchmark contract", () => {
     }
   });
 
-  it("emits repeated nonmaterial crossings as advisory in the final report", () => {
+  it("passes first-pass nonmaterial crossings without paying for confirmation", () => {
     const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-advisory-"));
     const metric = "runtime.apiLatencyMs.small.code";
     const first = runtimeViolation(metric, 53);
@@ -476,29 +612,72 @@ describe("release benchmark contract", () => {
     try {
       const result = runConfirmationHarness(root, [
         benchmarkPass({ runtimeViolations: [first] }),
-        benchmarkPass({ runtimeViolations: [second] }),
       ]);
       expect(result.exitCode).toBe(0);
+      expect(result.calls).toBe(1);
       expect(result.report.budgetEvaluation).toMatchObject({
         runtimeViolations: [],
         passed: true,
         runtimeConfirmation: {
           status: "passed",
           firstPassViolations: [first],
-          secondPassViolations: [second],
-          confirmedViolations: [second],
+          secondPassViolations: [],
+          confirmedViolations: [],
           advisoryAssessments: [{
             metric,
             classification: "advisory",
             reason: "below_material_threshold",
             firstMeasured: 53,
-            secondMeasured: 58,
+            secondMeasured: null,
+            requiredSupportingSamples: 2,
+            firstSampleCount: 10,
+            firstSupportingSamples: 0,
           }],
           materialAssessments: [],
         },
       });
       expect(readRawAttempt(root, 1).budgetEvaluation.runtimeViolations).toEqual([first]);
-      expect(readRawAttempt(root, 2).budgetEvaluation.runtimeViolations).toEqual([second]);
+      expect(existsSync(join(root, "report.attempt-2.json"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a single-outlier advisory without running a second full pass", () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-single-outlier-"));
+    const metric = "runtime.maintenanceMs.small.graph_rebuild";
+    const policy = runtimeMaterialityPolicy(metric);
+    const crossing = runtimeViolation(metric, policy.materialThreshold + 25);
+    try {
+      const result = runConfirmationHarness(root, [
+        benchmarkPass({
+          runtimeViolations: [crossing],
+          supportingSamples: { [metric]: 1 },
+        }),
+      ]);
+      expect(result.exitCode).toBe(0);
+      expect(result.calls).toBe(1);
+      expect(result.report.budgetEvaluation).toMatchObject({
+        runtimeViolations: [],
+        passed: true,
+        runtimeConfirmation: {
+          status: "passed",
+          firstPassViolations: [crossing],
+          secondPassViolations: [],
+          advisoryAssessments: [{
+            metric,
+            classification: "advisory",
+            reason: "insufficient_sample_support",
+            requiredSupportingSamples: 2,
+            firstSampleCount: 10,
+            firstSupportingSamples: 1,
+          }],
+          materialAssessments: [],
+        },
+      });
+      expect(readRawAttempt(root, 1).profiles.small.maintenance.graph_rebuild.elapsedMs.samples)
+        .toHaveLength(10);
+      expect(existsSync(join(root, "report.attempt-2.json"))).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -506,7 +685,11 @@ describe("release benchmark contract", () => {
 
   it("fails hard violations on either attempt without treating them as noise", () => {
     const graphRatio = runtimeViolation("runtime.databaseToInputRatio.small.graph");
-    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    const knowledgeMetric = "runtime.apiLatencyMs.medium.knowledge";
+    const knowledge = runtimeViolation(
+      knowledgeMetric,
+      runtimeMaterialityPolicy(knowledgeMetric).materialThreshold + 1,
+    );
     const asset = runtimeViolation("assets.routes.home.jsBytes");
     for (const scenario of [
       {
@@ -558,7 +741,11 @@ describe("release benchmark contract", () => {
     }
 
     const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-missing-second-"));
-    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    const knowledgeMetric = "runtime.apiLatencyMs.medium.knowledge";
+    const knowledge = runtimeViolation(
+      knowledgeMetric,
+      runtimeMaterialityPolicy(knowledgeMetric).materialThreshold + 1,
+    );
     try {
       const result = runConfirmationHarness(root, [
         benchmarkPass({ runtimeViolations: [knowledge] }),
@@ -581,8 +768,101 @@ describe("release benchmark contract", () => {
     }
   });
 
+  it("uses exit 2 when confirmation metadata would exceed the report cap", () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-final-cap-"));
+    try {
+      const pass = { ...benchmarkPass(), padding: "" };
+      const emptyBytes = Buffer.byteLength(`${JSON.stringify(pass)}\n`);
+      pass.padding = "x".repeat((2 * 1024 * 1024) - emptyBytes - 32);
+      expect(Buffer.byteLength(`${JSON.stringify(pass)}\n`)).toBeLessThan(2 * 1024 * 1024);
+      const result = runConfirmationHarness(root, [pass]);
+      expect(result.exitCode).toBe(2);
+      expect(result.calls).toBe(1);
+      expect(result.report).toBeUndefined();
+      expect(existsSync(join(root, "report.attempt-1.json"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats invalid raw evidence for a confirmable metric as operational", () => {
+    const metric = "runtime.maintenanceMs.small.graph_rebuild";
+    const policy = runtimeMaterialityPolicy(metric);
+    const crossing = runtimeViolation(metric, policy.materialThreshold + 25);
+    const scenarios = [
+      ["malformed", (pass) => {
+        pass.profiles.small.maintenance.graph_rebuild.elapsedMs = {
+          samples: "invalid",
+          p95: crossing.measured,
+        };
+      }],
+      ["missing", (pass) => {
+        delete pass.profiles.small.maintenance.graph_rebuild.elapsedMs;
+      }],
+      ["wrong-count", (pass) => {
+        pass.profiles.small.maintenance.graph_rebuild.elapsedMs.samples.pop();
+      }],
+      ["nonfinite", (pass) => {
+        pass.profiles.small.maintenance.graph_rebuild.elapsedMs.samples[0] = null;
+      }],
+      ["p95-mismatch", (pass) => {
+        pass.profiles.small.maintenance.graph_rebuild.elapsedMs.p95 += 1;
+      }],
+      ["duplicate", (pass) => {
+        pass.budgetEvaluation.runtimeViolations.push({ ...crossing });
+      }],
+    ];
+    for (const [name, mutate] of scenarios) {
+      const root = mkdtempSync(join(tmpdir(), `mex-release-confirm-evidence-${name}-`));
+      try {
+        const pass = benchmarkPass({ runtimeViolations: [crossing] });
+        mutate(pass);
+        const result = runConfirmationHarness(root, [pass]);
+        expect(result.exitCode, name).toBe(2);
+        expect(result.calls, name).toBe(1);
+        expect(result.report.budgetEvaluation).toMatchObject({
+          passed: false,
+          runtimeConfirmation: { status: "operational_failure" },
+        });
+        expect(existsSync(join(root, "report.attempt-1.json")), name).toBe(true);
+        expect(existsSync(join(root, "report.attempt-2.json")), name).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("treats invalid second-attempt sample evidence as operational", () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-release-confirm-second-evidence-"));
+    const metric = "runtime.browserHeapBytes.small.home";
+    const policy = runtimeMaterialityPolicy(metric);
+    const crossing = runtimeViolation(metric, policy.materialThreshold + 1);
+    const second = benchmarkPass({ runtimeViolations: [crossing] });
+    second.profiles.small.browserHeap.routes.home.samples.pop();
+    try {
+      const result = runConfirmationHarness(root, [
+        benchmarkPass({ runtimeViolations: [crossing] }),
+        second,
+      ]);
+      expect(result.exitCode).toBe(2);
+      expect(result.calls).toBe(2);
+      expect(result.report.budgetEvaluation).toMatchObject({
+        passed: false,
+        runtimeConfirmation: { status: "operational_failure" },
+      });
+      expect(existsSync(join(root, "report.attempt-1.json"))).toBe(true);
+      expect(existsSync(join(root, "report.attempt-2.json"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses exit 2 if repository HEAD changes between or during attempts", () => {
-    const knowledge = runtimeViolation("runtime.apiLatencyMs.medium.knowledge");
+    const knowledgeMetric = "runtime.apiLatencyMs.medium.knowledge";
+    const knowledge = runtimeViolation(
+      knowledgeMetric,
+      runtimeMaterialityPolicy(knowledgeMetric).materialThreshold + 1,
+    );
     for (const heads of [
       ["a".repeat(40), "b".repeat(40)],
       ["a".repeat(40), "a".repeat(40), "b".repeat(40)],
@@ -809,15 +1089,94 @@ function committedConfirmableRuntimeMetrics() {
   return metrics;
 }
 
-function benchmarkPass({ assetViolations = [], runtimeViolations = [] } = {}) {
+function benchmarkPass({
+  assetViolations = [],
+  runtimeViolations = [],
+  supportingSamples = {},
+} = {}) {
   return {
     schemaVersion: 1,
+    profiles: runtimeProfilesForViolations(runtimeViolations, supportingSamples),
     budgetEvaluation: {
       assetViolations,
       runtimeViolations,
       passed: assetViolations.length === 0 && runtimeViolations.length === 0,
     },
   };
+}
+
+function runtimeProfilesForViolations(violations, supportingSamples) {
+  const profiles = {};
+  for (const violation of violations) {
+    const policy = runtimeMaterialityPolicy(violation.metric);
+    if (policy === null) continue;
+    const requestedSupport = supportingSamples[violation.metric]
+      ?? (violation.measured > policy.materialThreshold ? 2 : 0);
+    const summary = runtimeSummary(violation.measured, policy, requestedSupport);
+    setRuntimeSummary(profiles, violation.metric, summary);
+  }
+  return profiles;
+}
+
+function runtimeSummary(measured, policy, supportingSamples) {
+  if (!Number.isInteger(supportingSamples)
+    || supportingSamples < 0
+    || supportingSamples > policy.sampleCount
+    || (measured > policy.materialThreshold && supportingSamples < 1)
+    || (measured <= policy.materialThreshold && supportingSamples > 0)) {
+    throw new Error("Invalid test runtime sample support.");
+  }
+  const samples = Array(policy.sampleCount).fill(0);
+  if (supportingSamples > 0) {
+    const supportingValue = policy.materialThreshold
+      + ((measured - policy.materialThreshold) / 2);
+    for (let index = policy.sampleCount - supportingSamples; index < policy.sampleCount - 1; index += 1) {
+      samples[index] = supportingValue;
+    }
+  }
+  samples[policy.sampleCount - 1] = measured;
+  return { samples, p95: measured };
+}
+
+function setRuntimeSummary(profiles, metric, summary) {
+  const [, category, profile, name] = metric.split(".");
+  profiles[profile] ??= {};
+  if (category === "coldHubReadyMs") profiles[profile].coldHubReadyMs = summary;
+  else if (category === "idleRssBytes") {
+    profiles[profile].idle ??= {};
+    profiles[profile].idle.rssBytes = summary;
+  } else if (category === "idleCpuMs") {
+    profiles[profile].idle ??= {};
+    profiles[profile].idle.cpuMs = summary;
+  } else if (category === "apiLatencyMs") {
+    profiles[profile].apiLatencyMs ??= {};
+    profiles[profile].apiLatencyMs[name] = summary;
+  } else if (category === "maintenanceMs") {
+    profiles[profile].maintenance ??= {};
+    profiles[profile].maintenance[name] ??= {};
+    profiles[profile].maintenance[name].elapsedMs = summary;
+  } else if (category === "maintenancePeakRssBytes") {
+    profiles[profile].maintenance ??= {};
+    profiles[profile].maintenance[name] ??= {};
+    profiles[profile].maintenance[name].peakRssBytes = summary;
+  } else if (category === "browserHeapBytes") {
+    profiles[profile].browserHeap ??= { routes: {} };
+    profiles[profile].browserHeap.routes[name] = summary;
+  } else throw new Error(`Unsupported test runtime metric: ${metric}`);
+}
+
+function confirmationSupport(first = [], second = []) {
+  return {
+    first: sampleSupportMap(first),
+    second: sampleSupportMap(second),
+  };
+}
+
+function sampleSupportMap(entries) {
+  return new Map(entries.map(([metric, supportingSamples]) => [metric, {
+    sampleCount: runtimeMaterialityPolicy(metric).sampleCount,
+    supportingSamples,
+  }]));
 }
 
 function runConfirmationHarness(root, passes, options = {}) {

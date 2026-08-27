@@ -76,10 +76,19 @@ database-to-input ratios, and any unknown runtime metric never receive a retry.
 The read and maintenance nonmutation contracts likewise remain ordinary hard
 tests. A first pass containing only wall-clock, RSS, CPU, or browser-heap
 breaches triggers one independent full benchmark pass on the same pinned
-runner and exact repository HEAD. CI fails a noisy metric only when that exact
-metric breaches again and both measurements exceed its material threshold. The
-committed p95 budgets remain the raw alert/crossing line and are not
-recalibrated. For each exact metric key, the blocking threshold is
+runner and exact repository HEAD only when at least one crossing could still
+become material. A crossing is potentially material when its p95 is strictly
+above the material threshold and at least two of its raw samples are also
+strictly above that threshold. If every first-pass crossing is below the
+threshold or has fewer than two supporting samples, enforcement records the
+advisories and passes without spending another full benchmark run. CI fails a
+noisy metric only when that exact metric breaches again, both p95 measurements
+exceed its material threshold, and both attempts have at least two supporting
+raw samples. This avoids treating the single maximum selected by nearest-rank
+p95 over either ten timing samples or five memory samples as
+distribution-level evidence. The committed p95 budgets remain the raw
+alert/crossing line and are not recalibrated. For each exact metric key, the
+blocking threshold is
 `budget + max(15% of budget, minimum excess)`:
 
 | Runtime category | Minimum excess |
@@ -93,18 +102,23 @@ recalibrated. For each exact metric key, the blocking threshold is
 
 Crossings from both attempts remain bounded in `firstPassViolations` and
 `secondPassViolations`. Repeated exact keys remain in `confirmedViolations`.
-`advisoryAssessments` records one-off crossings and repeated crossings where
-either measurement is at or below the material threshold;
-`materialAssessments` records only repeated crossings where both measurements
-are strictly above it. The final `runtimeViolations` list contains only those
-material crossings plus immediate hard failures. Operational benchmark failures
-are never retried as budget noise. Enforcement exits 0 for a pass, 1 for a
-budget failure, and 2 when a pass cannot produce a valid bounded report.
+`advisoryAssessments` records one-off crossings, threshold misses, and
+crossings with insufficient raw-sample support. Each generated assessment
+records the required support count and the bounded sample/support counts for
+the attempts that observed the metric; raw sample arrays remain in the
+retained attempt reports. `materialAssessments` records only repeated crossings
+where both measurements and both raw-sample distributions satisfy the rule.
+The final `runtimeViolations` list contains only those material crossings plus
+immediate hard failures. Operational benchmark failures, including missing or
+inconsistent raw sample evidence, are never retried as budget noise.
+Enforcement exits 0 for a pass, 1 for a budget failure, and 2 when a pass cannot
+produce a valid bounded report.
 
 The dedicated `release-performance` CI job installs Chromium on the pinned
 runner, enforces the budgets, and retains the final report plus both attempt
-reports when confirmation was required. Runtime candidates in
-that report are `ceil(p95 * 1.15)` independently for each fixture profile,
+reports when confirmation was required. It also retains the first raw attempt
+when advisory sample support makes a second pass unnecessary. Runtime
+candidates in that report are `ceil(p95 * 1.15)` independently for each fixture profile,
 route, read, and maintenance operation. The committed values are copied exactly
 from the first healthy retained pinned report; its enforcing rerun must pass
 before Checkpoint A is considered green. Future recalibration uses the same
