@@ -126,6 +126,10 @@ import type {
   RepositoryWikiListBundle,
   RepositoryWikiSearchBundle,
 } from "../wiki/application-adapter.js";
+import {
+  TEAM_READABLE_ENTITY_TYPES,
+  WIKI_ENTITY_TYPES,
+} from "../wiki/model/entity.js";
 
 interface HubJobReader {
   list(request?: { limit?: number }): {
@@ -543,10 +547,18 @@ export function createLocalHubReadServices(
 
     async wikiEntities(request: WikiEntityListRequest): Promise<WikiEntityListResponse> {
       const connected = requireWiki(wiki);
+      if (request.kind !== undefined && isTeamReadableEntityKind(request.kind)) {
+        throw new HubHttpError(
+          400,
+          "INVALID_REQUEST",
+          "Invalid Knowledge kind",
+          "Team-owned entity kinds are available through their dedicated Hub workbenches, not Knowledge.",
+        );
+      }
       const bundle = await connected.listBundle({
         limit: request.limit,
         includeArchived: request.lifecycle === "archived",
-        ...(request.kind === undefined ? {} : { kinds: [request.kind] }),
+        kinds: request.kind === undefined ? WIKI_ENTITY_TYPES : [request.kind],
         ...(request.topic === undefined ? {} : { topics: [request.topic] }),
         ...(request.lifecycle === undefined ? {} : { lifecycleStates: [request.lifecycle] }),
         ...(request.grounding === undefined ? {} : { groundingHealth: [request.grounding] }),
@@ -695,6 +707,7 @@ async function unifiedSearch(
     : wiki.searchBundle({
         query: request.q,
         limit: request.limit,
+        kinds: WIKI_ENTITY_TYPES,
         ...(request.wikiCursor === undefined ? {} : { cursor: request.wikiCursor }),
       }).then((bundle): SearchResponse["groups"]["wiki"] => ({
         status: "available",
@@ -1548,6 +1561,10 @@ function boundedWikiText(value: string, maximumBytes: number, fallback: string):
 function safeWikiTaxonomy(value: string, fallback: string): string {
   const bounded = boundedWikiText(value, 128, fallback);
   return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(bounded) ? bounded : fallback;
+}
+
+function isTeamReadableEntityKind(value: string): boolean {
+  return (TEAM_READABLE_ENTITY_TYPES as readonly string[]).includes(value);
 }
 
 function safeEvidenceValue(value: string | undefined, maximumBytes: number): string | null {

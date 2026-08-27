@@ -24,7 +24,13 @@ import {
   type LocalHubReadServicesOptions,
 } from "../services.js";
 import { createRepositoryWikiPort } from "../../wiki/application-adapter.js";
-import type { WikiIndexStatus } from "../../team/contracts/wiki.js";
+import type {
+  WikiEntitySummary,
+  WikiIndexStatus,
+  WikiListRequest,
+  WikiQueryRequest,
+} from "../../team/contracts/wiki.js";
+import { WIKI_ENTITY_TYPES } from "../../wiki/model/entity.js";
 import { createRepositoryTeamWorkflowPortWithDependencies } from "../../team/workflow/repository-team-workflow-port.js";
 import { ActivityRepository } from "../../team/activity/repository.js";
 import { MemberRepository } from "../../team/identity/member-repository.js";
@@ -120,7 +126,113 @@ function specIndexProjection() {
   };
 }
 
+function wikiSummary(id: string, kind: string, title: string): WikiEntitySummary {
+  return {
+    ref: { id, kind, title },
+    title,
+    summary: `${title} summary.`,
+    location: {
+      path: kind === "workstream"
+        ? `.mex/workstreams/${id}.md`
+        : `.mex/context/${id}.md`,
+      startLine: 1,
+      endLine: 12,
+    },
+    version: { semanticRevision: 1, contentHash: "a".repeat(64) },
+    lifecycleState: "promoted",
+    groundingHealth: "unverified",
+    topics: [],
+    sourceTypes: ["manual"],
+    diagnostics: [],
+  };
+}
+
 describe("createLocalHubReadServices", () => {
+  it("keeps Team-owned Wiki rows out of general Knowledge browse and search", async () => {
+    const team = wikiSummary(
+      "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "workstream",
+      "A team Workstream",
+    );
+    const knowledge = [
+      wikiSummary("mx_01ARZ3NDEKTSV4RRFFQ69G5FA1", "spec", "Release Spec"),
+      wikiSummary("mx_01ARZ3NDEKTSV4RRFFQ69G5FA2", "requirement", "Release requirement"),
+      wikiSummary("mx_01ARZ3NDEKTSV4RRFFQ69G5FA3", "constraint", "Release constraint"),
+      wikiSummary(
+        "mx_01ARZ3NDEKTSV4RRFFQ69G5FA4",
+        "acceptance_criterion",
+        "Release acceptance criterion",
+      ),
+    ];
+    const customKnowledge = wikiSummary(
+      "mx_01ARZ3NDEKTSV4RRFFQ69G5FA5",
+      "roadmap",
+      "Registered project roadmap",
+    );
+    // Keep the Team row first so a missing upstream kind filter reproduces the
+    // production failure before any valid `mx_` Knowledge projection appears.
+    const candidates = [team, ...knowledge, customKnowledge];
+    const listBundle = vi.fn(async (request: WikiListRequest) => ({
+      indexedRevision: "f".repeat(64),
+      observedAt: NOW.toISOString(),
+      results: {
+        items: candidates.filter((item) => request.kinds?.includes(item.ref.kind) ?? true),
+        nextCursor: null,
+        estimatedTokens: 100,
+        truncated: false,
+      },
+    }));
+    const searchBundle = vi.fn(async (request: WikiQueryRequest) => ({
+      indexedRevision: "f".repeat(64),
+      observedAt: NOW.toISOString(),
+      results: {
+        items: candidates
+          .filter((item) => request.kinds?.includes(item.ref.kind) ?? true)
+          .map((entity) => ({ entity, matchedFields: ["title" as const] })),
+        nextCursor: null,
+        estimatedTokens: 100,
+        truncated: false,
+      },
+    }));
+    const wiki = {
+      ...wikiWithStatus("fresh"),
+      listBundle,
+      searchBundle,
+    } satisfies HubWikiReadService;
+    const services = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      wiki,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+
+    const browse = await services.wikiEntities?.({ limit: 25 });
+    expect(browse?.items.map((item) => item.id)).toEqual(knowledge.map((item) => item.ref.id));
+    expect(listBundle.mock.calls[0]?.[0].kinds).toEqual(WIKI_ENTITY_TYPES);
+
+    const requirement = await services.wikiEntities?.({ kind: "requirement", limit: 25 });
+    expect(requirement?.items.map((item) => item.kind)).toEqual(["requirement"]);
+    expect(listBundle.mock.calls[1]?.[0].kinds).toEqual(["requirement"]);
+
+    const custom = await services.wikiEntities?.({ kind: "roadmap", limit: 25 });
+    expect(custom?.items.map((item) => item.id)).toEqual([customKnowledge.ref.id]);
+    expect(listBundle.mock.calls[2]?.[0].kinds).toEqual(["roadmap"]);
+
+    const callsBeforeTeamKind = listBundle.mock.calls.length;
+    await expect(services.wikiEntities?.({ kind: "workstream", limit: 25 }))
+      .rejects.toMatchObject({ status: 400, code: "INVALID_REQUEST" });
+    expect(listBundle).toHaveBeenCalledTimes(callsBeforeTeamKind);
+
+    const search = await services.search({ q: "release", limit: 25 });
+    expect(search.groups.wiki).toMatchObject({
+      status: "available",
+      items: knowledge.map((item) => expect.objectContaining({ id: item.ref.id, kind: "wiki" })),
+    });
+    expect(searchBundle.mock.calls[0]?.[0].kinds).toEqual(WIKI_ENTITY_TYPES);
+  });
+
   it("shrinks a valid maximal member page without breaking its continuation cursor", async () => {
     const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
     const members: TeamMember[] = Array.from({ length: 50 }, (_, index) => {
