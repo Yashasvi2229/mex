@@ -12,6 +12,16 @@ import type {
   GraphSymbol,
   HealthResponse,
   HomeResponse,
+  InboxDraftDetail,
+  InboxDraftListRequest,
+  InboxDraftListResponse,
+  InboxOperationApplyRequest,
+  InboxOperationApplyResponse,
+  InboxOperationPreviewRequest,
+  InboxOperationPreviewResponse,
+  InboxProposalDetail,
+  InboxProposalListRequest,
+  InboxProposalListResponse,
   JobsResponse,
   JobSummary,
   SearchRequest,
@@ -398,6 +408,12 @@ const capabilities: CapabilitiesResponse = {
   },
   workstreams: { read: available, canonicalMutation: available },
   specs: { read: available },
+  inbox: {
+    read: available,
+    draftMutation: available,
+    proposalMutation: available,
+    specApproval: available,
+  },
   jobs: available,
   graph: { read: available, refresh: available, rebuild: available },
   wiki: {
@@ -920,6 +936,70 @@ function fixtureOperationId(prefix: "event" | "member" | "ws", sequence: number)
   return `${prefix}_01K37WVM6H7JK8M9NPQRSTVVW${alphabet[sequence % alphabet.length]}`;
 }
 
+const fixtureInboxDraftId = "inbox_00000000000000000000000000000001";
+const fixtureInboxProposalId = "proposal_01000000000000000000001720";
+const fixtureInboxSpecId = "mx_01000000000000000000000001";
+const fixtureInboxCreatedSpecId = "mx_02000000000000000000000001";
+
+const fixtureInboxDrafts: InboxDraftDetail[] = [{
+  id: fixtureInboxDraftId,
+  revision: revision("1"),
+  updatedAt: timestamp(16),
+  changeKind: "spec.create",
+  entityKind: "requirement",
+  title: "Release benchmark local draft Requirement",
+  rationaleExcerpt: "Keep the release evidence reviewable before it enters canonical history.",
+  input: {
+    change: {
+      kind: "spec.create",
+      entityKind: "requirement",
+      title: "Release benchmark local draft Requirement",
+      summary: "A bounded release benchmark requirement ready for team review.",
+      body: "The release benchmark must retain exact local evidence.\n\nReviewers can inspect the proposed bytes before publishing.",
+      status: "in_flight",
+    },
+    rationale: "Keep the release evidence reviewable before it enters canonical history.",
+    evidence: [{ kind: "manual", note: "Collected from the Checkpoint E release review." }],
+    targetRevisions: [],
+  },
+}];
+
+const fixtureInboxProposals: InboxProposalDetail[] = [{
+  schemaVersion: 1,
+  ref: {
+    id: fixtureInboxProposalId,
+    kind: "proposal",
+    title: "Release benchmark pending Spec update",
+  },
+  sourcePath: `.mex/inbox/${fixtureInboxProposalId}.md`,
+  revision: revision("2"),
+  state: "pending",
+  author: fixtureWorkstreamActor,
+  changeKind: "spec.update",
+  entityKind: "spec",
+  title: "Release benchmark pending Spec update",
+  rationaleExcerpt: "Clarify the exact evidence boundary for the release gate.",
+  change: {
+    kind: "spec.update",
+    target: {
+      id: fixtureInboxSpecId,
+      kind: "spec",
+      title: "Human-team memory release",
+    },
+    patch: {
+      body: "The release gate records exact, bounded evidence before approval.\n\nPrivate proposal prose remains outside canonical Specs until approval.",
+      summary: "Require exact evidence review before release approval.",
+    },
+  },
+  rationale: "Clarify the exact evidence boundary for the release gate.",
+  evidence: [{ kind: "file", path: "scripts/release-benchmark/run.mjs" }],
+  targetRevisions: [{
+    target: { kind: "entity", id: fixtureInboxSpecId },
+    revision: revision("3"),
+    semanticRevision: 4,
+  }],
+}];
+
 function fixtureCurrentActor(
   members: readonly TeamMember[],
   selection: TeamCurrentActorResponse["selection"],
@@ -1006,6 +1086,8 @@ class FixtureHubApi implements HubApi {
   readonly #jobs = structuredClone(jobs);
   readonly #members = structuredClone(fixtureMembers);
   readonly #workstreams = structuredClone(fixtureWorkstreams);
+  readonly #inboxDrafts = structuredClone(fixtureInboxDrafts);
+  readonly #inboxProposals = structuredClone(fixtureInboxProposals);
   readonly #activityItems = structuredClone(activityItems);
   #selection: TeamCurrentActorResponse["selection"] = {
     memberId: fixtureMemberIds[0],
@@ -1029,6 +1111,12 @@ class FixtureHubApi implements HubApi {
         workstreams: {
           availability: "available" as const,
           count: this.#workstreams.filter((item) => item.state !== "archived").length,
+        },
+        inbox: {
+          availability: "available" as const,
+          count: this.#inboxProposals.filter((item) => (
+            item.state === "pending" || item.state === "stale"
+          )).length,
         },
         activity: {
           availability: "available" as const,
@@ -1088,6 +1176,385 @@ class FixtureHubApi implements HubApi {
     return workstream === undefined
       ? Promise.reject(new Error("Fixture Workstream not found."))
       : Promise.resolve(structuredClone(workstream));
+  }
+  getInboxDrafts(request: InboxDraftListRequest): Promise<InboxDraftListResponse> {
+    const parsedOffset = request.cursor?.match(/^fixture_inbox_drafts_(\d+)$/)?.[1];
+    const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
+    const details = this.#inboxDrafts.slice(offset, offset + request.limit);
+    const items = details.map(({ input: _input, ...summary }) => summary);
+    const nextOffset = offset + items.length;
+    const nextCursor = nextOffset < this.#inboxDrafts.length
+      ? `fixture_inbox_drafts_${nextOffset}`
+      : null;
+    return Promise.resolve({
+      items,
+      nextCursor,
+      truncated: nextCursor !== null,
+      sourceTruncated: false,
+      deterministicRevision: revision("4"),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    });
+  }
+  getInboxDraft(id: string): Promise<InboxDraftDetail> {
+    const draft = this.#inboxDrafts.find((candidate) => candidate.id === id);
+    return draft === undefined
+      ? Promise.reject(new Error("Fixture Inbox draft not found."))
+      : Promise.resolve(structuredClone(draft));
+  }
+  getInboxProposals(request: InboxProposalListRequest): Promise<InboxProposalListResponse> {
+    const filtered = this.#inboxProposals.filter((proposal) => (
+      request.states === undefined || request.states.includes(proposal.state)
+    ));
+    const parsedOffset = request.cursor?.match(/^fixture_inbox_proposals_(\d+)$/)?.[1];
+    const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
+    const details = filtered.slice(offset, offset + request.limit);
+    const items = details.map(({
+      change: _change,
+      rationale: _rationale,
+      evidence: _evidence,
+      targetRevisions: _targetRevisions,
+      reviewRationale: _reviewRationale,
+      ...summary
+    }) => summary);
+    const nextOffset = offset + items.length;
+    const nextCursor = nextOffset < filtered.length
+      ? `fixture_inbox_proposals_${nextOffset}`
+      : null;
+    return Promise.resolve({
+      items,
+      nextCursor,
+      truncated: nextCursor !== null,
+      sourceTruncated: false,
+      deterministicRevision: revision("5"),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    });
+  }
+  getInboxProposal(id: string): Promise<InboxProposalDetail> {
+    const proposal = this.#inboxProposals.find((candidate) => candidate.ref.id === id);
+    return proposal === undefined
+      ? Promise.reject(new Error("Fixture Inbox proposal not found."))
+      : Promise.resolve(structuredClone(proposal));
+  }
+  previewInboxOperation(
+    request: InboxOperationPreviewRequest,
+  ): Promise<InboxOperationPreviewResponse> {
+    const action = request.action;
+    const sequence = this.#previewSequence++;
+    const eventId = fixtureOperationId("event", sequence);
+    const activityAction = action.kind === "inbox.publish" ? "inbox.published"
+      : action.kind === "inbox.approve" ? "inbox.approved"
+        : action.kind === "inbox.reject" ? "inbox.rejected"
+          : action.kind === "inbox.withdraw" ? "inbox.withdrawn"
+            : action.kind === "inbox.mark-stale" ? "inbox.marked-stale"
+              : action.kind === "inbox.repair" ? "inbox.repaired"
+                : null;
+    const draft = "draftId" in action
+      ? this.#inboxDrafts.find((candidate) => candidate.id === action.draftId)
+      : undefined;
+    const proposal = "proposalId" in action
+      ? this.#inboxProposals.find((candidate) => candidate.ref.id === action.proposalId)
+      : undefined;
+    if ("proposalId" in action && proposal === undefined) {
+      return Promise.reject(new Error("Fixture Inbox proposal not found."));
+    }
+    if ((action.kind === "inbox.approve"
+      || action.kind === "inbox.reject"
+      || action.kind === "inbox.withdraw"
+      || action.kind === "inbox.mark-stale")
+      && proposal?.state !== "pending") {
+      return Promise.reject(new Error(`Fixture ${action.kind} requires a pending proposal.`));
+    }
+    if (action.kind === "inbox.repair" && proposal?.state !== "stale") {
+      return Promise.reject(new Error("Fixture inbox.repair requires a stale proposal."));
+    }
+    const createdDraftId = action.kind === "inbox.draft.save"
+      ? action.draftId ?? "inbox_00000000000000000000000000000002"
+      : null;
+    const publishedProposalId = "proposal_02000000000000000000001720";
+    const localChanges = action.kind === "inbox.draft.save"
+      ? [{
+          namespace: "inbox-draft" as const,
+          id: createdDraftId!,
+          beforeRevision: draft?.revision ?? null,
+          afterRevision: revision("6"),
+          summary: draft === undefined ? "Create checkout-local Inbox draft." : "Update checkout-local Inbox draft.",
+        }]
+      : action.kind === "inbox.draft.delete" || action.kind === "inbox.publish"
+        ? [{
+            namespace: "inbox-draft" as const,
+            id: action.draftId,
+            beforeRevision: draft?.revision ?? revision("1"),
+            afterRevision: null,
+            summary: action.kind === "inbox.publish"
+              ? "Remove the checkout-local draft after publishing."
+              : "Remove the checkout-local Inbox draft.",
+          }]
+        : [];
+    const primaryChanges: InboxOperationPreviewResponse["preview"]["changes"] = action.kind === "inbox.draft.save" || action.kind === "inbox.draft.delete"
+      ? []
+      : action.kind === "inbox.publish"
+        ? [{
+            kind: "create" as const,
+            path: `.mex/inbox/${publishedProposalId}.md`,
+            diff: `--- /dev/null\n+++ b/.mex/inbox/${publishedProposalId}.md\n+state: pending\n+title: ${draft?.title ?? "Published Spec proposal"}\n`,
+            beforeRevision: null,
+            afterRevision: revision("7"),
+          }]
+        : action.kind === "inbox.approve"
+          ? [
+            ...(proposal?.change.kind === "spec.create" ? [{
+              kind: "create" as const,
+              path: `.mex/specs/${fixtureInboxCreatedSpecId}.md`,
+              diff: `--- /dev/null\n+++ b/.mex/specs/${fixtureInboxCreatedSpecId}.md\n+title: ${proposal.title}\n`,
+              beforeRevision: null,
+              afterRevision: revision("8"),
+            }] : [{
+              kind: "update" as const,
+              path: `.mex/specs/${fixtureInboxSpecId}.md`,
+              diff: `--- a/.mex/specs/${fixtureInboxSpecId}.md\n+++ b/.mex/specs/${fixtureInboxSpecId}.md\n+The release gate records exact reviewed evidence.\n`,
+              beforeRevision: revision("3"),
+              afterRevision: revision("8"),
+            }]), {
+              kind: "update" as const,
+              path: ".mex/events/operations.jsonl",
+              diff: "--- a/.mex/events/operations.jsonl\n+++ b/.mex/events/operations.jsonl\n+{\"phase\":\"complete\",\"operation\":\"spec-authoring\"}\n",
+              beforeRevision: revision("4"),
+              afterRevision: revision("5"),
+            }, {
+              kind: "update" as const,
+              path: proposal?.sourcePath ?? `.mex/inbox/${action.proposalId}.md`,
+              diff: "--- proposal\n+++ proposal\n-state: pending\n+state: approved\n",
+              beforeRevision: proposal?.revision ?? revision("2"),
+              afterRevision: revision("9"),
+            }]
+          : [{
+              kind: "update" as const,
+              path: proposal?.sourcePath ?? `.mex/inbox/${action.proposalId}.md`,
+              diff: `--- proposal\n+++ proposal\n-state: ${proposal?.state ?? "pending"}\n+state: ${action.kind === "inbox.reject" ? "rejected" : action.kind === "inbox.withdraw" ? "withdrawn" : action.kind === "inbox.mark-stale" ? "stale" : "pending"}\n`,
+              beforeRevision: proposal?.revision ?? revision("2"),
+              afterRevision: revision("9"),
+            }];
+    const activityChange: InboxOperationPreviewResponse["preview"]["changes"][number] | null = activityAction === null
+      ? null
+      : {
+          kind: "create",
+          path: `.mex/events/activity/${timestamp(0).slice(0, 7)}/${eventId}.md`,
+          diff: `--- /dev/null\n+++ b/.mex/events/activity/${timestamp(0).slice(0, 7)}/${eventId}.md\n+action: ${activityAction}\n`,
+          beforeRevision: null,
+          afterRevision: revision("d"),
+        };
+    const changes = activityChange === null
+      ? primaryChanges
+      : [...primaryChanges, activityChange];
+    const purposeIds: InboxOperationPreviewResponse["receipt"]["purposeIds"] = action.kind === "inbox.draft.save"
+      ? draft === undefined
+        ? [{ purpose: "inbox-draft", id: createdDraftId! }]
+        : []
+      : action.kind === "inbox.draft.delete"
+        ? []
+        : action.kind === "inbox.publish"
+          ? [{ purpose: "activity", id: eventId }, { purpose: "proposal", id: publishedProposalId }]
+          : action.kind === "inbox.approve"
+            ? proposal?.change.kind === "spec.create"
+              ? [{ purpose: "activity", id: eventId }, { purpose: "spec-entity", id: fixtureInboxCreatedSpecId }]
+              : [{ purpose: "activity", id: eventId }]
+            : [{ purpose: "activity", id: eventId }];
+    return Promise.resolve({
+      schemaVersion: 1,
+      request: structuredClone(request),
+      preview: {
+        valid: true,
+        scope: action.kind === "inbox.draft.save" || action.kind === "inbox.draft.delete"
+          ? "local"
+          : action.kind === "inbox.publish"
+            ? "mixed"
+            : "canonical",
+        changes,
+        localChanges,
+        diagnostics: [],
+      },
+      receipt: {
+        schemaVersion: 1,
+        authority: {
+          actor: fixtureCurrentActor(this.#members, this.#selection).actor,
+          occurredAt: timestamp(0),
+          repoState: {
+            branch: home.repository.branch,
+            head: home.repository.head,
+            dirty: home.repository.dirty,
+            observedAt: timestamp(0),
+          },
+        },
+        purposeIds,
+        requestRevision: revision("a"),
+        presentationRevision: revision("b"),
+        previewRevision: revision("c"),
+      },
+    });
+  }
+  applyInboxOperation(
+    envelope: InboxOperationApplyRequest,
+  ): Promise<InboxOperationApplyResponse> {
+    const action = envelope.request.action;
+    let proposals: InboxProposalDetail[] = [];
+    const activityId = envelope.receipt.purposeIds.find((item) => item.purpose === "activity")?.id;
+    let event: TeamActivityEvent | null = null;
+    if (action.kind === "inbox.draft.save") {
+      const id = action.draftId ?? envelope.receipt.purposeIds.find((item) => item.purpose === "inbox-draft")?.id;
+      if (id !== undefined) {
+        const descriptor = action.draft.change.kind === "spec.create"
+          ? { entityKind: action.draft.change.entityKind, title: action.draft.change.title }
+          : { entityKind: action.draft.change.target.kind, title: action.draft.change.target.title ?? action.draft.change.target.id };
+        const next: InboxDraftDetail = {
+          id,
+          revision: envelope.preview.localChanges[0]?.afterRevision ?? revision("6"),
+          updatedAt: envelope.receipt.authority.occurredAt,
+          changeKind: action.draft.change.kind,
+          ...descriptor,
+          rationaleExcerpt: action.draft.rationale.slice(0, 240),
+          input: structuredClone(action.draft),
+        };
+        const index = this.#inboxDrafts.findIndex((candidate) => candidate.id === id);
+        if (index === -1) this.#inboxDrafts.unshift(next);
+        else this.#inboxDrafts[index] = next;
+      }
+    } else if (action.kind === "inbox.draft.delete") {
+      const index = this.#inboxDrafts.findIndex((candidate) => candidate.id === action.draftId);
+      if (index !== -1) this.#inboxDrafts.splice(index, 1);
+    } else if (action.kind === "inbox.publish") {
+      const draft = this.#inboxDrafts.find((candidate) => candidate.id === action.draftId);
+      const id = envelope.receipt.purposeIds.find((item) => item.purpose === "proposal")?.id;
+      if (draft !== undefined && id !== undefined) {
+        const proposal: InboxProposalDetail = {
+          schemaVersion: 1,
+          ref: { id, kind: "proposal", title: draft.title },
+          sourcePath: `.mex/inbox/${id}.md`,
+          revision: envelope.preview.changes[0]?.afterRevision ?? revision("7"),
+          state: "pending",
+          author: envelope.receipt.authority.actor,
+          changeKind: draft.changeKind,
+          entityKind: draft.entityKind,
+          title: draft.title,
+          rationaleExcerpt: draft.rationaleExcerpt,
+          change: structuredClone(draft.input.change),
+          rationale: draft.input.rationale,
+          evidence: structuredClone(draft.input.evidence),
+          targetRevisions: structuredClone(draft.input.targetRevisions),
+        };
+        this.#inboxProposals.unshift(proposal);
+        proposals = [proposal];
+        this.#inboxDrafts.splice(this.#inboxDrafts.indexOf(draft), 1);
+      }
+    } else {
+      const index = this.#inboxProposals.findIndex((candidate) => candidate.ref.id === action.proposalId);
+      const current = this.#inboxProposals[index];
+      if (current !== undefined) {
+        const { reviewer: _reviewer, reviewedAt: _reviewedAt, reviewRationale: _reviewRationale, ...withoutReview } = current;
+        const proposalRevision = envelope.preview.changes.find((change) => (
+          change.path === current.sourcePath
+        ))?.afterRevision ?? revision("9");
+        let updated: InboxProposalDetail;
+        if (action.kind === "inbox.repair") {
+          const descriptor = action.replacement.change.kind === "spec.create"
+            ? {
+                entityKind: action.replacement.change.entityKind,
+                title: action.replacement.change.title,
+              }
+            : {
+                entityKind: action.replacement.change.target.kind,
+                title: action.replacement.change.target.title ?? action.replacement.change.target.id,
+              };
+          updated = {
+            ...withoutReview,
+            state: "pending",
+            revision: proposalRevision,
+            changeKind: action.replacement.change.kind,
+            ...descriptor,
+            rationaleExcerpt: action.replacement.rationale.slice(0, 240),
+            change: structuredClone(action.replacement.change),
+            rationale: action.replacement.rationale,
+            evidence: structuredClone(action.replacement.evidence),
+            targetRevisions: structuredClone(action.replacement.targetRevisions),
+          };
+        } else if (action.kind === "inbox.mark-stale") {
+          updated = {
+            ...withoutReview,
+            state: "stale",
+            revision: proposalRevision,
+          };
+        } else {
+          updated = {
+            ...withoutReview,
+            state: action.kind === "inbox.approve" ? "approved"
+              : action.kind === "inbox.reject" ? "rejected"
+                : "withdrawn",
+            revision: proposalRevision,
+            reviewer: envelope.receipt.authority.actor,
+            reviewedAt: envelope.receipt.authority.occurredAt,
+            ...((action.kind === "inbox.reject" || action.kind === "inbox.withdraw")
+              && action.rationale !== undefined
+              ? { reviewRationale: action.rationale }
+              : {}),
+          };
+        }
+        this.#inboxProposals[index] = updated;
+        proposals = [updated];
+      }
+    }
+    if (activityId !== undefined) {
+      const actionName = action.kind === "inbox.publish" ? "inbox.published"
+        : action.kind === "inbox.approve" ? "inbox.approved"
+          : action.kind === "inbox.reject" ? "inbox.rejected"
+            : action.kind === "inbox.withdraw" ? "inbox.withdrawn"
+              : action.kind === "inbox.mark-stale" ? "inbox.marked-stale"
+                : action.kind === "inbox.repair" ? "inbox.repaired"
+                  : null;
+      const proposalId = action.kind === "inbox.publish"
+        ? envelope.receipt.purposeIds.find((item) => item.purpose === "proposal")?.id
+        : "proposalId" in action ? action.proposalId : undefined;
+      const subjectProposal = proposalId === undefined
+        ? []
+        : [{ kind: "entity" as const, entity: { id: proposalId, kind: "proposal" } }];
+      const approvalTarget = action.kind !== "inbox.approve"
+        ? []
+        : proposals[0]?.change.kind === "spec.create"
+          ? [{
+              kind: "entity" as const,
+              entity: {
+                id: envelope.receipt.purposeIds.find((item) => item.purpose === "spec-entity")?.id
+                  ?? fixtureInboxCreatedSpecId,
+                kind: proposals[0].change.entityKind,
+              },
+            }]
+          : proposals[0]?.change.kind === "spec.update"
+            ? [{ kind: "entity" as const, entity: structuredClone(proposals[0].change.target) }]
+            : [];
+      if (actionName !== null) {
+        event = {
+          schemaVersion: 1,
+          id: activityId,
+          timestamp: envelope.receipt.authority.occurredAt,
+          actor: envelope.receipt.authority.actor,
+          action: actionName,
+          subjects: [...subjectProposal, ...approvalTarget],
+          workstream: null,
+          repoState: envelope.receipt.authority.repoState,
+        };
+        this.#activityItems.unshift(fixtureTimelineEvent(event));
+      }
+    }
+    return Promise.resolve({
+      operationId: envelope.request.operationId,
+      previewRevision: envelope.receipt.previewRevision,
+      applied: true,
+      idempotentReplay: false,
+      changes: envelope.preview.changes,
+      localChanges: envelope.preview.localChanges,
+      proposals,
+      events: event === null ? [] : [event],
+    });
   }
   previewTeamOperation(
     request: TeamOperationPreviewRequest,

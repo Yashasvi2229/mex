@@ -51,6 +51,7 @@ export type { AuditEntry, AuditLog, AuditPhase, OperationRecord } from "./audit.
 
 export {
   attestEntityClaimants,
+  attestEntityClaimantsBatch,
   locateEntity,
   locateEntityClaimants,
   locateFile,

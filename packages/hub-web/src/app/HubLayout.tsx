@@ -26,6 +26,7 @@ function capabilityAvailable(
   if (name === "members") return capabilities.members.read.availability === "available";
   if (name === "workstreams") return capabilities.workstreams.read.availability === "available";
   if (name === "specs") return capabilities.specs.read.availability === "available";
+  if (name === "inbox") return capabilities.inbox.read.availability === "available";
   return false;
 }
 

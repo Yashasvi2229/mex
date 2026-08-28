@@ -39,6 +39,7 @@ import chalk from "chalk";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { WikiDiagnostic } from "../model/diagnostic.js";
+import { inspectDirectWikiSpecMutation } from "./spec-authoring-boundary.js";
 import {
   envelopeFor,
   exitCodeFor,
@@ -96,6 +97,8 @@ export interface CommandIo {
   projectRoot?: string;
   exclude?: readonly string[];
   readOnly?: readonly string[];
+  /** Root-product policy; internal engine callers deliberately leave this off. */
+  enforceInboxSpecBoundary?: boolean;
 }
 
 /** Raw commander flags. Strings, because that is what a shell hands over. */
@@ -366,6 +369,27 @@ export function runApply(io: CommandIo, file: string, flags: CommandFlags): void
     return;
   }
 
+  const guarded = directSpecBoundaryDiagnostics(io, envelope);
+  if (guarded.length > 0) {
+    emit(io, {
+      data: {
+        planned: false,
+        opId: null,
+        preview: null,
+        diff: null,
+        files: [],
+        proposedText: {},
+        plan: null,
+        applied: false,
+        replayed: false,
+        changedFiles: [],
+        createdIds: [],
+      },
+      diagnostics: [...guarded],
+    }, flags, () => undefined);
+    return;
+  }
+
   const result = wikiApplyOperation(envelope, {
     ...serviceOptions(io),
     ...(flags.apply === true && flags.dryRun !== true ? { apply: true } : {}),
@@ -396,7 +420,21 @@ function synthesisOptions(io: CommandIo): Parameters<typeof wikiSynthesisBuild>[
     ...(io.codeGraph === undefined ? {} : { codeGraph: io.codeGraph }),
     ...(io.graph === undefined ? {} : { graph: io.graph }),
     ...(io.synthesisScope === undefined ? {} : { scope: io.synthesisScope }),
+    ...(io.enforceInboxSpecBoundary === true
+      ? { operationGuard: (envelope: unknown) => directSpecBoundaryDiagnostics(io, envelope) }
+      : {}),
   };
+}
+
+function directSpecBoundaryDiagnostics(
+  io: CommandIo,
+  envelope: unknown,
+): readonly WikiDiagnostic[] {
+  if (io.enforceInboxSpecBoundary !== true) return [];
+  return inspectDirectWikiSpecMutation(envelope, {
+    scaffoldRoot: io.scaffoldRoot,
+    ...(io.exclude === undefined ? {} : { exclude: io.exclude }),
+  });
 }
 
 /**

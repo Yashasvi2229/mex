@@ -1,6 +1,6 @@
 # Human-Team Memory Contract Lock
 
-Status: Checkpoint D Workstream and read-only Spec surfaces implemented
+Status: Checkpoints E1-E4 implemented; pinned calibration applied and enforcing CI required
 
 This brief records the application boundary for the MEX OSS human-team memory
 program. The contract remains an internal, provisional API until a separate
@@ -242,6 +242,51 @@ internal package boundary:
 Checkpoint D does not add Spec authoring. Spec writes remain Inbox-governed and
 belong to Checkpoint E.
 
+## Inbox-governed Spec authoring contract boundary
+
+Checkpoint E0 locks the product contract. Checkpoint E1 implements its internal
+repository service, exact governed Wiki authoring seams, signed portable
+preview/apply, lifecycle recovery, and real consumer conformance without
+claiming CLI, capability, Hub, browser, compatibility, fixture, or performance
+implementation.
+The exact boundary is recorded in
+[`inbox-spec-authoring-contract.md`](inbox-spec-authoring-contract.md).
+
+- E is constrained to expose only a Team Inbox facade for bounded local draft
+  and canonical proposal summary/detail reads plus signed
+  `previewInbox`/`applyInbox`.
+- Each proposal contains exactly one non-batch typed Spec change: create one
+  service-ID-derived `.mex/specs/<mx-id>.md`, or update only title, summary, and
+  body on one exact existing Spec-family target.
+- Create is limited to `spec`, `requirement`, `constraint`, or
+  `acceptance_criterion`, status `in_flight | promoted`, bounded topics, and
+  at most one create-time relation in Checkpoint D's exact four-family direction
+  table. Sources, groundings, metadata, adoption, archive, post-create relation
+  changes, properties, type conversion, move, supersede, inline replacement,
+  and adapter `payload.operations` batches are absent.
+- At publish, repair, mark-stale, and approval, existing update targets and
+  create-time relation/topic endpoints are resolved and exact-revision checked
+  in one fresh Wiki view. Local draft save/delete does not require that view.
+- Proposal staleness is explicit: only the service may preview
+  `pending -> stale` after proving target drift, a failed approval writes
+  nothing, and repair is only `stale -> pending`.
+- The signed portable receipt carries at most two generated-purpose IDs from
+  `inbox-draft`, `proposal`, `activity`, and `spec-entity`, and retains the
+  128-node receipt ceiling. A package-private Wiki seam forces the reviewed
+  create ID during exact cross-process re-plan; no executable plan or handle
+  becomes portable.
+- Once product E ships, direct `mex wiki propose` and `mex wiki apply` reject
+  Spec-family creates/targets, type conversions, inline replacements, hidden
+  batch items, and `.mex/specs/**` writes. Non-Spec Wiki administration and
+  declared migration/maintenance remain separately gated.
+- Inbox capability descriptors use stable public request/preview `$ref` roots
+  and name the static `mex inbox contract --json` resolver. Those roots require
+  the resolver catalog; its bounded repository-independent envelope contains
+  the complete strict schemas, both examples, exact apply-envelope requirement,
+  and unchanged Team exit table even before repository readiness.
+- Relay, Playbook, Catch Up, new MCP, agent, Git mutation, hosted, and direct
+  Wiki/Spec editing surfaces remain outside E.
+
 ## Explicit exclusions
 
 Do not implement as part of this program:
@@ -298,9 +343,16 @@ Activity reads, signed cross-process preview/apply, v1-v4 apply-side migration,
 actor fallback, local-selection privacy, immutable recorded actors, exact
 replay, contention, two-clone convergence, and source truncation. Checkpoint D
 adds bounded Workstream lifecycle and cross-process preview/apply coverage plus
-fresh-only Spec projection tests against the real Wiki adapter. Inbox, Relay,
-Playbook, Catch Up, and governed Spec mutation remain assigned to later
-checkpoints.
+fresh-only Spec projection tests against the real Wiki adapter. Checkpoint E1
+adds the internal governed Inbox/Spec service and real repository conformance,
+including local drafts, portable proposals, exact Spec create/update approval,
+stale/repair, crash recovery, containment, privacy, and two-clone transfer. E2
+registers the guarded CLI and bounded static contract resolver, E3 registers the
+private Hub and lazy Inbox workbench, and E4 adds the deterministic fixture plus
+release measurements. Inbox's numeric release candidates are pinned from the
+retained Ubuntu report, and a clean enforcing CI run is required without
+widening earlier thresholds. Relay, Playbook, and Catch Up remain assigned to
+later checkpoints.
 
 ## Verification commands
 
@@ -309,6 +361,7 @@ npx vitest run test/wiki-port-mock.contract.test.ts
 npx vitest run test/wiki-port-real.contract.test.ts
 npx vitest run test/team-workflow-port-real.contract.test.ts
 npx vitest run test/team-identity-activity-real.contract.test.ts
+npx vitest run test/team-inbox-spec-authoring-real.contract.test.ts
 npx vitest run src/team/workflow/__tests__/repository-team-workstreams.test.ts
 npx vitest run src/team/specs
 npx vitest run src/graph/__tests__/protocol-v3-golden.test.ts

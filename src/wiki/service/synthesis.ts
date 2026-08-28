@@ -25,7 +25,7 @@
 
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
-import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
+import { diagnostic, hasBlockingDiagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import { withWikiQuery } from "../query/session.js";
 import type { WikiQuerySession } from "../query/session.js";
 import { resolveBounds } from "../query/budget.js";
@@ -73,6 +73,8 @@ export interface SynthesisOptions extends WikiWriteOptions {
   codeGraph?: SynthesisGraph | null;
   /** §12 scope knobs, already normalized by `loadWikiConfig`. */
   scope?: SynthesisScope;
+  /** Optional root-product policy applied before any proposal is planned or written. */
+  operationGuard?: (envelope: unknown) => readonly WikiDiagnostic[];
 }
 
 export interface SynthesisScope {
@@ -513,6 +515,16 @@ function runBatch(
   const changedFiles: string[] = [];
   const createdIds: string[] = [];
   let applied = false;
+
+  // Product policy is a batch preflight: one refused generated operation must
+  // prevent every sibling from being planned or written. Otherwise an agent
+  // could hide one governed Spec escape beside an unrelated safe mutation and
+  // still obtain a partial canonical write from the refused invocation.
+  const guarded = entries.flatMap((entry) => options.operationGuard?.(entry.envelope) ?? []);
+  diagnostics.push(...guarded);
+  if (hasBlockingDiagnostic(guarded)) {
+    return { data: emptyPropose(), diagnostics };
+  }
 
   for (const entry of entries) {
     const planned = planOperation(entry.envelope, planOptions);

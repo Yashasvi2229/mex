@@ -53,14 +53,15 @@ export const capabilityPages: Record<string, CapabilityPageDefinition> = {
     structuralUnavailable: true,
   },
   inbox: {
-    title: "Inbox", capability: "team", icon: Inbox,
+    title: "Inbox", capability: "inbox", icon: Inbox,
     connectedCopy: "Inbox is unavailable.",
     unavailableCopy: "Inbox is unavailable.",
   },
   relays: {
-    title: "Relays", capability: "team", icon: Send,
+    title: "Relays", capability: "inbox", icon: Send,
     connectedCopy: "Relays are unavailable.",
     unavailableCopy: "Relays are unavailable.",
+    structuralUnavailable: true,
   },
 };
 
@@ -73,6 +74,7 @@ function capabilityStatus(capabilities: CapabilitiesResponse | undefined, name: 
   if (name === "members") return capabilities.members.read;
   if (name === "workstreams") return capabilities.workstreams.read;
   if (name === "specs") return capabilities.specs.read;
+  if (name === "inbox") return capabilities.inbox.read;
   return undefined;
 }
 
@@ -99,8 +101,8 @@ export function CapabilityPage({ page }: { page: keyof typeof capabilityPages })
         ? "This read-only checkpoint does not mount this product surface."
         : definition.capability === "wiki"
         ? "Wiki is not connected."
-        : definition.capability === "team"
-          ? "Team features are not connected."
+        : definition.capability === "inbox"
+          ? "Inbox features are not connected."
           : "The code graph is not connected.";
   const Icon = definition.icon;
 

@@ -9,7 +9,10 @@ import {
 import { dirname, resolve } from "node:path";
 import { DEFAULT_WIKI_EXCLUDE } from "./config.js";
 import type { GraphStatusKind } from "./team/contracts/graph.js";
-import { TEAM_IDENTITY_ACTIVITY_LIMITS } from "./team/contracts/workflow.js";
+import {
+  TEAM_IDENTITY_ACTIVITY_LIMITS,
+  TEAM_INBOX_SPEC_LIMITS,
+} from "./team/contracts/workflow.js";
 import type { ContractWikiIndexState } from "./wiki/query/contract-session.js";
 import { VERSION } from "./version.js";
 
@@ -47,6 +50,8 @@ export interface InstalledCapability {
     | "project_hub"
     | "team_identity"
     | "team_workstreams"
+    | "team_inbox"
+    | "spec_authoring"
     | "activity_read"
     | "activity_record"
     | "spec_read"
@@ -66,6 +71,8 @@ export interface CapabilityCommandDescriptor {
   output: CapabilityCommandOutput;
   /** Machine-readable contract ID for caller-supplied input, when required. */
   inputContract?: string;
+  /** Descriptor ID of the bounded command that resolves an out-of-line contract. */
+  contractResolver?: "inbox.contract";
 }
 
 export interface TeamCliContract {
@@ -127,6 +134,35 @@ export interface TeamCliContract {
   }[];
 }
 
+export interface InboxCliContract {
+  schemaVersion: 1;
+  resolver: {
+    descriptorId: "inbox.contract";
+    command: "mex inbox contract --json";
+    contractId: "team.inbox.contract-catalog.v1";
+    maxBytes: number;
+    requirement: string;
+  };
+  requestFile: {
+    contractId: "team.inbox.request.v1";
+    mediaType: "application/json";
+    encoding: "utf-8";
+    maxBytes: number;
+    maxDepth: 32;
+    maxNodes: 4_096;
+    maxPortableSpecRequestBytes: number;
+    schema: Readonly<Record<string, unknown>>;
+  };
+  applyFile: {
+    contractId: "team.inbox.preview-envelope.v1";
+    mediaType: "application/json";
+    encoding: "utf-8";
+    maxBytes: number;
+    maxAgeSeconds: 1_800;
+    schema: Readonly<Record<string, unknown>>;
+  };
+}
+
 export interface NextInitializationAction {
   /** Null means the required recovery is a manual repository/configuration change. */
   command: string | null;
@@ -143,6 +179,7 @@ export interface CapabilitiesManifest {
   capabilities: InstalledCapability[];
   commands: Record<CapabilityCommandKind, CapabilityCommandDescriptor[]>;
   teamCliContract: TeamCliContract;
+  inboxCliContract: InboxCliContract;
   nextInitializationAction: NextInitializationAction | null;
 }
 
@@ -209,10 +246,16 @@ export interface RunCapabilitiesOptions {
 
 const TEAM_REQUEST_CONTRACT_ID = "team.identity_activity.request.v1" as const;
 const TEAM_PREVIEW_CONTRACT_ID = "team.identity_activity.preview-envelope.v1" as const;
+const INBOX_REQUEST_CONTRACT_ID = "team.inbox.request.v1" as const;
+const INBOX_PREVIEW_CONTRACT_ID = "team.inbox.preview-envelope.v1" as const;
+export const INBOX_CONTRACT_CATALOG_ID = "team.inbox.contract-catalog.v1" as const;
+export const INBOX_CONTRACT_DESCRIPTOR_ID = "inbox.contract" as const;
+export const INBOX_CONTRACT_COMMAND = "mex inbox contract --json" as const;
 const EXAMPLE_MEMBER_ID = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const EXAMPLE_WORKSTREAM_ID = "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const EXAMPLE_REVISION = "a".repeat(64);
 const EXAMPLE_SELECTION_REVISION = "b".repeat(64);
+const EXAMPLE_PROPOSAL_ID = "proposal_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
 function requestSchemaRef(name: string): string {
   return `${TEAM_REQUEST_CONTRACT_ID}#/$defs/${name}`;
@@ -222,623 +265,427 @@ function previewContractRef(commandName: string): string {
   return `${TEAM_PREVIEW_CONTRACT_ID}#${commandName}`;
 }
 
-const TEAM_REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
+const INBOX_REQUEST_SCHEMA_ID = "https://mex.dev/contracts/team-inbox-request-v1.json" as const;
+const INBOX_PREVIEW_SCHEMA_ID = "https://mex.dev/contracts/team-inbox-preview-envelope-v1.json" as const;
+const TEAM_REQUEST_SCHEMA_ID = "https://mex.dev/contracts/team-identity-activity-request-v1.json" as const;
+const INBOX_REQUEST_SCHEMA_REF = INBOX_REQUEST_SCHEMA_ID;
+const INBOX_PREVIEW_SCHEMA_REF = INBOX_PREVIEW_SCHEMA_ID;
+
+interface SchemaCompaction {
+  sourceId: string;
+  targetId: string;
+  anchorPrefix: string;
+  definitions: ReadonlyMap<string, string>;
+  anchors: ReadonlySet<string>;
+}
+
+function schemaCompaction(
+  schema: Readonly<Record<string, unknown>>,
+  targetId: string,
+  anchorPrefix = targetId.at(-1) ?? "s",
+): SchemaCompaction {
+  const sourceId = typeof schema.$id === "string" ? schema.$id : "";
+  const definitions = schema.$defs !== null && typeof schema.$defs === "object"
+    ? Object.keys(schema.$defs as Readonly<Record<string, unknown>>)
+    : [];
+  const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  if (sourceId.length === 0 || definitions.length > alphabet.length) {
+    throw new Error("Capability schema compaction configuration is invalid.");
+  }
+  const referenceCounts = new Map<string, number>();
+  const countReferences = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(countReferences);
+      return;
+    }
+    if (value === null || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value as Readonly<Record<string, unknown>>)) {
+      if (key === "$ref" && typeof child === "string" && child.startsWith("#/$defs/")) {
+        const name = child.slice("#/$defs/".length);
+        referenceCounts.set(name, (referenceCounts.get(name) ?? 0) + 1);
+      }
+      countReferences(child);
+    }
+  };
+  countReferences(schema);
+  return {
+    sourceId,
+    targetId,
+    anchorPrefix,
+    definitions: new Map(definitions.map((name, index) => [name, alphabet[index]!])),
+    anchors: new Set(definitions.filter((name) => (referenceCounts.get(name) ?? 0) >= 1)),
+  };
+}
+
+/** Preserve standard JSON Schema semantics while keeping discovery below 32 KiB. */
+function compactJsonSchema(
+  schema: Readonly<Record<string, unknown>>,
+  current: SchemaCompaction,
+  all: readonly SchemaCompaction[],
+): Readonly<Record<string, unknown>> {
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (value === null || typeof value !== "object") return value;
+    const result: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Readonly<Record<string, unknown>>)) {
+      if (key === "$defs" && child !== null && typeof child === "object" && !Array.isArray(child)) {
+        const compacted: Record<string, unknown> = {};
+        for (const [name, definition] of Object.entries(child as Readonly<Record<string, unknown>>)) {
+          const compactName = current.definitions.get(name) ?? name;
+          const compactDefinition = visit(definition);
+          compacted[compactName] = current.anchors.has(name)
+            ? { $id: compactResourceId(current, compactName), ...(compactDefinition as Record<string, unknown>) }
+            : compactDefinition;
+        }
+        result[key] = compacted;
+      } else if (key === "$id" && child === current.sourceId) {
+        result[key] = current.targetId;
+      } else if (key === "$ref" && typeof child === "string") {
+        result[key] = compactSchemaRef(child, current, all);
+      } else {
+        result[key] = visit(child);
+      }
+    }
+    if (
+      result.additionalProperties === false
+      && Array.isArray(result.required)
+      && result.properties !== null
+      && typeof result.properties === "object"
+      && !Array.isArray(result.properties)
+    ) {
+      const propertyNames = Object.keys(result.properties as Readonly<Record<string, unknown>>);
+      const requiredNames = result.required.filter((name): name is string => typeof name === "string");
+      if (
+        propertyNames.length === requiredNames.length
+        && propertyNames.every((name) => requiredNames.includes(name))
+      ) {
+        delete result.additionalProperties;
+        result.maxProperties = propertyNames.length;
+      }
+    }
+    return result;
+  };
+  return Object.freeze(visit(schema) as Record<string, unknown>);
+}
+
+function compactSchemaRef(
+  ref: string,
+  current: SchemaCompaction,
+  all: readonly SchemaCompaction[],
+): string {
+  const localPrefix = "#/$defs/";
+  if (ref.startsWith(localPrefix)) {
+    const name = ref.slice(localPrefix.length);
+    const compactName = current.definitions.get(name) ?? name;
+    return current.anchors.has(name)
+      ? compactResourceId(current, compactName)
+      : `${localPrefix}${compactName}`;
+  }
+  for (const candidate of all) {
+    if (ref === candidate.sourceId) return candidate.targetId;
+    const prefix = `${candidate.sourceId}${localPrefix}`;
+    if (ref.startsWith(prefix)) {
+      const name = ref.slice(prefix.length);
+      const compactName = candidate.definitions.get(name) ?? name;
+      return candidate.anchors.has(name)
+        ? compactResourceId(candidate, compactName)
+        : `${candidate.targetId}${localPrefix}${compactName}`;
+    }
+  }
+  return ref;
+}
+
+function compactResourceId(schema: SchemaCompaction, compactName: string): string {
+  return `urn:mex:${schema.anchorPrefix}:${compactName}`;
+}
+
+const COMPACT_TEAM_REQUEST_SCHEMA_SOURCE: Readonly<Record<string, unknown>> = Object.freeze({
   $schema: "https://json-schema.org/draft/2020-12/schema",
-  $id: "https://mex.dev/contracts/team-identity-activity-request-v1.json",
+  $id: TEAM_REQUEST_SCHEMA_ID,
   title: "MEX Team identity and Activity preview request v1",
   description:
     "Caller-authored authority-free request. Every object rejects extra keys; text is trimmed NFC without control characters and runtime byte ceilings apply.",
-  oneOf: [
-    { $ref: "#/$defs/memberAddRequest" },
-    { $ref: "#/$defs/memberUpdateRequest" },
-    { $ref: "#/$defs/memberDeactivateRequest" },
-    { $ref: "#/$defs/memberSelectRequest" },
-    { $ref: "#/$defs/activityRecordRequest" },
-    { $ref: "#/$defs/workstreamCreateRequest" },
-    { $ref: "#/$defs/workstreamUpdateRequest" },
-    { $ref: "#/$defs/workstreamArchiveRequest" },
+  type: "object",
+  additionalProperties: false,
+  required: ["operationId", "action", "expectedRevisions"],
+  properties: {
+    operationId: { $ref: "#/$defs/operationId" },
+    action: { type: "object", unevaluatedProperties: false, oneOf: [
+      {
+        required: ["kind", "member"],
+        properties: {
+          kind: { const: "member.add" },
+          member: {
+            type: "object", additionalProperties: false, required: ["displayName", "gitAliases"],
+            properties: {
+              displayName: { $ref: "#/$defs/t200" },
+              gitAliases: { type: "array", maxItems: 32, uniqueItems: true, items: { $ref: "#/$defs/gitAlias" } },
+            },
+          },
+        },
+      },
+      {
+        required: ["kind", "memberId", "patch"],
+        properties: {
+          kind: { const: "member.update" }, memberId: { $ref: "#/$defs/memberId" },
+          patch: {
+            type: "object", additionalProperties: false, minProperties: 1,
+            properties: {
+              displayName: { $ref: "#/$defs/t200" },
+              gitAliases: { type: "array", maxItems: 32, uniqueItems: true, items: { $ref: "#/$defs/gitAlias" } },
+            },
+          },
+        },
+      },
+      { required: ["kind", "memberId"], properties: { kind: { enum: ["member.deactivate", "member.select"] }, memberId: { $ref: "#/$defs/memberId" } } },
+      { required: ["kind"], properties: { kind: { const: "member.clear" } } },
+      {
+        required: ["kind", "activity"],
+        properties: {
+          kind: { const: "activity.record" },
+          activity: {
+            type: "object", additionalProperties: false, required: ["action", "subjects"],
+            properties: {
+              action: { type: "string", minLength: 1, maxLength: 128, pattern: "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$" },
+              subjects: { type: "array", maxItems: 64, items: { $ref: "#/$defs/activitySubject" } },
+              workstream: { $ref: "#/$defs/entityRef", type: "object", properties: { kind: { const: "workstream" } } },
+            },
+          },
+        },
+      },
+      { required: ["kind", "workstream"], properties: { kind: { const: "workstream.create" }, workstream: { $ref: "#/$defs/workstreamCreate" } } },
+      { required: ["kind", "workstreamId", "patch"], properties: { kind: { const: "workstream.update" }, workstreamId: { $ref: "#/$defs/workstreamId" }, patch: { $ref: "#/$defs/workstreamPatch" } } },
+      { required: ["kind", "workstreamId"], properties: { kind: { const: "workstream.archive" }, workstreamId: { $ref: "#/$defs/workstreamId" } } },
+    ] },
+    expectedRevisions: { $ref: "#/$defs/expectations" },
+  },
+  allOf: [
+    {
+      if: { properties: { action: { type: "object", properties: { kind: { enum: ["member.update", "member.deactivate", "member.select", "member.clear"] } } } } },
+      then: { properties: { expectedRevisions: { type: "array", minItems: 1 } } },
+    },
+    {
+      if: { properties: { action: { type: "object", properties: { kind: { enum: ["workstream.update", "workstream.archive"] } } } } },
+      then: { properties: { expectedRevisions: { type: "array", contains: { $ref: "#/$defs/workstreamExpectation" } } } },
+    },
   ],
   $defs: {
-    operationId: {
-      type: "string",
-      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-      description: "Globally unique within the bounded replay window; never intentionally reuse it.",
-    },
-    revision: {
-      anyOf: [
-        { type: "string", pattern: "^[a-f0-9]{64}$" },
-        { type: "null" },
-      ],
-    },
-    memberId: {
-      type: "string",
-      pattern: "^member_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
-    },
-    workstreamId: {
-      type: "string",
-      pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
-    },
-    canonicalText: {
-      type: "string",
-      minLength: 1,
-      pattern: "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f]+$",
-      description: "Must already be NFC; maxLength is also enforced as a UTF-8 byte ceiling.",
-    },
+    operationId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+    exactRevision: { type: "string", pattern: "^[a-f0-9]{64}$" },
+    revision: { anyOf: [{ $ref: "#/$defs/exactRevision" }, { type: "null" }] },
+    memberId: { type: "string", pattern: "^member_[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+    workstreamId: { type: "string", pattern: "^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+    text: { type: "string", minLength: 1, pattern: "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f]+$" },
+    t64: { $ref: "#/$defs/text", type: "string", maxLength: 64 },
+    t200: { $ref: "#/$defs/text", type: "string", maxLength: 200 },
+    t256: { $ref: "#/$defs/text", type: "string", maxLength: 256 },
+    t512: { $ref: "#/$defs/text", type: "string", maxLength: 512 },
+    t1024: { $ref: "#/$defs/text", type: "string", maxLength: 1_024 },
+    t4096: { $ref: "#/$defs/text", type: "string", maxLength: 4_096 },
+    t8192: { $ref: "#/$defs/text", type: "string", maxLength: 8_192 },
+    canonicalRepoPath: { type: "string", minLength: 1, maxLength: 4_096 },
     gitAlias: {
-      type: "object",
-      additionalProperties: false,
-      required: ["name", "email"],
+      type: "object", additionalProperties: false, required: ["name", "email"],
       properties: {
-        name: {
-          anyOf: [
-            { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 200 }] },
-            { type: "null" },
-          ],
-        },
-        email: {
-          anyOf: [
-            {
-              allOf: [
-                { $ref: "#/$defs/canonicalText" },
-                { type: "string", maxLength: 320, pattern: "^(?=.*@)\\S+$" },
-              ],
-            },
-            { type: "null" },
-          ],
-        },
+        name: { anyOf: [{ $ref: "#/$defs/t200" }, { type: "null" }] },
+        email: { anyOf: [{ $ref: "#/$defs/text", type: "string", maxLength: 320, pattern: "^(?=.*@)\\S+$" }, { type: "null" }] },
       },
-      anyOf: [
-        { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
-        { type: "object", properties: { email: { type: "string" } }, required: ["email"] },
-      ],
-    },
-    memberArtifactExpectation: {
-      type: "object",
-      additionalProperties: false,
-      required: ["target", "revision"],
-      properties: {
-        target: {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "path"],
-          properties: {
-            kind: { const: "artifact" },
-            path: {
-              type: "string",
-              pattern: "^\\.mex/team/members/member_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$",
-            },
-          },
-        },
-        revision: { type: "string", pattern: "^[a-f0-9]{64}$" },
-      },
-    },
-    workstreamArtifactExpectation: {
-      type: "object",
-      additionalProperties: false,
-      required: ["target", "revision"],
-      properties: {
-        target: {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "path"],
-          properties: {
-            kind: { const: "artifact" },
-            path: {
-              type: "string",
-              pattern: "^\\.mex/workstreams/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$",
-            },
-          },
-        },
-        revision: { type: "string", pattern: "^[a-f0-9]{64}$" },
-      },
-    },
-    entityExpectation: {
-      type: "object",
-      additionalProperties: false,
-      required: ["target", "revision"],
-      properties: {
-        target: {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "id"],
-          properties: {
-            kind: { const: "entity" },
-            id: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 256 }] },
-          },
-        },
-        revision: { $ref: "#/$defs/revision" },
-        semanticRevision: {
-          anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }],
-        },
-      },
-      if: { type: "object", properties: { revision: { type: "string" } }, required: ["revision"] },
-      then: {
-        type: "object",
-        required: ["semanticRevision"],
-        properties: {
-          semanticRevision: {
-            anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }],
-          },
-        },
-      },
-    },
-    artifactExpectation: {
-      type: "object",
-      additionalProperties: false,
-      required: ["target", "revision"],
-      properties: {
-        target: {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "path"],
-          properties: {
-            kind: { const: "artifact" },
-            path: {
-              type: "string",
-              minLength: 1,
-              maxLength: 4_096,
-              description: "Canonical contained repository-relative path; 4,096 UTF-8 bytes maximum.",
-            },
-          },
-        },
-        revision: { $ref: "#/$defs/revision" },
-      },
-    },
-    localExpectation: {
-      type: "object",
-      additionalProperties: false,
-      required: ["target", "revision"],
-      properties: {
-        target: {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "namespace", "id"],
-          properties: {
-            kind: { const: "local" },
-            namespace: {
-              enum: ["inbox-draft", "relay-draft", "cursor", "job", "member-selection"],
-            },
-            id: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 256 }] },
-          },
-        },
-        revision: { $ref: "#/$defs/revision" },
-      },
-    },
-    expectation: {
-      oneOf: [
-        { $ref: "#/$defs/entityExpectation" },
-        { $ref: "#/$defs/artifactExpectation" },
-        { $ref: "#/$defs/localExpectation" },
-      ],
-    },
-    expectations: {
-      type: "array",
-      maxItems: 64,
-      items: { $ref: "#/$defs/expectation" },
-    },
-    nonEmptyExpectations: {
-      type: "array",
-      minItems: 1,
-      maxItems: 64,
-      items: { $ref: "#/$defs/expectation" },
+      not: { required: ["name", "email"], properties: { name: { type: "null" }, email: { type: "null" } } },
     },
     entityRef: {
-      type: "object",
-      additionalProperties: false,
-      required: ["id", "kind"],
+      type: "object", additionalProperties: false, required: ["id", "kind"],
+      properties: { id: { $ref: "#/$defs/t256" }, kind: { $ref: "#/$defs/t64" }, title: { $ref: "#/$defs/t512" } },
+    },
+    codeRef: { type: "object", unevaluatedProperties: false, oneOf: [
+      { required: ["kind", "symbolId"], properties: { kind: { const: "symbol" }, symbolId: { $ref: "#/$defs/t1024" }, fingerprint: { $ref: "#/$defs/t1024" } } },
+      { required: ["kind", "path"], properties: { kind: { const: "file" }, path: { $ref: "#/$defs/canonicalRepoPath" }, fingerprint: { $ref: "#/$defs/t1024" } } },
+    ] },
+    actorRef: { type: "object", unevaluatedProperties: false, oneOf: [
+      { required: ["kind", "memberId"], properties: { kind: { const: "member" }, memberId: { $ref: "#/$defs/memberId" }, displayName: { $ref: "#/$defs/t512" } } },
+      {
+        required: ["kind", "name", "email"],
+        properties: { kind: { const: "git" }, name: { anyOf: [{ $ref: "#/$defs/t512" }, { type: "null" }] }, email: { anyOf: [{ $ref: "#/$defs/t512", type: "string", pattern: "^(?=.*@)\\S+$" }, { type: "null" }] } },
+        not: { required: ["name", "email"], properties: { name: { type: "null" }, email: { type: "null" } } },
+      },
+      { required: ["kind"], properties: { kind: { const: "unknown" } } },
+    ] },
+    expectation: { type: "object", unevaluatedProperties: false, oneOf: [
+      {
+        required: ["target", "revision"],
+        properties: {
+          target: { type: "object", additionalProperties: false, required: ["kind", "id"], properties: { kind: { const: "entity" }, id: { $ref: "#/$defs/t256" } } },
+          revision: { $ref: "#/$defs/revision" }, semanticRevision: { anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }] },
+        },
+        if: { required: ["revision"], properties: { revision: { type: "string" } } },
+        then: { required: ["semanticRevision"], properties: { semanticRevision: {} } },
+      },
+      { required: ["target", "revision"], properties: { target: { type: "object", additionalProperties: false, required: ["kind", "path"], properties: { kind: { const: "artifact" }, path: { $ref: "#/$defs/canonicalRepoPath" } } }, revision: { $ref: "#/$defs/revision" } } },
+      { required: ["target", "revision"], properties: { target: { type: "object", additionalProperties: false, required: ["kind", "namespace", "id"], properties: { kind: { const: "local" }, namespace: { enum: ["inbox-draft", "relay-draft", "cursor", "job", "member-selection"] }, id: { $ref: "#/$defs/t256" } } }, revision: { $ref: "#/$defs/revision" } } },
+    ] },
+    expectations: { type: "array", maxItems: 64, items: { $ref: "#/$defs/expectation" } },
+    workstreamExpectation: {
+      type: "object", additionalProperties: false, required: ["target", "revision"],
+      properties: { target: { type: "object", additionalProperties: false, required: ["kind", "path"], properties: { kind: { const: "artifact" }, path: { type: "string", pattern: "^\\.mex/workstreams/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$" } } }, revision: { $ref: "#/$defs/exactRevision" } },
+    },
+    actorSet: { type: "array", maxItems: 64, uniqueItems: true, items: { $ref: "#/$defs/actorRef" } },
+    entitySet: { type: "array", maxItems: 64, uniqueItems: true, items: { $ref: "#/$defs/entityRef" } },
+    codeSet: { type: "array", maxItems: 64, uniqueItems: true, items: { $ref: "#/$defs/codeRef" } },
+    pathSet: { type: "array", maxItems: 64, uniqueItems: true, items: { $ref: "#/$defs/canonicalRepoPath" } },
+    workstreamCreate: {
+      type: "object", additionalProperties: false, required: ["title", "goal", "summary", "owners", "nextMilestone"],
       properties: {
-        id: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 256 }] },
-        kind: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 64 }] },
-        title: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512 }] },
+        title: { $ref: "#/$defs/t512" }, goal: { $ref: "#/$defs/t4096" }, summary: { $ref: "#/$defs/t4096" },
+        owners: { $ref: "#/$defs/actorSet", type: "array", minItems: 1 },
+        contributors: { $ref: "#/$defs/actorSet" }, paths: { $ref: "#/$defs/pathSet" }, code: { $ref: "#/$defs/codeSet" },
+        topics: { $ref: "#/$defs/entitySet" }, components: { $ref: "#/$defs/entitySet" }, related: { $ref: "#/$defs/entitySet" },
+        nextMilestone: { $ref: "#/$defs/t4096" },
       },
     },
-    codeRef: {
-      oneOf: [
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "symbolId"],
-          properties: {
-            kind: { const: "symbol" },
-            symbolId: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 1_024 }] },
-            fingerprint: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 1_024 }] },
-          },
-        },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "path"],
-          properties: {
-            kind: { const: "file" },
-            path: { type: "string", minLength: 1, maxLength: 4_096 },
-            fingerprint: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 1_024 }] },
-          },
-        },
-      ],
-    },
-    actorRef: {
-      oneOf: [
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "memberId"],
-          properties: {
-            kind: { const: "member" },
-            memberId: { $ref: "#/$defs/memberId" },
-            displayName: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512 }] },
-          },
-        },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "name", "email"],
-          not: {
-            required: ["name", "email"],
-            properties: { name: { type: "null" }, email: { type: "null" } },
-          },
-          properties: {
-            kind: { const: "git" },
-            name: { anyOf: [{ allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512 }] }, { type: "null" }] },
-            email: { anyOf: [{ allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512, pattern: "^(?=.*@)\\S+$" }] }, { type: "null" }] },
-          },
-        },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind"],
-          properties: { kind: { const: "unknown" } },
-        },
-      ],
-    },
-    canonicalRepoPath: {
-      type: "string",
-      minLength: 1,
-      maxLength: 4_096,
-      description: "Canonical contained repository-relative path; 4,096 UTF-8 bytes maximum.",
-    },
-    actorSet: {
-      type: "array",
-      maxItems: 64,
-      uniqueItems: true,
-      items: { $ref: "#/$defs/actorRef" },
-    },
-    entitySet: {
-      type: "array",
-      maxItems: 64,
-      uniqueItems: true,
-      items: { $ref: "#/$defs/entityRef" },
-    },
-    codeSet: {
-      type: "array",
-      maxItems: 64,
-      uniqueItems: true,
-      items: { $ref: "#/$defs/codeRef" },
-    },
-    pathSet: {
-      type: "array",
-      maxItems: 64,
-      uniqueItems: true,
-      items: { $ref: "#/$defs/canonicalRepoPath" },
-    },
-    workstreamCreateInput: {
-      type: "object",
-      additionalProperties: false,
-      required: ["title", "goal", "summary", "owners", "nextMilestone"],
+    workstreamPatch: {
+      type: "object", additionalProperties: false, minProperties: 1,
       properties: {
-        title: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512 }] },
-        goal: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
-        summary: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
-        owners: { allOf: [{ $ref: "#/$defs/actorSet" }, { type: "array", minItems: 1 }] },
-        contributors: { $ref: "#/$defs/actorSet" },
-        paths: { $ref: "#/$defs/pathSet" },
-        code: { $ref: "#/$defs/codeSet" },
-        topics: { $ref: "#/$defs/entitySet" },
-        components: { $ref: "#/$defs/entitySet" },
-        related: { $ref: "#/$defs/entitySet" },
-        nextMilestone: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
+        title: { $ref: "#/$defs/t512" }, goal: { $ref: "#/$defs/t4096" }, summary: { $ref: "#/$defs/t4096" },
+        state: { enum: ["planned", "active", "blocked", "done"] }, owners: { $ref: "#/$defs/actorSet", type: "array", minItems: 1 },
+        contributors: { $ref: "#/$defs/actorSet" }, paths: { $ref: "#/$defs/pathSet" }, code: { $ref: "#/$defs/codeSet" }, topics: { $ref: "#/$defs/entitySet" }, components: { $ref: "#/$defs/entitySet" }, related: { $ref: "#/$defs/entitySet" },
+        blockers: { type: "array", maxItems: 64, uniqueItems: true, items: { $ref: "#/$defs/t4096" } }, currentState: { $ref: "#/$defs/t8192" }, nextMilestone: { $ref: "#/$defs/t4096" },
       },
     },
-    workstreamUpdatePatch: {
-      type: "object",
-      additionalProperties: false,
-      minProperties: 1,
-      properties: {
-        title: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 512 }] },
-        goal: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
-        summary: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
-        state: { enum: ["planned", "active", "blocked", "done"] },
-        owners: { allOf: [{ $ref: "#/$defs/actorSet" }, { type: "array", minItems: 1 }] },
-        contributors: { $ref: "#/$defs/actorSet" },
-        paths: { $ref: "#/$defs/pathSet" },
-        code: { $ref: "#/$defs/codeSet" },
-        topics: { $ref: "#/$defs/entitySet" },
-        components: { $ref: "#/$defs/entitySet" },
-        related: { $ref: "#/$defs/entitySet" },
-        blockers: {
-          type: "array",
-          maxItems: 64,
-          uniqueItems: true,
-          items: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
-        },
-        currentState: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 8_192 }] },
-        nextMilestone: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 4_096 }] },
+    activitySubject: { type: "object", unevaluatedProperties: false, oneOf: [
+      { required: ["kind", "entity"], properties: { kind: { const: "entity" }, entity: { $ref: "#/$defs/entityRef" } } },
+      { required: ["kind", "code"], properties: { kind: { const: "code" }, code: { $ref: "#/$defs/codeRef" } } },
+      { required: ["kind", "path"], properties: { kind: { const: "file" }, path: { $ref: "#/$defs/canonicalRepoPath" } } },
+      { required: ["kind", "hash"], properties: { kind: { const: "commit" }, hash: { type: "string", pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" } } },
+    ] },
+  },
+});
+
+const TEAM_SCHEMA_COMPACTION = Object.freeze({
+  ...schemaCompaction(COMPACT_TEAM_REQUEST_SCHEMA_SOURCE, TEAM_REQUEST_SCHEMA_ID, "t"),
+  // Only definitions referenced by another schema need a child resource ID.
+  // Team-local refs stay as shorter JSON Pointers rooted in this resource.
+  anchors: new Set(["operationId", "memberId"]),
+});
+const COMPACT_TEAM_REQUEST_SCHEMA_BASE = compactJsonSchema(
+  COMPACT_TEAM_REQUEST_SCHEMA_SOURCE,
+  TEAM_SCHEMA_COMPACTION,
+  [TEAM_SCHEMA_COMPACTION],
+);
+
+function teamCommandRequestSchema(kind: string | readonly string[]): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    $ref: "#",
+    type: "object",
+    properties: {
+      action: {
+        type: "object",
+        properties: { kind: Array.isArray(kind) ? { enum: kind } : { const: kind } },
       },
     },
-    activitySubject: {
-      oneOf: [
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "entity"],
-          properties: { kind: { const: "entity" }, entity: { $ref: "#/$defs/entityRef" } },
-        },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "code"],
-          properties: { kind: { const: "code" }, code: { $ref: "#/$defs/codeRef" } },
-        },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "path"],
-          properties: {
-            kind: { const: "file" },
-            path: { type: "string", minLength: 1, maxLength: 4_096 },
-          },
-        },
-        {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "hash"],
-          properties: {
-            kind: { const: "commit" },
-            hash: { type: "string", pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" },
-          },
-        },
-      ],
+  });
+}
+
+const TEAM_COMPATIBILITY_DEFINITIONS = Object.freeze(Object.fromEntries(
+  [...TEAM_SCHEMA_COMPACTION.definitions].map(([name, compactName]) => [
+    name,
+    {
+      $ref: TEAM_SCHEMA_COMPACTION.anchors.has(name)
+        ? compactResourceId(TEAM_SCHEMA_COMPACTION, compactName)
+        : `#/$defs/${compactName}`,
     },
-    memberAddAction: {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "member"],
-      properties: {
-        kind: { const: "member.add" },
-        member: {
-          type: "object",
-          additionalProperties: false,
-          required: ["displayName", "gitAliases"],
-          properties: {
-            displayName: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 200 }] },
-            gitAliases: {
-              type: "array",
-              maxItems: 32,
-              uniqueItems: true,
-              items: { $ref: "#/$defs/gitAlias" },
-            },
+  ]),
+));
+
+const TEAM_PUBLIC_COMPATIBILITY_DEFINITIONS = Object.freeze(Object.fromEntries(
+  [
+    "operationId", "revision", "memberId", "workstreamId", "gitAlias", "expectation",
+    "expectations", "entityRef", "codeRef", "actorRef", "canonicalRepoPath", "actorSet",
+    "entitySet", "codeSet", "pathSet", "activitySubject",
+  ].map((name) => [name, TEAM_COMPATIBILITY_DEFINITIONS[name]]),
+));
+
+function teamActionCompatibilitySchema(kind: string): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    $ref: "#/properties/action",
+    type: "object",
+    properties: { kind: { const: kind } },
+  });
+}
+
+function teamExpectationCompatibilitySchema(kind: "entity" | "artifact" | "local"): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    $ref: TEAM_COMPATIBILITY_DEFINITIONS.expectation.$ref,
+    type: "object",
+    properties: {
+      target: { type: "object", properties: { kind: { const: kind } } },
+    },
+  });
+}
+
+/**
+ * Public definitions shipped by the pre-Inbox Team v1 contract.
+ *
+ * The compact definitions they alias retain the same validation semantics;
+ * expectation variants narrow the closed aggregate union so callers compiling
+ * those pointers independently keep the original closure guarantees.
+ */
+const LEGACY_TEAM_COMPATIBILITY_DEFINITIONS = Object.freeze({
+  canonicalText: TEAM_COMPATIBILITY_DEFINITIONS.text,
+  memberArtifactExpectation: {
+    $ref: TEAM_COMPATIBILITY_DEFINITIONS.expectation.$ref,
+    type: "object",
+    properties: {
+      target: {
+        type: "object",
+        properties: {
+          kind: { const: "artifact" },
+          path: {
+            type: "string",
+            pattern: "^\\.mex/team/members/member_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$",
           },
         },
       },
+      revision: TEAM_COMPATIBILITY_DEFINITIONS.exactRevision,
     },
-    memberUpdateAction: {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "memberId", "patch"],
-      properties: {
-        kind: { const: "member.update" },
-        memberId: { $ref: "#/$defs/memberId" },
-        patch: {
-          type: "object",
-          additionalProperties: false,
-          minProperties: 1,
-          properties: {
-            displayName: { allOf: [{ $ref: "#/$defs/canonicalText" }, { type: "string", maxLength: 200 }] },
-            gitAliases: {
-              type: "array",
-              maxItems: 32,
-              uniqueItems: true,
-              items: { $ref: "#/$defs/gitAlias" },
-            },
-          },
-        },
-      },
-    },
-    memberDeactivateAction: {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "memberId"],
-      properties: {
-        kind: { const: "member.deactivate" },
-        memberId: { $ref: "#/$defs/memberId" },
-      },
-    },
-    memberSelectAction: {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "memberId"],
-      properties: {
-        kind: { const: "member.select" },
-        memberId: { $ref: "#/$defs/memberId" },
-      },
-    },
-    memberClearAction: {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind"],
-      properties: { kind: { const: "member.clear" } },
-    },
-    activityRecordAction: {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "activity"],
-      properties: {
-        kind: { const: "activity.record" },
-        activity: {
-          type: "object",
-          additionalProperties: false,
-          required: ["action", "subjects"],
-          properties: {
-            action: {
-              type: "string",
-              minLength: 1,
-              maxLength: 128,
-              pattern: "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
-            },
-            subjects: {
-              type: "array",
-              maxItems: 64,
-              items: { $ref: "#/$defs/activitySubject" },
-            },
-            workstream: {
-              allOf: [
-                { $ref: "#/$defs/entityRef" },
-                {
-                  type: "object",
-                  properties: { kind: { const: "workstream" } },
-                  required: ["kind"],
-                },
-              ],
-            },
-          },
-        },
-      },
-    },
-    workstreamCreateAction: {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "workstream"],
-      properties: {
-        kind: { const: "workstream.create" },
-        workstream: { $ref: "#/$defs/workstreamCreateInput" },
-      },
-    },
-    workstreamUpdateAction: {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "workstreamId", "patch"],
-      properties: {
-        kind: { const: "workstream.update" },
-        workstreamId: { $ref: "#/$defs/workstreamId" },
-        patch: { $ref: "#/$defs/workstreamUpdatePatch" },
-      },
-    },
-    workstreamArchiveAction: {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "workstreamId"],
-      properties: {
-        kind: { const: "workstream.archive" },
-        workstreamId: { $ref: "#/$defs/workstreamId" },
-      },
-    },
-    memberAddRequest: {
-      type: "object",
-      additionalProperties: false,
-      required: ["operationId", "action", "expectedRevisions"],
-      properties: {
-        operationId: { $ref: "#/$defs/operationId" },
-        action: { $ref: "#/$defs/memberAddAction" },
-        expectedRevisions: { $ref: "#/$defs/expectations" },
-      },
-    },
-    memberUpdateRequest: {
-      type: "object",
-      additionalProperties: false,
-      required: ["operationId", "action", "expectedRevisions"],
-      properties: {
-        operationId: { $ref: "#/$defs/operationId" },
-        action: { $ref: "#/$defs/memberUpdateAction" },
-        expectedRevisions: { $ref: "#/$defs/nonEmptyExpectations" },
-      },
-    },
-    memberDeactivateRequest: {
-      type: "object",
-      additionalProperties: false,
-      required: ["operationId", "action", "expectedRevisions"],
-      properties: {
-        operationId: { $ref: "#/$defs/operationId" },
-        action: { $ref: "#/$defs/memberDeactivateAction" },
-        expectedRevisions: { $ref: "#/$defs/nonEmptyExpectations" },
-      },
-    },
-    memberSelectRequest: {
-      oneOf: [
-        { $ref: "#/$defs/memberSelectOnlyRequest" },
-        { $ref: "#/$defs/memberClearRequest" },
-      ],
-    },
-    memberSelectOnlyRequest: {
-      type: "object",
-      additionalProperties: false,
-      required: ["operationId", "action", "expectedRevisions"],
-      properties: {
-        operationId: { $ref: "#/$defs/operationId" },
-        action: { $ref: "#/$defs/memberSelectAction" },
-        expectedRevisions: { $ref: "#/$defs/nonEmptyExpectations" },
-      },
-    },
-    memberClearRequest: {
-      type: "object",
-      additionalProperties: false,
-      required: ["operationId", "action", "expectedRevisions"],
-      properties: {
-        operationId: { $ref: "#/$defs/operationId" },
-        action: { $ref: "#/$defs/memberClearAction" },
-        expectedRevisions: { $ref: "#/$defs/nonEmptyExpectations" },
-      },
-    },
-    activityRecordRequest: {
-      type: "object",
-      additionalProperties: false,
-      required: ["operationId", "action", "expectedRevisions"],
-      properties: {
-        operationId: { $ref: "#/$defs/operationId" },
-        action: { $ref: "#/$defs/activityRecordAction" },
-        expectedRevisions: { $ref: "#/$defs/expectations" },
-      },
-    },
-    workstreamCreateRequest: {
-      type: "object",
-      additionalProperties: false,
-      required: ["operationId", "action", "expectedRevisions"],
-      properties: {
-        operationId: { $ref: "#/$defs/operationId" },
-        action: { $ref: "#/$defs/workstreamCreateAction" },
-        expectedRevisions: { $ref: "#/$defs/expectations" },
-      },
-    },
-    workstreamUpdateRequest: {
-      type: "object",
-      additionalProperties: false,
-      required: ["operationId", "action", "expectedRevisions"],
-      properties: {
-        operationId: { $ref: "#/$defs/operationId" },
-        action: { $ref: "#/$defs/workstreamUpdateAction" },
-        expectedRevisions: {
-          type: "array",
-          minItems: 1,
-          maxItems: 64,
-          contains: { $ref: "#/$defs/workstreamArtifactExpectation" },
-          items: { $ref: "#/$defs/expectation" },
-        },
-      },
-    },
-    workstreamArchiveRequest: {
-      type: "object",
-      additionalProperties: false,
-      required: ["operationId", "action", "expectedRevisions"],
-      properties: {
-        operationId: { $ref: "#/$defs/operationId" },
-        action: { $ref: "#/$defs/workstreamArchiveAction" },
-        expectedRevisions: {
-          type: "array",
-          minItems: 1,
-          maxItems: 64,
-          contains: { $ref: "#/$defs/workstreamArtifactExpectation" },
-          items: { $ref: "#/$defs/expectation" },
-        },
-      },
-    },
+  },
+  workstreamArtifactExpectation: TEAM_COMPATIBILITY_DEFINITIONS.workstreamExpectation,
+  entityExpectation: teamExpectationCompatibilitySchema("entity"),
+  artifactExpectation: teamExpectationCompatibilitySchema("artifact"),
+  localExpectation: teamExpectationCompatibilitySchema("local"),
+  nonEmptyExpectations: {
+    $ref: TEAM_COMPATIBILITY_DEFINITIONS.expectations.$ref,
+    type: "array",
+    minItems: 1,
+  },
+  workstreamCreateInput: TEAM_COMPATIBILITY_DEFINITIONS.workstreamCreate,
+  workstreamUpdatePatch: TEAM_COMPATIBILITY_DEFINITIONS.workstreamPatch,
+  memberAddAction: teamActionCompatibilitySchema("member.add"),
+  memberUpdateAction: teamActionCompatibilitySchema("member.update"),
+  memberDeactivateAction: teamActionCompatibilitySchema("member.deactivate"),
+  memberSelectAction: teamActionCompatibilitySchema("member.select"),
+  memberClearAction: teamActionCompatibilitySchema("member.clear"),
+  activityRecordAction: teamActionCompatibilitySchema("activity.record"),
+  workstreamCreateAction: teamActionCompatibilitySchema("workstream.create"),
+  workstreamUpdateAction: teamActionCompatibilitySchema("workstream.update"),
+  workstreamArchiveAction: teamActionCompatibilitySchema("workstream.archive"),
+  memberSelectOnlyRequest: teamCommandRequestSchema("member.select"),
+  memberClearRequest: teamCommandRequestSchema("member.clear"),
+});
+
+/** Retain the shipped command-specific v1 JSON Pointers after compaction. */
+const COMPACT_TEAM_REQUEST_SCHEMA = Object.freeze({
+  ...COMPACT_TEAM_REQUEST_SCHEMA_BASE,
+  $defs: {
+    ...(COMPACT_TEAM_REQUEST_SCHEMA_BASE.$defs as Readonly<Record<string, unknown>>),
+    ...TEAM_PUBLIC_COMPATIBILITY_DEFINITIONS,
+    ...LEGACY_TEAM_COMPATIBILITY_DEFINITIONS,
+    memberAddRequest: teamCommandRequestSchema("member.add"),
+    memberUpdateRequest: teamCommandRequestSchema("member.update"),
+    memberDeactivateRequest: teamCommandRequestSchema("member.deactivate"),
+    memberSelectRequest: teamCommandRequestSchema(["member.select", "member.clear"]),
+    activityRecordRequest: teamCommandRequestSchema("activity.record"),
+    workstreamCreateRequest: teamCommandRequestSchema("workstream.create"),
+    workstreamUpdateRequest: teamCommandRequestSchema("workstream.update"),
+    workstreamArchiveRequest: teamCommandRequestSchema("workstream.archive"),
   },
 });
 
@@ -870,7 +717,7 @@ const TEAM_CLI_CONTRACT: TeamCliContract = {
       codeIdentifierOrFingerprint: 1_024,
       repositoryPath: 4_096,
     },
-    schema: TEAM_REQUEST_SCHEMA,
+    schema: COMPACT_TEAM_REQUEST_SCHEMA,
     examples: [
       {
         command: "member.add",
@@ -1042,6 +889,769 @@ const TEAM_CLI_CONTRACT: TeamCliContract = {
     { code: 4, name: "conflict", meaning: "A revision, operation, or recovery conflict prevented the action." },
     { code: 5, name: "refused", meaning: "A containment, authorization, or origin safety policy refused the action." },
   ],
+};
+
+const INBOX_REQUEST_SCHEMA_SOURCE: Readonly<Record<string, unknown>> = Object.freeze({
+  $id: INBOX_REQUEST_SCHEMA_ID,
+  $comment: "maxLength counts code points; runtime also requires NFC, no controls/lone surrogates, canonical repository-relative paths, UTF-8 byte caps (id256,title512,summary2048,body16384,rationale8192,URI/note4096), WHATWG-valid credential-free HTTP(S) URIs, exact unique dependency expectation coverage, current endpoint kinds, and action/expectation target equality.",
+  $ref: "#/$defs/command",
+  $defs: {
+    mxId: { type: "string", pattern: "^mx_[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+    proposalId: { type: "string", pattern: "^proposal_[0-7][0-9A-HJKMNP-TV-Z]{25}$" },
+    localId: { type: "string", maxLength: 256, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    revision: { type: "string", pattern: "^[a-f0-9]{64}$" },
+    prose: { type: "string", pattern: "\\S" },
+    singleLine: { type: "string", minLength: 1, pattern: "^(?!\\s)(?![\\s\\S]*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$" },
+    repoPath: { type: "string", minLength: 1, maxLength: 4_096, pattern: "^[^\\u0000-\\u001f\\u007f]+$" },
+    specKind: { enum: ["spec", "requirement", "constraint", "acceptance_criterion"] },
+    specRef: {
+      type: "object",
+      additionalProperties: false,
+      required: ["id", "kind"],
+      properties: {
+        id: { $ref: "#/$defs/mxId" },
+        kind: { $ref: "#/$defs/specKind" },
+        title: { $ref: "#/$defs/prose", type: "string", maxLength: 512 },
+      },
+    },
+    relation: {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "target"],
+      properties: {
+        type: { enum: ["derived_from", "verified_by", "constrained_by", "refines"] },
+        target: { $ref: "#/$defs/specRef" },
+      },
+    },
+    entityExpectation: {
+      type: "object",
+      additionalProperties: false,
+      required: ["target", "revision", "semanticRevision"],
+      properties: {
+        target: {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind", "id"],
+          properties: { kind: { const: "entity" }, id: { $ref: "#/$defs/mxId" } },
+        },
+        revision: { $ref: "#/$defs/revision" },
+        semanticRevision: { type: "integer", minimum: 1, maximum: 9_007_199_254_740_991 },
+      },
+    },
+    evidenceEntity: {
+      type: "object", additionalProperties: false, required: ["kind", "entity"],
+      properties: {
+        kind: { const: "entity" },
+        entity: {
+          type: "object", additionalProperties: false, required: ["id", "kind"],
+          properties: {
+            id: { $ref: "#/$defs/singleLine", type: "string", maxLength: 256 },
+            kind: { $ref: "#/$defs/singleLine", type: "string", maxLength: 64 },
+            title: { $ref: "#/$defs/singleLine", type: "string", maxLength: 512 },
+          },
+        },
+      },
+    },
+    evidenceCode: {
+      type: "object", additionalProperties: false, required: ["kind", "code"],
+      properties: {
+        kind: { const: "code" },
+        code: {
+          type: "object", unevaluatedProperties: false, oneOf: [
+            {
+              required: ["kind", "symbolId"], properties: {
+                kind: { const: "symbol" },
+                symbolId: { $ref: "#/$defs/singleLine", type: "string", maxLength: 1_024 },
+                fingerprint: { $ref: "#/$defs/singleLine", type: "string", maxLength: 1_024 },
+              },
+            },
+            {
+              required: ["kind", "path"], properties: {
+                kind: { const: "file" }, path: { $ref: "#/$defs/repoPath" },
+                fingerprint: { $ref: "#/$defs/singleLine", type: "string", maxLength: 1_024 },
+              },
+            },
+          ],
+        },
+      },
+    },
+    evidenceCommit: {
+      type: "object", additionalProperties: false, required: ["kind", "hash"],
+      properties: { kind: { const: "commit" }, hash: { type: "string", pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" } },
+    },
+    evidenceFile: {
+      type: "object", additionalProperties: false, required: ["kind", "path"],
+      properties: { kind: { const: "file" }, path: { $ref: "#/$defs/repoPath" } },
+    },
+    evidence: {
+      type: "object",
+      unevaluatedProperties: false,
+      oneOf: [
+        { $ref: "#/$defs/evidenceEntity" }, { $ref: "#/$defs/evidenceCode" },
+        { $ref: "#/$defs/evidenceCommit" }, { $ref: "#/$defs/evidenceFile" },
+        {
+          required: ["kind", "uri"],
+          properties: {
+            kind: { const: "external" },
+            uri: { type: "string", maxLength: 4_096, pattern: "^https?://(?![^/?#]*@)[^\\s/?#]+(?:[/?#][^\\s]*)?$" },
+            label: { $ref: "#/$defs/singleLine", type: "string", maxLength: 512 },
+          },
+        },
+        {
+          required: ["kind", "note"],
+          properties: { kind: { const: "manual" }, note: { $ref: "#/$defs/prose", type: "string", maxLength: 4_096 } },
+        },
+      ],
+    },
+    createChange: {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "entityKind", "title", "body", "status"],
+      properties: {
+        kind: { const: "spec.create" },
+        entityKind: { $ref: "#/$defs/specKind" },
+        title: { $ref: "#/$defs/prose", type: "string", maxLength: 512 },
+        body: { $ref: "#/$defs/prose", type: "string", maxLength: 16_384 },
+        summary: { type: "string", maxLength: 2_048 },
+        status: { enum: ["in_flight", "promoted"] },
+        topics: { type: "array", maxItems: 64, uniqueItems: true, items: { $ref: "#/$defs/mxId" } },
+        relation: { $ref: "#/$defs/relation" },
+      },
+      allOf: [
+        {
+          if: { type: "object", required: ["relation"], properties: { relation: {} } },
+          then: { oneOf: [
+            { type: "object", properties: { entityKind: { $ref: "#/$defs/specKind" }, relation: { type: "object", properties: { type: { const: "constrained_by" }, target: { type: "object", properties: { kind: { const: "constraint" } } } } } } },
+            { type: "object", properties: { entityKind: { const: "requirement" }, relation: { type: "object", properties: { type: { const: "derived_from" }, target: { type: "object", properties: { kind: { const: "spec" } } } } } } },
+            { type: "object", properties: { entityKind: { const: "requirement" }, relation: { type: "object", properties: { type: { const: "refines" }, target: { type: "object", properties: { kind: { const: "requirement" } } } } } } },
+            { type: "object", properties: { entityKind: { const: "acceptance_criterion" }, relation: { type: "object", properties: { type: { const: "verified_by" }, target: { type: "object", properties: { kind: { enum: ["spec", "requirement"] } } } } } } },
+          ] },
+        },
+      ],
+    },
+    updateChange: {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "target", "patch"],
+      properties: {
+        kind: { const: "spec.update" },
+        target: { $ref: "#/$defs/specRef" },
+        patch: {
+          type: "object", additionalProperties: false, minProperties: 1,
+          properties: {
+            title: { $ref: "#/$defs/prose", type: "string", maxLength: 512 },
+            summary: { type: "string", maxLength: 2_048 },
+            body: { $ref: "#/$defs/prose", type: "string", maxLength: 16_384 },
+          },
+        },
+      },
+    },
+    draft: {
+      type: "object",
+      additionalProperties: false,
+      required: ["change", "rationale", "evidence", "targetRevisions"],
+      properties: {
+        change: { oneOf: [{ $ref: "#/$defs/createChange" }, { $ref: "#/$defs/updateChange" }] },
+        rationale: { $ref: "#/$defs/prose", type: "string", maxLength: 8_192 },
+        evidence: { type: "array", maxItems: 64, items: { $ref: "#/$defs/evidence" } },
+        targetRevisions: { type: "array", maxItems: 64, uniqueItems: true, items: { $ref: "#/$defs/entityExpectation" } },
+      },
+      oneOf: [
+        {
+          properties: {
+            change: { type: "object", required: ["kind"], properties: { kind: { const: "spec.update" } } },
+            targetRevisions: { type: "array", minItems: 1, maxItems: 1 },
+          },
+        },
+        {
+          properties: {
+            change: { type: "object", required: ["kind", "relation"], properties: { kind: { const: "spec.create" }, relation: {} } },
+            targetRevisions: { type: "array", minItems: 1 },
+          },
+        },
+        {
+          properties: {
+            change: {
+              type: "object", required: ["kind", "topics"],
+              properties: { kind: { const: "spec.create" }, relation: false, topics: { type: "array", minItems: 1 } },
+            },
+            targetRevisions: { type: "array", minItems: 1 },
+          },
+        },
+        {
+          properties: {
+            change: {
+              type: "object", required: ["kind"],
+              properties: { kind: { const: "spec.create" }, relation: false, topics: { type: "array", maxItems: 0 } },
+            },
+            targetRevisions: { type: "array", maxItems: 0 },
+          },
+        },
+      ],
+    },
+    localExpectation: {
+      type: "object", additionalProperties: false, required: ["target", "revision"],
+      properties: {
+        target: {
+          type: "object", additionalProperties: false, required: ["kind", "namespace", "id"],
+          properties: { kind: { const: "local" }, namespace: { const: "inbox-draft" }, id: { $ref: "#/$defs/localId" } },
+        },
+        revision: { $ref: "#/$defs/revision" },
+      },
+    },
+    proposalExpectation: {
+      type: "object", additionalProperties: false, required: ["target", "revision"],
+      properties: {
+        target: {
+          type: "object", additionalProperties: false, required: ["kind", "path"],
+          properties: { kind: { const: "artifact" }, path: { type: "string", pattern: "^\\.mex/inbox/proposal_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$" } },
+        },
+        revision: { $ref: "#/$defs/revision" },
+      },
+    },
+    action: {
+      type: "object",
+      unevaluatedProperties: false,
+      oneOf: [
+        { required: ["kind", "draft"], properties: { kind: { const: "inbox.draft.save" }, draftId: { $ref: "#/$defs/localId" }, draft: { $ref: "#/$defs/draft" } } },
+        { required: ["kind", "draftId"], properties: { kind: { enum: ["inbox.draft.delete", "inbox.publish"] }, draftId: { $ref: "#/$defs/localId" } } },
+        { required: ["kind", "proposalId"], properties: { kind: { const: "inbox.approve" }, proposalId: { $ref: "#/$defs/proposalId" } } },
+        { required: ["kind", "proposalId", "rationale"], properties: { kind: { enum: ["inbox.reject", "inbox.mark-stale"] }, proposalId: { $ref: "#/$defs/proposalId" }, rationale: { $ref: "#/$defs/prose", type: "string", maxLength: 8_192 } } },
+        { required: ["kind", "proposalId"], properties: { kind: { const: "inbox.withdraw" }, proposalId: { $ref: "#/$defs/proposalId" }, rationale: { $ref: "#/$defs/prose", type: "string", maxLength: 8_192 } } },
+        { required: ["kind", "proposalId", "replacement"], properties: { kind: { const: "inbox.repair" }, proposalId: { $ref: "#/$defs/proposalId" }, replacement: { $ref: "#/$defs/draft" } } },
+      ],
+    },
+    command: {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "action", "expectedRevisions"],
+      properties: {
+        operationId: { $ref: `${TEAM_REQUEST_SCHEMA_ID}#/$defs/operationId` },
+        action: { $ref: "#/$defs/action" },
+        expectedRevisions: {
+          type: "array", maxItems: 1,
+          items: { oneOf: [{ $ref: "#/$defs/localExpectation" }, { $ref: "#/$defs/proposalExpectation" }] },
+        },
+      },
+      $comment: "Runtime additionally requires the expectation target id/path to equal the action draftId/proposalId.",
+      oneOf: [
+        {
+          required: ["action", "expectedRevisions"],
+          properties: {
+            action: { type: "object", required: ["draftId"], properties: { draftId: {} } },
+            expectedRevisions: { type: "array", minItems: 1, items: { $ref: "#/$defs/localExpectation" } },
+          },
+        },
+        {
+          required: ["action", "expectedRevisions"],
+          properties: {
+            action: { type: "object", required: ["proposalId"], properties: { proposalId: {} } },
+            expectedRevisions: { type: "array", minItems: 1, items: { $ref: "#/$defs/proposalExpectation" } },
+          },
+        },
+        {
+          required: ["action", "expectedRevisions"],
+          properties: {
+            action: {
+              type: "object", required: ["draft"], properties: { draft: {} },
+              not: { required: ["draftId"], properties: { draftId: {} } },
+            },
+            expectedRevisions: { type: "array", maxItems: 0 },
+          },
+        },
+      ],
+    },
+  },
+});
+
+const INBOX_PREVIEW_SCHEMA_SOURCE: Readonly<Record<string, unknown>> = Object.freeze({
+  $id: INBOX_PREVIEW_SCHEMA_ID,
+  $comment: "maxLength counts code points; runtime additionally enforces NFC, control/lone-surrogate rejection, canonical repository paths, UTF-8 byte limits, exact calendar timestamps (including month-length/leap-year rules), wrapper/preview diagnostic equality, and the global 64 KiB/32-depth/4096-node envelope bounds.",
+  type: "object",
+  additionalProperties: false,
+  required: ["schemaVersion", "command", "mode", "ok", "data", "diagnostics", "problem"],
+  properties: {
+    schemaVersion: { const: 1 },
+    command: { enum: [
+      "inbox.draft.save", "inbox.draft.delete", "inbox.publish",
+      "inbox.proposal.approve", "inbox.proposal.reject", "inbox.proposal.withdraw",
+      "inbox.proposal.mark-stale", "inbox.proposal.repair",
+    ] },
+    mode: { const: "preview" },
+    ok: { const: true },
+    data: { $ref: "#/$defs/serviceEnvelope" },
+    diagnostics: { $ref: "#/$defs/diagnostics" },
+    problem: { type: "null" },
+  },
+  oneOf: [
+    ["inbox.draft.save", "inbox.draft.save"],
+    ["inbox.draft.delete", "inbox.draft.delete"],
+    ["inbox.publish", "inbox.publish"],
+    ["inbox.proposal.approve", "inbox.approve"],
+    ["inbox.proposal.reject", "inbox.reject"],
+    ["inbox.proposal.withdraw", "inbox.withdraw"],
+    ["inbox.proposal.mark-stale", "inbox.mark-stale"],
+    ["inbox.proposal.repair", "inbox.repair"],
+  ].map(([command, action]) => ({
+    properties: {
+      command: { const: command },
+      data: {
+        type: "object", required: ["request"], properties: {
+          request: {
+            type: "object", required: ["action"], properties: {
+              action: { type: "object", required: ["kind"], properties: { kind: { const: action } } },
+            },
+          },
+        },
+      },
+    },
+  })),
+  $defs: {
+    singleLine: { type: "string", minLength: 1, pattern: "^(?!\\s)(?![\\s\\S]*\\s$)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$" },
+    jsonValue: {
+      oneOf: [
+        { type: "string" },
+        { type: "number" },
+        { type: "boolean" },
+        { type: "null" },
+        { type: "array", items: { $ref: "#/$defs/jsonValue" } },
+        {
+          type: "object",
+          propertyNames: { type: "string" },
+          additionalProperties: { $ref: "#/$defs/jsonValue" },
+        },
+      ],
+    },
+    nullableRevision: { type: ["string", "null"], pattern: "^[a-f0-9]{64}$" },
+    repoPath: { type: "string", minLength: 1, maxLength: 4_096, pattern: "^[^\\u0000-\\u001f\\u007f]+$" },
+    timestamp: { type: "string", pattern: "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$" },
+    recovery: {
+      type: "object", additionalProperties: false, required: ["label"],
+      properties: {
+        label: { $ref: "#/$defs/singleLine", type: "string", maxLength: 4_096 },
+        command: { $ref: "#/$defs/singleLine", type: "string", maxLength: 4_096 },
+        route: { $ref: "#/$defs/singleLine", type: "string", maxLength: 4_096 },
+      },
+    },
+    location: {
+      type: "object", additionalProperties: false, required: ["path"],
+      properties: {
+        path: { $ref: "#/$defs/repoPath" }, startLine: { type: "integer", minimum: 1, maximum: 9_007_199_254_740_991 },
+        endLine: { type: "integer", minimum: 1, maximum: 9_007_199_254_740_991 }, startOffset: { type: "integer", minimum: 0, maximum: 9_007_199_254_740_991 },
+        endOffset: { type: "integer", minimum: 0, maximum: 9_007_199_254_740_991 }, headingDepth: { type: "integer", minimum: 1, maximum: 9_007_199_254_740_991 },
+      },
+    },
+    diagnosticEntity: {
+      type: "object", additionalProperties: false, required: ["id", "kind"],
+      properties: {
+        id: { $ref: "#/$defs/singleLine", type: "string", maxLength: 256 },
+        kind: { $ref: "#/$defs/singleLine", type: "string", maxLength: 64 },
+        title: { $ref: "#/$defs/singleLine", type: "string", maxLength: 512 },
+      },
+    },
+    diagnostic: {
+      type: "object", additionalProperties: false, required: ["code", "severity", "message"],
+      properties: {
+        code: { $ref: "#/$defs/singleLine", type: "string", maxLength: 256 }, severity: { enum: ["error", "warning", "info"] }, message: { $ref: "#/$defs/singleLine", type: "string", maxLength: 4_096 },
+        path: { $ref: "#/$defs/repoPath" }, location: { $ref: "#/$defs/location" },
+        entity: { $ref: "#/$defs/diagnosticEntity" },
+        remediation: { type: "array", maxItems: 50, items: { $ref: "#/$defs/recovery" } },
+        detail: {
+          type: "object",
+          $comment: "Diagnostic detail keys are code-specific; every value is closed to recursive JSON and remains subject to the envelope bounds.",
+          additionalProperties: { $ref: "#/$defs/jsonValue" },
+        },
+      },
+    },
+    diagnostics: { type: "array", maxItems: 50, items: { $ref: "#/$defs/diagnostic" } },
+    fileChange: {
+      type: "object", additionalProperties: false,
+      required: ["kind", "path", "diff", "beforeRevision", "afterRevision"],
+      properties: {
+        kind: { enum: ["create", "update", "delete", "move"] },
+        path: { $ref: "#/$defs/repoPath" },
+        previousPath: { $ref: "#/$defs/repoPath" },
+        diff: { type: "string" },
+        beforeRevision: { $ref: "#/$defs/nullableRevision" },
+        afterRevision: { $ref: "#/$defs/nullableRevision" },
+      },
+      oneOf: [
+        {
+          type: "object", not: { required: ["previousPath"], properties: { previousPath: {} } },
+          properties: { kind: { const: "create" }, beforeRevision: { type: "null" } },
+        },
+        {
+          type: "object", not: { required: ["previousPath"], properties: { previousPath: {} } },
+          properties: { kind: { const: "update" } },
+        },
+        {
+          type: "object", not: { required: ["previousPath"], properties: { previousPath: {} } },
+          properties: { kind: { const: "delete" }, afterRevision: { type: "null" } },
+        },
+        {
+          type: "object", required: ["previousPath"],
+          properties: { kind: { const: "move" } },
+        },
+      ],
+    },
+    localChange: {
+      type: "object", additionalProperties: false,
+      required: ["namespace", "id", "beforeRevision", "afterRevision", "summary"],
+      properties: {
+        namespace: { const: "inbox-draft" }, id: { $ref: `${INBOX_REQUEST_SCHEMA_ID}#/$defs/localId` },
+        beforeRevision: { $ref: "#/$defs/nullableRevision" }, afterRevision: { $ref: "#/$defs/nullableRevision" },
+        summary: { $ref: "#/$defs/singleLine", type: "string", maxLength: 1_024 },
+      },
+    },
+    publicPreview: {
+      type: "object", additionalProperties: false,
+      required: ["valid", "scope", "changes", "localChanges", "diagnostics"],
+      properties: {
+        valid: { const: true }, scope: { enum: ["canonical", "local", "mixed"] },
+        changes: { type: "array", maxItems: 16, items: { $ref: "#/$defs/fileChange" } },
+        localChanges: { type: "array", maxItems: 16, items: { $ref: "#/$defs/localChange" } },
+        diagnostics: { $ref: "#/$defs/diagnostics" },
+      },
+    },
+    repoState: {
+      type: "object", additionalProperties: false, required: ["branch", "head", "dirty", "observedAt"],
+      properties: {
+        branch: { anyOf: [{ $ref: "#/$defs/singleLine", type: "string", maxLength: 1_024 }, { type: "null" }] },
+        head: { type: ["string", "null"], pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" },
+        dirty: { type: "boolean" },
+        observedAt: { $ref: "#/$defs/timestamp" },
+      },
+    },
+    actor: {
+      oneOf: [
+        {
+          type: "object", additionalProperties: false, required: ["kind"],
+          properties: { kind: { const: "unknown" } },
+        },
+        {
+          type: "object", additionalProperties: false, required: ["kind", "memberId"],
+          properties: {
+            kind: { const: "member" },
+            memberId: { $ref: `${TEAM_REQUEST_SCHEMA_ID}#/$defs/memberId` },
+            displayName: { $ref: "#/$defs/singleLine", type: "string", maxLength: 512 },
+          },
+        },
+        {
+          type: "object", additionalProperties: false, required: ["kind", "name", "email"],
+          properties: {
+            kind: { const: "git" },
+            name: { anyOf: [{ $ref: "#/$defs/singleLine", type: "string", maxLength: 512 }, { type: "null" }] },
+            email: { anyOf: [{ $ref: "#/$defs/singleLine", type: "string", maxLength: 512 }, { type: "null" }] },
+          },
+          not: {
+            required: ["name", "email"],
+            properties: { name: { type: "null" }, email: { type: "null" } },
+          },
+        },
+      ],
+    },
+    authority: {
+      type: "object", additionalProperties: false, required: ["actor", "occurredAt", "repoState"],
+      properties: {
+        actor: { $ref: "#/$defs/actor" },
+        occurredAt: { $ref: "#/$defs/timestamp" }, repoState: { $ref: "#/$defs/repoState" },
+      },
+    },
+    draftPurpose: {
+      type: "object", additionalProperties: false, required: ["purpose", "id"],
+      properties: { purpose: { const: "inbox-draft" }, id: { $ref: `${INBOX_REQUEST_SCHEMA_ID}#/$defs/localId` } },
+    },
+    proposalPurpose: {
+      type: "object", additionalProperties: false, required: ["purpose", "id"],
+      properties: { purpose: { const: "proposal" }, id: { type: "string", pattern: "^proposal_[0-7][0-9A-HJKMNP-TV-Z]{25}$" } },
+    },
+    activityPurpose: {
+      type: "object", additionalProperties: false, required: ["purpose", "id"],
+      properties: { purpose: { const: "activity" }, id: { type: "string", pattern: "^event_[0-7][0-9A-HJKMNP-TV-Z]{25}$" } },
+    },
+    specPurpose: {
+      type: "object", additionalProperties: false, required: ["purpose", "id"],
+      properties: { purpose: { const: "spec-entity" }, id: { type: "string", pattern: "^mx_[0-7][0-9A-HJKMNP-TV-Z]{25}$" } },
+    },
+    purpose: { oneOf: [
+      { $ref: "#/$defs/activityPurpose" }, { $ref: "#/$defs/draftPurpose" },
+      { $ref: "#/$defs/proposalPurpose" }, { $ref: "#/$defs/specPurpose" },
+    ] },
+    noPurposes: { type: "array", maxItems: 0 },
+    draftPurposes: { type: "array", minItems: 1, maxItems: 1, prefixItems: [{ $ref: "#/$defs/draftPurpose" }], items: false },
+    activityPurposes: { type: "array", minItems: 1, maxItems: 1, prefixItems: [{ $ref: "#/$defs/activityPurpose" }], items: false },
+    publishPurposes: {
+      type: "array", minItems: 2, maxItems: 2,
+      prefixItems: [{ $ref: "#/$defs/activityPurpose" }, { $ref: "#/$defs/proposalPurpose" }], items: false,
+    },
+    approvePurposes: { oneOf: [
+      { $ref: "#/$defs/activityPurposes" },
+      {
+        type: "array", minItems: 2, maxItems: 2,
+        prefixItems: [{ $ref: "#/$defs/activityPurpose" }, { $ref: "#/$defs/specPurpose" }], items: false,
+      },
+    ] },
+    receipt: {
+      type: "object", additionalProperties: false,
+      required: ["schemaVersion", "authority", "purposeIds", "requestRevision", "presentationRevision", "previewRevision"],
+      properties: {
+        schemaVersion: { const: 1 }, authority: { $ref: "#/$defs/authority" },
+        purposeIds: { type: "array", maxItems: 2, uniqueItems: true, items: { $ref: "#/$defs/purpose" } },
+        requestRevision: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        presentationRevision: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        previewRevision: { type: "string", pattern: "^[a-f0-9]{64}$" },
+      },
+    },
+    serviceEnvelope: {
+      type: "object", additionalProperties: false, required: ["schemaVersion", "request", "preview", "receipt"],
+      properties: {
+        schemaVersion: { const: 1 }, request: { $ref: INBOX_REQUEST_SCHEMA_ID },
+        preview: { $ref: "#/$defs/publicPreview" }, receipt: { $ref: "#/$defs/receipt" },
+      },
+      oneOf: [
+        {
+          properties: {
+            request: {
+              type: "object", required: ["action"], properties: {
+                action: {
+                  type: "object", required: ["kind"], properties: { kind: { const: "inbox.draft.save" } },
+                  not: { required: ["draftId"], properties: { draftId: {} } },
+                },
+              },
+            },
+            receipt: { type: "object", required: ["purposeIds"], properties: { purposeIds: { $ref: "#/$defs/draftPurposes" } } },
+          },
+        },
+        {
+          properties: {
+            request: {
+              type: "object", required: ["action"], properties: {
+                action: { type: "object", required: ["kind", "draftId"], properties: { kind: { const: "inbox.draft.save" }, draftId: {} } },
+              },
+            },
+            receipt: { type: "object", required: ["purposeIds"], properties: { purposeIds: { $ref: "#/$defs/noPurposes" } } },
+          },
+        },
+        {
+          properties: {
+            request: { type: "object", required: ["action"], properties: { action: { type: "object", required: ["kind"], properties: { kind: { const: "inbox.draft.delete" } } } } },
+            receipt: { type: "object", required: ["purposeIds"], properties: { purposeIds: { $ref: "#/$defs/noPurposes" } } },
+          },
+        },
+        {
+          properties: {
+            request: { type: "object", required: ["action"], properties: { action: { type: "object", required: ["kind"], properties: { kind: { const: "inbox.publish" } } } } },
+            receipt: { type: "object", required: ["purposeIds"], properties: { purposeIds: { $ref: "#/$defs/publishPurposes" } } },
+          },
+        },
+        {
+          properties: {
+            request: { type: "object", required: ["action"], properties: { action: { type: "object", required: ["kind"], properties: { kind: { const: "inbox.approve" } } } } },
+            receipt: { type: "object", required: ["purposeIds"], properties: { purposeIds: { $ref: "#/$defs/approvePurposes" } } },
+          },
+        },
+        {
+          properties: {
+            request: { type: "object", required: ["action"], properties: { action: { type: "object", required: ["kind"], properties: { kind: { enum: ["inbox.reject", "inbox.withdraw", "inbox.mark-stale", "inbox.repair"] } } } } },
+            receipt: { type: "object", required: ["purposeIds"], properties: { purposeIds: { $ref: "#/$defs/activityPurposes" } } },
+          },
+        },
+      ],
+    },
+  },
+});
+
+const INBOX_REQUEST_SCHEMA_COMPACTION = schemaCompaction(
+  INBOX_REQUEST_SCHEMA_SOURCE,
+  INBOX_REQUEST_SCHEMA_ID,
+  "i",
+);
+const INBOX_PREVIEW_SCHEMA_COMPACTION = schemaCompaction(
+  INBOX_PREVIEW_SCHEMA_SOURCE,
+  INBOX_PREVIEW_SCHEMA_ID,
+  "p",
+);
+const SCHEMA_COMPACTIONS = [
+  TEAM_SCHEMA_COMPACTION,
+  INBOX_REQUEST_SCHEMA_COMPACTION,
+  INBOX_PREVIEW_SCHEMA_COMPACTION,
+] as const;
+const INBOX_REQUEST_SCHEMA = compactJsonSchema(
+  INBOX_REQUEST_SCHEMA_SOURCE,
+  INBOX_REQUEST_SCHEMA_COMPACTION,
+  SCHEMA_COMPACTIONS,
+);
+const INBOX_PREVIEW_SCHEMA = compactJsonSchema(
+  INBOX_PREVIEW_SCHEMA_SOURCE,
+  INBOX_PREVIEW_SCHEMA_COMPACTION,
+  SCHEMA_COMPACTIONS,
+);
+
+export interface InboxContractCatalogData {
+  catalogVersion: 1;
+  contractId: typeof INBOX_CONTRACT_CATALOG_ID;
+  mediaType: "application/schema+json";
+  encoding: "utf-8";
+  catalog: Readonly<Record<string, unknown>>;
+  requestFile: {
+    contractId: typeof INBOX_REQUEST_CONTRACT_ID;
+    schemaRef: typeof INBOX_REQUEST_SCHEMA_REF;
+    schemaScope: string;
+    runtimeConstraints: readonly {
+      id: string;
+      enforcedBy: "request-parser";
+      requirement: string;
+    }[];
+    examples: readonly {
+      command: "inbox.draft.save" | "inbox.proposal.approve";
+      usage: string;
+      request: Readonly<Record<string, unknown>>;
+    }[];
+  };
+  applyFile: {
+    contractId: typeof INBOX_PREVIEW_CONTRACT_ID;
+    schemaRef: typeof INBOX_PREVIEW_SCHEMA_REF;
+    schemaScope: string;
+    runtimeConstraints: readonly {
+      id: string;
+      enforcedBy: "preview-parser" | "signed-apply-service";
+      requirement: string;
+    }[];
+    requirement: string;
+  };
+  exitCodes: TeamCliContract["exitCodes"];
+}
+
+const INBOX_REQUEST_EXAMPLES = [
+  {
+    command: "inbox.draft.save",
+    usage: "mex inbox draft save request.json --json",
+    request: {
+      operationId: "example-save",
+      action: {
+        kind: "inbox.draft.save",
+        draft: {
+          change: { kind: "spec.create", entityKind: "spec", title: "Release", body: "Scope.", status: "in_flight" },
+          rationale: "Review.",
+          evidence: [],
+          targetRevisions: [],
+        },
+      },
+      expectedRevisions: [],
+    },
+  },
+  {
+    command: "inbox.proposal.approve",
+    usage: "mex inbox proposal approve request.json --json",
+    request: {
+      operationId: "example-approve",
+      action: { kind: "inbox.approve", proposalId: EXAMPLE_PROPOSAL_ID },
+      expectedRevisions: [{
+        target: { kind: "artifact", path: `.mex/inbox/${EXAMPLE_PROPOSAL_ID}.md` },
+        revision: EXAMPLE_REVISION,
+      }],
+    },
+  },
+] as const satisfies InboxContractCatalogData["requestFile"]["examples"];
+
+const INBOX_APPLY_REQUIREMENT =
+  "Pass the exact complete successful schemaVersion 1 Team JSON preview emitted for the same command; fragments, altered envelopes, and reconstructed receipts are rejected.";
+
+const INBOX_SCHEMA_CATALOG: Readonly<Record<string, unknown>> = Object.freeze({
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  $id: "urn:mex:team.inbox:contract-catalog:v1",
+  $defs: {
+    teamIdentityActivityDependency: COMPACT_TEAM_REQUEST_SCHEMA,
+    request: INBOX_REQUEST_SCHEMA,
+    previewEnvelope: INBOX_PREVIEW_SCHEMA,
+  },
+});
+
+/** Static, repository-independent payload returned by `mex inbox contract`. */
+export function inboxContractCatalogData(): InboxContractCatalogData {
+  return {
+    catalogVersion: 1,
+    contractId: INBOX_CONTRACT_CATALOG_ID,
+    mediaType: "application/schema+json",
+    encoding: "utf-8",
+    catalog: INBOX_SCHEMA_CATALOG,
+    requestFile: {
+      contractId: INBOX_REQUEST_CONTRACT_ID,
+      schemaRef: INBOX_REQUEST_SCHEMA_REF,
+      schemaScope: "The JSON Schema closes every field shape and action-specific cardinality; the named cross-field invariants below are additionally enforced before repository access.",
+      runtimeConstraints: [
+        {
+          id: "dependency-expectation-target-equality",
+          enforcedBy: "request-parser",
+          requirement: "targetRevisions must contain exactly one current expectation for every unique topic/relation endpoint on create, or exactly the updated target on update, with no unrelated targets.",
+        },
+        {
+          id: "action-expectation-target-equality",
+          enforcedBy: "request-parser",
+          requirement: "The single local/proposal expectedRevisions target must exactly equal the draftId/proposalId selected by the action.",
+        },
+        {
+          id: "external-evidence-url-validity",
+          enforcedBy: "request-parser",
+          requirement: "External evidence URIs must parse under WHATWG URL rules as lower-case absolute http:// or https:// URLs with a host and without credentials.",
+        },
+      ],
+      examples: INBOX_REQUEST_EXAMPLES,
+    },
+    applyFile: {
+      contractId: INBOX_PREVIEW_CONTRACT_ID,
+      schemaRef: INBOX_PREVIEW_SCHEMA_REF,
+      schemaScope: "The JSON Schema closes the complete preview envelope, action-specific receipt purpose shapes, and file-change invariants; parser constraints run before repository access, while signed/replanned revision checks run in the apply service before effects.",
+      runtimeConstraints: [
+        {
+          id: "command-action-equality",
+          enforcedBy: "preview-parser",
+          requirement: "The wrapper command must select the exact request action encoded by the same command surface.",
+        },
+        {
+          id: "diagnostic-projection-equality",
+          enforcedBy: "preview-parser",
+          requirement: "Wrapper diagnostics must be byte-equivalent under stable JSON ordering to data.preview.diagnostics.",
+        },
+        {
+          id: "signed-revision-equality",
+          enforcedBy: "signed-apply-service",
+          requirement: "Request, presentation, preview, repository, and expected target revisions must match the exact emitted signed preview at apply time.",
+        },
+      ],
+      requirement: INBOX_APPLY_REQUIREMENT,
+    },
+    exitCodes: TEAM_CLI_CONTRACT.exitCodes,
+  };
+}
+
+const INBOX_CLI_CONTRACT: InboxCliContract = {
+  schemaVersion: 1,
+  resolver: {
+    descriptorId: INBOX_CONTRACT_DESCRIPTOR_ID,
+    command: INBOX_CONTRACT_COMMAND,
+    contractId: INBOX_CONTRACT_CATALOG_ID,
+    maxBytes: TEAM_INBOX_SPEC_LIMITS.maxEnvelopeBytes,
+    requirement: "The $ref roots below are unusable until this exact resolver catalog is loaded.",
+  },
+  requestFile: {
+    contractId: INBOX_REQUEST_CONTRACT_ID,
+    mediaType: "application/json",
+    encoding: "utf-8",
+    maxBytes: TEAM_INBOX_SPEC_LIMITS.maxEnvelopeBytes,
+    maxDepth: 32,
+    maxNodes: 4_096,
+    maxPortableSpecRequestBytes: TEAM_INBOX_SPEC_LIMITS.maxPortableRequestBytes,
+    schema: Object.freeze({ $ref: INBOX_REQUEST_SCHEMA_REF }),
+  },
+  applyFile: {
+    contractId: INBOX_PREVIEW_CONTRACT_ID,
+    mediaType: "application/json",
+    encoding: "utf-8",
+    maxBytes: TEAM_INBOX_SPEC_LIMITS.maxEnvelopeBytes,
+    maxAgeSeconds: 1_800,
+    schema: Object.freeze({ $ref: INBOX_PREVIEW_SCHEMA_REF }),
+  },
 };
 
 const COMMANDS = {
@@ -1242,6 +1852,127 @@ const COMMANDS = {
     "json",
     previewContractRef("workstream.archive"),
   ),
+  inboxContract: inboxCommand(
+    "inbox.contract",
+    "mex inbox contract",
+    "mex inbox contract --json",
+  ),
+  inboxDraftList: inboxCommand(
+    "inbox.draft.list",
+    "mex inbox draft list",
+    "mex inbox draft list --json",
+  ),
+  inboxDraftShow: inboxCommand(
+    "inbox.draft.show",
+    "mex inbox draft show",
+    "mex inbox draft show <draft-id> --json",
+  ),
+  inboxProposalList: inboxCommand(
+    "inbox.proposal.list",
+    "mex inbox proposal list",
+    "mex inbox proposal list --json",
+  ),
+  inboxProposalShow: inboxCommand(
+    "inbox.proposal.show",
+    "mex inbox proposal show",
+    "mex inbox proposal show <proposal-id> --json",
+  ),
+  inboxDraftSavePreview: inboxCommand(
+    "inbox.draft.save.preview",
+    "mex inbox draft save",
+    "mex inbox draft save <request-file> --json",
+    INBOX_REQUEST_SCHEMA_REF,
+  ),
+  inboxDraftSaveApply: inboxCommand(
+    "inbox.draft.save.apply",
+    "mex inbox draft save",
+    "mex inbox draft save --apply <preview-envelope> --json",
+    INBOX_PREVIEW_SCHEMA_REF,
+  ),
+  inboxDraftDeletePreview: inboxCommand(
+    "inbox.draft.delete.preview",
+    "mex inbox draft delete",
+    "mex inbox draft delete <request-file> --json",
+    INBOX_REQUEST_SCHEMA_REF,
+  ),
+  inboxDraftDeleteApply: inboxCommand(
+    "inbox.draft.delete.apply",
+    "mex inbox draft delete",
+    "mex inbox draft delete --apply <preview-envelope> --json",
+    INBOX_PREVIEW_SCHEMA_REF,
+  ),
+  inboxPublishPreview: inboxCommand(
+    "inbox.publish.preview",
+    "mex inbox publish",
+    "mex inbox publish <request-file> --json",
+    INBOX_REQUEST_SCHEMA_REF,
+  ),
+  inboxPublishApply: inboxCommand(
+    "inbox.publish.apply",
+    "mex inbox publish",
+    "mex inbox publish --apply <preview-envelope> --json",
+    INBOX_PREVIEW_SCHEMA_REF,
+  ),
+  inboxProposalApprovePreview: inboxCommand(
+    "inbox.proposal.approve.preview",
+    "mex inbox proposal approve",
+    "mex inbox proposal approve <request-file> --json",
+    INBOX_REQUEST_SCHEMA_REF,
+  ),
+  inboxProposalApproveApply: inboxCommand(
+    "inbox.proposal.approve.apply",
+    "mex inbox proposal approve",
+    "mex inbox proposal approve --apply <preview-envelope> --json",
+    INBOX_PREVIEW_SCHEMA_REF,
+  ),
+  inboxProposalRejectPreview: inboxCommand(
+    "inbox.proposal.reject.preview",
+    "mex inbox proposal reject",
+    "mex inbox proposal reject <request-file> --json",
+    INBOX_REQUEST_SCHEMA_REF,
+  ),
+  inboxProposalRejectApply: inboxCommand(
+    "inbox.proposal.reject.apply",
+    "mex inbox proposal reject",
+    "mex inbox proposal reject --apply <preview-envelope> --json",
+    INBOX_PREVIEW_SCHEMA_REF,
+  ),
+  inboxProposalWithdrawPreview: inboxCommand(
+    "inbox.proposal.withdraw.preview",
+    "mex inbox proposal withdraw",
+    "mex inbox proposal withdraw <request-file> --json",
+    INBOX_REQUEST_SCHEMA_REF,
+  ),
+  inboxProposalWithdrawApply: inboxCommand(
+    "inbox.proposal.withdraw.apply",
+    "mex inbox proposal withdraw",
+    "mex inbox proposal withdraw --apply <preview-envelope> --json",
+    INBOX_PREVIEW_SCHEMA_REF,
+  ),
+  inboxProposalMarkStalePreview: inboxCommand(
+    "inbox.proposal.mark_stale.preview",
+    "mex inbox proposal mark-stale",
+    "mex inbox proposal mark-stale <request-file> --json",
+    INBOX_REQUEST_SCHEMA_REF,
+  ),
+  inboxProposalMarkStaleApply: inboxCommand(
+    "inbox.proposal.mark_stale.apply",
+    "mex inbox proposal mark-stale",
+    "mex inbox proposal mark-stale --apply <preview-envelope> --json",
+    INBOX_PREVIEW_SCHEMA_REF,
+  ),
+  inboxProposalRepairPreview: inboxCommand(
+    "inbox.proposal.repair.preview",
+    "mex inbox proposal repair",
+    "mex inbox proposal repair <request-file> --json",
+    INBOX_REQUEST_SCHEMA_REF,
+  ),
+  inboxProposalRepairApply: inboxCommand(
+    "inbox.proposal.repair.apply",
+    "mex inbox proposal repair",
+    "mex inbox proposal repair --apply <preview-envelope> --json",
+    INBOX_PREVIEW_SCHEMA_REF,
+  ),
   specList: command("spec.list", "mex spec list", "mex spec list --json", "json"),
   specShow: command("spec.show", "mex spec show", "mex spec show <spec-id> --json", "json"),
 } as const;
@@ -1310,6 +2041,8 @@ export async function inspectCapabilities(
       installedTeamCapability("project_hub", initializationState, teamUnavailableReason),
       installedTeamCapability("team_identity", initializationState, teamUnavailableReason),
       installedTeamCapability("team_workstreams", initializationState, teamUnavailableReason),
+      installedTeamCapability("team_inbox", initializationState, teamUnavailableReason),
+      installedSpecAuthoringCapability(initializationState, wikiIndexState, teamUnavailableReason),
       installedTeamCapability("activity_read", initializationState, teamUnavailableReason),
       installedTeamCapability("activity_record", initializationState, teamUnavailableReason),
       installedSpecCapability(initializationState, wikiIndexState),
@@ -1324,6 +2057,7 @@ export async function inspectCapabilities(
       teamUnavailableReason,
     ),
     teamCliContract: TEAM_CLI_CONTRACT,
+    inboxCliContract: INBOX_CLI_CONTRACT,
     nextInitializationAction: nextInitializationAction(
       initializationState,
       graphIndexState,
@@ -1373,6 +2107,7 @@ function command(
   usage: string,
   output: CapabilityCommandOutput,
   inputContract?: string,
+  contractResolver?: CapabilityCommandDescriptor["contractResolver"],
 ): CapabilityCommandDescriptor {
   return Object.freeze({
     id,
@@ -1380,7 +2115,17 @@ function command(
     usage,
     output,
     ...(inputContract === undefined ? {} : { inputContract }),
+    ...(contractResolver === undefined ? {} : { contractResolver }),
   });
+}
+
+function inboxCommand(
+  id: string,
+  path: string,
+  usage: string,
+  inputContract?: string,
+): CapabilityCommandDescriptor {
+  return command(id, path, usage, "json", inputContract, INBOX_CONTRACT_DESCRIPTOR_ID);
 }
 
 function availableCommands(
@@ -1390,7 +2135,7 @@ function availableCommands(
   graphMaintenance: MaintenanceAvailability,
   teamUnavailableReason: CapabilityUnavailableReason | null,
 ): Record<CapabilityCommandKind, CapabilityCommandDescriptor[]> {
-  const read: CapabilityCommandDescriptor[] = [COMMANDS.capabilities];
+  const read: CapabilityCommandDescriptor[] = [COMMANDS.capabilities, COMMANDS.inboxContract];
   const preview: CapabilityCommandDescriptor[] = [];
   const apply: CapabilityCommandDescriptor[] = [];
 
@@ -1405,6 +2150,10 @@ function availableCommands(
       COMMANDS.activityShow,
       COMMANDS.workstreamList,
       COMMANDS.workstreamShow,
+      COMMANDS.inboxDraftList,
+      COMMANDS.inboxDraftShow,
+      COMMANDS.inboxProposalList,
+      COMMANDS.inboxProposalShow,
     );
     preview.push(
       COMMANDS.memberAddPreview,
@@ -1415,6 +2164,10 @@ function availableCommands(
       COMMANDS.workstreamCreatePreview,
       COMMANDS.workstreamUpdatePreview,
       COMMANDS.workstreamArchivePreview,
+      COMMANDS.inboxDraftSavePreview,
+      COMMANDS.inboxDraftDeletePreview,
+      COMMANDS.inboxProposalRejectPreview,
+      COMMANDS.inboxProposalWithdrawPreview,
     );
     apply.push(
       COMMANDS.memberAddApply,
@@ -1425,6 +2178,10 @@ function availableCommands(
       COMMANDS.workstreamCreateApply,
       COMMANDS.workstreamUpdateApply,
       COMMANDS.workstreamArchiveApply,
+      COMMANDS.inboxDraftSaveApply,
+      COMMANDS.inboxDraftDeleteApply,
+      COMMANDS.inboxProposalRejectApply,
+      COMMANDS.inboxProposalWithdrawApply,
     );
   }
 
@@ -1436,6 +2193,11 @@ function availableCommands(
 
   if (graphIndexState === "fresh") {
     read.push(COMMANDS.graphScope, COMMANDS.graphGet, COMMANDS.graphQuery, COMMANDS.graphImpact);
+  }
+
+  if (teamUnavailableReason === null && (wikiIndexState === "fresh" || wikiIndexState === "stale")) {
+    preview.push(COMMANDS.inboxProposalMarkStalePreview);
+    apply.push(COMMANDS.inboxProposalMarkStaleApply);
   }
 
   if (wikiIndexState === "fresh") {
@@ -1450,6 +2212,18 @@ function availableCommands(
       COMMANDS.wikiGraph,
       COMMANDS.wikiForCode,
     );
+    if (teamUnavailableReason === null) {
+      preview.push(
+        COMMANDS.inboxPublishPreview,
+        COMMANDS.inboxProposalApprovePreview,
+        COMMANDS.inboxProposalRepairPreview,
+      );
+      apply.push(
+        COMMANDS.inboxPublishApply,
+        COMMANDS.inboxProposalApproveApply,
+        COMMANDS.inboxProposalRepairApply,
+      );
+    }
     preview.push(COMMANDS.wikiApplyPreview, COMMANDS.wikiRegeneratePreview);
     apply.push(COMMANDS.wikiApply, COMMANDS.wikiRegenerate);
   } else if (wikiIndexState === "migration_required") {
@@ -1464,7 +2238,7 @@ function installedTeamCapability(
   id: Extract<
     InstalledCapability["id"],
     "project_hub" | "team_identity" | "activity_read" | "activity_record"
-    | "team_workstreams"
+    | "team_workstreams" | "team_inbox"
   >,
   initializationState: RepositoryInitializationState,
   teamUnavailableReason: CapabilityUnavailableReason | null,
@@ -1472,6 +2246,22 @@ function installedTeamCapability(
   const reason = repositoryUnavailableReason(initializationState) ?? teamUnavailableReason;
   return {
     id,
+    installed: true,
+    availability: reason === null ? "available" : "unavailable",
+    unavailableReason: reason,
+  };
+}
+
+function installedSpecAuthoringCapability(
+  initializationState: RepositoryInitializationState,
+  wikiIndexState: CapabilityIndexState,
+  teamUnavailableReason: CapabilityUnavailableReason | null,
+): InstalledCapability {
+  const reason = repositoryUnavailableReason(initializationState)
+    ?? teamUnavailableReason
+    ?? unavailableReason("wiki", initializationState, wikiIndexState);
+  return {
+    id: "spec_authoring",
     installed: true,
     availability: reason === null ? "available" : "unavailable",
     unavailableReason: reason,

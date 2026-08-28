@@ -37,6 +37,7 @@ import {
 } from "../index/corpus-policy.js";
 import { readContainedSource } from "../index/source-read.js";
 import { WIKI_META_KEYS, WIKI_SCHEMA_VERSION, WIKI_TABLES } from "../index/schema.js";
+import { isTeamOwnedReadOnlyPath } from "../model/team-owned-paths.js";
 import { estimateTokens } from "./budget.js";
 import { healthRank, LIFECYCLE_RANK, MATCH_FIELD_RANK, type MatchField } from "./rank.js";
 
@@ -160,6 +161,13 @@ export interface ContractGrounding {
 }
 
 export interface ContractEntity extends ContractEntitySummary {
+  /** @internal Exact stored row fields used for source-bound authoring attestation. */
+  indexRow: {
+    entityKey: string;
+    metadataKind: "frontmatter" | "comment";
+    provenance: string | null;
+    metadata: string | null;
+  };
   body: string;
   relations: readonly ContractRelationRef[];
   backlinks: readonly ContractRelation[];
@@ -237,6 +245,24 @@ export interface ContractReadValidation {
   status: ContractWikiIndexStatus;
 }
 
+/**
+ * Package-private freshness proof for governed authoring. Team-owned Markdown
+ * participates in the ordinary Wiki corpus, but cannot invalidate an exact
+ * read of Wiki-owned canonical bytes merely because Team published it.
+ */
+export interface ContractAuthoringCorpusAttestation {
+  containmentSafe: boolean;
+  wikiOwnedFresh: boolean;
+  /** Stored error diagnostics must be confined to Team-owned source files. */
+  wikiOwnedDiagnosticsHealthy: boolean;
+  teamOwnedDrift: boolean;
+  wikiOwnedRevision: string;
+  /** Exact full inventory used to bind current claimant source bytes. */
+  allFiles: readonly { path: string; contentHash: string }[];
+  /** Wiki-owned subset compared to the disposable index. */
+  files: readonly { path: string; contentHash: string }[];
+}
+
 export interface ContractDiagnosticRequest {
   entityIds?: readonly string[];
   paths?: readonly string[];
@@ -281,6 +307,8 @@ export interface WikiContractReadSession {
   searchCandidates(request: ContractSearchCandidateRequest): ContractSearchCandidates;
   /** Exact added, modified, and deleted canonical paths under this read snapshot. */
   refreshPaths(): readonly string[];
+  /** @internal Exact Wiki-owned inventory under this immutable index lease. */
+  authoringCorpusAttestation(): ContractAuthoringCorpusAttestation;
   relations(request: ContractRelationRequest): ContractPage<ContractRelationHit>;
   backlinks(request: Omit<ContractRelationRequest, "direction">): ContractPage<ContractRelation>;
   neighborhood(request: ContractNeighborhoodRequest): ContractNeighborhood;
@@ -312,7 +340,9 @@ interface EntityRow {
   heading_depth: number;
   file_content_hash: string;
   entity_content_hash: string;
+  metadata_kind: "frontmatter" | "comment";
   provenance: string | null;
+  metadata: string | null;
 }
 
 interface CursorPayload {
@@ -345,7 +375,8 @@ interface ContractSidecarProbe {
 const ENTITY_COLUMNS = [
   "e.entity_key", "e.id", "e.type", "e.title", "e.summary", "e.body", "e.status", "e.revision", "e.file",
   "e.metadata_start", "e.metadata_end", "e.heading_start", "e.heading_end", "e.body_start", "e.body_end",
-  "e.start_line", "e.end_line", "e.heading_depth", "e.file_content_hash", "e.entity_content_hash", "e.provenance",
+  "e.start_line", "e.end_line", "e.heading_depth", "e.file_content_hash", "e.entity_content_hash",
+  "e.metadata_kind", "e.provenance", "e.metadata",
 ].join(", ");
 
 /** Inspect exact index/corpus state without creating or changing either. */
@@ -637,6 +668,12 @@ class ContractSession implements WikiContractReadSession {
     const summary = this.summaries([row])[0]!;
     return {
       ...summary,
+      indexRow: {
+        entityKey: row.entity_key,
+        metadataKind: row.metadata_kind,
+        provenance: row.provenance,
+        metadata: row.metadata,
+      },
       body: row.body,
       relations: this.relationRefs(row.entity_key),
       backlinks: this.fullBacklinks(id),
@@ -747,6 +784,94 @@ class ContractSession implements WikiContractReadSession {
         .filter((file) => !currentByPath.has(file.path))
         .map((file) => file.path),
     ])].sort(compareString);
+  }
+
+  authoringCorpusAttestation(): ContractAuthoringCorpusAttestation {
+    this.assertOpen();
+    const current = observeCorpus(this.options.scaffoldRoot, this.options.exclude);
+    if (!current.stable) {
+      throw new WikiContractReadError(
+        "INDEX_UNAVAILABLE",
+        "The canonical Wiki corpus is not stable enough for exact authoring attestation.",
+      );
+    }
+    const indexed = this.db.prepare(
+      `SELECT path, content_hash FROM wiki_files
+       ORDER BY path LIMIT ${WIKI_CORPUS_LIMITS.maxMarkdownFiles + 1}`,
+    ).all() as Array<{ path: string; content_hash: string }>;
+    if (
+      indexed.length > WIKI_CORPUS_LIMITS.maxMarkdownFiles
+      || indexed.some((row) => (
+        !isSafeRepoPath(row.path) || !isContentHash(row.content_hash)
+      ))
+    ) {
+      throw new WikiContractReadError(
+        "INDEX_UNAVAILABLE",
+        "The indexed Wiki file inventory is not safe for exact authoring attestation.",
+      );
+    }
+
+    const currentWikiOwned = current.files.filter(
+      (file) => !isTeamOwnedReadOnlyPath(file.path),
+    );
+    const indexedWikiOwned = indexed
+      .filter((file) => !isTeamOwnedReadOnlyPath(file.path))
+      .map((file) => ({ path: file.path, contentHash: file.content_hash }));
+    const currentTeamOwned = current.files.filter(
+      (file) => isTeamOwnedReadOnlyPath(file.path),
+    );
+    const indexedTeamOwned = indexed
+      .filter((file) => isTeamOwnedReadOnlyPath(file.path))
+      .map((file) => ({ path: file.path, contentHash: file.content_hash }));
+
+    return {
+      containmentSafe: !current.diagnostics.some(
+        (entry) => entry.code === "PATH_OUTSIDE_SCAFFOLD",
+      ),
+      wikiOwnedFresh: sameFileInventory(currentWikiOwned, indexedWikiOwned),
+      wikiOwnedDiagnosticsHealthy: !this.hasWikiOwnedErrorDiagnostic(
+        new Set(indexedTeamOwned.map((file) => file.path)),
+      ),
+      teamOwnedDrift: !sameFileInventory(currentTeamOwned, indexedTeamOwned),
+      wikiOwnedRevision: indexedCorpusRevision(currentWikiOwned),
+      allFiles: current.files,
+      files: currentWikiOwned,
+    };
+  }
+
+  /**
+   * Preserve the index's pre-drift quality classification. Whole-corpus
+   * inspection reports `stale` before stored diagnostics once Team publishes,
+   * so exact authoring must independently retain Wiki-owned error state.
+   */
+  private hasWikiOwnedErrorDiagnostic(indexedTeamOwnedPaths: ReadonlySet<string>): boolean {
+    const rows = this.db.prepare(
+      `SELECT d.file,
+              (SELECT e.file
+                 FROM wiki_entities e
+                WHERE e.id = d.entity_id AND e.shadowed = 0
+                ORDER BY e.entity_key
+                LIMIT 1) AS entity_file
+         FROM wiki_diagnostics d
+        WHERE d.severity = 'error'
+        ORDER BY d.scope, d.code, d.file, d.entity_id, d.path, d.start_offset, d.message
+        LIMIT 100001`,
+    ).iterate() as IterableIterator<{ file: string | null; entity_file: string | null }>;
+    let count = 0;
+    for (const row of rows) {
+      count += 1;
+      if (count > 100_000) {
+        throw new WikiContractReadError(
+          "INDEX_UNAVAILABLE",
+          "The indexed Wiki diagnostic inventory exceeds its safety bound.",
+        );
+      }
+      const sourcePath = row.file ?? row.entity_file;
+      if (sourcePath === null
+        || !isTeamOwnedReadOnlyPath(sourcePath)
+        || !indexedTeamOwnedPaths.has(sourcePath)) return true;
+    }
+    return false;
   }
 
   private searchCandidateSet(
@@ -1553,6 +1678,17 @@ function observeCorpus(scaffoldRoot: string, exclude: readonly string[] | undefi
   }
   files.sort((left, right) => compareString(left.path, right.path));
   return { revision: indexedCorpusRevision(files), files, diagnostics, stable };
+}
+
+function sameFileInventory(
+  left: readonly { path: string; contentHash: string }[],
+  right: readonly { path: string; contentHash: string }[],
+): boolean {
+  return left.length === right.length
+    && left.every((file, index) => (
+      file.path === right[index]?.path
+      && file.contentHash === right[index]?.contentHash
+    ));
 }
 
 function hasLegacyInventory(scaffoldRoot: string, exclude: readonly string[] | undefined): boolean {

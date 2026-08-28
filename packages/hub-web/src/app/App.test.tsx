@@ -85,7 +85,7 @@ describe("Project Hub routes", () => {
     expect(screen.getByText("Source matches", { selector: "h2" })).toBeVisible();
   });
 
-  it("links Home to canonical Workstreams and Activity while Inbox and Relays stay unavailable", async () => {
+  it("links Home to canonical Workstreams, Inbox, and Activity while Relays stay unavailable", async () => {
     renderRoute("/");
     const workstreamMetric = await screen.findByRole("link", { name: /Canonical delivery threads/ });
     expect(workstreamMetric).toHaveAttribute("href", "/workstreams");
@@ -99,9 +99,16 @@ describe("Project Hub routes", () => {
     expect(screen.getByRole("link", { name: "Activity" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Members" })).toBeVisible();
     expect(screen.getByRole("link", { name: /Open member identity for Ada Lovelace/ })).toHaveAttribute("href", "/members");
-    expect(screen.getByRole("link", { name: "Inbox Unavailable" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Inbox" })).toHaveAttribute("href", "/inbox");
     expect(screen.getByRole("link", { name: "Relays Unavailable" })).toBeVisible();
     expect(screen.queryByText("Wiki unavailable")).not.toBeInTheDocument();
+  });
+
+  it("keeps the direct Relays route structurally unavailable when Inbox is connected", async () => {
+    renderRoute("/relays");
+    expect(await screen.findByRole("heading", { level: 2, name: "Relays are unavailable." })).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("Unavailable");
+    expect(screen.queryByText("Dependency connected")).not.toBeInTheDocument();
   });
 
   it("keeps the Search input synchronized with browser history", async () => {

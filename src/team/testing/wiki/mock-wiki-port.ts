@@ -21,6 +21,9 @@ import type {
   WikiEntityNeighborhood,
   WikiEntityNeighborhoodSnapshot,
   WikiEntitySummary,
+  WikiExactAuthoringPreviewPort,
+  WikiExactEntityAttestationView,
+  WikiForcedCreatedIdPreviewPort,
   WikiGroundingResolution,
   WikiIndexState,
   WikiIndexStatus,
@@ -86,6 +89,20 @@ export type MockWikiOperation =
 export interface MockWikiOperationPlan {
   operations: readonly MockWikiOperation[];
 }
+
+/**
+ * Package-private testing payload for the receipt-bound create seam. The
+ * caller deliberately omits the new entity ID; the supplied `createdIds`
+ * value must be the only source that materializes it in the returned plan.
+ */
+export interface MockWikiForcedCreatePayload {
+  operations: readonly [{
+    type: "create-entry";
+    entity: Omit<MockWikiEntitySeed, "id">;
+  }];
+}
+
+type MockWikiOperationInput = MockWikiOperationPlan | MockWikiForcedCreatePayload;
 
 export interface MockMigrationFile {
   path: string;
@@ -173,7 +190,8 @@ export class MockWikiPort implements WikiPort<
   MockWikiOperationPlan,
   MockWikiOperationPlan,
   MockWikiMigrationPlan
-> {
+>, WikiForcedCreatedIdPreviewPort<MockWikiOperationPlan, MockWikiOperationPlan>,
+WikiExactAuthoringPreviewPort<MockWikiOperationPlan, MockWikiOperationPlan> {
   private canonical: State;
   private index: State;
   private indexState: WikiIndexState;
@@ -219,6 +237,42 @@ export class MockWikiPort implements WikiPort<
     this.requireReadableIndex();
     const entity = this.index.entities.get(id);
     return entity ? toEntity(entity, this.index, this.now()) : null;
+  }
+
+  async readExactEntityAttestations(
+    entityIds: readonly EntityId[],
+  ): Promise<WikiExactEntityAttestationView> {
+    if (!Array.isArray(entityIds) || entityIds.length > 100) {
+      throw problem("INVALID_REQUEST", 400, "Exact Wiki attestation accepts at most 100 entity IDs.");
+    }
+    if (this.indexState !== "fresh") {
+      throw problem("INDEX_STALE", 409, "Exact Wiki attestation requires a fresh index.");
+    }
+    const seen = new Set<string>();
+    for (const id of entityIds) {
+      if (!isWikiMintedEntityId(id)) {
+        throw problem("INVALID_REQUEST", 400, "Exact Wiki attestation contains an invalid mx entity ID.");
+      }
+      if (seen.has(id)) {
+        throw problem("INVALID_REQUEST", 400, "Exact Wiki attestation contains a duplicate entity ID.");
+      }
+      seen.add(id);
+    }
+    const indexedRevision = digestState(this.index);
+    return {
+      indexedRevision,
+      observedAt: this.indexedAt ?? this.now(),
+      entities: entityIds.map((id) => {
+        const entity = this.index.entities.get(id);
+        return {
+          id,
+          entity: entity === undefined ? null : {
+            ref: { id: entity.id, kind: entity.kind, title: entity.title },
+            version: versionForEntity(entity, this.index),
+          },
+        };
+      }),
+    };
   }
 
   async getEntityNeighborhood(
@@ -446,6 +500,39 @@ export class MockWikiPort implements WikiPort<
     return this.planOperation(request);
   }
 
+  async previewAuthoringOperations(
+    request: WikiOperationRequest<MockWikiOperationPlan>,
+  ): Promise<WikiOperationPreview<MockWikiOperationPlan>> {
+    const operations = request.operation.payload?.operations;
+    if (!Array.isArray(operations)
+      || operations.length !== 1
+      || operations[0]?.type !== "update-entry") {
+      throw problem(
+        "VALIDATION_FAILED",
+        422,
+        "Exact Wiki authoring preview accepts exactly one governed update and no generated IDs.",
+      );
+    }
+    return this.previewOperations(request);
+  }
+
+  async previewOperationsWithCreatedIds(
+    request: WikiOperationRequest<MockWikiOperationInput>,
+    createdIds: readonly EntityId[],
+  ): Promise<WikiOperationPreview<MockWikiOperationPlan>> {
+    if (!Array.isArray(createdIds)
+      || createdIds.length !== 1
+      || !isWikiMintedEntityId(createdIds[0])) {
+      throw problem("VALIDATION_FAILED", 422, "A receipt-bound Wiki create requires exactly one canonical mx entity ID.");
+    }
+    assertForcedCreateEnvelope(request);
+    const plan = materializeForcedCreatePlan(request.operation.payload, createdIds[0]);
+    assertPlanPaths(plan);
+    assertPlanPreconditions(plan, request.expectedRevisions);
+    this.assertExpectedRevisions(request.expectedRevisions);
+    return this.planOperation(request, plan);
+  }
+
   async validateCurrentRevisionExpectations(
     expectations: readonly WikiRevisionExpectation[],
   ): Promise<void> {
@@ -453,7 +540,7 @@ export class MockWikiPort implements WikiPort<
   }
 
   async applyOperations(
-    request: WikiOperationApplyRequest<MockWikiOperationPlan, MockWikiOperationPlan>,
+    request: WikiOperationApplyRequest<MockWikiOperationInput, MockWikiOperationPlan>,
   ): Promise<WikiOperationResult> {
     const requestDigest = hash(stableStringify(request));
     const previous = this.appliedOperations.get(request.operation.opId);
@@ -468,11 +555,13 @@ export class MockWikiPort implements WikiPort<
       return { ...previous.result, idempotentReplay: true };
     }
 
-    assertOperationEnvelope(request);
-    assertPlanPaths(request.operation.payload);
-    assertPlanPreconditions(request.operation.payload, request.expectedRevisions);
+    const forcedPlan = forcedCreatePlanForApply(request);
+    const proposedPlan = forcedPlan ?? request.operation.payload as MockWikiOperationPlan;
+    if (forcedPlan === null) assertOperationEnvelope(request as WikiOperationRequest<MockWikiOperationPlan>);
+    assertPlanPaths(proposedPlan);
+    assertPlanPreconditions(proposedPlan, request.expectedRevisions);
     this.assertExpectedRevisions(request.expectedRevisions);
-    const preview = this.planOperation(request);
+    const preview = this.planOperation(request, proposedPlan);
     if (stableStringify(request.plan) !== stableStringify(preview.plan)) {
       throw problem(
         "REVISION_CONFLICT",
@@ -820,9 +909,12 @@ export class MockWikiPort implements WikiPort<
   }
 
   private planOperation(
-    request: WikiOperationRequest<MockWikiOperationPlan>,
+    request: WikiOperationRequest<unknown>,
+    proposedPlan?: MockWikiOperationPlan,
   ): WikiOperationPreview<MockWikiOperationPlan> {
-    const plan = cloneOperationPlan(request.operation.payload);
+    const plan = cloneOperationPlan(
+      proposedPlan ?? request.operation.payload as MockWikiOperationPlan,
+    );
     let next: State;
     let diagnostics: readonly Diagnostic[];
     try {
@@ -958,6 +1050,89 @@ function cloneOperationPlan(plan: MockWikiOperationPlan): MockWikiOperationPlan 
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertForcedCreateEnvelope(
+  request: WikiOperationRequest<MockWikiOperationInput>,
+): asserts request is WikiOperationRequest<MockWikiForcedCreatePayload> {
+  const { operation } = request;
+  if (!operation.opId.trim()) {
+    throw problem("INVALID_REQUEST", 400, "Wiki operation ID must not be empty.");
+  }
+  if (!operation.actor.id.trim()) {
+    throw problem("INVALID_REQUEST", 400, "Wiki operation actor ID must not be empty.");
+  }
+  if (!operation.timestamp.trim() || Number.isNaN(Date.parse(operation.timestamp))) {
+    throw problem("INVALID_REQUEST", 400, "Wiki operation timestamp must be an ISO timestamp.");
+  }
+  const operations = operation.payload?.operations;
+  const primary = Array.isArray(operations) ? operations[0] : undefined;
+  if (operation.type !== "create-entry"
+    || !Array.isArray(operations)
+    || operations.length !== 1
+    || primary?.type !== "create-entry"
+    || !isRecord(primary.entity)
+    || Object.prototype.hasOwnProperty.call(primary.entity, "id")
+    || operation.entityId !== undefined
+    || operation.baseRevision !== undefined
+    || operation.baseContentHash !== undefined) {
+    throw problem(
+      "VALIDATION_FAILED",
+      422,
+      "Receipt-bound Wiki preview accepts exactly one direct create with no caller-provided entity ID.",
+    );
+  }
+}
+
+function materializeForcedCreatePlan(
+  payload: MockWikiForcedCreatePayload,
+  createdId: EntityId,
+): MockWikiOperationPlan {
+  const operation = payload.operations[0];
+  return {
+    operations: [{
+      type: "create-entry",
+      entity: cloneEntity({ ...operation.entity, id: createdId }),
+    }],
+  };
+}
+
+function forcedCreatePlanForApply(
+  request: WikiOperationApplyRequest<MockWikiOperationInput, MockWikiOperationPlan>,
+): MockWikiOperationPlan | null {
+  const operations = request.operation.payload?.operations;
+  const primary = Array.isArray(operations) ? operations[0] : undefined;
+  if (primary?.type !== "create-entry"
+    || !isRecord(primary.entity)
+    || primary.entity.id !== undefined) {
+    return null;
+  }
+  assertForcedCreateEnvelope(request);
+  const plannedOperations = request.plan?.operations;
+  const planned = Array.isArray(plannedOperations) ? plannedOperations[0] : undefined;
+  if (!Array.isArray(plannedOperations)
+    || plannedOperations.length !== 1
+    || planned?.type !== "create-entry"
+    || !isWikiMintedEntityId(planned.entity.id)) {
+    throw problem(
+      "VALIDATION_FAILED",
+      422,
+      "A receipt-bound Wiki apply requires the one concrete plan returned by preview.",
+    );
+  }
+  const { id: _createdId, ...plannedInput } = planned.entity;
+  if (stableStringify(plannedInput) !== stableStringify(primary.entity)) {
+    throw problem(
+      "REVISION_CONFLICT",
+      409,
+      "The receipt-bound Wiki create plan does not match the reviewed ID-less request.",
+    );
+  }
+  return cloneOperationPlan(request.plan);
+}
+
 function assertOperationEnvelope(
   request: WikiOperationRequest<MockWikiOperationPlan>,
 ): void {
@@ -1052,7 +1227,7 @@ function relationsForEntity(
 
 function applyMockPlanWithAudit(
   state: State,
-  request: WikiOperationRequest<MockWikiOperationPlan>,
+  request: WikiOperationRequest<unknown>,
   plan: MockWikiOperationPlan,
 ): State {
   const before = cloneState(state);
@@ -1579,6 +1754,10 @@ function affectedRefs(plan: MockWikiOperationPlan, state: State): EntityRef[] {
       const entity = state.entities.get(id);
       return entity ? [{ id, kind: entity.kind, title: entity.title }] : [];
     });
+}
+
+function isWikiMintedEntityId(value: unknown): value is EntityId {
+  return typeof value === "string" && /^mx_[0-9A-HJKMNP-TV-Z]{26}$/u.test(value);
 }
 
 function paginate<T>(

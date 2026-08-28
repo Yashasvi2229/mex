@@ -24,8 +24,9 @@ import {
   fixtureInputSizes,
   initializeReleaseFixtureGit,
   RELEASE_FIXTURE_PROFILES,
+  snapshotReleaseReadState,
 } from "./fixtures.mjs";
-import { startHub } from "./hub.mjs";
+import { assertInboxFixturePage, releaseCommonReadPaths, startHub } from "./hub.mjs";
 import { enforceWithConfirmation } from "./enforce.mjs";
 import { candidateRuntimeBudgets, evaluateRuntimeBudgets } from "./runtime-budgets.mjs";
 import {
@@ -37,6 +38,7 @@ import {
 import { assetBudgetCandidate, runtimeBudgetCandidate, summarize } from "./statistics.mjs";
 
 const budgets = JSON.parse(readFileSync(new URL("./budgets.json", import.meta.url), "utf8"));
+const budgetsSchema = JSON.parse(readFileSync(new URL("./budgets.schema.json", import.meta.url), "utf8"));
 const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 const reportSchema = JSON.parse(readFileSync(new URL("./report.schema.json", import.meta.url), "utf8"));
 
@@ -45,9 +47,9 @@ describe("release benchmark contract", () => {
     expect(budgets.schemaVersion).toBe(1);
     expect(budgets.samples).toEqual({ timing: 10, idleMemory: 5 });
     expect(RELEASE_FIXTURE_PROFILES).toEqual({
-      small: { sourceFiles: 4, wikiEntities: 4, workstreams: 1, activityEvents: 4 },
-      medium: { sourceFiles: 16, wikiEntities: 16, workstreams: 1, activityEvents: 16 },
-      large: { sourceFiles: 48, wikiEntities: 48, workstreams: 1, activityEvents: 48 },
+      small: { sourceFiles: 4, wikiEntities: 4, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 4 },
+      medium: { sourceFiles: 16, wikiEntities: 16, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 16 },
+      large: { sourceFiles: 48, wikiEntities: 48, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 48 },
     });
     expect(Object.keys(budgets.assets.routes)).toEqual(RELEASE_ROUTE_KEYS);
     expect(Object.keys(releaseWorkbenchPaths({
@@ -65,10 +67,28 @@ describe("release benchmark contract", () => {
     for (const profile of ["small", "medium", "large"]) {
       expect(Object.keys(budgets.runtime.browserHeapBytes[profile])).toEqual(RELEASE_ROUTE_KEYS);
     }
+    expect({
+      small: {
+        inboxDrafts: budgets.runtime.apiLatencyMs.small.inboxDrafts,
+        inboxProposals: budgets.runtime.apiLatencyMs.small.inboxProposals,
+      },
+      medium: {
+        inboxDrafts: budgets.runtime.apiLatencyMs.medium.inboxDrafts,
+        inboxProposals: budgets.runtime.apiLatencyMs.medium.inboxProposals,
+      },
+      large: {
+        inboxDrafts: budgets.runtime.apiLatencyMs.large.inboxDrafts,
+        inboxProposals: budgets.runtime.apiLatencyMs.large.inboxProposals,
+      },
+    }).toEqual({
+      small: { inboxDrafts: 7, inboxProposals: 6 },
+      medium: { inboxDrafts: 7, inboxProposals: 6 },
+      large: { inboxDrafts: 7, inboxProposals: 6 },
+    });
     expect(budgets.assets.routes.code).toEqual(budgets.assets.routes.search);
     expect(budgets.provisional).toBe(false);
     expect(budgets.calibration).toEqual({
-      status: "calibrated-from-pinned-runs-33005876613-33083122092-and-33117048710",
+      status: "calibrated-from-pinned-runs-33005876613-33083122092-33117048710-E33169865368",
       runtimeFormula: "ceil(measured p95 * 1.15)",
       assetFormula: "ceil(built bytes * 1.05)",
     });
@@ -87,10 +107,32 @@ describe("release benchmark contract", () => {
     expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("advisoryAssessments");
     expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("materialAssessments");
     expect(reportSchema.$defs.profile.properties.fixture.required).toContain("workstreams");
+    expect(reportSchema.$defs.profile.properties.fixture.required).not.toContain("inboxDrafts");
+    expect(reportSchema.$defs.profile.properties.fixture.required).not.toContain("inboxProposals");
     expect(reportSchema.$defs.profile.properties.fixture.properties.workstreams).toEqual({
       type: "integer",
       minimum: 1,
     });
+    expect(reportSchema.$defs.readSummaries.required).toEqual([
+      "search",
+      "code",
+      "knowledge",
+      "activity",
+    ]);
+    expect(Object.keys(releaseCommonReadPaths("symbol/release"))).toEqual([
+      "search",
+      "code",
+      "knowledge",
+      "activity",
+      "inboxDrafts",
+      "inboxProposals",
+    ]);
+    expect(budgetsSchema.$defs.readBudgets.properties).toEqual(expect.objectContaining({
+      inboxDrafts: { $ref: "#/$defs/nonNegativeNumber" },
+      inboxProposals: { $ref: "#/$defs/nonNegativeNumber" },
+    }));
+    const validateBudgets = new Ajv2020({ strict: true }).compile(budgetsSchema);
+    expect(validateBudgets(budgets), JSON.stringify(validateBudgets.errors)).toBe(true);
   });
 
   it("uses nearest-rank p95 and rejects the wrong sample count", () => {
@@ -139,8 +181,30 @@ describe("release benchmark contract", () => {
       input: { graphBytes: 1, graphFiles: 1, wikiBytes: 1, wikiFiles: 1 },
     };
     expect(validateFixture(generatedFixture), JSON.stringify(validateFixture.errors)).toBe(true);
-    const { workstreams: _workstreams, ...legacyFixture } = generatedFixture;
-    expect(validateFixture(legacyFixture)).toBe(false);
+    expect(generatedFixture).toMatchObject({ inboxDrafts: 1, inboxProposals: 1 });
+    const {
+      inboxDrafts: _inboxDrafts,
+      inboxProposals: _inboxProposals,
+      ...legacyFixture
+    } = generatedFixture;
+    expect(validateFixture(legacyFixture), JSON.stringify(validateFixture.errors)).toBe(true);
+    const validateReads = ajv.compile({
+      $defs: reportSchema.$defs,
+      ...reportSchema.$defs.readSummaries,
+    });
+    const summary = {
+      samples: Array.from({ length: 10 }, (_, index) => index + 1),
+      min: 1,
+      median: 5.5,
+      p95: 10,
+      max: 10,
+    };
+    expect(validateReads({
+      search: summary,
+      code: summary,
+      knowledge: summary,
+      activity: summary,
+    }), JSON.stringify(validateReads.errors)).toBe(true);
     const metric = "runtime.apiLatencyMs.small.code";
     const legacyReport = representativeReleaseReport({
       runtimeViolations: [],
@@ -267,6 +331,89 @@ describe("release benchmark contract", () => {
     )).toThrow(/Home workbench still includes ActivityPage/u);
   });
 
+  it("keeps the Inbox workbench out of the initial and Home static closures", () => {
+    const manifest = {
+      "_inbox-opaque.js": {
+        file: "assets/inbox.js",
+        src: "src/pages/InboxPage.tsx",
+      },
+    };
+    expect(() => assertNoForbiddenWorkbench(
+      manifest,
+      new Set(["_inbox-opaque.js"]),
+      "initial application shell",
+      ["InboxPage"],
+    )).toThrow(/initial application shell still includes InboxPage/u);
+    expect(() => assertNoForbiddenWorkbench(
+      manifest,
+      new Set(["_inbox-opaque.js"]),
+      "Home workbench",
+      ["InboxPage"],
+    )).toThrow(/Home workbench still includes InboxPage/u);
+  });
+
+  it("requires the exact one-item draft and pending proposal benchmark pages", () => {
+    const page = (item) => ({
+      items: [item],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "a".repeat(64),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    });
+    expect(() => assertInboxFixturePage(page({
+      id: "inbox_fixed",
+      title: "Local fixture",
+    }), {
+      kind: "draft",
+      id: "inbox_fixed",
+      title: "Local fixture",
+    })).not.toThrow();
+    expect(() => assertInboxFixturePage(page({
+      ref: { id: "proposal_fixed" },
+      title: "Pending fixture",
+      state: "pending",
+    }), {
+      kind: "proposal",
+      id: "proposal_fixed",
+      title: "Pending fixture",
+    })).not.toThrow();
+    expect(() => assertInboxFixturePage(page({
+      ref: { id: "proposal_fixed" },
+      title: "Pending fixture",
+      state: "approved",
+    }), {
+      kind: "proposal",
+      id: "proposal_fixed",
+      title: "Pending fixture",
+    })).toThrow(/not pending/u);
+    expect(() => assertInboxFixturePage({
+      ...page({ id: "inbox_fixed", title: "Local fixture" }),
+      diagnostics: [{ code: "FIXTURE_DEGRADED" }],
+    }, {
+      kind: "draft",
+      id: "inbox_fixed",
+      title: "Local fixture",
+    })).toThrow(/diagnostic-free one-item page/u);
+    expect(() => assertInboxFixturePage({
+      ...page({ id: "inbox_fixed", title: "Local fixture" }),
+      diagnosticsTruncated: true,
+    }, {
+      kind: "draft",
+      id: "inbox_fixed",
+      title: "Local fixture",
+    })).toThrow(/diagnostic-free one-item page/u);
+    expect(() => assertInboxFixturePage({
+      ...page({ id: "inbox_fixed", title: "Local fixture" }),
+      deterministicRevision: "not-a-revision",
+    }, {
+      kind: "draft",
+      id: "inbox_fixed",
+      title: "Local fixture",
+    })).toThrow(/diagnostic-free one-item page/u);
+  });
+
   it("keeps runtime candidates and enforcement scoped to each fixture profile", () => {
     const profiles = {
       small: runtimeProfile(100),
@@ -292,6 +439,42 @@ describe("release benchmark contract", () => {
       budget: 99,
       reason: "budget_exceeded",
     });
+  });
+
+  it("keeps missing runtime budgets schema-valid and fail-closed for pinned characterization", () => {
+    const profiles = Object.fromEntries(["small", "medium", "large"].map((profile) => [
+      profile,
+      {
+        ...runtimeProfile(100),
+        apiLatencyMs: {
+          search: { p95: 100 },
+          inboxDrafts: { p95: 2 },
+          inboxProposals: { p95: 3 },
+        },
+      },
+    ]));
+    const characterizedBudgets = candidateRuntimeBudgets(profiles);
+    for (const profile of ["small", "medium", "large"]) {
+      delete characterizedBudgets.apiLatencyMs[profile].inboxDrafts;
+      delete characterizedBudgets.apiLatencyMs[profile].inboxProposals;
+    }
+    const violations = evaluateRuntimeBudgets(profiles, characterizedBudgets);
+    expect(violations).toHaveLength(6);
+    expect(violations).toEqual(expect.arrayContaining([
+      {
+        metric: "runtime.apiLatencyMs.small.inboxDrafts",
+        measured: 2,
+        budget: null,
+        reason: "budget_missing",
+      },
+      {
+        metric: "runtime.apiLatencyMs.large.inboxProposals",
+        measured: 3,
+        budget: null,
+        reason: "budget_missing",
+      },
+    ]));
+    expect(JSON.parse(JSON.stringify(violations))).toEqual(violations);
   });
 
   it("retries only potentially material crossings and blocks supported repeats", () => {
@@ -399,7 +582,7 @@ describe("release benchmark contract", () => {
     }
 
     const exactMetrics = committedConfirmableRuntimeMetrics();
-    expect(exactMetrics).toHaveLength(96);
+    expect(exactMetrics).toHaveLength(102);
     for (const metric of exactMetrics) {
       expect(runtimeMaterialityPolicy(metric)).not.toBeNull();
       const violation = runtimeViolation(metric);
@@ -982,6 +1165,40 @@ describe("release benchmark contract", () => {
         "MEX Release Benchmark",
         "release-benchmark@example.invalid",
       ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("binds artifact locks while ignoring only SQLite reader coordination bytes", () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-release-read-snapshot-"));
+    const environmentRoot = join(root, "environment");
+    try {
+      mkdirSync(environmentRoot, { recursive: true });
+      const environment = createBenchmarkEnvironment(environmentRoot, process.env);
+      writeMinimalReleaseFixture(root);
+      writeFileSync(join(root, ".gitignore"), ".mex/graph.db*\n.mex/local/\n");
+      mkdirSync(join(root, ".mex", "local"), { recursive: true });
+      writeFileSync(join(root, ".mex", "local", "team.db"), "durable");
+      writeFileSync(join(root, ".mex", "local", "team.db-shm"), "reader-a");
+      writeFileSync(join(root, ".mex", "local", "cache-shm"), "durable-a");
+      writeFileSync(join(root, ".mex", "local", "cache.shm"), "durable-a");
+      initializeReleaseFixtureGit(root, environment);
+
+      const before = snapshotReleaseReadState(root, environment);
+      writeFileSync(join(root, ".mex", "local", "team.db-shm"), "reader-b");
+      expect(snapshotReleaseReadState(root, environment)).toEqual(before);
+
+      writeFileSync(join(root, ".mex", "local", "cache-shm"), "durable-b");
+      expect(snapshotReleaseReadState(root, environment)).not.toEqual(before);
+
+      const afterDashShm = snapshotReleaseReadState(root, environment);
+      writeFileSync(join(root, ".mex", "local", "cache.shm"), "durable-b");
+      expect(snapshotReleaseReadState(root, environment)).not.toEqual(afterDashShm);
+
+      const beforeLock = snapshotReleaseReadState(root, environment);
+      writeFileSync(join(root, ".mex", "inbox.mex-lock"), "unexpected lock");
+      expect(snapshotReleaseReadState(root, environment)).not.toEqual(beforeLock);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

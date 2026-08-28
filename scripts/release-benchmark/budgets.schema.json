@@ -118,7 +118,9 @@
         "search": { "$ref": "#/$defs/nonNegativeNumber" },
         "code": { "$ref": "#/$defs/nonNegativeNumber" },
         "knowledge": { "$ref": "#/$defs/nonNegativeNumber" },
-        "activity": { "$ref": "#/$defs/nonNegativeNumber" }
+        "activity": { "$ref": "#/$defs/nonNegativeNumber" },
+        "inboxDrafts": { "$ref": "#/$defs/nonNegativeNumber" },
+        "inboxProposals": { "$ref": "#/$defs/nonNegativeNumber" }
       }
     },
     "profiledReadBudgets": {

@@ -30,7 +30,7 @@ async function normalizeEstablishedVisualGolden(
   await page.getByRole("link", { name: "Members", exact: true }).evaluate((element) => element.remove());
   const unavailableMarker = await page.getByRole("link", { name: /Playbooks/ }).locator('[aria-label="Unavailable"]')
     .evaluate((element) => element.outerHTML);
-  for (const label of ["Workstreams", "Specs"] as const) {
+  for (const label of ["Workstreams", "Specs", "Inbox"] as const) {
     await page.getByRole("link", { name: label, exact: true }).evaluate((element, marker) => {
       element.insertAdjacentHTML("beforeend", marker);
     }, unavailableMarker);
@@ -51,12 +51,15 @@ async function normalizeEstablishedVisualGolden(
     await page.getByRole("region", { name: "Project sections" }).evaluate((element) => {
       const rows = [...element.querySelectorAll<HTMLElement>('[role="listitem"]')];
       const workstreams = rows.find((row) => row.textContent?.includes("Workstreams"));
+      const inbox = rows.find((row) => row.textContent?.includes("Inbox"));
       const relays = rows.find((row) => row.textContent?.includes("Relays"));
-      const replacement = relays?.lastElementChild?.cloneNode(true);
-      if (!workstreams?.lastElementChild || !replacement) {
-        throw new Error("The Workstream visual golden status template is unavailable.");
+      const workstreamReplacement = relays?.lastElementChild?.cloneNode(true);
+      const inboxReplacement = relays?.lastElementChild?.cloneNode(true);
+      if (!workstreams?.lastElementChild || !inbox?.lastElementChild || !workstreamReplacement || !inboxReplacement) {
+        throw new Error("The Team workbench visual golden status template is unavailable.");
       }
-      workstreams.lastElementChild.replaceWith(replacement);
+      workstreams.lastElementChild.replaceWith(workstreamReplacement);
+      inbox.lastElementChild.replaceWith(inboxReplacement);
     });
     await page.locator('a[aria-label^="Open member identity for"]').evaluate((element) => {
       const template = document.querySelector<HTMLElement>('[data-slot="badge"][data-variant="outline"]');
@@ -642,6 +645,93 @@ test.describe("populated development fixture", () => {
     }
   }
 
+  for (const width of [390, 768, 1024, 1440] as const) {
+    test(`keeps Inbox accessible and overflow-free at ${width}px`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/inbox?fixture=populated");
+
+      if (width < 1024) {
+        await expect(page.getByRole("heading", { name: "A wider workbench is required" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "Primary" })).toBeHidden();
+      } else {
+        await expect(page.getByRole("heading", { level: 1, name: "Inbox" })).toBeVisible();
+        await expect(page.locator('[data-inbox-workbench="ready"]')).toBeVisible();
+        await expect(page.locator(
+          '[data-inbox-draft-id="inbox_00000000000000000000000000000001"]',
+        )).toContainText("Release benchmark local draft Requirement");
+        await expect(page.locator(
+          '[data-inbox-proposal-id="proposal_01000000000000000000001720"]',
+        )).toContainText("Release benchmark pending Spec update");
+      }
+
+      const geometry = await page.evaluate(() => ({
+        viewportWidth: window.innerWidth,
+        documentClientWidth: document.documentElement.clientWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+      }));
+      expect(geometry).toEqual({
+        viewportWidth: width,
+        documentClientWidth: width,
+        documentScrollWidth: width,
+        bodyScrollWidth: width,
+      });
+      await expectAccessible(page);
+    });
+  }
+
+  test("keeps Inbox selection and review dialogs keyboard complete", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/inbox?fixture=populated");
+    await expect(page.locator('[data-inbox-workbench="ready"]')).toBeVisible();
+
+    const draft = page.locator('[data-inbox-draft-id="inbox_00000000000000000000000000000001"]');
+    const proposal = page.locator('[data-inbox-proposal-id="proposal_01000000000000000000001720"]');
+    await expect(draft).toContainText("Release benchmark local draft Requirement");
+    await expect(proposal).toContainText("Release benchmark pending Spec update");
+
+    await draft.focus();
+    await page.keyboard.press("Enter");
+    await expect(draft).toHaveAttribute("aria-current", "true");
+    await expect(draft).toHaveAttribute("data-selected", "true");
+    await expect(page.getByRole("region", { name: "Selected Inbox review detail" })
+      .getByRole("heading", { name: "Release benchmark local draft Requirement", exact: true })).toBeVisible();
+
+    const createDraft = page.getByRole("button", { name: "New local draft", exact: true });
+    await createDraft.click();
+    const editor = page.getByRole("dialog", { name: "Create local Spec draft" });
+    await expect(editor).toBeVisible();
+    await expect(editor.getByText(
+      "This draft stays private to this checkout. Previewing and saving it does not publish canonical project memory.",
+      { exact: true },
+    )).toBeVisible();
+    await expect(page.getByLabel("Change type", { exact: true })).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect.poll(() => editor.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await expectAccessible(page);
+    await page.keyboard.press("Escape");
+    await expect(editor).toBeHidden();
+    await expect(createDraft).toBeFocused();
+
+    await proposal.focus();
+    await page.keyboard.press("Enter");
+    await expect(proposal).toHaveAttribute("aria-current", "true");
+    await expect(proposal).toHaveAttribute("data-selected", "true");
+    await expect(page.getByRole("region", { name: "Selected Inbox review detail" })
+      .getByRole("heading", { name: "Release benchmark pending Spec update", exact: true })).toBeVisible();
+
+    const approve = page.getByRole("button", { name: "Review & approve", exact: true });
+    await approve.click();
+    const review = page.getByRole("dialog", { name: "Review proposal for approval" });
+    await expect(review).toBeVisible();
+    await expect(review.getByRole("button", { name: "Preview Spec approval", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(review).toBeHidden();
+    await expect(approve).toBeFocused();
+  });
+
   test("supports keyboard routing, focus restoration, every shell, and 404", async ({ page }) => {
     await page.goto("/?fixture=populated");
     await page.keyboard.press("Tab");
@@ -847,6 +937,17 @@ test.describe("built production Hub", () => {
     await expect(page.getByRole("heading", { name: "Members", exact: true })).toBeVisible();
     await expect(page.getByText("Ada Lovelace", { exact: true })).toHaveCount(0);
     await expect(page.getByText("member_01K36WVM6H7JK8M9NPQRSTVVWX", { exact: true })).toHaveCount(0);
+    const [draftsResponse, proposalsResponse] = await Promise.all([
+      page.waitForResponse((candidate) => new URL(candidate.url()).pathname === "/api/v1/inbox/drafts"),
+      page.waitForResponse((candidate) => new URL(candidate.url()).pathname === "/api/v1/inbox/proposals"),
+      page.goto(`${productionOrigin}/inbox?fixture=populated`),
+    ]);
+    expect(draftsResponse.status()).toBe(200);
+    expect(proposalsResponse.status()).toBe(200);
+    expect(await draftsResponse.json()).toMatchObject({ items: [], nextCursor: null });
+    expect(await proposalsResponse.json()).toMatchObject({ items: [], nextCursor: null });
+    await expect(page.getByRole("heading", { level: 1, name: "Inbox" })).toBeVisible();
+    await expect(page.locator('[data-inbox-workbench="ready"]')).toBeVisible();
     await page.waitForLoadState("networkidle");
     if (!projectRoot) throw new Error("The production Hub fixture root is unavailable.");
     const beforeIdle = snapshotReleaseProtectedState(projectRoot);

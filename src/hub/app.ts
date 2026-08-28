@@ -13,6 +13,19 @@ import {
   HubCapabilitiesSchema,
   HUB_LIMITS,
   HubJobSnapshotSchema,
+  InboxDraftDetailSchema,
+  InboxDraftIdSchema,
+  InboxDraftListRequestSchema,
+  InboxDraftListResponseSchema,
+  InboxOperationApplyRequestSchema,
+  InboxOperationApplyResponseSchema,
+  InboxOperationPreviewRequestSchema,
+  InboxOperationPreviewResponseSchema,
+  InboxProposalDetailSchema,
+  InboxProposalIdSchema,
+  InboxProposalListRequestSchema,
+  InboxProposalListResponseSchema,
+  InboxProposalStateSchema,
   JobCancelRequestSchema,
   JobPageRequestSchema,
   JobPageResponseSchema,
@@ -55,6 +68,16 @@ import {
   type HubCapabilities,
   type HubJobKind,
   type HubJobSnapshot,
+  type InboxDraftDetail,
+  type InboxDraftListRequest,
+  type InboxDraftListResponse,
+  type InboxOperationApplyRequest,
+  type InboxOperationApplyResponse,
+  type InboxOperationPreviewRequest,
+  type InboxOperationPreviewResponse,
+  type InboxProposalDetail,
+  type InboxProposalListRequest,
+  type InboxProposalListResponse,
   type JobPageRequest,
   type SearchRequest,
   type SearchResponse,
@@ -144,6 +167,22 @@ export interface HubReadServices {
     request: TeamWorkstreamListRequest,
   ): Promise<TeamWorkstreamListResponse> | TeamWorkstreamListResponse;
   workstream?(workstreamId: string): Promise<TeamWorkstream | null> | TeamWorkstream | null;
+  inboxDrafts?(
+    request: InboxDraftListRequest,
+  ): Promise<InboxDraftListResponse> | InboxDraftListResponse;
+  inboxDraft?(draftId: string): Promise<InboxDraftDetail | null> | InboxDraftDetail | null;
+  inboxProposals?(
+    request: InboxProposalListRequest,
+  ): Promise<InboxProposalListResponse> | InboxProposalListResponse;
+  inboxProposal?(
+    proposalId: string,
+  ): Promise<InboxProposalDetail | null> | InboxProposalDetail | null;
+  previewInboxOperation?(
+    request: InboxOperationPreviewRequest,
+  ): Promise<InboxOperationPreviewResponse> | InboxOperationPreviewResponse;
+  applyInboxOperation?(
+    request: InboxOperationApplyRequest,
+  ): Promise<InboxOperationApplyResponse> | InboxOperationApplyResponse;
   specs?(request: SpecListRequest): Promise<SpecListResponse> | SpecListResponse;
   spec?(specId: string): Promise<SpecDetailResponse> | SpecDetailResponse;
   currentActor?(): Promise<TeamCurrentActorResponse> | TeamCurrentActorResponse;
@@ -333,6 +372,66 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
     const workstream = await readWorkstream(workstreamId);
     if (workstream === null) throw notFound("The requested Workstream does not exist.");
     return resourceResponse(TeamWorkstreamSchema, workstream);
+  });
+
+  app.get("/api/v1/inbox/drafts", async (context) => {
+    const request = parseInput(
+      InboxDraftListRequestSchema,
+      readStrictQuery(context.req.raw, ["cursor", "limit"]),
+    );
+    const drafts = options.services.inboxDrafts;
+    if (drafts === undefined) throw unavailable("Inbox draft reads are not connected in this build.");
+    return resourceResponse(InboxDraftListResponseSchema, await drafts(request));
+  });
+
+  app.get("/api/v1/inbox/drafts/:id", async (context) => {
+    readStrictQuery(context.req.raw, []);
+    const draftId = parseInput(InboxDraftIdSchema, context.req.param("id"));
+    const readDraft = options.services.inboxDraft;
+    if (readDraft === undefined) throw unavailable("Inbox draft reads are not connected in this build.");
+    const draft = await readDraft(draftId);
+    if (draft === null) throw notFound("The requested Inbox draft does not exist.");
+    return resourceResponse(InboxDraftDetailSchema, draft);
+  });
+
+  app.get("/api/v1/inbox/proposals", async (context) => {
+    const request = parseInput(
+      InboxProposalListRequestSchema,
+      readInboxProposalListQuery(context.req.raw),
+    );
+    const proposals = options.services.inboxProposals;
+    if (proposals === undefined) throw unavailable("Inbox proposal reads are not connected in this build.");
+    return resourceResponse(InboxProposalListResponseSchema, await proposals(request));
+  });
+
+  app.get("/api/v1/inbox/proposals/:id", async (context) => {
+    readStrictQuery(context.req.raw, []);
+    const proposalId = parseInput(InboxProposalIdSchema, context.req.param("id"));
+    const readProposal = options.services.inboxProposal;
+    if (readProposal === undefined) throw unavailable("Inbox proposal reads are not connected in this build.");
+    const proposal = await readProposal(proposalId);
+    if (proposal === null) throw notFound("The requested Inbox proposal does not exist.");
+    return resourceResponse(InboxProposalDetailSchema, proposal);
+  });
+
+  app.post("/api/v1/inbox/operations/preview", async (context) => {
+    const request = parseInput(
+      InboxOperationPreviewRequestSchema,
+      await readBoundedJson(context.req.raw),
+    );
+    const preview = options.services.previewInboxOperation;
+    if (preview === undefined) throw unavailable("Inbox mutations are not connected in this build.");
+    return resourceResponse(InboxOperationPreviewResponseSchema, await preview(request));
+  });
+
+  app.post("/api/v1/inbox/operations/apply", async (context) => {
+    const request = parseInput(
+      InboxOperationApplyRequestSchema,
+      await readBoundedJson(context.req.raw),
+    );
+    const apply = options.services.applyInboxOperation;
+    if (apply === undefined) throw unavailable("Inbox mutations are not connected in this build.");
+    return resourceResponse(InboxOperationApplyResponseSchema, await apply(request));
   });
 
   app.get("/api/v1/specs", async (context) => {
@@ -719,6 +818,19 @@ function readSpecListQuery(request: Request): Record<string, unknown> {
       ? {}
       : { groundingHealth: query.groundingHealth.split(",") }),
     ...(query.topics === undefined ? {} : { topics: query.topics.split(",") }),
+  };
+}
+
+function readInboxProposalListQuery(request: Request): Record<string, unknown> {
+  const query = readStrictQuery(request, ["state", "cursor", "limit"]);
+  const states = query.state === undefined ? undefined : query.state.split(",");
+  if (states !== undefined) {
+    for (const state of states) parseInput(InboxProposalStateSchema, state);
+  }
+  return {
+    ...(states === undefined ? {} : { states }),
+    ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+    ...(query.limit === undefined ? {} : { limit: query.limit }),
   };
 }
 

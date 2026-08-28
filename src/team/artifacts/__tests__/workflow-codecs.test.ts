@@ -112,6 +112,81 @@ describe("workflow artifact codecs", () => {
     })).toThrow(/checkout-local artifact paths/);
   });
 
+  it("preserves governed multiline prose while rejecting noncanonical controls", () => {
+    const base = {
+      request: {
+        operation: {
+          opId: "wiki-op-multiline",
+          type: "create-entry" as const,
+          payload: { body: "First line\n\tIndented line" },
+        },
+        expectedRevisions: [],
+      },
+      rationale: "First reason\n\tSecond reason",
+      evidence: [
+        { kind: "manual" as const, note: "Observed\n\tin review" },
+        { kind: "external" as const, uri: "https://example.test/review", label: "Review notes" },
+      ],
+      targetRevisions: [],
+    };
+    expect(normalizeInboxDraftInput(base)).toEqual(base);
+    const pending = serializeInboxProposalArtifact({
+      id: PROPOSAL,
+      state: "pending",
+      author: ACTOR,
+      rationale: base.rationale,
+      evidence: base.evidence,
+      request: base.request,
+      targetRevisions: [],
+    });
+    expect(parseInboxProposalArtifact(pending, inboxProposalArtifactPath(PROPOSAL))).toMatchObject({
+      rationale: base.rationale,
+      evidence: base.evidence,
+    });
+    const rejected = serializeInboxProposalArtifact({
+      id: PROPOSAL,
+      state: "rejected",
+      author: ACTOR,
+      rationale: base.rationale,
+      evidence: base.evidence,
+      request: base.request,
+      targetRevisions: [],
+      reviewer: ACTOR,
+      reviewedAt: NOW,
+      reviewRationale: "First finding\n\tSecond finding",
+    });
+    expect(parseInboxProposalArtifact(rejected, inboxProposalArtifactPath(PROPOSAL))).toMatchObject({
+      reviewRationale: "First finding\n\tSecond finding",
+    });
+    for (const hostile of ["bad\u0001control", "e\u0301", "bad\ud800"]) {
+      expect(() => normalizeInboxDraftInput({ ...base, rationale: hostile }), JSON.stringify(hostile)).toThrow();
+      expect(() => normalizeInboxDraftInput({
+        ...base,
+        evidence: [{ kind: "manual", note: hostile }],
+      })).toThrow();
+    }
+    expect(() => normalizeInboxDraftInput({
+      ...base,
+      evidence: [{ kind: "external", uri: "https://example.test/\nunsafe", label: "Safe label" }],
+    })).toThrow();
+    expect(() => normalizeInboxDraftInput({
+      ...base,
+      evidence: [{ kind: "external", uri: "https://example.test/safe", label: "Not\nmultiline" }],
+    })).toThrow();
+    for (const hostile of ["bad\u0085label", "bad\u2028label", "bad\u2029label", "bad\ud800", "e\u0301", " padded "]) {
+      expect(() => normalizeInboxDraftInput({
+        ...base,
+        evidence: [{ kind: "external", uri: "https://example.test/safe", label: hostile }],
+      }), JSON.stringify(hostile)).toThrow();
+    }
+    for (const hostile of ["https://example.test/bad\u0085uri", "https://example.test/bad\u2028uri", "https://example.test/bad\ud800"] ) {
+      expect(() => normalizeInboxDraftInput({
+        ...base,
+        evidence: [{ kind: "external", uri: hostile, label: "Safe label" }],
+      }), JSON.stringify(hostile)).toThrow();
+    }
+  });
+
   it("rejects wrong paths, noncanonical bytes, lifecycle contradictions, and bodies", () => {
     const document = serializeWorkstreamArtifact({
       id: WORKSTREAM, entityRevision: 1, state: "blocked", title: "Blocked", goal: "Unblock", summary: "Waiting", owners: [ACTOR],

@@ -18,7 +18,9 @@ import { createBenchmarkEnvironment } from "./environment.mjs";
 import {
   copyReleaseFixture,
   createReleaseFixture,
+  prepareReleaseFixtureTools,
   RELEASE_FIXTURE_PROFILES,
+  snapshotReleaseReadState,
   sqliteFamilySize,
   toggleSourceRefreshMarker,
   toggleWikiRefreshMarker,
@@ -89,9 +91,11 @@ const report = {
 };
 
 let activeServer;
+let fixtureTools;
 try {
   if (!options.assetsOnly) {
     const benchmarkEnvironment = createBenchmarkEnvironment(workRoot);
+    fixtureTools = prepareReleaseFixtureTools({ cliPath, environment: benchmarkEnvironment });
     for (const profileName of Object.keys(RELEASE_FIXTURE_PROFILES)) {
       process.stderr.write(`Benchmarking ${profileName} release fixture...\n`);
       const baseFixture = createReleaseFixture({
@@ -99,6 +103,7 @@ try {
         profileName,
         cliPath,
         environment: benchmarkEnvironment,
+        fixtureTools,
       });
 
       const coldReadyMs = [];
@@ -137,7 +142,18 @@ try {
       );
       activeServer = await startHub({ projectRoot: workingRoot, cliPath, environment: benchmarkEnvironment });
       const auth = await authenticateHub(activeServer);
-      const commonReads = await measureCommonReads(activeServer, auth, budgets.samples.timing);
+      const beforeOrdinaryReads = snapshotReleaseReadState(workingRoot, benchmarkEnvironment);
+      const commonReads = await measureCommonReads(
+        activeServer,
+        auth,
+        budgets.samples.timing,
+        {
+          draftId: baseFixture.firstInboxDraftId,
+          draftTitle: baseFixture.inboxDraftTitle,
+          proposalId: baseFixture.firstInboxProposalId,
+          proposalTitle: baseFixture.inboxProposalTitle,
+        },
+      );
       const apiLatency = commonReads.timings;
       const browser = await measureWorkbenchHeap({
         server: activeServer,
@@ -146,7 +162,15 @@ try {
         knowledgeEntityId: baseFixture.firstWikiEntityId,
         specEntityId: baseFixture.firstSpecId,
         codeSymbolId: commonReads.codeSymbolId,
+        inboxDraftId: baseFixture.firstInboxDraftId,
+        inboxDraftTitle: baseFixture.inboxDraftTitle,
+        inboxProposalId: baseFixture.firstInboxProposalId,
+        inboxProposalTitle: baseFixture.inboxProposalTitle,
       });
+      const afterOrdinaryReads = snapshotReleaseReadState(workingRoot, benchmarkEnvironment);
+      if (JSON.stringify(afterOrdinaryReads) !== JSON.stringify(beforeOrdinaryReads)) {
+        throw new Error(`${profileName} ordinary Hub/Inbox reads mutated protected repository state.`);
+      }
       const maintenance = await measureMaintenance({
         server: activeServer,
         auth,
@@ -183,6 +207,7 @@ try {
   writeBoundedReport(reportPath, report);
 } finally {
   if (activeServer) await activeServer.close().catch(() => undefined);
+  fixtureTools?.cleanup();
   rmSync(workRoot, { recursive: true, force: true });
 }
 

@@ -82,7 +82,11 @@ export function candidateRuntimeBudgets(profiles) {
 }
 
 function compare(violations, metric, measured, budget) {
-  if (!Number.isFinite(budget) || measured > budget) {
+  if (!Number.isFinite(budget)) {
+    violations.push({ metric, measured, budget: null, reason: "budget_missing" });
+    return;
+  }
+  if (measured > budget) {
     violations.push({ metric, measured, budget, reason: "budget_exceeded" });
   }
 }

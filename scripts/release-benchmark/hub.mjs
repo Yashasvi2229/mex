@@ -9,6 +9,7 @@ const JOB_TIMEOUT_MS = 180_000;
 const PROCESS_SAMPLE_INTERVAL_MS = 10;
 const IDLE_WINDOW_MS = 2_000;
 const TERMINAL_JOB_STATES = new Set(["succeeded", "failed", "interrupted"]);
+const REVISION_PATTERN = /^[a-f0-9]{64}$/u;
 
 export async function startHub({
   projectRoot,
@@ -134,7 +135,7 @@ export async function measureIdleProcess(server) {
   };
 }
 
-export async function measureCommonReads(server, auth, samples) {
+export async function measureCommonReads(server, auth, samples, inboxFixture) {
   const warmSearch = await hubJson(
     server,
     "/api/v1/search?q=releaseBenchmarkNeedle&limit=25",
@@ -147,13 +148,24 @@ export async function measureCommonReads(server, auth, samples) {
   await hubJson(server, `/api/v1/code/symbols/${encodeURIComponent(symbol.id)}?view=overview`, auth);
   await hubJson(server, "/api/v1/wiki/entities?limit=25", auth);
   await hubJson(server, "/api/v1/activity?limit=25", auth);
+  const warmInboxDrafts = await hubJson(server, "/api/v1/inbox/drafts?limit=25", auth);
+  const warmInboxProposals = await hubJson(
+    server,
+    "/api/v1/inbox/proposals?state=pending,stale&limit=25",
+    auth,
+  );
+  assertInboxFixturePage(warmInboxDrafts, {
+    kind: "draft",
+    id: inboxFixture.draftId,
+    title: inboxFixture.draftTitle,
+  });
+  assertInboxFixturePage(warmInboxProposals, {
+    kind: "proposal",
+    id: inboxFixture.proposalId,
+    title: inboxFixture.proposalTitle,
+  });
 
-  const paths = {
-    search: "/api/v1/search?q=releaseBenchmarkNeedle&limit=25",
-    code: `/api/v1/code/symbols/${encodeURIComponent(symbol.id)}?view=overview`,
-    knowledge: "/api/v1/wiki/entities?limit=25",
-    activity: "/api/v1/activity?limit=25",
-  };
+  const paths = releaseCommonReadPaths(symbol.id);
   const timings = Object.fromEntries(Object.keys(paths).map((name) => [name, []]));
   for (let sample = 0; sample < samples; sample += 1) {
     for (const [name, path] of Object.entries(paths)) {
@@ -163,6 +175,44 @@ export async function measureCommonReads(server, auth, samples) {
     }
   }
   return { timings, codeSymbolId: symbol.id };
+}
+
+export function releaseCommonReadPaths(codeSymbolId) {
+  return {
+    search: "/api/v1/search?q=releaseBenchmarkNeedle&limit=25",
+    code: `/api/v1/code/symbols/${encodeURIComponent(codeSymbolId)}?view=overview`,
+    knowledge: "/api/v1/wiki/entities?limit=25",
+    activity: "/api/v1/activity?limit=25",
+    inboxDrafts: "/api/v1/inbox/drafts?limit=25",
+    inboxProposals: "/api/v1/inbox/proposals?state=pending,stale&limit=25",
+  };
+}
+
+export function assertInboxFixturePage(page, expected) {
+  if (
+    !page
+    || !Array.isArray(page.items)
+    || page.items.length !== 1
+    || page.nextCursor !== null
+    || page.truncated !== false
+    || page.sourceTruncated !== false
+    || !REVISION_PATTERN.test(page.deterministicRevision)
+    || !Array.isArray(page.diagnostics)
+    || page.diagnostics.length !== 0
+    || page.diagnosticsTruncated !== false
+  ) {
+    throw new Error(
+      `The benchmark Inbox ${expected.kind} list did not return its exact complete diagnostic-free one-item page.`,
+    );
+  }
+  const item = page.items[0];
+  const id = expected.kind === "proposal" ? item?.ref?.id : item?.id;
+  if (id !== expected.id || item?.title !== expected.title) {
+    throw new Error(`The benchmark Inbox ${expected.kind} list returned unexpected fixture content.`);
+  }
+  if (expected.kind === "proposal" && item?.state !== "pending") {
+    throw new Error("The benchmark Inbox proposal is not pending.");
+  }
 }
 
 export async function measureMaintenance({

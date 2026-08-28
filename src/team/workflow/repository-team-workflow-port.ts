@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { dirname } from "node:path";
 import {
   createRepositoryWikiPort,
   type RepositoryWikiOperationPayload,
@@ -16,7 +17,11 @@ import type {
   Revision,
   RevisionExpectation,
 } from "../contracts/shared.js";
-import { isRevision, MexPortError } from "../contracts/shared.js";
+import {
+  isRepoRelativePath,
+  isRevision,
+  MexPortError,
+} from "../contracts/shared.js";
 import type {
   ActivityEvent,
   InboxDraft,
@@ -43,6 +48,19 @@ import type {
   TeamIdentityActivityPreviewEnvelope,
   TeamIdentityActivityPublicPreview,
   TeamIdentityActivityPurposeId,
+  TeamInboxDraftListRequest,
+  TeamInboxProposalListRequest,
+  TeamInboxSpecApplyResult,
+  TeamInboxSpecAuthoringPort,
+  TeamInboxSpecCommand,
+  TeamInboxSpecDraftDetail,
+  TeamInboxSpecDraftSummary,
+  TeamInboxSpecPage,
+  TeamInboxSpecPreviewEnvelope,
+  TeamInboxSpecPublicPreview,
+  TeamInboxSpecProposalDetail,
+  TeamInboxSpecProposalSummary,
+  TeamInboxSpecPurposeId,
   TeamMember,
   TeamMemberListRequest,
   TeamWorkflowApplyRequest,
@@ -57,6 +75,7 @@ import type {
   TeamWorkstreamPurposeId,
 } from "../contracts/workflow.js";
 import {
+  TEAM_INBOX_SPEC_LIMITS,
   TEAM_IDENTITY_ACTIVITY_LIMITS,
   TEAM_READ_LIMITS,
 } from "../contracts/workflow.js";
@@ -68,6 +87,8 @@ import type {
   WikiOperationRequest,
   WikiOperationResult,
   WikiPort,
+  WikiExactAuthoringPreviewPort,
+  WikiForcedCreatedIdPreviewPort,
   WikiRevisionExpectation,
 } from "../contracts/wiki.js";
 import {
@@ -80,7 +101,11 @@ import {
   memberArtifactPath,
 } from "../artifacts/codecs.js";
 import { artifactError } from "../artifacts/errors.js";
-import { readContainedArtifact, tryReadContainedArtifact } from "../artifacts/filesystem.js";
+import {
+  assertContainedArtifactDirectory,
+  readContainedArtifact,
+  tryReadContainedArtifact,
+} from "../artifacts/filesystem.js";
 import { revisionOf } from "../artifacts/revision.js";
 import { generateArtifactId, isArtifactId } from "../artifacts/ulid.js";
 import {
@@ -127,6 +152,30 @@ import {
   type WikiRecoveryWorkflowEffect,
 } from "../local-state/index.js";
 import { TeamReceiptSigner } from "../local-state/receipt-signer.js";
+import {
+  assertExactSpecAttestations,
+  boundedInboxJson,
+  boundedInboxReceiptJson,
+  decodeInboxCursor,
+  encodeInboxCursor,
+  hashInboxValue,
+  inboxDraftInputFromProduct,
+  inboxSigningPayload,
+  materializeSpecWikiRequest,
+  normalizeInboxListFilter,
+  normalizeTeamInboxSpecCommand,
+  productDraftProjection,
+  productDraftSummary,
+  productInputFromInboxDraft,
+  productProposalProjection,
+  productProposalSummary,
+  specAttestationsHaveDrifted,
+  specDependencyIds,
+  storedSpecChange,
+  type ExactSpecEntityAttestation,
+  utf8Excerpt,
+} from "../inbox/spec-authoring.js";
+import { generateEntityId, isEntityId } from "../../wiki/model/ids.js";
 import { RepositoryRootGuard } from "./repository-root.js";
 
 const MAX_ISSUED_PREVIEWS = 256;
@@ -182,6 +231,8 @@ export interface RepositoryTeamWorkflowPortOptions<
     playbook?: () => string;
     playbookRun?: () => string;
     activity?: (timestampMs: number) => string;
+    /** Package-private receipt-pinned Wiki entity ID factory for E tests. */
+    spec?: () => string;
     localDraft?: (kind: "inbox" | "relay") => string;
     leaseToken?: () => string;
   };
@@ -210,7 +261,8 @@ interface PrimaryResult<TWikiPayload extends JsonValue> {
 
 type PortableWorkflowPurposeId =
   | TeamIdentityActivityPurposeId
-  | TeamWorkstreamPurposeId;
+  | TeamWorkstreamPurposeId
+  | TeamInboxSpecPurposeId;
 
 interface RecoverableWikiPort<TWikiPayload extends JsonValue, TWikiPlan>
   extends WikiPort<unknown, TWikiPayload, TWikiPlan, unknown> {
@@ -250,7 +302,7 @@ interface MemberCursor {
 export class RepositoryTeamWorkflowPort<
   TWikiPayload extends JsonValue,
   TWikiPlan = unknown,
-> implements TeamWorkflowPort<TWikiPayload> {
+> implements TeamWorkflowPort<TWikiPayload>, TeamInboxSpecAuthoringPort {
   readonly #root: RepositoryRootGuard;
   readonly #git: GitPort;
   readonly #wiki: WikiPort<unknown, TWikiPayload, TWikiPlan, unknown>;
@@ -269,6 +321,7 @@ export class RepositoryTeamWorkflowPort<
   readonly #actors: ActorResolver;
   readonly #activity: ActivityRepository;
   readonly #localDraftId: (kind: "inbox" | "relay") => string;
+  readonly #specId: () => string;
   readonly #leaseToken: () => string;
   readonly #issued = new Map<Revision, PreparedOperation<TWikiPayload, TWikiPlan>>();
   readonly #issuedByCommand = new Map<Revision, Revision>();
@@ -324,6 +377,7 @@ export class RepositoryTeamWorkflowPort<
     });
     this.#localDraftId = options.idFactories?.localDraft
       ?? ((kind) => `${kind}_${randomBytes(16).toString("hex")}`);
+    this.#specId = options.idFactories?.spec ?? (() => generateEntityId());
     this.#leaseToken = options.idFactories?.leaseToken
       ?? (() => randomBytes(32).toString("hex"));
   }
@@ -683,6 +737,332 @@ export class RepositoryTeamWorkflowPort<
     });
   }
 
+  async getInboxDraft(id: string): Promise<TeamInboxSpecDraftDetail | null> {
+    this.#root.assertCurrent();
+    const draft = await this.getLocalDraft(id);
+    if (draft === null || draft.kind !== "inbox") return null;
+    return productDraftProjection(
+      draft as unknown as InboxDraft<JsonValue>,
+    );
+  }
+
+  async listInboxDrafts(
+    request: TeamInboxDraftListRequest = {},
+  ): Promise<TeamInboxSpecPage<TeamInboxSpecDraftSummary>> {
+    this.#root.assertCurrent();
+    const filter = normalizeInboxListFilter(request, false);
+    const filterRevision = hashInboxValue({
+      changeKinds: filter.changeKinds ?? null,
+      entityKinds: filter.entityKinds ?? null,
+    });
+    const cursor = decodeInboxCursor(filter.cursor);
+    if (cursor !== null && cursor.filterRevision !== filterRevision) {
+      throw inboxPageConflict();
+    }
+    const all: TeamInboxSpecDraftDetail[] = [];
+    let innerCursor: string | undefined;
+    for (;;) {
+      const page = this.#local.listLocalDrafts<InboxDraftInput<JsonValue>>({
+        kind: "inbox",
+        limit: TEAM_INBOX_SPEC_LIMITS.maxPageSize,
+        ...(innerCursor === undefined ? {} : { cursor: innerCursor }),
+      });
+      for (const stored of page.items) {
+        const projected = productDraftProjection(
+          localDraftProjection(stored) as InboxDraft<JsonValue>,
+        );
+        if (projected !== null && inboxSummaryMatches(projected, filter)) {
+          all.push(projected);
+        }
+      }
+      if (page.nextCursor === null) break;
+      innerCursor = page.nextCursor;
+    }
+    const corpusRevision = hashInboxValue(all.map((item) => ({
+      id: item.id,
+      revision: item.revision,
+    })));
+    if (cursor !== null && cursor.corpusRevision !== corpusRevision) {
+      throw inboxPageConflict();
+    }
+    const offset = cursor === null ? 0 : parseInboxOffset(cursor.innerCursor);
+    if (offset > all.length) throw inboxPageConflict();
+    const items = all.slice(offset, offset + filter.limit);
+    const nextOffset = offset + items.length;
+    const hasMore = nextOffset < all.length;
+    return {
+      items: items.map(productDraftSummary),
+      nextCursor: hasMore
+        ? encodeInboxCursor({
+            v: 1,
+            innerCursor: String(nextOffset),
+            corpusRevision,
+            filterRevision,
+          })
+        : null,
+      truncated: hasMore,
+      sourceTruncated: false,
+      deterministicRevision: hashInboxValue({ corpusRevision, filterRevision }),
+      diagnostics: [],
+    };
+  }
+
+  async getInboxProposal(
+    id: string,
+  ): Promise<TeamInboxSpecProposalDetail | null> {
+    this.#root.assertCurrent();
+    const proposal = await this.#proposals.get(id);
+    return proposal === null
+      ? null
+      : productProposalProjection(
+          proposal as unknown as InboxProposal<JsonValue>,
+        );
+  }
+
+  async listInboxProposals(
+    request: TeamInboxProposalListRequest = {},
+  ): Promise<TeamInboxSpecPage<TeamInboxSpecProposalSummary>> {
+    this.#root.assertCurrent();
+    const filter = normalizeInboxListFilter(request, true);
+    const filterRevision = hashInboxValue({
+      changeKinds: filter.changeKinds ?? null,
+      entityKinds: filter.entityKinds ?? null,
+      states: filter.states ?? null,
+    });
+    const cursor = decodeInboxCursor(filter.cursor);
+    if (cursor !== null && cursor.filterRevision !== filterRevision) {
+      throw inboxPageConflict();
+    }
+    const all: TeamInboxSpecProposalDetail[] = [];
+    let innerCursor: string | undefined;
+    let corpusRevision: Revision | null = null;
+    for (;;) {
+      let page: WorkflowRepositoryPage<InboxProposal<TWikiPayload>>;
+      try {
+        page = await this.#proposals.list({
+          limit: TEAM_INBOX_SPEC_LIMITS.maxPageSize,
+          ...(filter.states === undefined ? {} : { states: filter.states }),
+          ...(innerCursor === undefined ? {} : { cursor: innerCursor }),
+        });
+      } catch (error) {
+        if (
+          error instanceof MexPortError
+          && error.problem.code === "VALIDATION_FAILED"
+          && error.problem.title === "Workflow artifact directory is too large"
+        ) {
+          throw artifactError(
+            "INDEX_CORRUPT",
+            "Inbox proposal source is outside its bounded contract",
+            "The Inbox proposal directory exceeds the bounded readable source.",
+            ".mex/inbox",
+          );
+        }
+        throw error;
+      }
+      if (corpusRevision === null) corpusRevision = page.deterministicRevision;
+      if (corpusRevision !== page.deterministicRevision) throw inboxPageConflict();
+      for (const proposal of page.items) {
+        const projected = productProposalProjection(
+          proposal as unknown as InboxProposal<JsonValue>,
+        );
+        if (projected !== null && inboxSummaryMatches(projected, filter)) {
+          all.push(projected);
+        }
+      }
+      if (page.nextCursor === null) break;
+      innerCursor = page.nextCursor;
+    }
+    corpusRevision ??= hashInboxValue([]);
+    if (cursor !== null && cursor.corpusRevision !== corpusRevision) {
+      throw inboxPageConflict();
+    }
+    const offset = cursor === null ? 0 : parseInboxOffset(cursor.innerCursor);
+    if (offset > all.length) throw inboxPageConflict();
+    const items = all.slice(offset, offset + filter.limit);
+    const nextOffset = offset + items.length;
+    const hasMore = nextOffset < all.length;
+    return {
+      items: items.map(productProposalSummary),
+      nextCursor: hasMore
+        ? encodeInboxCursor({
+            v: 1,
+            innerCursor: String(nextOffset),
+            corpusRevision,
+            filterRevision,
+          })
+        : null,
+      truncated: hasMore,
+      sourceTruncated: false,
+      deterministicRevision: hashInboxValue({ corpusRevision, filterRevision }),
+      diagnostics: [],
+    };
+  }
+
+  async previewInbox(
+    commandValue: TeamInboxSpecCommand,
+  ): Promise<TeamInboxSpecPreviewEnvelope> {
+    this.#root.assertCurrent();
+    const command = normalizeTeamInboxSpecCommand(commandValue);
+    await this.#assertInboxProductTargets(command);
+    const workflowCommand = workflowCommandFromInbox<TWikiPayload>(command);
+    let internal = await this.#previewWorkflow(workflowCommand, true, true);
+    if (!this.#portablePreviewIsFresh(internal.command.authority.occurredAt)) {
+      this.#evictIssuedCommand(internal);
+      internal = await this.#previewWorkflow(workflowCommand, true, true);
+    }
+    const prepared = this.#issued.get(internal.previewRevision);
+    if (prepared === undefined) throw previewConflict();
+    const publicPreview = inboxPublicPreviewFrom(internal);
+    const purposeIds = inboxPurposeIdsFromPrepared(command, prepared);
+    const requestRevision = hashText(boundedInboxJson(command));
+    let presentationRevision: Revision;
+    try {
+      presentationRevision = hashText(boundedInboxJson(publicPreview));
+    } catch (error) {
+      if (
+        error instanceof MexPortError
+        && error.problem.code === "INVALID_REQUEST"
+      ) throw inboxEnvelopeTooLarge();
+      throw error;
+    }
+    const receiptBase = {
+      schemaVersion: 1 as const,
+      authority: internal.command.authority,
+      purposeIds,
+      requestRevision,
+      presentationRevision,
+    };
+    const signingPayload = inboxSigningPayload(receiptBase);
+    const unsignedEnvelope = {
+      schemaVersion: 1,
+      request: command,
+      preview: publicPreview,
+      receipt: { ...receiptBase, previewRevision: "0".repeat(64) },
+    };
+    assertInboxEnvelopeFits(unsignedEnvelope);
+    parseInboxEnvelope(unsignedEnvelope);
+    this.#receiptSigner.initialize();
+    const previewRevision = this.#receiptSigner.sign(signingPayload);
+    const envelope = deepFreeze({
+      schemaVersion: 1 as const,
+      request: command,
+      preview: publicPreview,
+      receipt: { ...receiptBase, previewRevision },
+    });
+    assertInboxEnvelopeFits(envelope);
+    parseInboxEnvelope(envelope);
+    const portable = withPortableEnvelopeAttestation(
+      prepared,
+      previewRevision,
+      inboxEnvelopeRevision(envelope),
+    );
+    this.#rememberIssued(previewRevision, portable, false);
+    return envelope;
+  }
+
+  async applyInbox(
+    envelopeValue: TeamInboxSpecPreviewEnvelope,
+  ): Promise<TeamInboxSpecApplyResult> {
+    this.#root.assertCurrent();
+    let envelope: TeamInboxSpecPreviewEnvelope;
+    try {
+      envelope = parseInboxEnvelope(envelopeValue);
+    } catch (error) {
+      if (
+        error instanceof MexPortError
+        && error.problem.code === "INVALID_REQUEST"
+      ) {
+        throw invalidSignedInboxEnvelope();
+      }
+      throw error;
+    }
+    assertInboxPreviewContainment(this.#root.path, envelope.preview);
+    const workflowRequest = workflowCommandFromInbox<TWikiPayload>(
+      envelope.request,
+    );
+    const command = deepFreeze({
+      ...workflowRequest,
+      authority: envelope.receipt.authority,
+    }) as PreparedTeamWorkflowCommand<TWikiPayload>;
+
+    let existing: TeamWorkflowJournalEntry | null = null;
+    try {
+      existing = this.#local.getWorkflowOperation(command.operationId);
+    } catch (error) {
+      if (!(error instanceof MexPortError)) throw error;
+      if (error.problem.code === "MIGRATION_REQUIRED") {
+        existing = null;
+      } else if (error.problem.code === "OPERATION_INTERRUPTED") {
+        this.#local.initializeForMutation();
+        existing = this.#local.getWorkflowOperation(command.operationId);
+      } else {
+        throw error;
+      }
+    }
+    let result: TeamWorkflowResult<TWikiPayload>;
+    const completedInterruptedOperation = existing !== null
+      && existing.phase !== "complete";
+    if (existing !== null) {
+      assertJournalEnvelopeAttestation(existing.effects, envelope);
+      result = await this.apply({
+        command,
+        expectedPreviewRevision: envelope.receipt.previewRevision,
+      });
+    } else {
+      this.#receiptSigner.verify(
+        inboxSigningPayload(envelope.receipt),
+        envelope.receipt.previewRevision,
+      );
+      this.#assertPortablePreviewFresh(envelope.receipt.authority.occurredAt);
+      await this.#assertAuthorityCurrent(envelope.receipt.authority);
+      const replanned = await this.#plan(
+        command,
+        envelope.receipt.requestRevision,
+        envelope.receipt.purposeIds,
+        true,
+      );
+      if (
+        boundedInboxJson(inboxPublicPreviewFrom(replanned.preview))
+          !== boundedInboxJson(envelope.preview)
+        || boundedInboxJson(inboxPurposeIdsFromPrepared(envelope.request, replanned))
+          !== boundedInboxJson(envelope.receipt.purposeIds)
+      ) {
+        throw previewConflict();
+      }
+      const portable = withPortableEnvelopeAttestation(
+        replanned,
+        envelope.receipt.previewRevision,
+        inboxEnvelopeRevision(envelope),
+      );
+      this.#rememberIssued(envelope.receipt.previewRevision, portable, false);
+      result = await this.apply({
+        command,
+        expectedPreviewRevision: envelope.receipt.previewRevision,
+      });
+    }
+    const proposals = result.artifacts.flatMap((artifact) => {
+      if (artifact.kind !== "proposal") return [];
+      const projected = productProposalProjection(
+        artifact as unknown as InboxProposal<JsonValue>,
+      );
+      return projected === null ? [] : [projected];
+    });
+    return {
+      operationId: result.operationId,
+      previewRevision: result.previewRevision,
+      applied: true,
+      idempotentReplay: completedInterruptedOperation
+        ? false
+        : result.idempotentReplay,
+      changes: result.changes,
+      localChanges: result.localChanges.filter(
+        (change) => change.namespace === "inbox-draft",
+      ) as TeamInboxSpecApplyResult["localChanges"],
+      proposals,
+      events: result.events as TeamInboxSpecApplyResult["events"],
+    };
+  }
+
   async getArtifact(ref: EntityRef): Promise<TeamArtifact<TWikiPayload> | null> {
     this.#root.assertCurrent();
     switch (ref.kind) {
@@ -755,6 +1135,14 @@ export class RepositoryTeamWorkflowPort<
   async preview(
     command: TeamWorkflowCommand<TWikiPayload>,
   ): Promise<TeamWorkflowPreview<TWikiPayload>> {
+    return this.#previewWorkflow(command, false);
+  }
+
+  async #previewWorkflow(
+    command: TeamWorkflowCommand<TWikiPayload>,
+    bypassCache: boolean,
+    governedInbox = false,
+  ): Promise<TeamWorkflowPreview<TWikiPayload>> {
     this.#root.assertCurrent();
     assertCommandShape(command);
     assertOperationId(command.operationId);
@@ -765,7 +1153,9 @@ export class RepositoryTeamWorkflowPort<
       command.expectedRevisions,
     ) as typeof callerCommand.expectedRevisions;
     const commandRevision = hashText(boundedStableJson(callerCommand));
-    const cachedRevision = this.#issuedByCommand.get(commandRevision);
+    const cachedRevision = bypassCache
+      ? undefined
+      : this.#issuedByCommand.get(commandRevision);
     const cached = cachedRevision === undefined
       ? undefined
       : this.#issued.get(cachedRevision);
@@ -785,7 +1175,12 @@ export class RepositoryTeamWorkflowPort<
       ...callerCommand,
       authority: { actor, occurredAt, repoState },
     }) as PreparedTeamWorkflowCommand<TWikiPayload>;
-    const prepared = await this.#plan(preparedCommand, commandRevision);
+    const prepared = await this.#plan(
+      preparedCommand,
+      commandRevision,
+      undefined,
+      governedInbox,
+    );
     this.#rememberIssued(prepared.preview.previewRevision, prepared, true);
     return prepared.preview;
   }
@@ -922,6 +1317,10 @@ export class RepositoryTeamWorkflowPort<
         prepared.preview.command.authority,
         prepared.preview.command.action.kind === "member.clear",
       );
+      await this.#assertExpectationsCurrent(
+        prepared.preview.command.expectedRevisions,
+      );
+      await this.#assertInboxActionDependencies(prepared.preview.command);
       const primary = await prepared.applyPrimary();
       await this.#runPhaseHook("after-canonical-publication");
       if (isAuditOnlyEffects(prepared.effects)) {
@@ -1006,8 +1405,14 @@ export class RepositoryTeamWorkflowPort<
     command: PreparedTeamWorkflowCommand<TWikiPayload>,
     callerCommandRevision: Revision,
     purposeIds?: readonly PortableWorkflowPurposeId[],
+    governedInbox = false,
   ): Promise<PreparedOperation<TWikiPayload, TWikiPlan>> {
-    const planned = await this.#planPrimary(command, undefined, purposeIds);
+    const planned = await this.#planPrimary(
+      command,
+      undefined,
+      purposeIds,
+      governedInbox,
+    );
     if (planned.wiki?.preview.recoveryManifest !== undefined) {
       assertWikiRecoveryManifestMatchesChanges(
         planned.wiki.preview.recoveryManifest,
@@ -1088,6 +1493,7 @@ export class RepositoryTeamWorkflowPort<
     command: PreparedTeamWorkflowCommand<TWikiPayload>,
     recoveryEffects?: readonly TeamWorkflowJournalEffect[],
     purposeIds?: readonly PortableWorkflowPurposeId[],
+    governedInbox = false,
   ): Promise<{
     changes: readonly FileChange[];
     localChanges: readonly LocalStateChange[];
@@ -1337,6 +1743,7 @@ export class RepositoryTeamWorkflowPort<
           : normalizeRelayDraftInput(action.draft);
         const draftId = action.draftId
           ?? recoveryLocalId(recoveryEffects, `${kind}-draft`)
+          ?? (kind === "inbox" ? purposeId(purposeIds, "inbox-draft") : undefined)
           ?? this.#localDraftId(kind);
         const current = action.draftId === undefined
           ? null
@@ -1397,7 +1804,12 @@ export class RepositoryTeamWorkflowPort<
         const draft = requiredDraft<TWikiPayload>(this.#local.getLocalDraft(action.draftId), "inbox");
         requireLocalExpectation(expectedRevisions, "inbox-draft", action.draftId, draft.revision);
         const payload = draft.payload as InboxDraftInput<TWikiPayload>;
-        const recoveryId = recoveryCanonicalId(recoveryEffects, "proposal");
+        await this.#assertSpecDraftDependenciesIfPresent(
+          payload as unknown as InboxDraftInput<JsonValue>,
+        );
+        const recoveryId = recoveryCanonicalId(recoveryEffects, "proposal")
+          ?? purposeId(purposeIds, "proposal")
+          ?? null;
         const plan = await this.#proposals.previewCreate({
           ...(recoveryId === null ? {} : { id: recoveryId }),
           author: authority.actor,
@@ -1502,23 +1914,125 @@ export class RepositoryTeamWorkflowPort<
       }
       case "inbox.reject":
       case "inbox.withdraw":
+      case "inbox.mark-stale":
       case "inbox.repair":
       case "inbox.approve":
-        return this.#planProposalAction(command);
+        return this.#planProposalAction(
+          command,
+          purposeIds,
+          recoveryEffects,
+          governedInbox,
+        );
       default:
         return assertNever(action);
     }
   }
 
-  async #planProposalAction(command: PreparedTeamWorkflowCommand<TWikiPayload>): Promise<any> {
+  async #planProposalAction(
+    command: PreparedTeamWorkflowCommand<TWikiPayload>,
+    purposeIds?: readonly PortableWorkflowPurposeId[],
+    recoveryEffects?: readonly TeamWorkflowJournalEffect[],
+    governedInbox = false,
+  ): Promise<any> {
     const action = command.action;
     if (!("proposalId" in action)) return assertNever(action as never);
     const current = await required(this.#proposals.get(action.proposalId), "Inbox proposal");
     requireArtifactExpectation(command.expectedRevisions, current.sourcePath, current.revision);
+    const specChange = storedSpecChange(
+      current as unknown as InboxProposal<JsonValue>,
+    );
+    if (governedInbox && specChange === null) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Inbox proposal is outside Spec authoring",
+        "The governed Inbox/Spec facade cannot execute a generic Wiki proposal.",
+        current.sourcePath,
+      );
+    }
+    if (
+      specChange !== null
+      && action.kind !== "inbox.mark-stale"
+      && current.state !== (action.kind === "inbox.repair" ? "stale" : "pending")
+    ) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Invalid Inbox proposal state",
+        action.kind === "inbox.repair"
+          ? "Only a stale Inbox proposal can be repaired."
+          : "Only a pending Inbox proposal can be reviewed or withdrawn.",
+        current.sourcePath,
+      );
+    }
+    if (action.kind === "inbox.mark-stale") {
+      if (specChange === null || current.state !== "pending") {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Invalid Inbox stale transition",
+          "Only a pending governed Spec proposal can be explicitly marked stale.",
+          current.sourcePath,
+        );
+      }
+      if (!await this.#specProposalHasDrifted(
+        current as unknown as InboxProposal<JsonValue>,
+      )) {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Inbox proposal is still current",
+          "A proposal can be marked stale only after the service proves dependency drift.",
+          current.sourcePath,
+        );
+      }
+      const plan = await this.#proposals.previewUpdate(current.ref.id, {
+        ...withoutStored(current),
+        state: "stale",
+      }, current.revision);
+      return canonicalWorkflowPlan(plan, "proposal", current.ref.id, {
+        action: "inbox.marked-stale",
+        subjects: [entitySubject(plan.artifact.ref)],
+        metadata: { rationaleExcerpt: utf8Excerpt(action.rationale) },
+      }, this.#proposals);
+    }
     if (action.kind === "inbox.approve") {
       await this.#assertExpectationsCurrent(current.targetRevisions);
-      const wikiRequest = portableWikiRequest(current, command.authority.actor, command.authority.occurredAt);
-      const wikiPreview = await this.#wiki.previewOperations(wikiRequest);
+      if (specChange !== null) {
+        await this.#assertSpecProposalDependencies(
+          current as unknown as InboxProposal<JsonValue>,
+        );
+      }
+      const receiptSpecId = purposeId(purposeIds, "spec-entity");
+      const recoverySpecId = specChange?.kind === "spec.create"
+        ? recoveryCreatedSpecId(
+            recoveryEffects,
+            current.ref.id,
+            specChange.entityKind,
+          )
+        : null;
+      if (
+        receiptSpecId !== undefined
+        && recoverySpecId !== null
+        && receiptSpecId !== recoverySpecId
+      ) throw previewConflict();
+      if (
+        governedInbox
+        && specChange?.kind === "spec.create"
+        && recoveryEffects !== undefined
+        && recoverySpecId === null
+      ) throw incompleteRecovery();
+      const pinnedSpecId = specChange?.kind === "spec.create"
+        ? receiptSpecId ?? recoverySpecId ?? this.#mintSpecId()
+        : undefined;
+      const wikiRequest = specChange === null
+        ? portableWikiRequest(current, command.authority.actor, command.authority.occurredAt)
+        : materializeSpecWikiRequest(
+            current as unknown as InboxProposal<JsonValue>,
+            command.authority,
+            pinnedSpecId,
+          ) as unknown as WikiOperationRequest<TWikiPayload>;
+      const wikiPreview = specChange?.kind === "spec.create"
+        ? await this.#previewWikiWithCreatedId(wikiRequest, pinnedSpecId!)
+        : specChange?.kind === "spec.update"
+          ? await this.#previewWikiAuthoringUpdate(wikiRequest)
+          : await this.#wiki.previewOperations(wikiRequest);
       if (!wikiPreview.valid) {
         throw artifactError("VALIDATION_FAILED", "Wiki proposal is not valid", "The Inbox proposal must be repaired and previewed again before approval.", current.sourcePath);
       }
@@ -1528,7 +2042,14 @@ export class RepositoryTeamWorkflowPort<
       }, current.revision);
       const base = canonicalWorkflowPlan(plan, "proposal", current.ref.id, {
         action: "inbox.approved",
-        subjects: [entitySubject(current.ref), ...wikiPreview.affectedEntities.map(entitySubject)],
+        subjects: specChange === null
+          ? [entitySubject(current.ref), ...wikiPreview.affectedEntities.map(entitySubject)]
+          : [
+              entitySubject(current.ref),
+              entitySubject(specChange.kind === "spec.create"
+                ? { id: pinnedSpecId!, kind: specChange.entityKind }
+                : specChange.target),
+            ],
       }, this.#proposals);
       const wikiEffects = wikiPreview.changes.map((change, index): CanonicalWorkflowEffect => ({
         kind: "canonical", namespace: "wiki", id: `${current.ref.id}:${index}`,
@@ -1550,6 +2071,11 @@ export class RepositoryTeamWorkflowPort<
           return { ...primary([applied.artifact], [...wikiResult.changes, applied.change]), wikiResult };
         },
       };
+    }
+    if (action.kind === "inbox.repair" && specChange !== null) {
+      await this.#assertSpecDraftDependenciesIfPresent(
+        action.replacement as unknown as InboxDraftInput<JsonValue>,
+      );
     }
     const next = action.kind === "inbox.reject"
       ? { state: "rejected" as const, reviewer: command.authority.actor, reviewedAt: command.authority.occurredAt, reviewRationale: action.rationale }
@@ -1650,6 +2176,181 @@ export class RepositoryTeamWorkflowPort<
         );
       }
     }
+  }
+
+  async #assertSpecDraftDependenciesIfPresent(
+    input: InboxDraftInput<JsonValue>,
+  ): Promise<void> {
+    const product = productInputFromInboxDraft(input);
+    if (product === null) return;
+    const attestations = await this.#readExactSpecAttestations(
+      specDependencyIds(product.change),
+    );
+    assertExactSpecAttestations(
+      product.change,
+      product.targetRevisions,
+      attestations,
+    );
+  }
+
+  async #assertInboxProductTargets(
+    command: TeamInboxSpecCommand,
+  ): Promise<void> {
+    const action = command.action;
+    if (
+      action.kind === "inbox.draft.save"
+      && action.draftId === undefined
+    ) return;
+    if (
+      action.kind === "inbox.draft.save"
+      || action.kind === "inbox.draft.delete"
+      || action.kind === "inbox.publish"
+    ) {
+      const draftId = action.draftId;
+      if (draftId === undefined) throw previewConflict();
+      const stored = this.#local.getLocalDraft<InboxDraftInput<JsonValue>>(draftId);
+      if (
+        stored === null
+        || stored.kind !== "inbox"
+        || productDraftProjection(
+          localDraftProjection(stored) as InboxDraft<JsonValue>,
+        ) === null
+      ) {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Inbox draft is outside Spec authoring",
+          "The governed Inbox/Spec facade accepts only its own typed local drafts.",
+        );
+      }
+      return;
+    }
+    const proposal = await this.#proposals.get(action.proposalId);
+    if (
+      proposal === null
+      || productProposalProjection(
+        proposal as unknown as InboxProposal<JsonValue>,
+      ) === null
+    ) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Inbox proposal is outside Spec authoring",
+        "The governed Inbox/Spec facade accepts only its own typed canonical proposals.",
+      );
+    }
+  }
+
+  async #assertSpecProposalDependencies(
+    proposal: InboxProposal<JsonValue>,
+  ): Promise<void> {
+    const change = storedSpecChange(proposal);
+    if (change === null) return;
+    const attestations = await this.#readExactSpecAttestations(
+      specDependencyIds(change),
+    );
+    assertExactSpecAttestations(
+      change,
+      proposal.targetRevisions,
+      attestations,
+    );
+  }
+
+  async #assertInboxActionDependencies(
+    command: PreparedTeamWorkflowCommand<TWikiPayload>,
+  ): Promise<void> {
+    if (command.action.kind === "inbox.approve") {
+      const proposal = await required(
+        this.#proposals.get(command.action.proposalId),
+        "Inbox proposal",
+      );
+      await this.#assertExpectationsCurrent(proposal.targetRevisions);
+      await this.#assertSpecProposalDependencies(
+        proposal as unknown as InboxProposal<JsonValue>,
+      );
+      return;
+    }
+    if (command.action.kind === "inbox.publish") {
+      const draft = requiredDraft<TWikiPayload>(
+        this.#local.getLocalDraft(command.action.draftId),
+        "inbox",
+      );
+      await this.#assertSpecDraftDependenciesIfPresent(
+        draft.payload as unknown as InboxDraftInput<JsonValue>,
+      );
+      return;
+    }
+    if (command.action.kind === "inbox.repair") {
+      await this.#assertSpecDraftDependenciesIfPresent(
+        command.action.replacement as unknown as InboxDraftInput<JsonValue>,
+      );
+      return;
+    }
+    if (command.action.kind !== "inbox.mark-stale") return;
+    const proposal = await required(
+      this.#proposals.get(command.action.proposalId),
+      "Inbox proposal",
+    );
+    if (!await this.#specProposalHasDrifted(
+      proposal as unknown as InboxProposal<JsonValue>,
+    )) {
+      throw artifactError(
+        "REVISION_CONFLICT",
+        "Inbox proposal is no longer stale",
+        "The exact drift proved at preview is no longer present. Preview again.",
+      );
+    }
+  }
+
+  async #specProposalHasDrifted(
+    proposal: InboxProposal<JsonValue>,
+  ): Promise<boolean> {
+    const change = storedSpecChange(proposal);
+    if (change === null) return false;
+    const attestations = await this.#readExactSpecAttestations(
+      specDependencyIds(change),
+    );
+    return specAttestationsHaveDrifted(
+      change,
+      proposal.targetRevisions,
+      attestations,
+    );
+  }
+
+  async #readExactSpecAttestations(
+    ids: readonly string[],
+  ): Promise<readonly ExactSpecEntityAttestation[]> {
+    const port = asInboxSpecWikiPort(this.#wiki);
+    if (port === null) throw inboxWikiUnavailable();
+    const view = await port.readExactEntityAttestations(ids);
+    return view.entities as readonly ExactSpecEntityAttestation[];
+  }
+
+  async #previewWikiWithCreatedId(
+    request: WikiOperationRequest<TWikiPayload>,
+    specId: string,
+  ): Promise<WikiOperationPreview<TWikiPlan>> {
+    const port = asInboxSpecWikiPort(this.#wiki);
+    if (port === null) throw inboxWikiUnavailable();
+    return port.previewOperationsWithCreatedIds(request, [specId]);
+  }
+
+  async #previewWikiAuthoringUpdate(
+    request: WikiOperationRequest<TWikiPayload>,
+  ): Promise<WikiOperationPreview<TWikiPlan>> {
+    const port = asInboxSpecWikiPort(this.#wiki);
+    if (port === null) throw inboxWikiUnavailable();
+    return port.previewAuthoringOperations(request);
+  }
+
+  #mintSpecId(): string {
+    const id = this.#specId();
+    if (!isEntityId(id) || !id.startsWith("mx_")) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Invalid generated Spec ID",
+        "The Inbox service must mint one canonical mx ID for Spec create.",
+      );
+    }
+    return id;
   }
 
   async #requireWorkstreamDependency(
@@ -1770,9 +2471,16 @@ export class RepositoryTeamWorkflowPort<
     // Revalidate canonical truth without minting a second set of IDs for
     // create/supersede operations. The reviewed opaque plan performs its own
     // exact base-byte check immediately before publication.
-    await this.#wiki.validateCurrentRevisionExpectations(
-      prepared.wiki.request.expectedRevisions,
-    );
+    const governedInboxApproval = prepared.preview.command.action.kind
+      === "inbox.approve"
+      && prepared.effects.some(
+        (effect) => effect.kind === "identity_activity_receipt",
+      );
+    if (!governedInboxApproval) {
+      await this.#wiki.validateCurrentRevisionExpectations(
+        prepared.wiki.request.expectedRevisions,
+      );
+    }
     const recovery = prepared.wiki.preview.recoveryManifest;
     const recoverable = recovery === undefined ? null : asRecoverableWikiPort(this.#wiki);
     if (
@@ -1803,13 +2511,7 @@ export class RepositoryTeamWorkflowPort<
         prepared.preview.command.action.memberId,
       );
     }
-    if (prepared.preview.command.action.kind === "inbox.approve") {
-      const proposal = await required(
-        this.#proposals.get(prepared.preview.command.action.proposalId),
-        "Inbox proposal",
-      );
-      await this.#assertExpectationsCurrent(proposal.targetRevisions);
-    }
+    await this.#assertInboxActionDependencies(prepared.preview.command);
     this.#assertCleanupPending(prepared.effects);
     await this.#revalidatePreparedWiki(prepared);
     for (const effect of prepared.effects) {
@@ -2126,7 +2828,13 @@ export class RepositoryTeamWorkflowPort<
       );
       if (occupied !== null) throw targetRevisionChanged(activity.path);
     }
-    const planned = await this.#planPrimary(command, effects);
+    const planned = await this.#planPrimary(
+      command,
+      effects,
+      undefined,
+      command.action.kind.startsWith("inbox.")
+        && effects.some((effect) => effect.kind === "identity_activity_receipt"),
+    );
     const expectedPrimary = effects.filter(
       (effect) =>
         effect.kind === "canonical"
@@ -2145,6 +2853,7 @@ export class RepositoryTeamWorkflowPort<
       command.action.kind === "member.clear",
     );
     await this.#assertExpectationsCurrent(command.expectedRevisions);
+    await this.#assertInboxActionDependencies(command);
     await planned.applyPrimary();
     await this.#runPhaseHook("after-canonical-publication");
     if (isAuditOnlyEffects(effects)) {
@@ -2256,11 +2965,36 @@ export class RepositoryTeamWorkflowPort<
     ) {
       throw targetRevisionChanged(proposalEffect.path);
     }
-    const request = portableWikiRequest(
-      proposal,
-      activity.actor,
-      activity.occurredAt,
+    const specChange = storedSpecChange(
+      proposal as unknown as InboxProposal<JsonValue>,
     );
+    const recoveredSpecId = specChange?.kind === "spec.create"
+      ? recoveryCreatedSpecId(
+          effects,
+          proposal.ref.id,
+          specChange.entityKind,
+        )
+      : null;
+    if (specChange?.kind === "spec.create" && recoveredSpecId === null) {
+      throw wikiRecoveryConflict(
+        "The durable Wiki recovery manifest lost the receipt-pinned Spec ID.",
+      );
+    }
+    const request = specChange === null
+      ? portableWikiRequest(
+          proposal,
+          activity.actor,
+          activity.occurredAt,
+        )
+      : materializeSpecWikiRequest(
+          proposal as unknown as InboxProposal<JsonValue>,
+          {
+            actor: activity.actor,
+            occurredAt: activity.occurredAt,
+            repoState: activity.repoState,
+          },
+          specChange.kind === "spec.create" ? recoveredSpecId! : undefined,
+        ) as unknown as WikiOperationRequest<TWikiPayload>;
     if (recovery.manifest.operationId !== request.operation.opId) {
       throw wikiRecoveryConflict(
         "The durable Wiki recovery manifest identifies a different operation.",
@@ -2544,7 +3278,13 @@ export class RepositoryTeamWorkflowPort<
     const activityEffectValue = entry.effects.find((effect): effect is ActivityWorkflowEffect => effect.kind === "activity");
     const event = activityEffectValue === undefined
       ? null
-      : activityEventFromEffect(activityEffectValue);
+      : await this.#activity.get(activityEffectValue.id);
+    if (
+      activityEffectValue !== undefined
+      && (event === null
+        || event.sourcePath !== activityEffectValue.path
+        || event.revision !== activityEffectValue.revision)
+    ) throw incompleteRecovery();
     return {
       operationId: entry.operationId,
       previewRevision: entry.previewRevision,
@@ -2773,6 +3513,125 @@ function publicPreviewFrom<TWikiPayload extends JsonValue>(
   });
 }
 
+function inboxPublicPreviewFrom<TWikiPayload extends JsonValue>(
+  preview: TeamWorkflowPreview<TWikiPayload>,
+): TeamInboxSpecPreviewEnvelope["preview"] {
+  if (preview.localChanges.some((change) => change.namespace !== "inbox-draft")) {
+    throw previewConflict();
+  }
+  return deepFreeze({
+    valid: preview.valid,
+    scope: preview.scope,
+    changes: preview.changes,
+    localChanges: preview.localChanges as TeamInboxSpecPreviewEnvelope["preview"]["localChanges"],
+    diagnostics: preview.diagnostics,
+  });
+}
+
+function workflowCommandFromInbox<TWikiPayload extends JsonValue>(
+  command: TeamInboxSpecCommand,
+): TeamWorkflowCommand<TWikiPayload> {
+  const action = command.action;
+  const translated = action.kind === "inbox.draft.save"
+    ? {
+        kind: action.kind,
+        ...(action.draftId === undefined ? {} : { draftId: action.draftId }),
+        draft: inboxDraftInputFromProduct(
+          action.draft,
+          command.operationId,
+        ) as unknown as InboxDraftInput<TWikiPayload>,
+      }
+    : action.kind === "inbox.repair"
+      ? {
+          kind: action.kind,
+          proposalId: action.proposalId,
+          replacement: inboxDraftInputFromProduct(
+            action.replacement,
+            command.operationId,
+          ) as unknown as InboxDraftInput<TWikiPayload>,
+        }
+      : action;
+  return deepFreeze({
+    operationId: command.operationId,
+    action: translated,
+    expectedRevisions: command.expectedRevisions,
+  }) as TeamWorkflowCommand<TWikiPayload>;
+}
+
+function inboxPurposeIdsFromPrepared<
+  TWikiPayload extends JsonValue,
+  TWikiPlan,
+>(
+  command: TeamInboxSpecCommand,
+  prepared: PreparedOperation<TWikiPayload, TWikiPlan>,
+): readonly TeamInboxSpecPurposeId[] {
+  const purposes: TeamInboxSpecPurposeId[] = [];
+  if (
+    command.action.kind === "inbox.draft.save"
+    && command.action.draftId === undefined
+  ) {
+    const drafts = prepared.effects.filter(
+      (effect): effect is LocalWorkflowEffect =>
+        effect.kind === "local" && effect.namespace === "inbox-draft",
+    );
+    if (drafts.length !== 1 || drafts[0]!.beforeRevision !== null) {
+      throw previewConflict();
+    }
+    purposes.push({ purpose: "inbox-draft", id: drafts[0]!.id });
+  }
+  if (command.action.kind === "inbox.publish") {
+    const proposals = prepared.effects.filter(
+      (effect): effect is CanonicalWorkflowEffect =>
+        effect.kind === "canonical" && effect.namespace === "proposal",
+    );
+    if (proposals.length !== 1 || proposals[0]!.beforeRevision !== null) {
+      throw previewConflict();
+    }
+    purposes.push({ purpose: "proposal", id: proposals[0]!.id });
+  }
+  if (
+    command.action.kind === "inbox.publish"
+    || command.action.kind === "inbox.approve"
+    || command.action.kind === "inbox.reject"
+    || command.action.kind === "inbox.withdraw"
+    || command.action.kind === "inbox.mark-stale"
+    || command.action.kind === "inbox.repair"
+  ) {
+    const activities = prepared.effects.filter(
+      (effect): effect is ActivityWorkflowEffect => effect.kind === "activity",
+    );
+    if (activities.length !== 1) throw previewConflict();
+    purposes.push({ purpose: "activity", id: activities[0]!.id });
+  }
+  if (
+    command.action.kind === "inbox.approve"
+    && prepared.wiki?.request.operation.type === "create-entry"
+  ) {
+    const affected = prepared.wiki.preview.affectedEntities.filter(
+      (entity) => isEntityId(entity.id) && entity.id.startsWith("mx_"),
+    );
+    if (affected.length !== 1) throw previewConflict();
+    const createdId = affected[0]!.id;
+    const manifestIds = prepared.wiki.preview.recoveryManifest?.items.flatMap(
+      (item) => item.createdIds,
+    );
+    if (
+      manifestIds !== undefined
+      && (manifestIds.length !== 1 || manifestIds[0] !== createdId)
+    ) throw previewConflict();
+    purposes.push({ purpose: "spec-entity", id: createdId });
+  }
+  if (purposes.length > TEAM_INBOX_SPEC_LIMITS.maxPurposeIds) {
+    throw previewConflict();
+  }
+  purposes.sort((left, right) => compareCodePoints(left.purpose, right.purpose));
+  if (
+    new Set(purposes.map((item) => item.purpose)).size !== purposes.length
+    || new Set(purposes.map((item) => item.id)).size !== purposes.length
+  ) throw previewConflict();
+  return deepFreeze(purposes);
+}
+
 function commandFromPrepared<TWikiPayload extends JsonValue>(
   command: PreparedTeamWorkflowCommand<TWikiPayload>,
 ): TeamWorkflowCommand<TWikiPayload> {
@@ -2816,9 +3675,17 @@ function workstreamEnvelopeRevision(
   return hashText(boundedWorkstreamEnvelopeJson(envelope));
 }
 
+function inboxEnvelopeRevision(
+  envelope: TeamInboxSpecPreviewEnvelope,
+): Revision {
+  return hashText(boundedInboxJson(envelope));
+}
+
 function assertJournalEnvelopeAttestation(
   effects: readonly TeamWorkflowJournalEffect[],
-  envelope: TeamIdentityActivityPreviewEnvelope | TeamWorkstreamPreviewEnvelope,
+  envelope: TeamIdentityActivityPreviewEnvelope
+    | TeamWorkstreamPreviewEnvelope
+    | TeamInboxSpecPreviewEnvelope,
 ): void {
   const receipts = effects.filter(
     (effect): effect is IdentityActivityReceiptWorkflowEffect =>
@@ -2833,13 +3700,19 @@ function assertJournalEnvelopeAttestation(
 }
 
 function portableEnvelopeRevision(
-  envelope: TeamIdentityActivityPreviewEnvelope | TeamWorkstreamPreviewEnvelope,
+  envelope: TeamIdentityActivityPreviewEnvelope
+    | TeamWorkstreamPreviewEnvelope
+    | TeamInboxSpecPreviewEnvelope,
 ): Revision {
-  return envelope.request.action.kind.startsWith("workstream.")
-    ? workstreamEnvelopeRevision(envelope as TeamWorkstreamPreviewEnvelope)
-    : identityActivityEnvelopeRevision(
-        envelope as TeamIdentityActivityPreviewEnvelope,
-      );
+  if (envelope.request.action.kind.startsWith("workstream.")) {
+    return workstreamEnvelopeRevision(envelope as TeamWorkstreamPreviewEnvelope);
+  }
+  if (envelope.request.action.kind.startsWith("inbox.")) {
+    return inboxEnvelopeRevision(envelope as TeamInboxSpecPreviewEnvelope);
+  }
+  return identityActivityEnvelopeRevision(
+    envelope as TeamIdentityActivityPreviewEnvelope,
+  );
 }
 
 function isAuditOnlyEffects(effects: readonly TeamWorkflowJournalEffect[]): boolean {
@@ -3037,6 +3910,191 @@ function parseWorkstreamEnvelope(
   assertPublicWorkstreamPreview(envelope.preview);
   assertWorkstreamReceipt(envelope.receipt, envelope.request, envelope.preview);
   return deepFreeze(envelope as unknown as TeamWorkstreamPreviewEnvelope);
+}
+
+function parseInboxEnvelope(value: unknown): TeamInboxSpecPreviewEnvelope {
+  const serialized = boundedInboxJson(value);
+  const parsed = JSON.parse(serialized) as unknown;
+  if (!isPlainObject(parsed)) throw invalidInboxEnvelope();
+  exactEnvelopeKeys(
+    parsed,
+    ["schemaVersion", "request", "preview", "receipt"],
+    [],
+    invalidInboxEnvelope,
+  );
+  if (parsed.schemaVersion !== 1) throw invalidInboxEnvelope();
+  const request = normalizeTeamInboxSpecCommand(parsed.request);
+  const preview = parseInboxPublicPreview(parsed.preview);
+  const receipt = parseInboxReceipt(parsed.receipt, request, preview);
+  return deepFreeze({ schemaVersion: 1, request, preview, receipt });
+}
+
+function parseInboxPublicPreview(
+  value: unknown,
+): TeamInboxSpecPreviewEnvelope["preview"] {
+  if (!isPlainObject(value)) throw invalidInboxEnvelope();
+  exactEnvelopeKeys(
+    value,
+    ["valid", "scope", "changes", "localChanges", "diagnostics"],
+    [],
+    invalidInboxEnvelope,
+  );
+  if (
+    typeof value.valid !== "boolean"
+    || (value.scope !== "canonical" && value.scope !== "local" && value.scope !== "mixed")
+    || !Array.isArray(value.changes)
+    || !Array.isArray(value.localChanges)
+    || !Array.isArray(value.diagnostics)
+  ) throw invalidInboxEnvelope();
+  for (const change of value.changes) {
+    if (
+      !isPlainObject(change)
+      || typeof change.path !== "string"
+      || !isRepoRelativePath(change.path)
+      || typeof change.diff !== "string"
+      || (change.kind !== "create"
+        && change.kind !== "update"
+        && change.kind !== "delete"
+        && change.kind !== "move")
+      || (change.beforeRevision !== null
+        && (typeof change.beforeRevision !== "string"
+          || !isRevision(change.beforeRevision)))
+      || (change.afterRevision !== null
+        && (typeof change.afterRevision !== "string"
+          || !isRevision(change.afterRevision)))
+      || (change.kind === "create" && change.beforeRevision !== null)
+      || (change.kind === "delete" && change.afterRevision !== null)
+      || (change.kind !== "move" && Object.hasOwn(change, "previousPath"))
+      || (change.kind === "move"
+        && (typeof change.previousPath !== "string"
+          || !isRepoRelativePath(change.previousPath)))
+    ) throw invalidInboxEnvelope();
+    exactEnvelopeKeys(
+      change,
+      change.kind === "move"
+        ? ["kind", "path", "previousPath", "diff", "beforeRevision", "afterRevision"]
+        : ["kind", "path", "diff", "beforeRevision", "afterRevision"],
+      [],
+      invalidInboxEnvelope,
+    );
+  }
+  for (const change of value.localChanges) {
+    if (!isPlainObject(change)) throw invalidInboxEnvelope();
+    exactEnvelopeKeys(
+      change,
+      ["namespace", "id", "beforeRevision", "afterRevision", "summary"],
+      [],
+      invalidInboxEnvelope,
+    );
+    if (
+      change.namespace !== "inbox-draft"
+      || typeof change.id !== "string"
+      || (change.beforeRevision !== null
+        && (typeof change.beforeRevision !== "string" || !isRevision(change.beforeRevision)))
+      || (change.afterRevision !== null
+        && (typeof change.afterRevision !== "string" || !isRevision(change.afterRevision)))
+      || typeof change.summary !== "string"
+    ) throw invalidInboxEnvelope();
+  }
+  return deepFreeze(value as unknown as TeamInboxSpecPreviewEnvelope["preview"]);
+}
+
+function parseInboxReceipt(
+  value: unknown,
+  request: TeamInboxSpecCommand,
+  preview: TeamInboxSpecPreviewEnvelope["preview"],
+): TeamInboxSpecPreviewEnvelope["receipt"] {
+  boundedInboxReceiptJson(value);
+  if (!isPlainObject(value)) throw invalidInboxEnvelope();
+  exactEnvelopeKeys(value, [
+    "schemaVersion",
+    "authority",
+    "purposeIds",
+    "requestRevision",
+    "presentationRevision",
+    "previewRevision",
+  ], [], invalidInboxEnvelope);
+  if (
+    value.schemaVersion !== 1
+    || typeof value.requestRevision !== "string"
+    || !isRevision(value.requestRevision)
+    || typeof value.presentationRevision !== "string"
+    || !isRevision(value.presentationRevision)
+    || typeof value.previewRevision !== "string"
+    || !isRevision(value.previewRevision)
+  ) throw invalidInboxEnvelope();
+  assertReceiptAuthority(value.authority, invalidInboxEnvelope);
+  const purposeIds = normalizeInboxPurposeIds(value.purposeIds, request);
+  if (
+    value.requestRevision !== hashText(boundedInboxJson(request))
+    || value.presentationRevision !== hashText(boundedInboxJson(preview))
+  ) throw previewConflict();
+  return deepFreeze({
+    schemaVersion: 1,
+    authority: value.authority,
+    purposeIds,
+    requestRevision: value.requestRevision,
+    presentationRevision: value.presentationRevision,
+    previewRevision: value.previewRevision,
+  } as TeamInboxSpecPreviewEnvelope["receipt"]);
+}
+
+function normalizeInboxPurposeIds(
+  value: unknown,
+  request: TeamInboxSpecCommand,
+): readonly TeamInboxSpecPurposeId[] {
+  if (!Array.isArray(value) || value.length > TEAM_INBOX_SPEC_LIMITS.maxPurposeIds) {
+    throw invalidInboxEnvelope();
+  }
+  const purposes = value.map((item): TeamInboxSpecPurposeId => {
+    if (!isPlainObject(item)) throw invalidInboxEnvelope();
+    exactEnvelopeKeys(item, ["purpose", "id"], [], invalidInboxEnvelope);
+    if (
+      item.purpose !== "inbox-draft"
+      && item.purpose !== "proposal"
+      && item.purpose !== "activity"
+      && item.purpose !== "spec-entity"
+    ) throw invalidInboxEnvelope();
+    if (typeof item.id !== "string") throw invalidInboxEnvelope();
+    const valid = item.purpose === "activity"
+      ? isArtifactId(item.id, "event")
+      : item.purpose === "proposal"
+        ? isArtifactId(item.id, "proposal")
+        : item.purpose === "spec-entity"
+          ? isEntityId(item.id) && item.id.startsWith("mx_")
+          : Buffer.byteLength(item.id, "utf8") <= 256
+            && item.id.length > 0
+            && !/[\0-\x1f\x7f]/u.test(item.id);
+    if (!valid) throw invalidInboxEnvelope();
+    return { purpose: item.purpose, id: item.id };
+  });
+  const ordered = [...purposes].sort(
+    (left, right) => compareCodePoints(left.purpose, right.purpose),
+  );
+  if (
+    stableJson(ordered) !== stableJson(purposes)
+    || new Set(purposes.map((item) => item.purpose)).size !== purposes.length
+    || new Set(purposes.map((item) => item.id)).size !== purposes.length
+  ) throw invalidInboxEnvelope();
+  const action = request.action;
+  const actual = purposes.map((item) => item.purpose);
+  const expected: readonly TeamInboxSpecPurposeId["purpose"][] =
+    action.kind === "inbox.draft.save" && action.draftId === undefined
+      ? ["inbox-draft"]
+      : action.kind === "inbox.publish"
+        ? ["activity", "proposal"]
+        : action.kind === "inbox.approve"
+          ? actual.includes("spec-entity")
+            ? ["activity", "spec-entity"]
+            : ["activity"]
+          : action.kind === "inbox.reject"
+            || action.kind === "inbox.withdraw"
+            || action.kind === "inbox.mark-stale"
+            || action.kind === "inbox.repair"
+            ? ["activity"]
+            : [];
+  if (stableJson(actual) !== stableJson(expected)) throw invalidInboxEnvelope();
+  return deepFreeze(purposes);
 }
 
 function assertPublicWorkstreamPreview(
@@ -3447,7 +4505,7 @@ function boundedCanonicalJson(
       normalized = current.map((item) => visit(item, depth + 1));
     } else {
       if (!isPlainObject(current)) throw invalid();
-      const record: Record<string, unknown> = {};
+      const record = Object.create(null) as Record<string, unknown>;
       for (const key of Object.keys(current).sort()) {
         if (current[key] === undefined) throw invalid();
         record[key] = visit(current[key], depth + 1);
@@ -3494,6 +4552,68 @@ function invalidWorkstreamEnvelope(): MexPortError {
     "Invalid Workstream preview",
     "The portable Workstream preview envelope is malformed or exceeds its bounded contract.",
   );
+}
+
+function invalidInboxEnvelope(): MexPortError {
+  return artifactError(
+    "INVALID_REQUEST",
+    "Invalid Inbox/Spec preview",
+    "The portable Inbox/Spec preview envelope is malformed or exceeds its bounded contract.",
+  );
+}
+
+function invalidSignedInboxEnvelope(): MexPortError {
+  return artifactError(
+    "VALIDATION_FAILED",
+    "Invalid signed Inbox/Spec preview",
+    "The supplied Inbox/Spec envelope is malformed, out of bounds, or has an invalid purpose binding.",
+  );
+}
+
+function inboxEnvelopeTooLarge(): MexPortError {
+  const detail = `The complete Inbox/Spec preview envelope exceeds ${TEAM_INBOX_SPEC_LIMITS.maxEnvelopeBytes} UTF-8 bytes.`;
+  return new MexPortError({
+    title: "Inbox/Spec preview envelope is too large",
+    status: 422,
+    code: "VALIDATION_FAILED",
+    detail,
+    diagnostics: [{
+      code: "ENVELOPE_TOO_LARGE",
+      severity: "error",
+      message: detail,
+    }],
+  });
+}
+
+function assertInboxEnvelopeFits(value: unknown): void {
+  if (
+    Buffer.byteLength(stableJson(value), "utf8")
+      > TEAM_INBOX_SPEC_LIMITS.maxEnvelopeBytes
+  ) throw inboxEnvelopeTooLarge();
+}
+
+function assertInboxPreviewContainment(
+  projectRoot: string,
+  preview: TeamInboxSpecPublicPreview,
+): void {
+  if (preview.localChanges.length > 0) {
+    assertContainedArtifactDirectory(
+      projectRoot,
+      ".mex/local" as RepoRelativePath,
+    );
+  }
+  for (const change of preview.changes) {
+    assertContainedArtifactDirectory(
+      projectRoot,
+      dirname(change.path) as RepoRelativePath,
+    );
+    if (change.kind === "move") {
+      assertContainedArtifactDirectory(
+        projectRoot,
+        dirname(change.previousPath) as RepoRelativePath,
+      );
+    }
+  }
 }
 
 function canonicalPlan<TWikiPayload extends JsonValue>(
@@ -3585,6 +4705,56 @@ function recoveryCanonicalId(
   );
   if (matches.length !== 1) throw incompleteRecovery();
   return matches[0]!.id;
+}
+
+function recoveryCreatedSpecId(
+  effects: readonly TeamWorkflowJournalEffect[] | undefined,
+  proposalId: string,
+  expectedKind: string,
+): string | null {
+  if (effects === undefined) return null;
+  const recovery = effects.filter(
+    (effect): effect is WikiRecoveryWorkflowEffect => effect.kind === "wiki_recovery",
+  );
+  if (recovery.length > 1) throw incompleteRecovery();
+  const manifestIds = recovery.length === 0
+    ? []
+    : recovery[0]!.manifest.items.flatMap((item) => item.createdIds);
+  if (
+    manifestIds.length > 1
+    || (manifestIds.length === 1
+      && (!isEntityId(manifestIds[0]) || !manifestIds[0]!.startsWith("mx_")))
+  ) throw incompleteRecovery();
+
+  const activities = effects.filter(
+    (effect): effect is ActivityWorkflowEffect => effect.kind === "activity",
+  );
+  if (activities.length !== 1 || activities[0]!.action !== "inbox.approved") {
+    throw incompleteRecovery();
+  }
+  const subjects = activities[0]!.subjects;
+  if (subjects.length !== 2 || subjects.some((subject) => subject.kind !== "entity")) {
+    throw incompleteRecovery();
+  }
+  const proposalSubjects = subjects.filter(
+    (subject) => subject.kind === "entity" && subject.entity.id === proposalId,
+  );
+  const specSubjects = subjects.filter(
+    (subject) => subject.kind === "entity"
+      && subject.entity.id !== proposalId
+      && isEntityId(subject.entity.id)
+      && subject.entity.id.startsWith("mx_")
+      && subject.entity.kind === expectedKind,
+  );
+  if (proposalSubjects.length !== 1 || specSubjects.length !== 1) {
+    throw incompleteRecovery();
+  }
+  const activityId = specSubjects[0]!.kind === "entity"
+    ? specSubjects[0]!.entity.id
+    : null;
+  const manifestId = manifestIds[0] ?? null;
+  if (manifestId !== null && manifestId !== activityId) throw incompleteRecovery();
+  return activityId;
 }
 
 function recoveryLocalId(
@@ -3727,6 +4897,33 @@ function asRecoverableWikiPort<
     : null;
 }
 
+function asInboxSpecWikiPort<
+  TWikiPayload extends JsonValue,
+  TWikiPlan,
+>(
+  port: WikiPort<unknown, TWikiPayload, TWikiPlan, unknown>,
+): (WikiForcedCreatedIdPreviewPort<TWikiPayload, TWikiPlan>
+  & WikiExactAuthoringPreviewPort<TWikiPayload, TWikiPlan>) | null {
+  const candidate = port as Partial<
+    WikiForcedCreatedIdPreviewPort<TWikiPayload, TWikiPlan>
+      & WikiExactAuthoringPreviewPort<TWikiPayload, TWikiPlan>
+  >;
+  return typeof candidate.readExactEntityAttestations === "function"
+    && typeof candidate.previewOperationsWithCreatedIds === "function"
+    && typeof candidate.previewAuthoringOperations === "function"
+    ? candidate as WikiForcedCreatedIdPreviewPort<TWikiPayload, TWikiPlan>
+      & WikiExactAuthoringPreviewPort<TWikiPayload, TWikiPlan>
+    : null;
+}
+
+function inboxWikiUnavailable(): MexPortError {
+  return artifactError(
+    "MIGRATION_REQUIRED",
+    "Inbox Spec authoring is unavailable",
+    "The repository Wiki adapter does not provide the exact governed Spec authoring seam.",
+  );
+}
+
 function wikiRecoveryMismatch(
   reason: Extract<WikiOperationRecoveryInspection, { state: "mismatch" }>["reason"],
 ): MexPortError {
@@ -3751,6 +4948,41 @@ function wikiRecoveryConflict(detail: string): MexPortError {
 
 function compareCodePoints(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function inboxSummaryMatches(
+  summary: {
+    changeKind: "spec.create" | "spec.update";
+    entityKind: string;
+    state?: string;
+  },
+  filter: {
+    changeKinds?: readonly ("spec.create" | "spec.update")[];
+    entityKinds?: readonly string[];
+    states?: readonly string[];
+  },
+): boolean {
+  return (filter.changeKinds === undefined
+      || filter.changeKinds.includes(summary.changeKind))
+    && (filter.entityKinds === undefined
+      || filter.entityKinds.includes(summary.entityKind))
+    && (filter.states === undefined
+      || (summary.state !== undefined && filter.states.includes(summary.state)));
+}
+
+function parseInboxOffset(value: string): number {
+  if (!/^(?:0|[1-9][0-9]{0,9})$/u.test(value)) throw invalidInboxEnvelope();
+  const offset = Number(value);
+  if (!Number.isSafeInteger(offset)) throw invalidInboxEnvelope();
+  return offset;
+}
+
+function inboxPageConflict(): MexPortError {
+  return artifactError(
+    "REVISION_CONFLICT",
+    "Inbox collection changed",
+    "The Inbox draft or proposal collection changed during pagination. Restart from the first page.",
+  );
 }
 
 function assertWikiRecoveryManifestMatchesChanges(
@@ -3954,6 +5186,7 @@ function assertActionShape(action: unknown): void {
     "inbox.publish": [["kind", "draftId"], []],
     "inbox.approve": [["kind", "proposalId"], []],
     "inbox.reject": [["kind", "proposalId", "rationale"], []],
+    "inbox.mark-stale": [["kind", "proposalId", "rationale"], []],
     "inbox.withdraw": [["kind", "proposalId"], ["rationale"]],
     "inbox.repair": [["kind", "proposalId", "replacement"], []],
     "relay.draft.save": [["kind", "draft"], ["draftId"]],
@@ -4108,7 +5341,7 @@ function boundedStableJson(value: unknown): string {
       result = current.map((item) => visit(item, depth + 1));
     } else {
       if (!isPlainObject(current)) invalidApplyRequest();
-      const sorted: Record<string, unknown> = {};
+      const sorted = Object.create(null) as Record<string, unknown>;
       for (const key of Object.keys(current).sort()) {
         const entry = current[key];
         if (entry === undefined) invalidApplyRequest();
@@ -4133,7 +5366,7 @@ function stableJson(value: unknown): string {
 function sortJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortJson);
   if (typeof value !== "object" || value === null) return value;
-  const sorted: Record<string, unknown> = {};
+  const sorted = Object.create(null) as Record<string, unknown>;
   for (const key of Object.keys(value as Record<string, unknown>).sort()) {
     sorted[key] = sortJson((value as Record<string, unknown>)[key]);
   }

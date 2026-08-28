@@ -16,7 +16,7 @@ import { generateEntityId, isEntityId, type EntityId as EngineEntityId } from ".
 import type { GroundingGraph } from "./grounding/adapter.js";
 import { resolveGrounding } from "./grounding/resolve.js";
 import type { GroundingResolution as EngineGroundingResolution } from "./model/grounding.js";
-import type { GroundingResolver } from "./index/write.js";
+import { canonicalJson, type GroundingResolver } from "./index/write.js";
 import {
   WikiMaintenanceInterruptedError,
   type WikiMaintenanceProgress,
@@ -35,6 +35,7 @@ import {
   OPERATION_LOG_MAX_BYTES,
   OPERATION_LOG_MAX_ENTRIES,
   attestEntityClaimants,
+  attestEntityClaimantsBatch,
   payloadHashOf,
   planOperationBatch,
   readAuditLog,
@@ -42,11 +43,14 @@ import {
   locateEntity,
   WikiClaimantScanIncompleteError,
   type AuditEntry,
+  type LocatedEntity,
   type WikiOperationBatchPlan,
   type WikiPatchPlan,
 } from "./operations/index.js";
 import { readOperationLogExact } from "./operations/audit.js";
-import { createParseCache } from "./operations/locate.js";
+import { SimulatedWikiCrashError } from "./operations/apply.js";
+import { createParseCache, parseCached } from "./operations/locate.js";
+import { isTeamOwnedReadOnlyPath } from "./model/team-owned-paths.js";
 import { WIKI_CORPUS_LIMITS, WikiCorpusLimitError } from "./index/corpus-policy.js";
 import {
   inspectWikiContractIndex,
@@ -100,6 +104,9 @@ import {
   type WikiEntityNeighborhood,
   type WikiEntityNeighborhoodSnapshot,
   type WikiEntitySummary,
+  type WikiExactEntityAttestationView,
+  type WikiExactAuthoringPreviewPort,
+  type WikiForcedCreatedIdPreviewPort,
   type WikiGrounding,
   type WikiGroundingCandidate,
   type WikiGroundingResolution,
@@ -360,6 +367,12 @@ export class RepositoryWikiPort implements WikiPort<
   RepositoryWikiOperationPayload,
   RepositoryWikiOperationPlan,
   RepositoryWikiMigrationPlan
+>, WikiForcedCreatedIdPreviewPort<
+  RepositoryWikiOperationPayload,
+  RepositoryWikiOperationPlan
+>, WikiExactAuthoringPreviewPort<
+  RepositoryWikiOperationPayload,
+  RepositoryWikiOperationPlan
 > {
   readonly #projectRoot: string;
   readonly #scaffoldRoot: string;
@@ -586,6 +599,100 @@ export class RepositoryWikiPort implements WikiPort<
     return this.#readCurrent((session, graph) => {
       const entity = session.get(id);
       return entity === null ? null : projectEntity(entity, stableObservationTime(session), graph);
+    });
+  }
+
+  /**
+   * Package-private common-snapshot attestation for governed Team authoring.
+   * Unlike separate `getEntity` calls, every requested ID is resolved under
+   * one immutable Wiki lease and the canonical corpus is revalidated before
+   * this ordered view is released.
+   */
+  async readExactEntityAttestations(
+    entityIds: readonly EntityId[],
+  ): Promise<WikiExactEntityAttestationView> {
+    if (!Array.isArray(entityIds) || entityIds.length > MAX_CURRENT_REVISION_EXPECTATIONS) {
+      throw invalidRequest(`Exact Wiki attestation accepts at most ${MAX_CURRENT_REVISION_EXPECTATIONS} entity IDs.`);
+    }
+    const seen = new Set<string>();
+    for (const id of entityIds) {
+      if (!isEntityId(id) || !id.startsWith("mx_")) {
+        throw invalidRequest("Exact Wiki attestation contains an invalid mx entity ID.");
+      }
+      if (seen.has(id)) throw invalidRequest("Exact Wiki attestation contains a duplicate entity ID.");
+      seen.add(id);
+    }
+    return this.#readExactAuthoring((session, fileHashes) => {
+      let claimants: ReturnType<typeof attestEntityClaimantsBatch>;
+      try {
+        claimants = attestEntityClaimantsBatch(entityIds, {
+          scaffoldRoot: this.#scaffoldRoot,
+          ...(this.#options.exclude === undefined ? {} : { exclude: this.#options.exclude }),
+          ...(this.#options.registry === undefined ? {} : { registry: this.#options.registry }),
+          parseCache: createParseCache(),
+        });
+      } catch (error) {
+        if (
+          error instanceof WikiClaimantScanIncompleteError
+          || error instanceof WikiCorpusLimitError
+        ) {
+          throw revisionConflict(
+            "The complete bounded Wiki claimant corpus could not be attested.",
+          );
+        }
+        throw error;
+      }
+      return {
+        indexedRevision: session.indexedRevision,
+        observedAt: stableObservationTime(session),
+        entities: entityIds.map((id) => {
+          const indexed = session.get(id);
+          const current = claimants.get(id);
+          if (current === undefined) {
+            throw revisionConflict("The requested Wiki claimant attestation is incomplete.");
+          }
+          if (indexed === null) {
+            if (current.claimantCount !== 0 || current.winner !== null) {
+              throw revisionConflict("A requested Wiki entity has an unindexed current claimant.");
+            }
+            return { id, entity: null };
+          }
+          const winner = current.winner;
+          if (
+            current.claimantCount !== 1
+            || current.ambiguous
+            || winner === null
+            || isTeamOwnedReadOnlyPath(winner.path)
+          ) {
+            throw revisionConflict(
+              "The requested Wiki entity does not have one exact Wiki-owned claimant.",
+            );
+          }
+          const currentFileHash = exactFileContentHash(winner.text);
+          if (
+            fileHashes.get(winner.path) !== currentFileHash
+            || !indexedEntityMatchesCurrentClaimant(indexed, winner, currentFileHash)
+          ) {
+            throw revisionConflict(
+              "The requested Wiki entity row does not match its exact current source bytes.",
+            );
+          }
+          return {
+            id,
+            entity: {
+              ref: {
+                id: winner.entity.id,
+                kind: winner.entity.type,
+                title: winner.entity.title,
+              },
+              version: {
+                semanticRevision: winner.entity.revision,
+                contentHash: currentFileHash,
+              },
+            },
+          };
+        }),
+      };
     });
   }
 
@@ -849,7 +956,31 @@ export class RepositoryWikiPort implements WikiPort<
   async previewOperations(
     request: WikiOperationRequest<RepositoryWikiOperationPayload>,
   ): Promise<RepositoryWikiOperationPreview> {
-    return this.#previewOperationRequest(request, null);
+    return this.#previewOperationRequest(request, null, null, false);
+  }
+
+  /** Package-private exact-authoring update preview; public previews stay strict. */
+  async previewAuthoringOperations(
+    request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+  ): Promise<RepositoryWikiOperationPreview> {
+    const items = normalizeRepositoryOperations(request.operation);
+    if (items.length !== 1 || items[0]?.type !== "update-entry") {
+      throw validationError(
+        "Exact Wiki authoring preview accepts exactly one governed update and no generated IDs.",
+      );
+    }
+    return this.#previewOperationRequest(request, null, null, true);
+  }
+
+  /**
+   * Package-private receipt-bound create preview. It is deliberately narrower
+   * than WikiPort: one direct create consumes exactly one caller-pinned ID.
+   */
+  async previewOperationsWithCreatedIds(
+    request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+    createdIds: readonly EntityId[],
+  ): Promise<RepositoryWikiOperationPreview> {
+    return this.#previewOperationRequest(request, null, createdIds, true);
   }
 
   /** Package-private recovery entry point; callers persist only its bounded manifest. */
@@ -857,7 +988,7 @@ export class RepositoryWikiPort implements WikiPort<
     request: WikiOperationRequest<RepositoryWikiOperationPayload>,
     manifest: RepositoryWikiOperationRecoveryManifest,
   ): Promise<RepositoryWikiOperationPreview> {
-    return this.#previewOperationRequest(request, manifest);
+    return this.#previewOperationRequest(request, manifest, null, false);
   }
 
   /** Package-private, read-only classification of this request's ledger records. */
@@ -873,10 +1004,15 @@ export class RepositoryWikiPort implements WikiPort<
   async #previewOperationRequest(
     request: WikiOperationRequest<RepositoryWikiOperationPayload>,
     manifest: RepositoryWikiOperationRecoveryManifest | null,
+    forcedCreatedIds: readonly EntityId[] | null,
+    exactAuthoring: boolean,
   ): Promise<RepositoryWikiOperationPreview> {
     const items = normalizeRepositoryOperations(request.operation);
     assertOperationPayloadPaths(items);
     this.#assertOperationEnvelope(request, items);
+    const pinnedIds = forcedCreatedIds === null
+      ? null
+      : normalizeForcedCreatedIds(request, items, forcedCreatedIds);
     const requestHash = hashCanonical({ operation: request.operation, expectedRevisions: request.expectedRevisions });
     const recovery = this.#operationRecoveryAnalysis(request, items);
     let durableResume: DurableOperationResume | null = null;
@@ -904,13 +1040,23 @@ export class RepositoryWikiPort implements WikiPort<
       throw validationError("No durable Wiki operation prefix exists for this recovery manifest.");
     }
     const prepared: PreparedDurableOperationResume = durableResume === null
-      ? { envelopes: this.#prepareOperationBatch(request, items) }
+      ? { envelopes: this.#prepareOperationBatch(request, items, exactAuthoring) }
       : this.#prepareDurableOperationResume(request, items, durableResume);
+    let pinnedIdIndex = 0;
     const result = await this.#withStableGrounding((graph) => {
       const operationOptions = {
         ...this.#operationOptions(graph),
         ...(prepared.preferFile === undefined ? {} : { preferFile: prepared.preferFile }),
-        ...(prepared.generateId === undefined ? {} : { generateId: prepared.generateId }),
+        ...(pinnedIds !== null ? {
+          generateId: () => {
+            const id = pinnedIds[pinnedIdIndex];
+            pinnedIdIndex += 1;
+            if (id === undefined) {
+              throw validationError("The Wiki create attempted to consume more receipt-pinned IDs than were supplied.");
+            }
+            return id as EngineEntityId;
+          },
+        } : prepared.generateId === undefined ? {} : { generateId: prepared.generateId }),
         ...(durableResume === null ? {} : {
           auditText: prepared.settledIntentPlan?.audit.proposedText ?? durableResume.auditBaseText,
           auditExists: prepared.settledIntentPlan === undefined ? durableResume.auditBaseExists : true,
@@ -943,6 +1089,9 @@ export class RepositoryWikiPort implements WikiPort<
         ),
       };
     });
+    if (pinnedIds !== null && pinnedIdIndex > pinnedIds.length) {
+      throw validationError("The Wiki create consumed more receipt-pinned IDs than were supplied.");
+    }
     if (!result.ok) {
       const diagnostics = result.diagnostics.map(projectDiagnostic);
       const pathProblem = pathDiagnostic(result.diagnostics);
@@ -950,7 +1099,20 @@ export class RepositoryWikiPort implements WikiPort<
       return invalidOperationPreview(request.operation.opId, requestHash, diagnostics);
     }
 
-    await this.#validatePlannedAuthority(request, result.plan.operations, durableResume !== null);
+    if (pinnedIds !== null) {
+      const plannedCreatedIds = result.plan.operations.flatMap((operation) => operation.createdIds);
+      if (pinnedIdIndex !== pinnedIds.length
+        || canonical(plannedCreatedIds) !== canonical(pinnedIds)) {
+        throw validationError("The Wiki create did not consume exactly the receipt-pinned entity ID.");
+      }
+    }
+
+    await this.#validatePlannedAuthority(
+      request,
+      result.plan.operations,
+      durableResume !== null,
+      exactAuthoring,
+    );
     if (durableResume !== null) this.#validateResumedPlan(result.plan, durableResume);
 
     const enginePreviewRevision = result.plan.previewRevision;
@@ -968,8 +1130,14 @@ export class RepositoryWikiPort implements WikiPort<
       handle,
     };
     const changes = operationBatchChanges(result.plan);
-    const affectedIds = [...new Set(result.plan.operations.flatMap((operation) => operation.entityIds))];
-    const affectedEntities = await this.#affectedEntities(affectedIds);
+    const affectedIds = [...new Set(result.plan.operations.flatMap((operation) => (
+      [...operation.entityIds, ...operation.createdIds]
+    )))];
+    const affectedEntities = await this.#affectedEntities(
+      affectedIds,
+      result.plan.operations,
+      exactAuthoring,
+    );
     const recoveryManifest = durableResume?.manifest
       ?? operationRecoveryManifest(request.operation.opId, requestHash, result.plan);
     return {
@@ -1264,6 +1432,88 @@ export class RepositoryWikiPort implements WikiPort<
       return this.#deps.read(this.#readOptions(), read);
     } catch (error) {
       throw translateReadError(error, this.#inspect());
+    }
+  }
+
+  #readOperationPreview<T>(
+    exactAuthoring: boolean,
+    read: (session: WikiContractReadSession) => T,
+  ): T {
+    return exactAuthoring
+      ? this.#readExactAuthoring((session) => read(session))
+      : this.#read(read);
+  }
+
+  /**
+   * Governed authoring needs a narrower freshness scope than ordinary Wiki
+   * reads: Team-owned Markdown may advance independently, while every
+   * Wiki-owned path and exact requested entity source must remain unchanged.
+   */
+  #readExactAuthoring<T>(
+    read: (
+      session: WikiContractReadSession,
+      fileHashes: ReadonlyMap<string, string>,
+    ) => T,
+  ): T {
+    try {
+      return this.#deps.read(this.#readOptions(), (session) => {
+        const status = session.status();
+        if (status.state !== "fresh" && status.state !== "stale") {
+          throw indexError(status);
+        }
+        const before = session.authoringCorpusAttestation();
+        this.#assertExactAuthoringCorpus(status, before);
+        const value = read(
+          session,
+          new Map(before.allFiles.map((file) => [file.path, file.contentHash])),
+        );
+        const after = session.authoringCorpusAttestation();
+        this.#assertExactAuthoringCorpus(status, after);
+        if (
+          before.wikiOwnedRevision !== after.wikiOwnedRevision
+          || !sameAttestedFileInventory(before.files, after.files)
+          || !sameAttestedFileInventory(before.allFiles, after.allFiles)
+        ) {
+          throw revisionConflict(
+            "The Wiki-owned canonical corpus changed during exact authoring attestation.",
+          );
+        }
+        return value;
+      });
+    } catch (error) {
+      throw translateReadError(error, this.#inspect());
+    }
+  }
+
+  #assertExactAuthoringCorpus(
+    status: ContractWikiIndexStatus,
+    attestation: ReturnType<WikiContractReadSession["authoringCorpusAttestation"]>,
+  ): void {
+    if (!attestation.containmentSafe) {
+      throw portError(
+        "PATH_OUTSIDE_PROJECT",
+        400,
+        "Wiki path is outside the project",
+        "Exact Wiki authoring attestation found an unsafe canonical path.",
+      );
+    }
+    if (!attestation.wikiOwnedFresh) {
+      throw status.state === "stale"
+        ? indexError(status)
+        : revisionConflict(
+            "The Wiki-owned canonical corpus changed during exact authoring attestation.",
+          );
+    }
+    if (!attestation.wikiOwnedDiagnosticsHealthy) {
+      throw indexError(status);
+    }
+    if (
+      (status.state === "fresh" && attestation.teamOwnedDrift)
+      || (status.state === "stale" && !attestation.teamOwnedDrift)
+    ) {
+      throw revisionConflict(
+        "The Wiki corpus freshness state changed during exact authoring attestation.",
+      );
     }
   }
 
@@ -1790,8 +2040,9 @@ export class RepositoryWikiPort implements WikiPort<
   #prepareOperationBatch(
     request: WikiOperationRequest<RepositoryWikiOperationPayload>,
     items: readonly NormalizedRepositoryOperation[],
+    exactAuthoring: boolean,
   ): readonly Record<string, unknown>[] {
-    return this.#read((session) => {
+    return this.#readOperationPreview(exactAuthoring, (session) => {
       for (const expected of request.expectedRevisions) {
         if (expected.target.kind === "artifact" && "contentHash" in expected) {
           const path = toScaffoldPath(expected.target.path);
@@ -1843,6 +2094,7 @@ export class RepositoryWikiPort implements WikiPort<
     request: WikiOperationRequest<RepositoryWikiOperationPayload>,
     plans: readonly WikiPatchPlan[],
     durableResume = false,
+    exactAuthoring = false,
   ): Promise<void> {
     for (const plan of plans) {
       if (plan.audit.path !== "events/operations.jsonl") {
@@ -1857,7 +2109,7 @@ export class RepositoryWikiPort implements WikiPort<
 
     if (durableResume) return;
 
-    await this.#read((session) => {
+    await this.#readOperationPreview(exactAuthoring, (session) => {
       const created = new Set(plans.flatMap((plan) => plan.createdIds));
       const entityExpectations = new Map(request.expectedRevisions.flatMap((expectation) => (
         expectation.target.kind === "entity" && "version" in expectation
@@ -1903,11 +2155,51 @@ export class RepositoryWikiPort implements WikiPort<
     });
   }
 
-  async #affectedEntities(ids: readonly string[]): Promise<readonly EntityRef[]> {
+  async #affectedEntities(
+    ids: readonly string[],
+    plans: readonly WikiPatchPlan[],
+    exactAuthoring: boolean,
+  ): Promise<readonly EntityRef[]> {
     if (ids.length === 0) return [];
+    const requested = new Set(ids);
+    const planned = new Map<string, EntityRef>();
+    const parseCache = createParseCache();
+    // Parse only the exact already-planned bytes. Building generic operation
+    // options here would consume write-only failure hooks during a read-only
+    // preview projection.
+    const options = {
+      scaffoldRoot: this.#scaffoldRoot,
+      ...(this.#options.registry === undefined ? {} : { registry: this.#options.registry }),
+      parseCache,
+    };
+    for (const plan of plans) {
+      for (const file of plan.files) {
+        const parsed = parseCached(options, file.path, file.absolutePath, file.proposedText);
+        for (const candidate of parsed.entities) {
+          if (!requested.has(candidate.entity.id)) continue;
+          planned.set(candidate.entity.id, {
+            id: candidate.entity.id,
+            kind: candidate.entity.type,
+            title: candidate.entity.title,
+          });
+        }
+      }
+    }
+    if (exactAuthoring) {
+      return ids.map((id) => {
+        const ref = planned.get(id);
+        if (ref === undefined) {
+          throw revisionConflict(
+            "The exact Wiki authoring plan did not project every affected entity from its proposed bytes.",
+          );
+        }
+        return ref;
+      });
+    }
     return this.#read((session) => ids.flatMap((id) => {
       const entity = session.get(id);
-      return entity === null ? [] : [projectRef(entity)];
+      const ref = entity === null ? planned.get(id) : projectRef(entity);
+      return ref === undefined ? [] : [ref];
     }));
   }
 
@@ -2158,6 +2450,53 @@ export class RepositoryWikiPort implements WikiPort<
   #now(): string {
     return (this.#options.now ?? (() => new Date().toISOString()))();
   }
+}
+
+function sameAttestedFileInventory(
+  left: readonly { path: string; contentHash: string }[],
+  right: readonly { path: string; contentHash: string }[],
+): boolean {
+  return left.length === right.length
+    && left.every((file, index) => (
+      file.path === right[index]?.path
+      && file.contentHash === right[index]?.contentHash
+    ));
+}
+
+function indexedEntityMatchesCurrentClaimant(
+  indexed: ContractEntity,
+  current: LocatedEntity,
+  currentFileHash: string,
+): boolean {
+  const entity = current.entity;
+  const location = entity.location;
+  return indexed.indexRow.entityKey === current.entityKey
+    && indexed.indexRow.metadataKind === current.metadataKind
+    && indexed.indexRow.provenance === canonicalJson(entity.provenance)
+    && indexed.indexRow.metadata === canonicalJson(entity.metadata)
+    && indexed.id === entity.id
+    && indexed.type === entity.type
+    && indexed.title === entity.title
+    && indexed.summary === (entity.summary ?? null)
+    && indexed.body === entity.body
+    && indexed.lifecycleState === entity.status
+    && indexed.semanticRevision === entity.revision
+    && indexed.fileContentHash === currentFileHash
+    && location.fileContentHash === currentFileHash
+    && indexed.entityContentHash === location.entityContentHash
+    && indexed.location.path === current.path
+    && location.file === current.path
+    && indexed.location.metadataStart === location.metadataStart
+    && indexed.location.metadataEnd === location.metadataEnd
+    && indexed.location.headingStart === location.headingStart
+    && indexed.location.headingEnd === location.headingEnd
+    && indexed.location.bodyStart === location.bodyStart
+    && indexed.location.bodyEnd === location.bodyEnd
+    && indexed.location.startLine === location.startLine
+    && indexed.location.endLine === location.endLine
+    && indexed.location.headingDepth === location.headingDepth
+    && indexed.topics.length === entity.topics.length
+    && indexed.topics.every((topic, index) => topic === entity.topics[index]);
 }
 
 export function createRepositoryWikiPort(
@@ -3219,6 +3558,28 @@ function normalizeRepositoryOperations(
   return raw.map((item) => normalizeRepositoryOperationItem(item));
 }
 
+function normalizeForcedCreatedIds(
+  request: WikiOperationRequest<RepositoryWikiOperationPayload>,
+  items: readonly NormalizedRepositoryOperation[],
+  createdIds: readonly EntityId[],
+): readonly EngineEntityId[] {
+  if (!Array.isArray(createdIds)
+    || createdIds.length !== 1
+    || !isEntityId(createdIds[0])
+    || !createdIds[0].startsWith("mx_")) {
+    throw validationError("A receipt-bound Wiki create requires exactly one canonical mx entity ID.");
+  }
+  if (items.length !== 1
+    || items[0]?.type !== "create-entry"
+    || items[0].entityId !== undefined
+    || request.operation.entityId !== undefined
+    || (isPlainObject(request.operation.payload)
+      && Array.isArray(request.operation.payload["operations"]))) {
+    throw validationError("Receipt-bound Wiki preview accepts exactly one direct create-entry operation.");
+  }
+  return [createdIds[0] as EngineEntityId];
+}
+
 function normalizeRepositoryOperationItem(value: unknown): NormalizedRepositoryOperation {
   if (!isPlainObject(value)
     || typeof value["type"] !== "string"
@@ -3438,6 +3799,14 @@ function translateReadError(error: unknown, status: ContractWikiIndexStatus): Me
 
 function translateWriteError(error: unknown): MexPortError {
   if (error instanceof MexPortError) return error;
+  if (error instanceof SimulatedWikiCrashError) {
+    return portError(
+      "OPERATION_INTERRUPTED",
+      409,
+      "Wiki operation interrupted",
+      "The Wiki operation was interrupted after a durable recovery boundary.",
+    );
+  }
   if (error instanceof MigrationSelectionError) {
     return validationError("The Wiki migration selection is invalid.");
   }

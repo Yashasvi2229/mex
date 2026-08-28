@@ -4,6 +4,14 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   HUB_LIMITS,
+  InboxDraftDetailSchema,
+  InboxDraftInputSchema,
+  InboxDraftListResponseSchema,
+  InboxOperationApplyResponseSchema,
+  InboxOperationPreviewRequestSchema,
+  InboxOperationPreviewResponseSchema,
+  InboxProposalDetailSchema,
+  InboxProposalListResponseSchema,
   SpecDetailResponseSchema,
   SpecListResponseSchema,
 } from "@mex/hub-contracts";
@@ -12,12 +20,19 @@ import type { Diagnostic, Revision } from "../../team/contracts/shared.js";
 import type {
   TeamMember,
   TeamMemberListRequest,
+  TeamInboxSpecApplyResult,
+  TeamInboxSpecCommand,
+  TeamInboxSpecDraftDetail,
+  TeamEvidenceRef,
+  TeamInboxSpecPreviewEnvelope,
+  TeamInboxSpecProposalDetail,
   TeamPage,
   Workstream,
 } from "../../team/contracts/workflow.js";
 import {
   createLocalHubReadServices as createLocalHubReadServicesBase,
   type HubTeamIdentityActivityService,
+  type HubInboxSpecAuthoringService,
   type HubTeamWorkstreamService,
   type HubGraphReadService,
   type HubWikiReadService,
@@ -41,6 +56,9 @@ import type {
 
 const EVENT = "event_01ARZ3NDEKTSV4RRFFQ69G5FAB";
 const MEMBER = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const INBOX_DRAFT = "inbox_00000000000000000000000000000001";
+const INBOX_PROPOSAL = "proposal_01000000000000000000001720";
+const INBOX_SPEC = "mx_01000000000000000000000001";
 const NOW = new Date("2026-08-23T00:00:00.000Z");
 
 const git = {
@@ -126,6 +144,101 @@ function specIndexProjection() {
   };
 }
 
+function inboxDraftFixture(): TeamInboxSpecDraftDetail {
+  return {
+    id: INBOX_DRAFT,
+    revision: "1".repeat(64),
+    updatedAt: NOW.toISOString(),
+    changeKind: "spec.create",
+    entityKind: "requirement",
+    title: "Release benchmark local draft Requirement",
+    rationaleExcerpt: "Review this local draft.",
+    input: {
+      change: {
+        kind: "spec.create",
+        entityKind: "requirement",
+        title: "Release benchmark local draft Requirement",
+        body: "A local body.\n\nIt remains multiline.",
+        status: "in_flight",
+      },
+      rationale: "Review this local draft.\nPreserve its context.",
+      evidence: [],
+      targetRevisions: [],
+    },
+  };
+}
+
+function inboxProposalFixture(
+  state: "pending" | "stale" = "pending",
+): TeamInboxSpecProposalDetail {
+  return {
+    schemaVersion: 1,
+    ref: { id: INBOX_PROPOSAL, kind: "proposal" },
+    sourcePath: `.mex/inbox/${INBOX_PROPOSAL}.md`,
+    revision: "2".repeat(64),
+    state,
+    author: { kind: "unknown" },
+    changeKind: "spec.update",
+    entityKind: "spec",
+    title: "Release benchmark pending Spec update",
+    rationaleExcerpt: "Review this exact update.",
+    change: {
+      kind: "spec.update",
+      target: { id: INBOX_SPEC, kind: "spec" },
+      patch: { summary: "A reviewed summary." },
+    },
+    rationale: "Review this exact update.",
+    evidence: [],
+    targetRevisions: [{
+      target: { kind: "entity", id: INBOX_SPEC },
+      revision: "3".repeat(64),
+      semanticRevision: 1,
+    }],
+  };
+}
+
+function inboxPreviewFixture(): TeamInboxSpecPreviewEnvelope {
+  const draft = inboxDraftFixture();
+  return {
+    schemaVersion: 1,
+    request: {
+      operationId: "hub_inbox_draft_save",
+      action: { kind: "inbox.draft.save", draft: draft.input },
+      expectedRevisions: [],
+    },
+    preview: {
+      valid: true,
+      scope: "local",
+      changes: [],
+      localChanges: [{
+        namespace: "inbox-draft",
+        id: INBOX_DRAFT,
+        beforeRevision: null,
+        afterRevision: draft.revision,
+        summary: "Create a checkout-local Inbox draft.",
+      }],
+      diagnostics: [],
+    },
+    receipt: {
+      schemaVersion: 1,
+      authority: {
+        actor: { kind: "unknown" },
+        occurredAt: NOW.toISOString(),
+        repoState: {
+          branch: "feature/inbox",
+          head: "a".repeat(40),
+          dirty: false,
+          observedAt: NOW.toISOString(),
+        },
+      },
+      purposeIds: [{ purpose: "inbox-draft", id: INBOX_DRAFT }],
+      requestRevision: "4".repeat(64),
+      presentationRevision: "5".repeat(64),
+      previewRevision: "6".repeat(64),
+    },
+  };
+}
+
 function wikiSummary(id: string, kind: string, title: string): WikiEntitySummary {
   return {
     ref: { id, kind, title },
@@ -148,6 +261,396 @@ function wikiSummary(id: string, kind: string, title: string): WikiEntitySummary
 }
 
 describe("createLocalHubReadServices", () => {
+  it("strict-parses a real E1 multiline draft preview, apply, list, and detail through Hub projectors", async () => {
+    let activitySequence = 0;
+    const context = join(projectRoot, ".mex", "context");
+    mkdirSync(context, { recursive: true });
+    writeFileSync(join(context, "hub-inbox-index-seed.md"), `<!-- mex:entity
+id: mx_02000000000000000000000001
+type: topic
+status: promoted
+revision: 1
+-->
+## Hub Inbox index seed
+
+The governed authoring test keeps one canonical entity available to the exact-reader index.
+`, "utf8");
+    const wiki = createRepositoryWikiPort(projectRoot, { now: () => NOW.toISOString() });
+    await wiki.rebuildIndex();
+    const team = createRepositoryTeamWorkflowPortWithDependencies(projectRoot, {
+      scaffoldId: "scaffold-local",
+      wiki,
+      git,
+      now: () => new Date(NOW),
+      idFactories: {
+        localDraft: () => INBOX_DRAFT,
+        proposal: () => INBOX_PROPOSAL,
+        activity: () => activitySequence++ === 0
+          ? EVENT
+          : "event_01ARZ3NDEKTSV4RRFFQ69G5FAC",
+        leaseToken: () => "e".repeat(64),
+      },
+    });
+    const services = createLocalHubReadServicesBase({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      team,
+      inbox: team,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+    const request = InboxOperationPreviewRequestSchema.parse({
+      operationId: "hub_real_e1_draft_save",
+      action: {
+        kind: "inbox.draft.save",
+        draft: {
+          change: {
+            kind: "spec.create",
+            entityKind: "requirement",
+            title: "Multiline Hub projection",
+            body: "The first exact line.\n\tThe tabbed second line remains canonical.",
+            status: "in_flight",
+          },
+          rationale: "Exercise the real E1 envelope.\nKeep multiline context intact.",
+          evidence: [{
+            kind: "manual",
+            note: "Real E1 local-draft result.\n\tThe observation retains its indentation.",
+          }, {
+            kind: "external",
+            uri: "https://example.test/review-evidence",
+            label: "Bounded external evidence",
+          }],
+          targetRevisions: [],
+        },
+      },
+      expectedRevisions: [],
+    });
+    if (request.action.kind !== "inbox.draft.save") {
+      throw new Error("expected the parsed real-service request to remain a draft save");
+    }
+    const savedDraft = request.action.draft;
+    if (savedDraft.change.kind !== "spec.create") {
+      throw new Error("expected the parsed real-service change to remain a Spec create");
+    }
+    const hostileEvidence: readonly TeamEvidenceRef[] = [{
+      kind: "entity",
+      entity: { id: "mx_reference", kind: "spec", title: "C1\u0085title" },
+    }, {
+      kind: "code",
+      code: { kind: "symbol", symbolId: "symbol\u2028boundary" },
+    }, {
+      kind: "external",
+      uri: "https://example.test/evidence",
+      label: "Broken \ud800 label",
+    }, {
+      kind: "external",
+      uri: "https://example.test/Cafe\u0301",
+    }, {
+      kind: "external",
+      uri: "HTTPS://example.test/evidence",
+    }, {
+      kind: "external",
+      uri: "http:example.test/evidence",
+    }, {
+      kind: "external",
+      uri: "https://example.test/evidence note",
+    }];
+    for (const [index, evidence] of hostileEvidence.entries()) {
+      const hostile: TeamInboxSpecCommand = {
+        ...request,
+        operationId: `hub_real_e1_hostile_${index}`,
+        action: {
+          kind: "inbox.draft.save",
+          draft: {
+            change: {
+              kind: "spec.create",
+              entityKind: "requirement",
+              title: savedDraft.change.title,
+              body: savedDraft.change.body,
+              status: savedDraft.change.status,
+            },
+            rationale: savedDraft.rationale,
+            evidence: [evidence],
+            targetRevisions: [],
+          },
+        },
+      };
+      expect(InboxOperationPreviewRequestSchema.safeParse(hostile).success).toBe(false);
+      await expect(team.previewInbox(hostile)).rejects.toMatchObject({
+        problem: { code: "INVALID_REQUEST" },
+      });
+    }
+
+    const preview = await services.previewInboxOperation?.(request);
+    expect(InboxOperationPreviewResponseSchema.parse(preview)).toEqual(preview);
+    expect(preview?.request.action).toMatchObject({
+      kind: "inbox.draft.save",
+      draft: { change: { body: savedDraft.change.body } },
+    });
+    const applied = await services.applyInboxOperation?.(preview!);
+    expect(InboxOperationApplyResponseSchema.parse(applied)).toEqual(applied);
+    const page = await services.inboxDrafts?.({ limit: 25 });
+    expect(InboxDraftListResponseSchema.parse(page).items).toHaveLength(1);
+    const detail = await services.inboxDraft?.(INBOX_DRAFT);
+    const parsedDetail = InboxDraftDetailSchema.parse(detail);
+    expect(parsedDetail.input.change).toMatchObject({
+      kind: "spec.create",
+      body: savedDraft.change.body,
+    });
+    expect(parsedDetail.input.evidence).toEqual(savedDraft.evidence);
+
+    const publish = InboxOperationPreviewRequestSchema.parse({
+      operationId: "hub_real_e1_publish",
+      action: { kind: "inbox.publish", draftId: INBOX_DRAFT },
+      expectedRevisions: [{
+        target: { kind: "local", namespace: "inbox-draft", id: INBOX_DRAFT },
+        revision: parsedDetail.revision,
+      }],
+    });
+    const publishPreview = await services.previewInboxOperation?.(publish);
+    expect(InboxOperationPreviewResponseSchema.parse(publishPreview)).toEqual(publishPreview);
+    await expect(services.applyInboxOperation?.(publishPreview!)).resolves.toMatchObject({
+      applied: true,
+      proposals: [{ ref: { id: INBOX_PROPOSAL }, state: "pending" }],
+    });
+    const pending = InboxProposalDetailSchema.parse(
+      await services.inboxProposal?.(INBOX_PROPOSAL),
+    );
+    expect(pending.rationale).toBe(savedDraft.rationale);
+    expect(pending.evidence).toEqual(savedDraft.evidence);
+
+    const reject = InboxOperationPreviewRequestSchema.parse({
+      operationId: "hub_real_e1_reject",
+      action: {
+        kind: "inbox.reject",
+        proposalId: INBOX_PROPOSAL,
+        rationale: "The first review finding.\n\tThe second finding remains indented.",
+      },
+      expectedRevisions: [{
+        target: { kind: "artifact", path: pending.sourcePath },
+        revision: pending.revision,
+      }],
+    });
+    if (reject.action.kind !== "inbox.reject") {
+      throw new Error("expected the parsed real-service request to remain a rejection");
+    }
+    const rejectionRationale = reject.action.rationale;
+    const rejectPreview = await services.previewInboxOperation?.(reject);
+    expect(InboxOperationPreviewResponseSchema.parse(rejectPreview)).toEqual(rejectPreview);
+    await expect(services.applyInboxOperation?.(rejectPreview!)).resolves.toMatchObject({
+      applied: true,
+      proposals: [{ ref: { id: INBOX_PROPOSAL }, state: "rejected" }],
+    });
+    expect(InboxProposalDetailSchema.parse(
+      await services.inboxProposal?.(INBOX_PROPOSAL),
+    )).toMatchObject({
+      state: "rejected",
+      reviewRationale: rejectionRationale,
+    });
+  });
+
+  it("projects the private Inbox facade explicitly and counts only actionable canonical proposals", async () => {
+    const draft = Object.assign(inboxDraftFixture(), { privateMetadata: "/Users/alice/draft" });
+    const pending = Object.assign(inboxProposalFixture("pending"), { internalRequest: { secret: true } });
+    const stale = {
+      ...inboxProposalFixture("stale"),
+      ref: { id: "proposal_02000000000000000000001720", kind: "proposal" as const },
+      sourcePath: ".mex/inbox/proposal_02000000000000000000001720.md" as const,
+      title: "Stale release Spec update",
+    };
+    const previewEnvelope = inboxPreviewFixture();
+    const draftWire = InboxDraftInputSchema.parse(draft.input);
+    const listInboxDrafts = vi.fn(async () => ({
+      items: [draft],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "7".repeat(64),
+      diagnostics: [] as Diagnostic[],
+    }));
+    const listInboxProposals = vi.fn(async (request?: { cursor?: string; states?: readonly string[] }) => (
+      request?.cursor === "proposal-page-2"
+        ? {
+            items: [stale],
+            nextCursor: null,
+            truncated: false,
+            sourceTruncated: false,
+            deterministicRevision: "8".repeat(64),
+            diagnostics: [] as Diagnostic[],
+          }
+        : {
+            items: [pending],
+            nextCursor: "proposal-page-2",
+            truncated: true,
+            sourceTruncated: false,
+            deterministicRevision: "8".repeat(64),
+            diagnostics: [] as Diagnostic[],
+          }
+    ));
+    const applyInbox = vi.fn(async (envelope: TeamInboxSpecPreviewEnvelope): Promise<TeamInboxSpecApplyResult> => ({
+      operationId: envelope.request.operationId,
+      previewRevision: envelope.receipt.previewRevision,
+      applied: true,
+      idempotentReplay: false,
+      changes: envelope.preview.changes,
+      localChanges: envelope.preview.localChanges,
+      proposals: [pending],
+      events: [],
+    }));
+    const inbox: HubInboxSpecAuthoringService = {
+      getInboxDraft: async () => draft,
+      listInboxDrafts,
+      getInboxProposal: async () => pending,
+      listInboxProposals,
+      previewInbox: async () => previewEnvelope,
+      applyInbox,
+    };
+    const services = createLocalHubReadServicesBase({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      team: identityService(),
+      inbox,
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+
+    await expect(services.capabilities()).resolves.toMatchObject({
+      inbox: {
+        read: { availability: "available" },
+        draftMutation: { availability: "available" },
+        proposalMutation: { availability: "available" },
+        specApproval: { availability: "unavailable" },
+      },
+    });
+    const home = await services.home();
+    expect(home.sections.inbox).toEqual({ availability: "available", count: 2 });
+    expect(listInboxDrafts).not.toHaveBeenCalled();
+    expect(listInboxProposals.mock.calls.slice(0, 2).map(([request]) => request?.states))
+      .toEqual([["pending", "stale"], ["pending", "stale"]]);
+
+    const draftPage = await services.inboxDrafts?.({ limit: 25 });
+    const proposalPage = await services.inboxProposals?.({ states: ["pending", "stale"], limit: 25 });
+    const draftDetail = await services.inboxDraft?.(INBOX_DRAFT);
+    const proposalDetail = await services.inboxProposal?.(INBOX_PROPOSAL);
+    expect(InboxDraftListResponseSchema.parse(draftPage).items[0]).not.toHaveProperty("input");
+    expect(InboxProposalListResponseSchema.parse(proposalPage).items[0]).not.toHaveProperty("change");
+    expect(InboxDraftDetailSchema.parse(draftDetail)).not.toHaveProperty("privateMetadata");
+    expect(InboxProposalDetailSchema.parse(proposalDetail)).not.toHaveProperty("internalRequest");
+    expect(JSON.stringify({ draftPage, proposalPage, draftDetail, proposalDetail })).not.toContain("/Users/alice");
+    expect(JSON.stringify({ draftPage, proposalPage, draftDetail, proposalDetail })).not.toContain("secret");
+
+    const preview = await services.previewInboxOperation?.({
+      operationId: previewEnvelope.request.operationId,
+      action: {
+        kind: "inbox.draft.save",
+        draft: draftWire,
+      },
+      expectedRevisions: [],
+    });
+    expect(InboxOperationPreviewResponseSchema.parse(preview)).toEqual(preview);
+    const applied = await services.applyInboxOperation?.(preview!);
+    expect(InboxOperationApplyResponseSchema.parse(applied)).toEqual(applied);
+    expect(applyInbox).toHaveBeenCalledWith(previewEnvelope);
+
+    const safeDiagnostic = {
+      code: "VALIDATION_FAILED",
+      severity: "warning" as const,
+      message: "The Inbox operation failed bounded validation.",
+      path: `.mex/inbox/${INBOX_PROPOSAL}.md` as const,
+    };
+    const diagnosticEnvelope: TeamInboxSpecPreviewEnvelope = {
+      ...previewEnvelope,
+      preview: {
+        ...previewEnvelope.preview,
+        diagnostics: [safeDiagnostic],
+      },
+    };
+    const diagnosticServices = createLocalHubReadServicesBase({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      team: identityService(),
+      inbox: {
+        ...inbox,
+        previewInbox: async () => diagnosticEnvelope,
+      },
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+    const diagnosticPreview = await diagnosticServices.previewInboxOperation?.({
+      operationId: previewEnvelope.request.operationId,
+      action: { kind: "inbox.draft.save", draft: draftWire },
+      expectedRevisions: [],
+    });
+    expect(diagnosticPreview?.preview.diagnostics).toEqual([safeDiagnostic]);
+    expect(JSON.stringify(diagnosticPreview?.preview.diagnostics))
+      .toBe(JSON.stringify(diagnosticEnvelope.preview.diagnostics));
+    await expect(diagnosticServices.applyInboxOperation?.(diagnosticPreview!)).resolves.toMatchObject({
+      applied: true,
+    });
+    expect(applyInbox).toHaveBeenLastCalledWith(diagnosticEnvelope);
+
+    const redacting = createLocalHubReadServicesBase({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      team: identityService(),
+      inbox: {
+        ...inbox,
+        previewInbox: async () => ({
+          ...previewEnvelope,
+          preview: {
+            ...previewEnvelope.preview,
+            diagnostics: [{
+              code: "PRIVATE_DIAGNOSTIC",
+              severity: "warning",
+              message: "Internal checkout at /Users/alice/repository needs review.",
+              path: "/Users/alice/repository/private.md",
+            }],
+          },
+        }),
+      },
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+    await expect(redacting.previewInboxOperation?.({
+      operationId: previewEnvelope.request.operationId,
+      action: { kind: "inbox.draft.save", draft: draftWire },
+      expectedRevisions: [],
+    })).rejects.toMatchObject({ status: 500, code: "INTERNAL_ERROR" });
+
+    const unsafe = createLocalHubReadServicesBase({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      team: identityService(),
+      inbox: {
+        ...inbox,
+        previewInbox: async () => ({
+          ...previewEnvelope,
+          preview: {
+            ...previewEnvelope.preview,
+            diagnostics: [{
+              code: "PRIVATE_DIAGNOSTIC",
+              severity: "warning",
+              message: "Review required.",
+              detail: { privatePath: "/Users/alice/repository" },
+            }],
+          },
+        }),
+      },
+      jobs: { list: () => ({ items: [] }) },
+      now: () => new Date(NOW),
+    });
+    await expect(unsafe.previewInboxOperation?.({
+      operationId: previewEnvelope.request.operationId,
+      action: { kind: "inbox.draft.save", draft: draftWire },
+      expectedRevisions: [],
+    })).rejects.toMatchObject({ status: 500, code: "INTERNAL_ERROR" });
+  });
+
   it("keeps Team-owned Wiki rows out of general Knowledge browse and search", async () => {
     const team = wikiSummary(
       "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV",
