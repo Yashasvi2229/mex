@@ -13,7 +13,7 @@ edges:
   - target: "../context/conventions.md"
     condition: "when verifying a graph implementation change"
 grounds_to: []
-last_updated: 2026-08-22
+last_updated: 2026-08-28
 ---
 
 # Safe Graph Snapshot Evolution
@@ -70,6 +70,10 @@ belong only to explicit maintenance workflows.
 - `PRAGMA quick_check` does not prove application compatibility. FTS shadow
   tables, fingerprint JSON, LSH bands, ownership, and dangling references need
   explicit invariants.
+- A schema version integer is not lineage proof. When independently developed
+  stores reused version 3, migration had to inspect the complete compact
+  fingerprint/LSH and generalized-grounding shapes before choosing a lossless
+  v4 path. Partial or ambiguous shapes require rebuild rather than inference.
 - Source bytes can change A→B→A while a compiler runs. Final source hashing alone
   cannot detect facts extracted from B; extraction must be bound to A.
 - Graph diagnostics and remediation commands must be truthful. Do not recommend
@@ -86,6 +90,8 @@ belong only to explicit maintenance workflows.
       false corruption diagnosis.
 - [ ] Missing, legacy, newer, malformed, and structurally corrupt schemas have
       accurate diagnostics and safe remediation.
+- [ ] Every recognized historical lineage and complete hybrid migrates through
+      a locked candidate; partial hybrids fail without changing prior bytes.
 - [ ] Source/config symlink escape, retarget, atomic replacement, and ABA tests
       preserve the prior snapshot.
 - [ ] Failed parse/stage/publication tests preserve prior facts and metadata.

@@ -13,6 +13,8 @@ This page records the completed Graph slice. The earlier
 [`project-hub-foundation.md`](project-hub-foundation.md) remains the Lane B
 foundation record; its Graph-pending boundary is superseded here. The separate
 Wiki integration record supersedes this slice's original Wiki-pending boundary.
+The later [`graph-v4-compatibility.md`](graph-v4-compatibility.md) record defines
+how the released v0.7.3 compact store and the Wiki-grounding lineage coexist.
 
 ## Ownership and flow
 
@@ -141,8 +143,9 @@ rejection remain authoritative. Lane A's separate cross-process lock arbitrates
 Hub and CLI graph writers. Hub shutdown gives graph work up to 60 seconds to
 reach a safe boundary, then fails closed.
 
-`.mex/local/team.db` schema v3 adds the Lane A phase allowlist while preserving
-configured members and Catch Up cursors through transactional migration. Reads
+The Lane A phase allowlist introduced `.mex/local/team.db` schema v3; the later
+workflow schema v4 preserves it together with configured members, Catch Up
+cursors, and bounded workflow drafts through transactional migration. Reads
 still never create or migrate local state; explicit Hub startup owns migration
 and stale-job reconciliation.
 
@@ -201,8 +204,9 @@ Adapter and integration coverage exercises ranking parity, all relation and
 code-reference outcomes, cursor binding, UTF-8/source limits, missing/stale/
 degraded/incompatible/corrupt states, WAL activity, database and source ABA,
 final invalidation, safe diagnostics, job eligibility/contention/cancellation,
-schema v2-to-v3 migration and rollback, read non-mutation, real packed Search/
-Code/Health, and explicit packed refresh/rebuild. Browser coverage adds the Code
+recognized v1/v2 and dual-v3 lineage migration to schema v4 with rollback, read
+non-mutation, real packed Search/Code/Health, and explicit packed
+refresh/rebuild. Browser coverage adds the Code
 workspace, job confirmation, accessibility, reduced motion, zero outbound
 requests, and deterministic 1024/1440 screenshots.
 
