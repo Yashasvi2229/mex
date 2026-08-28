@@ -17,4 +17,3 @@ export {
   type TeamInboxSpecCliService,
   type TeamInboxSpecCliServiceFactory,
 } from "./service.js";
-

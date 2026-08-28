@@ -43,4 +43,3 @@ export function projectInboxApply(
 ): TeamInboxSpecApplyResult {
   return structuredClone(value);
 }
-

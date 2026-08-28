@@ -28,4 +28,3 @@ export interface TeamInboxSpecCliService {
 export type TeamInboxSpecCliServiceFactory = () =>
   | TeamInboxSpecCliService
   | Promise<TeamInboxSpecCliService>;
-
