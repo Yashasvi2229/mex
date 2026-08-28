@@ -725,8 +725,8 @@ export function defineTeamInboxSpecAuthoringContract(
       });
     });
 
-    it("persists every allowed create-time relation direction and exact endpoint expectation", async () => {
-      for (const validCase of TEAM_INBOX_VALID_CREATE_CASES) {
+    for (const validCase of TEAM_INBOX_VALID_CREATE_CASES) {
+      it(`persists the ${validCase} create case with its exact endpoint expectations`, async () => {
         await withHarness(factory, "empty", async (harness) => {
           const input = await harness.makeValidCreateInput(validCase);
           expectValidCreateCase(input, validCase);
@@ -766,8 +766,8 @@ export function defineTeamInboxSpecAuthoringContract(
             [proposal.ref, { id: specId, kind: input.change.entityKind }],
           );
         });
-      }
-    }, 30_000);
+      });
+    }
 
     it("publishes a draft with portable proposal and Activity IDs, then cleans up locally", async () => {
       await withHarness(factory, "empty", async (harness) => {
