@@ -311,10 +311,25 @@ describe("Knowledge detail and Code linking", () => {
   });
 
   it("adds Related Knowledge to the symbol identity rail without blocking graph reads", async () => {
-    renderRoute("/code/symbols/sym.createHubServer");
+    const fixture = createFixtureApi();
+    type CodeKnowledge = Awaited<ReturnType<HubApi["getCodeKnowledge"]>>;
+    let resolveKnowledge!: (response: CodeKnowledge) => void;
+    const pendingKnowledge = new Promise<CodeKnowledge>((resolve) => { resolveKnowledge = resolve; });
+    renderRoute("/code/symbols/sym.createHubServer", apiWith({
+      getCodeKnowledge: () => pendingKnowledge,
+    }));
+
     expect(await screen.findByRole("heading", { level: 1, name: "createHubServer" })).toBeVisible();
     const rail = await screen.findByRole("heading", { name: "Related Knowledge" });
     expect(rail).toBeVisible();
-    expect(screen.getByRole("link", { name: /Project Hub read boundaries/ })).toHaveAttribute("href", `/knowledge/${HUB_ID}`);
+    expect(screen.getByRole("heading", { name: "Finding explicit Knowledge links" })).toBeVisible();
+
+    const response = await fixture.getCodeKnowledge("sym.createHubServer", { limit: 25 });
+    await act(async () => {
+      resolveKnowledge(response);
+      await pendingKnowledge;
+    });
+
+    expect(await screen.findByRole("link", { name: /Project Hub read boundaries/ })).toHaveAttribute("href", `/knowledge/${HUB_ID}`);
   });
 });
