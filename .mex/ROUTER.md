@@ -112,13 +112,11 @@ Then read this file fully before doing anything else in this session.
   stale/repair lifecycle, service-minted create identity, and strict
   privacy/recovery boundaries. The guarded CLI, static contract resolver,
   private Hub, lazy Inbox workbench, deterministic fixture, and release
-  measurements are active. Pinned Inbox budget calibration and the final
-  enforcing release run remain pending.
+  measurements are active. Pinned Ubuntu Inbox asset, API, and heap candidates
+  are calibrated from the retained schema-valid report; a clean enforcing CI
+  run remains a mandatory merge gate and cannot widen earlier thresholds.
 
 **Not Built:**
-- Final pinned Ubuntu Inbox asset/API/heap calibration and its green enforcing
-  release rerun. Local measurements are characterization only and cannot set
-  committed budgets.
 - Wiki migration and synthesis UI, grounding-drift/review workbenches, product
   Relay/Playbook commands and Hub routes, Catch Up actions, and later delivery
   checkpoints from the human-team program. The workflow port remains internal;

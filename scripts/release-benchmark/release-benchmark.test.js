@@ -67,10 +67,28 @@ describe("release benchmark contract", () => {
     for (const profile of ["small", "medium", "large"]) {
       expect(Object.keys(budgets.runtime.browserHeapBytes[profile])).toEqual(RELEASE_ROUTE_KEYS);
     }
+    expect({
+      small: {
+        inboxDrafts: budgets.runtime.apiLatencyMs.small.inboxDrafts,
+        inboxProposals: budgets.runtime.apiLatencyMs.small.inboxProposals,
+      },
+      medium: {
+        inboxDrafts: budgets.runtime.apiLatencyMs.medium.inboxDrafts,
+        inboxProposals: budgets.runtime.apiLatencyMs.medium.inboxProposals,
+      },
+      large: {
+        inboxDrafts: budgets.runtime.apiLatencyMs.large.inboxDrafts,
+        inboxProposals: budgets.runtime.apiLatencyMs.large.inboxProposals,
+      },
+    }).toEqual({
+      small: { inboxDrafts: 7, inboxProposals: 6 },
+      medium: { inboxDrafts: 7, inboxProposals: 6 },
+      large: { inboxDrafts: 7, inboxProposals: 6 },
+    });
     expect(budgets.assets.routes.code).toEqual(budgets.assets.routes.search);
     expect(budgets.provisional).toBe(false);
     expect(budgets.calibration).toEqual({
-      status: "calibrated-from-pinned-runs-33005876613-33083122092-and-33117048710",
+      status: "calibrated-from-pinned-runs-33005876613-33083122092-33117048710-E33169865368",
       runtimeFormula: "ceil(measured p95 * 1.15)",
       assetFormula: "ceil(built bytes * 1.05)",
     });
@@ -564,7 +582,7 @@ describe("release benchmark contract", () => {
     }
 
     const exactMetrics = committedConfirmableRuntimeMetrics();
-    expect(exactMetrics).toHaveLength(96);
+    expect(exactMetrics).toHaveLength(102);
     for (const metric of exactMetrics) {
       expect(runtimeMaterialityPolicy(metric)).not.toBeNull();
       const violation = runtimeViolation(metric);

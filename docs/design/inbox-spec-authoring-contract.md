@@ -1,6 +1,6 @@
 # Inbox-Governed Spec Authoring Contract
 
-Status: Checkpoints E1-E4 implemented; pinned release calibration and final enforcement pending
+Status: Checkpoints E1-E4 implemented; pinned calibration applied and enforcing CI required
 
 This brief freezes the minimum product boundary for checkout-local Inbox drafts,
 portable canonical proposals, and explicitly reviewed Spec changes. E0 remains
@@ -471,5 +471,7 @@ Checkpoint E does not add:
 E1 adds focused repository-contract, two-process portability,
 failure-atomicity, containment, privacy, and two-clone coverage for the internal
 service. E2-E4 add the HTTP security, accessibility, product fixture,
-performance, packed-install, compatibility, capability, CLI, and Hub gates;
-only pinned numeric calibration and the final enforcing release run remain.
+performance, packed-install, compatibility, capability, CLI, and Hub gates.
+The exact Inbox asset, API, and heap candidates are calibrated from the
+retained pinned Ubuntu report; clean enforcing CI remains mandatory while
+every earlier threshold stays frozen.

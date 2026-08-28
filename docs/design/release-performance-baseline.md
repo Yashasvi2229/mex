@@ -29,16 +29,25 @@ three fixtures. Only the exact Workstreams and Specs list/detail asset
 candidates and their per-profile browser-heap candidates were copied; every
 pre-Checkpoint-D budget remains frozen.
 
-Checkpoint E's release-gate implementation now measures the real Inbox route,
-draft/proposal list reads, and Inbox heap, but its numeric limits are not yet
-calibrated. No local macOS measurement is eligible for a committed budget. The
-first retained Ubuntu 24.04/Node 22 characterization report must measure only
-`assets.routes.inbox`, each profile's
-`apiLatencyMs.inboxDrafts`/`apiLatencyMs.inboxProposals`, and each profile's
-`browserHeapBytes.inbox`. Missing Inbox API budgets fail closed with a bounded
-`budget_missing` violation while the report still retains their candidates.
-After those exact values are copied with the existing formulas, an enforcing
-pinned rerun must pass; every unrelated budget remains frozen.
+Checkpoint E's Inbox route, draft/proposal list reads, and Inbox heap were
+characterized by pinned CI run
+[`33169865368`](https://github.com/mex-memory/mex/actions/runs/33169865368),
+release-performance job
+[`98844086990`](https://github.com/mex-memory/mex/actions/runs/33169865368/job/98844086990).
+The retained `release-performance-1` artifact (ID `9685340925`, report
+SHA-256 `6cece5bcda181a0931edf2e3ee9355cff2a45f9d6af0ff463ba3eff0d16cdf50`)
+measured PR head `84b6124af88ddfcb6c1798cf95705f2d3850b64f` through GitHub's
+synthetic merge commit `f64338799d71a35476301a7458a6b6c96e9e5cde`. The report
+validated against the versioned schema on Ubuntu 24.04, Linux x64, Node
+22.22.0 with ten timing and five heap samples, one draft and one proposal in
+each fixture, and zero outbound browser requests. Only the exact Inbox asset
+candidates (`120514` JS, `15589` CSS, `0` font), draft/proposal API candidates
+(`7`/`6` ms for small, `7`/`6` ms for medium, and `7`/`6` ms for large), and
+Inbox heap candidates (`6492790`, `6497358`, and `6504906` bytes) were copied.
+The run's unrelated first-pass runtime crossings were not confirmed after the
+expected deterministic Inbox asset failure short-circuited confirmation, so
+every pre-Checkpoint-E budget remains frozen. A clean enforcing pinned run is
+required before the checkpoint can merge.
 
 ## Runner contract
 

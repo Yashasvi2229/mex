@@ -1,6 +1,6 @@
 # Human-Team Memory Contract Lock
 
-Status: Checkpoints E1-E4 implemented; pinned release calibration and final enforcement pending
+Status: Checkpoints E1-E4 implemented; pinned calibration applied and enforcing CI required
 
 This brief records the application boundary for the MEX OSS human-team memory
 program. The contract remains an internal, provisional API until a separate
@@ -349,8 +349,9 @@ including local drafts, portable proposals, exact Spec create/update approval,
 stale/repair, crash recovery, containment, privacy, and two-clone transfer. E2
 registers the guarded CLI and bounded static contract resolver, E3 registers the
 private Hub and lazy Inbox workbench, and E4 adds the deterministic fixture plus
-release measurements. Inbox's numeric release budgets and final enforcing
-pinned run remain pending. Relay, Playbook, and Catch Up remain assigned to
+release measurements. Inbox's numeric release candidates are pinned from the
+retained Ubuntu report, and a clean enforcing CI run is required without
+widening earlier thresholds. Relay, Playbook, and Catch Up remain assigned to
 later checkpoints.
 
 ## Verification commands
