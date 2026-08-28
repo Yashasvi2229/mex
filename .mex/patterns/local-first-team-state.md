@@ -12,7 +12,7 @@ edges:
   - target: "context/conventions.md"
     condition: "when changing canonical serialization or validation"
 grounds_to: []
-last_updated: 2026-08-27
+last_updated: 2026-08-28
 ---
 
 # Local-First Team State
@@ -60,6 +60,12 @@ under `.mex/local/`. Legacy `events/decisions.jsonl` stays byte-for-byte compati
 - A process-local Wiki patch handle is not recovery state. Persist a body-free
   manifest before apply, require a new preview when nothing landed, and resume
   only an exact operation-specific audit prefix when canonical bytes landed.
+- A signed preview that must survive a process restart cannot re-plan a create
+  with fresh random identifiers. Bind every engine-minted identifier in the
+  receipt, force those exact identifiers during re-plan, and compare the whole
+  reviewed presentation before journal intent. Reject hidden batch containers
+  as well as disallowed top-level operations when a product facade promises a
+  narrower write scope.
 
 ## Verify
 

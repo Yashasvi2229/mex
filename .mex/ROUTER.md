@@ -104,13 +104,23 @@ Then read this file fully before doing anything else in this session.
   fresh canonical Wiki Spec roots and their explicit bounded hierarchy. These
   reads share one immutable Wiki/grounding snapshot, never refresh or rebuild an
   index, and provide no Spec mutation surface.
+- Checkpoint E0 locks the product-only Team Inbox and governed Spec authoring
+  contract in `docs/design/inbox-spec-authoring-contract.md`: local draft and
+  portable proposal summary/detail reads, signed exact preview/apply, one
+  non-batch create or title/summary/body update per proposal, explicit
+  stale/repair lifecycle, service-minted create identity, and strict
+  CLI/Hub/UI/privacy/performance boundaries. This is a contract only; no
+  Checkpoint E product surface or green gate is claimed.
 
 **Not Built:**
-- Wiki creation/editing, migration and synthesis UI, grounding-drift/review
-  workbenches, product Inbox/Relay/Playbook commands and Hub routes,
-  Catch Up actions, and later delivery checkpoints from the human-team program.
-  The workflow port remains internal; Checkpoint D adds Workstreams and
-  read-only Spec projection without adding Spec writes.
+- Governed Inbox/Spec authoring commands, capabilities, Hub routes, browser
+  workbench, direct `mex wiki propose|apply` Spec bypass guard, forced-ID
+  portable approval seam, fixtures, tests, and Checkpoint E verification gates.
+  E0 defines these but does not implement or advertise them.
+- Wiki migration and synthesis UI, grounding-drift/review workbenches, product
+  Relay/Playbook commands and Hub routes, Catch Up actions, and later delivery
+  checkpoints from the human-team program. The workflow port remains internal;
+  Checkpoint D remains the latest implemented product surface.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**

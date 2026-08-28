@@ -1,6 +1,6 @@
 # Human-Team Memory Contract Lock
 
-Status: Checkpoint D Workstream and read-only Spec surfaces implemented
+Status: Checkpoint E0 Inbox-governed Spec authoring contract locked; product E not implemented
 
 This brief records the application boundary for the MEX OSS human-team memory
 program. The contract remains an internal, provisional API until a separate
@@ -242,6 +242,43 @@ internal package boundary:
 Checkpoint D does not add Spec authoring. Spec writes remain Inbox-governed and
 belong to Checkpoint E.
 
+## Inbox-governed Spec authoring contract boundary
+
+Checkpoint E0 locks the product contract without claiming its CLI, capability,
+Hub, browser, compatibility guard, fixture, test, or performance implementation.
+The exact boundary is recorded in
+[`inbox-spec-authoring-contract.md`](inbox-spec-authoring-contract.md).
+
+- E is constrained to expose only a Team Inbox facade for bounded local draft
+  and canonical proposal summary/detail reads plus signed
+  `previewInbox`/`applyInbox`.
+- Each proposal contains exactly one non-batch typed Spec change: create one
+  service-ID-derived `.mex/specs/<mx-id>.md`, or update only title, summary, and
+  body on one exact existing Spec-family target.
+- Create is limited to `spec`, `requirement`, `constraint`, or
+  `acceptance_criterion`, status `in_flight | promoted`, bounded topics, and
+  at most one create-time relation in Checkpoint D's exact four-family direction
+  table. Sources, groundings, metadata, adoption, archive, post-create relation
+  changes, properties, type conversion, move, supersede, inline replacement,
+  and adapter `payload.operations` batches are absent.
+- At publish, repair, mark-stale, and approval, existing update targets and
+  create-time relation/topic endpoints are resolved and exact-revision checked
+  in one fresh Wiki view. Local draft save/delete does not require that view.
+- Proposal staleness is explicit: only the service may preview
+  `pending -> stale` after proving target drift, a failed approval writes
+  nothing, and repair is only `stale -> pending`.
+- The signed portable receipt carries at most two generated-purpose IDs from
+  `inbox-draft`, `proposal`, `activity`, and `spec-entity`, and retains the
+  128-node receipt ceiling. A package-private Wiki seam forces the reviewed
+  create ID during exact cross-process re-plan; no executable plan or handle
+  becomes portable.
+- Once product E ships, direct `mex wiki propose` and `mex wiki apply` reject
+  Spec-family creates/targets, type conversions, inline replacements, hidden
+  batch items, and `.mex/specs/**` writes. Non-Spec Wiki administration and
+  declared migration/maintenance remain separately gated.
+- Relay, Playbook, Catch Up, new MCP, agent, Git mutation, hosted, and direct
+  Wiki/Spec editing surfaces remain outside E.
+
 ## Explicit exclusions
 
 Do not implement as part of this program:
@@ -298,9 +335,11 @@ Activity reads, signed cross-process preview/apply, v1-v4 apply-side migration,
 actor fallback, local-selection privacy, immutable recorded actors, exact
 replay, contention, two-clone convergence, and source truncation. Checkpoint D
 adds bounded Workstream lifecycle and cross-process preview/apply coverage plus
-fresh-only Spec projection tests against the real Wiki adapter. Inbox, Relay,
-Playbook, Catch Up, and governed Spec mutation remain assigned to later
-checkpoints.
+fresh-only Spec projection tests against the real Wiki adapter. Checkpoint E0
+now locks the governed Inbox/Spec authoring contract, but product Inbox
+commands, routes, UI, capability advertisement, direct-Wiki bypass guards,
+fixtures, tests, and Spec mutation remain unimplemented. Relay, Playbook, and
+Catch Up remain assigned to later checkpoints.
 
 ## Verification commands
 
