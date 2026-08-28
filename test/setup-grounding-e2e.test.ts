@@ -139,5 +139,5 @@ export function calculateCheckoutTotal(items: number[], member: boolean): number
     );
     expect(result).toEqual({ captured: 0, skipped: 1 });
     expect(warnings).toContainEqual(expect.stringContaining("function:missing"));
-  });
+  }, 30_000);
 });

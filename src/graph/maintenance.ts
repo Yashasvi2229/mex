@@ -27,7 +27,7 @@ import type {
   GraphRefreshResult,
   GraphStatus,
 } from "../team/contracts/graph.js";
-import { DB_SCHEMA_VERSION } from "./db/database.js";
+import { DB_SCHEMA_VERSION, upgradeGraphDatabase } from "./db/database.js";
 import { openSqlite } from "./db/sqlite.js";
 import { createGraphEngine, GraphSourceStagingError } from "./engine-impl.js";
 import type { BuildResult, GraphEngine } from "./engine.js";
@@ -50,6 +50,7 @@ const OWNED_DATABASE_PREFIXES = [
 export type GraphMaintenanceErrorCode =
   | "GRAPH_INDEX_MISSING"
   | "GRAPH_INDEX_NOT_REFRESHABLE"
+  | "GRAPH_INDEX_NOT_REPAIRABLE"
   | "GRAPH_MAINTENANCE_LOCKED"
   | "GRAPH_MAINTENANCE_GATE_STALE"
   | "GRAPH_MAINTENANCE_CANCELLED"
@@ -78,6 +79,21 @@ export interface GraphMaintenanceResult extends GraphRefreshResult {
   durationMs: number;
 }
 
+/** Result of an explicit storage repair; no source extraction is performed. */
+export interface GraphRepairResult {
+  state: "succeeded";
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  diagnostics: readonly Diagnostic[];
+  status: GraphStatus;
+  fromSchemaVersion: number;
+  toSchemaVersion: number;
+  lineage: "v1" | "v2" | "main-v3" | "integration-v3" | "hybrid-v3" | "v4";
+  upgraded: boolean;
+  recoveredWalBytes: number;
+}
+
 interface MaintenancePaths {
   projectRoot: string;
   projectRootReal: string;
@@ -97,6 +113,28 @@ interface DatabaseIdentity {
   mtimeMs: number;
   ctimeMs: number;
   digest: string;
+}
+
+interface RepairSourceIdentity {
+  database: DatabaseIdentity;
+  wal: DatabaseIdentity | null;
+  shm: DatabaseIdentity | null;
+}
+
+interface LiveShmSnapshot {
+  livePath: string;
+  backupPath: string | null;
+  backupIdentity: DatabaseIdentity | null;
+  databaseIdentity: DatabaseIdentity;
+  restoreState: "pending" | "live_removed" | "backup_renamed" | "complete";
+}
+
+interface DetachedLiveSidecars {
+  readonly entries: readonly {
+    livePath: string;
+    detachedPath: string;
+    identity: DatabaseIdentity;
+  }[];
 }
 
 interface StatIdentity {
@@ -133,6 +171,10 @@ interface GraphMaintenanceInternalHooks {
   afterLockAcquired?: () => void | Promise<void>;
   afterCandidateBuilt?: (candidatePath: string) => void | Promise<void>;
   afterCandidateValidated?: (candidatePath: string, status: GraphStatus) => void | Promise<void>;
+  beforeRepairCandidateMaterialize?: (candidatePath: string) => void;
+  afterRepairShmRemoved?: () => void;
+  afterRepairShmRestored?: () => void;
+  beforeRepairSidecarCleanup?: (path: string, index: number) => void;
   beforeLiveRevalidation?: () => void | Promise<void>;
   afterRollbackCreated?: (rollbackPath: string) => void | Promise<void>;
   afterPublish?: (databasePath: string) => void | Promise<void>;
@@ -155,6 +197,7 @@ interface CandidatePublicationInput {
   priorIdentity: DatabaseIdentity | null;
   retainRecovery: boolean;
   options: InternalMaintenanceOptions;
+  assertStatus?: (status: GraphStatus) => void;
 }
 
 interface CandidatePublicationResult {
@@ -163,7 +206,7 @@ interface CandidatePublicationResult {
   diagnostics: readonly Diagnostic[];
 }
 
-export type GraphMaintenanceLeaseMode = "refresh" | "rebuild";
+export type GraphMaintenanceLeaseMode = "refresh" | "rebuild" | "repair";
 
 /**
  * Internal programmatic lease for workflows that must keep graph writes and
@@ -175,6 +218,7 @@ export interface GraphMaintenanceLease {
   readonly databasePath: string;
   refresh(options?: GraphMaintenanceOptions): Promise<GraphMaintenanceResult>;
   rebuild(options?: GraphMaintenanceOptions): Promise<GraphMaintenanceResult>;
+  repair(options?: GraphMaintenanceOptions): Promise<GraphRepairResult>;
   release(): void;
 }
 
@@ -186,7 +230,7 @@ export function acquireGraphMaintenanceLease(
   const internalOptions = options as InternalMaintenanceOptions;
   const paths = resolveMaintenancePaths(projectRoot, mode === "rebuild");
   assertMaintenanceDirectoryUnchanged(paths);
-  if (mode === "refresh" && !existsSync(paths.database)) {
+  if (mode !== "rebuild" && !existsSync(paths.database)) {
     throw new GraphMaintenanceError(
       "GRAPH_INDEX_MISSING",
       "The graph index does not exist. Run `mex graph rebuild` first.",
@@ -196,9 +240,9 @@ export function acquireGraphMaintenanceLease(
   let released = false;
   let active = false;
   const run = async (
-    operation: "refresh" | "rebuild",
+    operation: "refresh" | "rebuild" | "repair",
     operationOptions: GraphMaintenanceOptions,
-  ): Promise<GraphMaintenanceResult> => {
+  ): Promise<GraphMaintenanceResult | GraphRepairResult> => {
     if (released) throw new Error("The graph maintenance lease has already been released.");
     if (active) {
       throw new GraphMaintenanceError(
@@ -218,9 +262,9 @@ export function acquireGraphMaintenanceLease(
       } as InternalMaintenanceOptions;
       await merged.__internal?.afterLockAcquired?.();
       assertMaintenanceDirectoryUnchanged(paths);
-      return operation === "refresh"
-        ? await refreshGraphWithLease(paths, merged)
-        : await rebuildGraphWithLease(paths, merged);
+      if (operation === "refresh") return await refreshGraphWithLease(paths, merged);
+      if (operation === "repair") return await repairGraphWithLease(paths, merged);
+      return await rebuildGraphWithLease(paths, merged);
     } finally {
       active = false;
     }
@@ -228,8 +272,9 @@ export function acquireGraphMaintenanceLease(
   return {
     projectRoot: paths.projectRoot,
     databasePath: paths.database,
-    refresh: (operationOptions = {}) => run("refresh", operationOptions),
-    rebuild: (operationOptions = {}) => run("rebuild", operationOptions),
+    refresh: (operationOptions = {}) => run("refresh", operationOptions) as Promise<GraphMaintenanceResult>,
+    rebuild: (operationOptions = {}) => run("rebuild", operationOptions) as Promise<GraphMaintenanceResult>,
+    repair: (operationOptions = {}) => run("repair", operationOptions) as Promise<GraphRepairResult>,
     release: () => {
       if (released) return;
       if (active) throw new Error("Cannot release an active graph maintenance lease.");
@@ -249,6 +294,156 @@ export async function refreshGraph(
     return await lease.refresh(options);
   } finally {
     lease.release();
+  }
+}
+
+/**
+ * Recover a checkpoint-stranded or recognized older graph without touching
+ * the live database in place. The live SQLite view is materialized into an
+ * owned same-directory candidate, upgraded there, validated, and only then
+ * published under the ordinary graph maintenance lock.
+ */
+export async function repairGraph(
+  projectRoot: string,
+  options: GraphMaintenanceOptions = {},
+): Promise<GraphRepairResult> {
+  const lease = acquireGraphMaintenanceLease(projectRoot, "repair", options);
+  try {
+    return await lease.repair(options);
+  } finally {
+    lease.release();
+  }
+}
+
+async function repairGraphWithLease(
+  paths: MaintenancePaths,
+  options: InternalMaintenanceOptions,
+): Promise<GraphRepairResult> {
+  const started = currentDate(options);
+  let candidatePath: string | null = null;
+  let detachedSidecars: DetachedLiveSidecars | null = null;
+  let liveShmSnapshot: LiveShmSnapshot | null = null;
+  let liveShmExpected: DatabaseIdentity | null | undefined;
+  let repairSource: RepairSourceIdentity | null = null;
+  let livePublished = false;
+  try {
+    assertNotAborted(options.signal);
+    progress(options, "discover", "Inspecting the graph database and recovery state.");
+    const priorStatus = await inspect(options, paths.projectRoot, paths.database);
+    assertMaintenanceDirectoryUnchanged(paths);
+    assertRepairSourceSafe(priorStatus);
+
+    candidatePath = ownedPath(paths, "candidate", createToken(options));
+    progress(options, "stage", "Materializing the exact live SQLite view into an isolated candidate.");
+    // Bind the complete recovery namespace before SQLite is allowed to read
+    // it. A failed VACUUM can still touch SHM, so the outer recovery path must
+    // never infer safety from the unchanged main database alone.
+    repairSource = captureRepairSource(paths);
+    liveShmExpected = repairSource.shm;
+    liveShmSnapshot = preserveLiveShm(paths, options);
+    const copied = materializeRepairCandidate(paths, candidatePath, repairSource, options);
+    repairSource = copied.source;
+    liveShmExpected = copied.source.shm;
+    assertNotAborted(options.signal);
+
+    let upgrade: ReturnType<typeof upgradeGraphDatabase>;
+    try {
+      upgrade = upgradeGraphDatabase(candidatePath);
+    } catch {
+      throw new GraphMaintenanceError(
+        "GRAPH_INDEX_NOT_REPAIRABLE",
+        "The graph schema lineage is ambiguous, malformed, or cannot be upgraded losslessly. Run `mex graph rebuild`.",
+        priorStatus.diagnostics,
+      );
+    }
+    if (upgrade.requiresRebuild) {
+      throw new GraphMaintenanceError(
+        "GRAPH_INDEX_NOT_REPAIRABLE",
+        "The graph uses a lineage that cannot be upgraded losslessly. Run `mex graph rebuild`.",
+        priorStatus.diagnostics,
+      );
+    }
+    checkpointRepairCandidate(candidatePath);
+    await options.__internal?.afterCandidateBuilt?.(candidatePath);
+    assertMaintenanceDirectoryUnchanged(paths);
+    assertNotAborted(options.signal);
+
+    progress(options, "validate", "Validating the repaired graph candidate.");
+    const candidate = await validateCandidate(
+      options,
+      paths,
+      candidatePath,
+      assertRepairPublishableCandidate,
+    );
+    await options.__internal?.afterCandidateValidated?.(candidatePath, candidate.status);
+    assertMaintenanceDirectoryUnchanged(paths);
+
+    // SQLite may update its ephemeral shared-memory header while reading the
+    // stranded WAL. Restore the exact pre-repair SHM bytes (or prior absence)
+    // before binding and detaching the publication namespace.
+    restoreLiveShmSnapshot(paths, liveShmSnapshot, copied.source.shm, copied.source.database, options);
+    liveShmSnapshot = null;
+    liveShmExpected = undefined;
+    // The candidate was built from this exact main-file/WAL view. Bind that
+    // view again before detaching recovery sidecars from the publication name.
+    revalidateRepairSource(paths, copied.source);
+    detachedSidecars = detachLiveSidecars(paths, copied.source, options);
+    const published = await publishCandidate({
+      paths,
+      candidatePath,
+      candidate,
+      priorStatus,
+      priorIdentity: copied.source.database,
+      retainRecovery: false,
+      options,
+      assertStatus: assertRepairPublishableCandidate,
+    });
+    livePublished = true;
+    candidatePath = null;
+    const cleanupDiagnostics = cleanupDetachedSidecars(paths, detachedSidecars, options);
+    detachedSidecars = null;
+
+    const finished = currentDate(options);
+    return {
+      state: "succeeded",
+      startedAt: started.toISOString(),
+      finishedAt: finished.toISOString(),
+      durationMs: Math.max(0, finished.getTime() - started.getTime()),
+      diagnostics: [...published.diagnostics, ...cleanupDiagnostics],
+      status: published.status,
+      fromSchemaVersion: upgrade.fromVersion,
+      toSchemaVersion: upgrade.toVersion,
+      lineage: upgrade.lineage,
+      upgraded: upgrade.changed,
+      recoveredWalBytes: copied.walBytes,
+    };
+  } catch (error) {
+    if (detachedSidecars && !livePublished) {
+      restoreDetachedSidecars(paths, detachedSidecars, repairSource?.database);
+    } else if (liveShmSnapshot) {
+      try {
+        if (repairSource) revalidateRepairSource(paths, repairSource);
+        restoreLiveShmSnapshot(
+          paths,
+          liveShmSnapshot,
+          liveShmExpected,
+          repairSource?.database ?? liveShmSnapshot.databaseIdentity,
+          options,
+        );
+      } catch (restoreError) {
+        if (liveShmSnapshot.backupPath && existsSync(liveShmSnapshot.backupPath)) {
+          throw retainedRecoveryError(
+            paths,
+            [liveShmSnapshot.backupPath],
+            "The live graph recovery namespace changed before its exact shared-memory snapshot could be restored.",
+          );
+        }
+        throw restoreError;
+      }
+    }
+    throw error;
+  } finally {
+    if (candidatePath) cleanupOwnedDatabase(paths, candidatePath);
   }
 }
 
@@ -426,6 +621,433 @@ async function rebuildCandidate(
   }
 }
 
+function materializeRepairCandidate(
+  paths: MaintenancePaths,
+  candidatePath: string,
+  expectedSource: RepairSourceIdentity,
+  options: InternalMaintenanceOptions,
+): { source: RepairSourceIdentity; walBytes: number } {
+  assertMaintenanceDirectoryUnchanged(paths);
+  assertOwnedDatabasePath(candidatePath);
+  if (existsSync(candidatePath)) {
+    throw new GraphMaintenanceError(
+      "GRAPH_MAINTENANCE_PATH_UNSAFE",
+      `Refusing to overwrite an existing owned maintenance path (${basename(candidatePath)}).`,
+    );
+  }
+  let before: RepairSourceIdentity;
+  let db: ReturnType<typeof openSqlite> | null = null;
+  try {
+    options.__internal?.beforeRepairCandidateMaterialize?.(candidatePath);
+    before = captureRepairSource(paths);
+    if (!sameRepairSourceIncludingShm(expectedSource, before)) {
+      throw new GraphMaintenanceError(
+        "GRAPH_MAINTENANCE_RACE",
+        "The live graph recovery namespace changed before candidate materialization.",
+      );
+    }
+    // VACUUM INTO reads one coherent SQLite snapshot, including committed WAL
+    // pages, while writing only the maintenance-owned candidate.
+    db = openSqlite(paths.database, { readOnly: true });
+    db.pragma("busy_timeout = 5000");
+    db.prepare("VACUUM INTO ?").run(candidatePath);
+  } catch (error) {
+    cleanupOwnedDatabase(paths, candidatePath);
+    if (error instanceof GraphMaintenanceError) throw error;
+    throw new GraphMaintenanceError(
+      "GRAPH_INDEX_NOT_REPAIRABLE",
+      "The graph recovery state could not be materialized safely. Run `mex graph rebuild`.",
+    );
+  } finally {
+    db?.close();
+  }
+  const after = captureRepairSource(paths);
+  if (!sameRepairSource(before, after)) {
+    cleanupOwnedDatabase(paths, candidatePath);
+    throw new GraphMaintenanceError(
+      "GRAPH_MAINTENANCE_RACE",
+      "The live graph or its WAL changed while the repair candidate was being materialized.",
+    );
+  }
+  assertOwnedCopyUnchanged(candidatePath, captureDatabaseIdentity(candidatePath));
+  fsyncFile(candidatePath);
+  return { source: after, walBytes: after.wal?.size ?? 0 };
+}
+
+function checkpointRepairCandidate(candidatePath: string): void {
+  let db: ReturnType<typeof openSqlite> | null = null;
+  try {
+    db = openSqlite(candidatePath);
+    db.pragma("busy_timeout = 5000");
+    db.pragma("wal_checkpoint(TRUNCATE)");
+    const rows = db.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check?: unknown }>;
+    const failures = rows
+      .map((row) => row.integrity_check)
+      .filter((value): value is string => typeof value === "string" && value !== "ok");
+    if (failures.length > 0) {
+      throw new GraphMaintenanceError(
+        "GRAPH_CANDIDATE_INVALID",
+        `The repaired graph candidate failed SQLite integrity validation: ${failures.join("; ")}.`,
+      );
+    }
+  } finally {
+    db?.close();
+  }
+}
+
+function preserveLiveShm(
+  paths: MaintenancePaths,
+  options: InternalMaintenanceOptions,
+): LiveShmSnapshot {
+  assertMaintenanceDirectoryUnchanged(paths);
+  const databaseBefore = captureDatabaseIdentity(paths.database);
+  const livePath = `${paths.database}-shm`;
+  const stats = safeLstat(livePath);
+  if (!stats) {
+    return {
+      livePath,
+      backupPath: null,
+      backupIdentity: null,
+      databaseIdentity: databaseBefore,
+      restoreState: "pending",
+    };
+  }
+  if (!stats.isFile() || stats.isSymbolicLink()) {
+    throw new GraphMaintenanceError(
+      "GRAPH_MAINTENANCE_PATH_UNSAFE",
+      "The graph shared-memory sidecar is not a contained regular file.",
+    );
+  }
+  const sourceIdentity = captureDatabaseIdentity(livePath);
+  const base = ownedPath(paths, "recovery", createToken(options));
+  const backupPath = `${base}.source-shm`;
+  const backupIdentity = copyExactDatabase(paths, livePath, backupPath, sourceIdentity);
+  const databaseAfter = captureDatabaseIdentity(paths.database);
+  if (!sameDatabaseIdentity(databaseBefore, databaseAfter)) {
+    cleanupOwnedDatabasePath(paths, backupPath);
+    throw new GraphMaintenanceError(
+      "GRAPH_MAINTENANCE_RACE",
+      "The live graph changed while its shared-memory recovery snapshot was captured.",
+    );
+  }
+  return {
+    livePath,
+    backupPath,
+    backupIdentity,
+    databaseIdentity: databaseAfter,
+    restoreState: "pending",
+  };
+}
+
+function restoreLiveShmSnapshot(
+  paths: MaintenancePaths,
+  snapshot: LiveShmSnapshot,
+  expectedCurrent?: DatabaseIdentity | null,
+  expectedDatabase: DatabaseIdentity = snapshot.databaseIdentity,
+  options?: InternalMaintenanceOptions,
+): void {
+  assertMaintenanceDirectoryUnchanged(paths);
+  assertRepairBaseContents(paths, expectedDatabase, snapshot.backupPath ? [snapshot.backupPath] : []);
+  if (snapshot.restoreState === "complete") return;
+
+  if (snapshot.restoreState === "backup_renamed") {
+    if (!snapshot.backupIdentity || !existsSync(snapshot.livePath)) {
+      throw new GraphMaintenanceError(
+        "GRAPH_PUBLICATION_FAILED",
+        "The exact shared-memory recovery snapshot became unavailable during restoration.",
+      );
+    }
+    const restored = captureDatabaseIdentity(snapshot.livePath);
+    if (restored.size !== snapshot.backupIdentity.size
+      || restored.digest !== snapshot.backupIdentity.digest) {
+      throw new GraphMaintenanceError(
+        "GRAPH_PUBLICATION_FAILED",
+        "The restored shared-memory sidecar no longer matches its exact recovery bytes.",
+      );
+    }
+    fsyncMaintenanceDirectory(paths);
+    snapshot.restoreState = "complete";
+    return;
+  }
+
+  if (snapshot.restoreState === "pending") {
+    const current = safeLstat(snapshot.livePath);
+    if (current) {
+      if (!current.isFile() || current.isSymbolicLink()) {
+        throw new GraphMaintenanceError(
+          "GRAPH_MAINTENANCE_PATH_UNSAFE",
+          "The graph shared-memory sidecar changed to an unsafe path during repair.",
+        );
+      }
+      const currentIdentity = captureDatabaseIdentity(snapshot.livePath);
+      if (expectedCurrent !== undefined
+        && (expectedCurrent === null || !sameDatabaseIdentity(currentIdentity, expectedCurrent))) {
+        throw new GraphMaintenanceError(
+          "GRAPH_MAINTENANCE_RACE",
+          "The graph shared-memory sidecar changed after candidate materialization.",
+        );
+      }
+      unlinkSync(snapshot.livePath);
+    } else if (expectedCurrent !== undefined && expectedCurrent !== null) {
+      throw new GraphMaintenanceError(
+        "GRAPH_MAINTENANCE_RACE",
+        "The graph shared-memory sidecar disappeared after candidate materialization.",
+      );
+    }
+    snapshot.restoreState = "live_removed";
+    options?.__internal?.afterRepairShmRemoved?.();
+  }
+
+  if (snapshot.backupPath && snapshot.backupIdentity) {
+    assertOwnedCopyUnchanged(snapshot.backupPath, snapshot.backupIdentity);
+    if (existsSync(snapshot.livePath)) {
+      throw new GraphMaintenanceError(
+        "GRAPH_PUBLICATION_FAILED",
+        "The graph shared-memory publication name was occupied during restoration.",
+      );
+    }
+    renameSync(snapshot.backupPath, snapshot.livePath);
+    snapshot.restoreState = "backup_renamed";
+    options?.__internal?.afterRepairShmRestored?.();
+  }
+  fsyncMaintenanceDirectory(paths);
+  snapshot.restoreState = "complete";
+}
+
+function captureRepairSource(paths: MaintenancePaths): RepairSourceIdentity {
+  assertMaintenanceDirectoryUnchanged(paths);
+  const journalPath = `${paths.database}-journal`;
+  const journal = safeLstat(journalPath);
+  if (journal) {
+    if (!journal.isFile() || journal.isSymbolicLink() || journal.size !== 0) {
+      throw new GraphMaintenanceError(
+        "GRAPH_INDEX_NOT_REPAIRABLE",
+        "A rollback journal is active; wait for its writer to finish or run `mex graph rebuild`.",
+      );
+    }
+  }
+  const walPath = `${paths.database}-wal`;
+  const walStats = safeLstat(walPath);
+  if (walStats && (!walStats.isFile() || walStats.isSymbolicLink())) {
+    throw new GraphMaintenanceError(
+      "GRAPH_MAINTENANCE_PATH_UNSAFE",
+      "The graph WAL is not a contained regular file.",
+    );
+  }
+  const shmPath = `${paths.database}-shm`;
+  const shmStats = safeLstat(shmPath);
+  if (shmStats && (!shmStats.isFile() || shmStats.isSymbolicLink())) {
+    throw new GraphMaintenanceError(
+      "GRAPH_MAINTENANCE_PATH_UNSAFE",
+      "The graph shared-memory sidecar is not a contained regular file.",
+    );
+  }
+  return {
+    database: captureDatabaseIdentity(paths.database),
+    wal: walStats && walStats.size > 0 ? captureDatabaseIdentity(walPath) : null,
+    shm: shmStats ? captureDatabaseIdentity(shmPath) : null,
+  };
+}
+
+function revalidateRepairSource(paths: MaintenancePaths, expected: RepairSourceIdentity): void {
+  const current = captureRepairSource(paths);
+  if (!sameRepairSource(current, expected)) {
+    throw new GraphMaintenanceError(
+      "GRAPH_MAINTENANCE_RACE",
+      "The live graph or its WAL changed before repaired candidate publication.",
+    );
+  }
+}
+
+function sameRepairSource(left: RepairSourceIdentity, right: RepairSourceIdentity): boolean {
+  return sameDatabaseIdentity(left.database, right.database)
+    && (left.wal === null
+      ? right.wal === null
+      : right.wal !== null && sameDatabaseIdentity(left.wal, right.wal));
+}
+
+function sameRepairSourceIncludingShm(
+  left: RepairSourceIdentity,
+  right: RepairSourceIdentity,
+): boolean {
+  return sameRepairSource(left, right)
+    && (left.shm === null
+      ? right.shm === null
+      : right.shm !== null && sameDatabaseIdentity(left.shm, right.shm));
+}
+
+function detachLiveSidecars(
+  paths: MaintenancePaths,
+  source: RepairSourceIdentity,
+  options: InternalMaintenanceOptions,
+): DetachedLiveSidecars {
+  revalidateRepairSource(paths, source);
+  const base = ownedPath(paths, "recovery", createToken(options));
+  const entries: Array<{
+    livePath: string;
+    detachedPath: string;
+    identity: DatabaseIdentity;
+  }> = [];
+  try {
+    for (const suffix of ["-wal", "-shm", "-journal"] as const) {
+      const livePath = `${paths.database}${suffix}`;
+      const stats = safeLstat(livePath);
+      if (!stats) continue;
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new GraphMaintenanceError(
+          "GRAPH_MAINTENANCE_PATH_UNSAFE",
+          `The graph recovery sidecar ${basename(livePath)} is not a regular file.`,
+        );
+      }
+      const identity = captureDatabaseIdentity(livePath);
+      if (suffix === "-wal" && identity.size > 0
+        && (!source.wal || !sameDatabaseIdentity(identity, source.wal))) {
+        throw new GraphMaintenanceError(
+          "GRAPH_MAINTENANCE_RACE",
+          "The graph WAL changed before repaired candidate publication.",
+        );
+      }
+      const detachedPath = `${base}${suffix}`;
+      if (existsSync(detachedPath)) {
+        throw new GraphMaintenanceError(
+          "GRAPH_MAINTENANCE_PATH_UNSAFE",
+          `Refusing to overwrite an existing recovery path (${basename(detachedPath)}).`,
+        );
+      }
+      assertMaintenanceDirectoryUnchanged(paths);
+      renameSync(livePath, detachedPath);
+      const detachedIdentity = captureDatabaseIdentity(detachedPath);
+      entries.push({ livePath, detachedPath, identity: detachedIdentity });
+      if (identity.dev !== detachedIdentity.dev
+        || identity.ino !== detachedIdentity.ino
+        || identity.size !== detachedIdentity.size
+        || identity.digest !== detachedIdentity.digest) {
+        throw new GraphMaintenanceError(
+          "GRAPH_MAINTENANCE_RACE",
+          `The graph recovery sidecar ${basename(livePath)} changed while it was detached.`,
+        );
+      }
+    }
+    revalidateLiveDatabase(paths.database, source.database);
+    fsyncMaintenanceDirectory(paths);
+    return { entries };
+  } catch (error) {
+    restoreDetachedSidecars(paths, { entries }, source.database);
+    throw error;
+  }
+}
+
+function restoreDetachedSidecars(
+  paths: MaintenancePaths,
+  detached: DetachedLiveSidecars,
+  expectedDatabase: DatabaseIdentity | undefined,
+): void {
+  if (!expectedDatabase) {
+    throw retainedSidecarRecoveryError(paths, detached, "The prior graph identity is unavailable.");
+  }
+  assertRepairBaseContents(
+    paths,
+    expectedDatabase,
+    detached.entries.map((entry) => entry.detachedPath),
+  );
+  for (const entry of [...detached.entries].reverse()) {
+    if (!existsSync(entry.detachedPath)) continue;
+    assertOwnedCopyUnchanged(entry.detachedPath, entry.identity);
+    if (existsSync(entry.livePath)) {
+      throw new GraphMaintenanceError(
+        "GRAPH_PUBLICATION_FAILED",
+        `A graph recovery sidecar reappeared before rollback (${basename(entry.livePath)}); the exact prior sidecar remains at ${toRepoRelative(paths.projectRoot, entry.detachedPath)}.`,
+      );
+    }
+    assertMaintenanceDirectoryUnchanged(paths);
+    renameSync(entry.detachedPath, entry.livePath);
+  }
+  fsyncMaintenanceDirectory(paths);
+}
+
+function assertRepairBaseContents(
+  paths: MaintenancePaths,
+  expected: DatabaseIdentity,
+  retainedPaths: readonly string[],
+): void {
+  let current: DatabaseIdentity;
+  try {
+    current = captureDatabaseIdentity(paths.database);
+  } catch {
+    throw retainedRecoveryError(paths, retainedPaths, "The live graph is unavailable.");
+  }
+  if (current.size !== expected.size || current.digest !== expected.digest) {
+    throw retainedRecoveryError(
+      paths,
+      retainedPaths,
+      "The live graph no longer matches the exact prior database.",
+    );
+  }
+}
+
+function retainedSidecarRecoveryError(
+  paths: MaintenancePaths,
+  detached: DetachedLiveSidecars,
+  reason: string,
+): GraphMaintenanceError {
+  return retainedRecoveryError(paths, detached.entries.map((entry) => entry.detachedPath), reason);
+}
+
+function retainedRecoveryError(
+  paths: MaintenancePaths,
+  retainedPaths: readonly string[],
+  reason: string,
+): GraphMaintenanceError {
+  const first = retainedPaths.find((path) => existsSync(path));
+  const recoveryPath = first ? toRepoRelative(paths.projectRoot, first) : undefined;
+  return new GraphMaintenanceError(
+    "GRAPH_PUBLICATION_FAILED",
+    `${reason} Exact prior recovery sidecars were not attached to it.`
+      + (recoveryPath ? ` Recovery data remains at ${recoveryPath}.` : ""),
+    recoveryPath
+      ? [recoveryRetainedDiagnostic(
+          recoveryPath,
+          "Exact prior graph recovery sidecars were retained because the live graph identity changed.",
+        )]
+      : [],
+    recoveryPath,
+  );
+}
+
+function cleanupDetachedSidecars(
+  paths: MaintenancePaths,
+  detached: DetachedLiveSidecars,
+  options: InternalMaintenanceOptions,
+): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  detached.entries.forEach((entry, index) => {
+    try {
+      options.__internal?.beforeRepairSidecarCleanup?.(entry.detachedPath, index);
+      if (!existsSync(entry.detachedPath)) return;
+      assertOwnedCopyUnchanged(entry.detachedPath, entry.identity);
+      assertMaintenanceDirectoryUnchanged(paths);
+      unlinkSync(entry.detachedPath);
+    } catch {
+      diagnostics.push({
+        code: "GRAPH_INDEX_RECOVERY_CLEANUP_INCOMPLETE",
+        severity: "warning",
+        message: "The repaired graph was published, but an exact prior recovery sidecar could not be removed automatically.",
+        path: toRepoRelative(paths.projectRoot, entry.detachedPath),
+      });
+    }
+  });
+  try {
+    fsyncMaintenanceDirectory(paths);
+  } catch {
+    diagnostics.push({
+      code: "GRAPH_INDEX_RECOVERY_CLEANUP_INCOMPLETE",
+      severity: "warning",
+      message: "The repaired graph was published, but recovery cleanup durability could not be confirmed.",
+    });
+  }
+  return diagnostics;
+}
+
 function maintenanceEngine(
   paths: MaintenancePaths,
   candidatePath: string,
@@ -501,7 +1123,7 @@ async function publishCandidate(input: CandidatePublicationInput): Promise<Candi
 
     const status = await inspect(options, paths.projectRoot, paths.database);
     assertMaintenanceDirectoryUnchanged(paths);
-    assertPublishableCandidate(status);
+    (input.assertStatus ?? assertPublishableCandidate)(status);
     const diagnostics: Diagnostic[] = [...status.diagnostics];
     let recoveryPath: string | undefined;
     if (rollbackPath && input.retainRecovery) {
@@ -535,7 +1157,7 @@ async function publishCandidate(input: CandidatePublicationInput): Promise<Candi
         rollbackPath = null;
         rollbackIdentity = null;
         fsyncMaintenanceDirectory(paths);
-      } catch (rollbackError) {
+      } catch {
         const retainedPath = rollbackPath && rollbackIdentity
           ? retainBoundRollbackCopy(paths, rollbackPath, rollbackIdentity)
           : undefined;
@@ -552,7 +1174,7 @@ async function publishCandidate(input: CandidatePublicationInput): Promise<Candi
           : input.candidate.status.diagnostics;
         throw new GraphMaintenanceError(
           "GRAPH_PUBLICATION_FAILED",
-          `The graph candidate failed validation and automatic rollback also failed: ${errorMessage(rollbackError)}`
+          "The graph candidate failed validation and automatic rollback could not be completed safely."
             + (retainedPath ? ` Exact prior bytes remain at ${retainedPath}.` : ""),
           diagnostics,
           retainedPath,
@@ -565,10 +1187,10 @@ async function publishCandidate(input: CandidatePublicationInput): Promise<Candi
       // is safer to leave that path alone and report the failed rollback.
       try {
         restoreMissingDatabaseState(input);
-      } catch (rollbackError) {
+      } catch {
         throw new GraphMaintenanceError(
           "GRAPH_PUBLICATION_FAILED",
-          `The first graph candidate failed validation and the prior missing state could not be restored safely: ${errorMessage(rollbackError)}`,
+          "The first graph candidate failed validation and the prior missing state could not be restored safely.",
           input.candidate.status.diagnostics,
         );
       }
@@ -577,8 +1199,8 @@ async function publishCandidate(input: CandidatePublicationInput): Promise<Candi
     throw new GraphMaintenanceError(
       published ? "GRAPH_PUBLICATION_FAILED" : "GRAPH_MAINTENANCE_RACE",
       published
-        ? `The graph candidate could not be published safely: ${errorMessage(error)}`
-        : `The live graph changed before candidate publication: ${errorMessage(error)}`,
+        ? "The graph candidate could not be published safely."
+        : "The live graph changed before candidate publication.",
       input.priorStatus.diagnostics,
     );
   } finally {
@@ -1063,13 +1685,14 @@ async function validateCandidate(
   options: InternalMaintenanceOptions,
   paths: MaintenancePaths,
   candidatePath: string,
+  assertStatus: (status: GraphStatus) => void = assertPublishableCandidate,
 ): Promise<ValidatedCandidate> {
   assertMaintenanceDirectoryUnchanged(paths);
   assertClearSidecars(candidatePath);
   const identityBefore = captureDatabaseIdentity(candidatePath);
   const status = await inspect(options, paths.projectRoot, candidatePath);
   assertMaintenanceDirectoryUnchanged(paths);
-  assertPublishableCandidate(status);
+  assertStatus(status);
   assertClearSidecars(candidatePath);
   const snapshot = readExactSnapshot(candidatePath);
   const identityAfter = captureDatabaseIdentity(candidatePath);
@@ -1190,6 +1813,45 @@ function assertRefreshable(status: GraphStatus): void {
       status.diagnostics,
     );
   }
+}
+
+function assertRepairSourceSafe(status: GraphStatus): void {
+  if (status.status === "missing") {
+    throw new GraphMaintenanceError(
+      "GRAPH_INDEX_MISSING",
+      "The graph index does not exist. Run `mex graph rebuild` first.",
+      status.diagnostics,
+    );
+  }
+  const blockedCodes = new Set([
+    "GRAPH_INDEX_CORRUPT",
+    "GRAPH_INDEX_SCHEMA_INVALID",
+    "GRAPH_INDEX_INVARIANT_FAILED",
+    "GRAPH_INDEX_SIDECAR_UNAVAILABLE",
+    "GRAPH_INDEX_UNAVAILABLE",
+    "GRAPH_INDEX_PATH_OUTSIDE_PROJECT",
+    "GRAPH_INDEX_PATH_UNAVAILABLE",
+    "GRAPH_INDEX_CORPUS_LIMIT_EXCEEDED",
+    "GRAPH_SOURCE_CORPUS_LIMIT_EXCEEDED",
+    "GRAPH_SOURCE_INSPECTION_INCOMPLETE",
+    "GRAPH_SEMANTIC_INPUT_INSPECTION_INCOMPLETE",
+    "GRAPH_REPO_INSPECTION_INCOMPLETE",
+    "GRAPH_MANIFEST_INSPECTION_FAILED",
+    "GRAPH_STATUS_OBSERVATION_RACE",
+  ]);
+  if (status.status === "corrupt"
+    || status.diagnostics.some((diagnostic) => blockedCodes.has(diagnostic.code))) {
+    throw new GraphMaintenanceError(
+      "GRAPH_INDEX_NOT_REPAIRABLE",
+      "The current graph cannot be repaired losslessly. Run `mex graph rebuild` after resolving its diagnostics.",
+      status.diagnostics,
+    );
+  }
+}
+
+function assertRepairPublishableCandidate(status: GraphStatus): void {
+  if (status.status === "stale") return;
+  assertPublishableCandidate(status);
 }
 
 function assertPublishableCandidate(status: GraphStatus): void {

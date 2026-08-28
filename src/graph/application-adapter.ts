@@ -1560,6 +1560,13 @@ function translateMaintenanceError(error: unknown): MexPortError {
         "Graph refresh unavailable",
         "The current graph state cannot be refreshed safely. Rebuild it instead.",
       );
+    case "GRAPH_INDEX_NOT_REPAIRABLE":
+      return portError(
+        "MIGRATION_REQUIRED",
+        409,
+        "Graph repair unavailable",
+        "The graph cannot be upgraded losslessly. Rebuild it from canonical source instead.",
+      );
     case "GRAPH_MAINTENANCE_LOCKED":
     case "GRAPH_MAINTENANCE_GATE_STALE":
       return portError(

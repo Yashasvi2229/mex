@@ -226,6 +226,7 @@ export interface CapabilityInspectionResult<State extends string> {
 interface MaintenanceAvailability {
   refresh: boolean;
   rebuild: boolean;
+  repair: boolean;
 }
 
 export interface CapabilityInspectionDependencies {
@@ -1668,6 +1669,7 @@ const COMMANDS = {
   graphImpact: command("graph.impact", "mex impact", "mex impact <target>", "jsonl-v3"),
   graphRefresh: command("graph.refresh", "mex graph refresh", "mex graph refresh --json", "json"),
   graphRebuild: command("graph.rebuild", "mex graph rebuild", "mex graph rebuild --json", "json"),
+  graphRepair: command("graph.repair", "mex graph repair", "mex graph repair --json", "json"),
   wikiList: command("wiki.list", "mex wiki list", "mex wiki list --json", "json"),
   wikiShow: command("wiki.show", "mex wiki show", "mex wiki show <id> --json", "json"),
   wikiQuery: command("wiki.query", "mex wiki query", "mex wiki query <text...> --json", "json"),
@@ -2011,7 +2013,7 @@ export async function inspectCapabilities(
   const repository = inspectRepository(cwd);
   let graphIndexState: CapabilityIndexState = "unavailable";
   let wikiIndexState: CapabilityIndexState = "unavailable";
-  let graphMaintenance: MaintenanceAvailability = { refresh: false, rebuild: false };
+  let graphMaintenance: MaintenanceAvailability = { refresh: false, rebuild: false, repair: false };
   let teamUnavailableReason: CapabilityUnavailableReason | null = fixedReason(
     "REPOSITORY_UNAVAILABLE",
     "Repository state cannot be inspected safely.",
@@ -2189,6 +2191,7 @@ function availableCommands(
   if (wikiIndexState !== "corpus_limit_exceeded") read.push(COMMANDS.wikiValidate);
   if (graphMaintenance.refresh) apply.push(COMMANDS.graphRefresh);
   if (graphMaintenance.rebuild) apply.push(COMMANDS.graphRebuild);
+  if (graphMaintenance.repair) apply.push(COMMANDS.graphRepair);
   if (wikiRebuildIsSafe(wikiIndexState)) apply.push(COMMANDS.wikiRebuild);
 
   if (graphIndexState === "fresh") {
@@ -2389,6 +2392,9 @@ function nextInitializationAction(
   if (graphIndexState === "stale" && graphMaintenance.refresh) {
     return { command: "mex graph refresh --json", reason: "Refresh the stale Code Graph index." };
   }
+  if (graphIndexState !== "fresh" && graphMaintenance.repair) {
+    return { command: "mex graph repair --json", reason: "Repair the recognized Code Graph index safely." };
+  }
   if (graphIndexState !== "fresh" && graphMaintenance.rebuild) {
     return { command: "mex graph rebuild --json", reason: "Build a fresh Code Graph index." };
   }
@@ -2437,19 +2443,20 @@ function graphMaintenanceAvailability(
   // A fresh status proves all build prerequisites were inspectable. For every
   // recovery state, preserve the status inspector's decision about whether an
   // executable maintenance action is safe to expose.
-  if (state === "fresh") return { refresh: true, rebuild: true };
+  if (state === "fresh") return { refresh: true, rebuild: true, repair: true };
   if (state === "corpus_limit_exceeded" || state === "unavailable") {
-    return { refresh: false, rebuild: false };
+    return { refresh: false, rebuild: false, repair: false };
   }
   return {
     refresh: diagnosticsAdvertise(diagnostics, "mex graph refresh"),
     rebuild: diagnosticsAdvertise(diagnostics, "mex graph rebuild"),
+    repair: diagnosticsAdvertise(diagnostics, "mex graph repair"),
   };
 }
 
 function diagnosticsAdvertise(
   diagnostics: readonly CapabilityInspectionDiagnostic[],
-  expected: "mex graph refresh" | "mex graph rebuild",
+  expected: "mex graph refresh" | "mex graph rebuild" | "mex graph repair",
 ): boolean {
   return diagnostics.some((diagnostic) => (
     Array.isArray(diagnostic.remediation)

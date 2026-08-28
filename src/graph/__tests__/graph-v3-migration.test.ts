@@ -1,6 +1,7 @@
 /**
- * Schema v3 — the subject-generalized grounding baseline, and the version
- * ladder that gets a database there.
+ * Schema v4 — main's compact fingerprint storage plus the integration stack's
+ * subject-generalized grounding baseline, and the version ladder that gets a
+ * database there.
  *
  * Three things are being defended here, and they fail in different ways.
  *
@@ -28,10 +29,20 @@ import {
   migrationSteps,
   openGraphDatabase,
   readSchemaVersion,
+  upgradeGraphDatabase,
 } from "../db/database.js";
 import { openSqlite, type SqliteDatabase } from "../db/sqlite.js";
+import { GraphStore } from "../db/store.js";
 import { GraphRebuildRequiredError } from "../errors.js";
 import { FingerprintStore } from "../fingerprint-store.js";
+import { bandHashes, createFingerprint, decodeMinhash } from "../fingerprint.js";
+import type { Fingerprint } from "../reconcile.js";
+import {
+  createGraphSnapshot,
+  GRAPH_SNAPSHOT_METADATA_KEY,
+  parseGraphSnapshot,
+  serializeGraphSnapshot,
+} from "../snapshot.js";
 
 const roots: string[] = [];
 
@@ -171,6 +182,169 @@ const BASELINE: ReadonlyArray<[string, string, string, string, string]> = [
   ["docs/cache.md", "function:ccc3", "function evict() {}", "hash-c", "mh:64:0e0f"],
 ];
 
+const V3_NODE_ID = "function:v3-lineage";
+const V3_FINGERPRINT = createFingerprint(Array.from({ length: 40 }, (_, index) => `token-${index}`));
+
+function createCombinedDatabase(path: string, includeEntity = false): void {
+  const db = openGraphDatabase(path);
+  try {
+    const graph = new GraphStore(db);
+    graph.upsertFile({
+      path: "src/v3.ts",
+      contentHash: "source-hash",
+      language: "typescript",
+      size: 40,
+      modifiedAt: 1,
+      indexedAt: 1,
+      nodeCount: 1,
+    });
+    graph.insertNode({
+      id: V3_NODE_ID,
+      kind: "function",
+      name: "lineage",
+      qualifiedName: "lineage",
+      identityKey: "src/v3.ts\0function\0lineage",
+      filePath: "src/v3.ts",
+      language: "typescript",
+      startLine: 1,
+      endLine: 2,
+      startColumn: 0,
+      endColumn: 1,
+      updatedAt: 1,
+    });
+    const fingerprints = new FingerprintStore(db);
+    fingerprints.upsert(V3_NODE_ID, V3_FINGERPRINT);
+    fingerprints.saveBaseline({
+      subject: { kind: "scaffold", id: ".mex/context/v3.md" },
+      nodeId: V3_NODE_ID,
+      source: "export function lineage() {}",
+      bodyHash: "body-v3",
+      fingerprint: "mh:64:v3",
+    });
+    if (includeEntity) {
+      fingerprints.saveBaseline({
+        subject: { kind: "entity", id: "mx_01KTESTV3LINEAGE000000000" },
+        nodeId: V3_NODE_ID,
+        source: "export function lineage() {}",
+        bodyHash: "body-v3",
+        fingerprint: "mh:64:v3",
+      });
+    }
+    const snapshot = createGraphSnapshot({
+      indexedAt: "2026-08-22T00:00:00.000Z",
+      git: { branch: "fixture", head: "a".repeat(40) },
+      schemaVersion: DB_SCHEMA_VERSION,
+      compilerVersion: "typescript-5.9-v2",
+      extractorVersion: "typescript-5.9-v2",
+      resolverVersion: "fixture-v1",
+      grammarHash: "b".repeat(64),
+      configHash: "c".repeat(64),
+      manifestHash: "d".repeat(64),
+      sources: [{ path: "src/v3.ts", contentHash: "e".repeat(64), parseStatus: "ok" }],
+    });
+    db.prepare(
+      `INSERT INTO project_metadata (key, value, updated_at) VALUES (?, ?, 1)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).run(GRAPH_SNAPSHOT_METADATA_KEY, serializeGraphSnapshot(snapshot));
+  } finally {
+    db.close();
+  }
+}
+
+function stampVersion(db: SqliteDatabase, version: number): void {
+  db.prepare("DELETE FROM schema_versions WHERE version > ?").run(version);
+  db.prepare(
+    "INSERT OR IGNORE INTO schema_versions (version, applied_at, description) VALUES (?, 1, 'lineage fixture')",
+  ).run(version);
+  const row = db.prepare("SELECT value FROM project_metadata WHERE key = ?")
+    .get(GRAPH_SNAPSHOT_METADATA_KEY) as { value: string } | undefined;
+  const snapshot = parseGraphSnapshot(row?.value);
+  if (snapshot) {
+    db.prepare("UPDATE project_metadata SET value = ? WHERE key = ?").run(
+      serializeGraphSnapshot({ ...snapshot, schemaVersion: version }),
+      GRAPH_SNAPSHOT_METADATA_KEY,
+    );
+  }
+}
+
+function makeLegacyFingerprintStorage(db: SqliteDatabase): void {
+  const row = db.prepare(
+    "SELECT node_id, minhash, neighbors, token_count FROM node_fingerprints WHERE node_id = ?",
+  ).get(V3_NODE_ID) as { node_id: string; minhash: Uint8Array; neighbors: string; token_count: number };
+  const fingerprint: Fingerprint = {
+    minhash: decodeMinhash(row.minhash),
+    neighbors: JSON.parse(row.neighbors) as string[],
+    tokenCount: row.token_count,
+  };
+  db.exec(`
+    DROP TABLE lsh_buckets;
+    DROP TABLE node_fingerprints;
+    CREATE TABLE node_fingerprints (
+      node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+      minhash TEXT NOT NULL,
+      neighbors TEXT NOT NULL,
+      token_count INTEGER NOT NULL
+    );
+    CREATE TABLE lsh_buckets (
+      band INTEGER NOT NULL,
+      band_hash TEXT NOT NULL,
+      node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE
+    );
+    CREATE INDEX idx_lsh ON lsh_buckets(band, band_hash);
+  `);
+  db.prepare(
+    "INSERT INTO node_fingerprints (node_id, minhash, neighbors, token_count) VALUES (?, ?, ?, ?)",
+  ).run(V3_NODE_ID, JSON.stringify(fingerprint.minhash), row.neighbors, row.token_count);
+  const insertBucket = db.prepare("INSERT INTO lsh_buckets (band, band_hash, node_id) VALUES (?, ?, ?)");
+  bandHashes(fingerprint).forEach((hash, band) => insertBucket.run(band, hash, V3_NODE_ID));
+}
+
+function makeLegacyGroundingStorage(db: SqliteDatabase): void {
+  const rows = db.prepare(
+    `SELECT subject_id, node_id, source, body_hash, fingerprint
+     FROM _mex_grounded_source WHERE subject_kind = 'scaffold' ORDER BY subject_id, node_id`,
+  ).all() as Array<{
+    subject_id: string;
+    node_id: string;
+    source: string;
+    body_hash: string;
+    fingerprint: string;
+  }>;
+  db.exec(`
+    DROP INDEX idx_grounded_subject;
+    DROP INDEX idx_grounded_node;
+    DROP TABLE _mex_grounded_source;
+    CREATE TABLE _mex_grounded_source (
+      scaffold_file TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      body_hash TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      PRIMARY KEY (scaffold_file, node_id)
+    );
+    CREATE INDEX idx_grounded_node ON _mex_grounded_source(node_id);
+  `);
+  const insert = db.prepare(
+    `INSERT INTO _mex_grounded_source
+       (scaffold_file, node_id, source, body_hash, fingerprint) VALUES (?, ?, ?, ?, ?)`,
+  );
+  for (const row of rows) {
+    insert.run(row.subject_id, row.node_id, row.source, row.body_hash, row.fingerprint);
+  }
+}
+
+function createLineageDatabase(path: string, lineage: "main-v3" | "integration-v3" | "hybrid-v3"): void {
+  createCombinedDatabase(path, lineage !== "main-v3");
+  const db = openSqlite(path);
+  try {
+    if (lineage === "main-v3") makeLegacyGroundingStorage(db);
+    if (lineage === "integration-v3") makeLegacyFingerprintStorage(db);
+    stampVersion(db, 3);
+  } finally {
+    db.close();
+  }
+}
+
 describe("the migration ladder", () => {
   it("has a rung for every version from 1 to the current one", () => {
     const steps = migrationSteps();
@@ -190,12 +364,12 @@ describe("the migration ladder", () => {
 
     const db = openGraphDatabase(dbPath, { allowRebuild: true });
     try {
-      expect(readSchemaVersion(db)).toBe(3);
+      expect(readSchemaVersion(db)).toBe(DB_SCHEMA_VERSION);
       // Both rungs left their mark. Under the old single-`if` dispatch the
       // database would carry a v3 row and never have seen the v3 step; the v2
       // row is what proves the v1 rung ran rather than being jumped over.
       expect(rows(db, "SELECT version FROM schema_versions ORDER BY version"))
-        .toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+        .toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
 
       // v1 facts stay untrustworthy — that is the v1 rung's own verdict and the
       // v3 rung must not launder it away.
@@ -229,7 +403,7 @@ describe("migrateV2ToV3", () => {
 
     const db = openGraphDatabase(dbPath, { allowRebuild: true });
     try {
-      expect(readSchemaVersion(db)).toBe(3);
+      expect(readSchemaVersion(db)).toBe(DB_SCHEMA_VERSION);
       expect(graphRequiresRebuild(db)).toBe(false);
     } finally {
       db.close();
@@ -392,6 +566,117 @@ describe("the subject-generalized baseline", () => {
       expect(store.listBaselines({ kind: "entity", id: "mx_nothing" })).toEqual([]);
     } finally {
       db.close();
+    }
+  });
+});
+
+describe("schema-v4 lineage reconciliation", () => {
+  it.each(["main-v3", "integration-v3", "hybrid-v3"] as const)(
+    "upgrades the %s lineage losslessly",
+    (lineage) => {
+      const dbPath = join(temporaryRoot(`mex-${lineage}-`), "graph.db");
+      createLineageDatabase(dbPath, lineage);
+
+      expect(() => openGraphDatabase(dbPath)).toThrow(GraphRebuildRequiredError);
+      expect(readSchemaVersionOf(dbPath)).toBe(3);
+
+      expect(upgradeGraphDatabase(dbPath)).toEqual({
+        fromVersion: 3,
+        toVersion: DB_SCHEMA_VERSION,
+        changed: true,
+        requiresRebuild: false,
+        lineage,
+      });
+
+      const db = openGraphDatabase(dbPath, { readOnly: true });
+      try {
+        const store = new FingerprintStore(db);
+        expect(store.get(V3_NODE_ID)).toEqual(V3_FINGERPRINT);
+        expect(store.lookup(V3_FINGERPRINT).map((entry) => entry.nodeId)).toContain(V3_NODE_ID);
+        expect(store.getGroundedSource(".mex/context/v3.md", V3_NODE_ID)).toMatchObject({
+          bodyHash: "body-v3",
+          fingerprint: "mh:64:v3",
+        });
+        if (lineage !== "main-v3") {
+          expect(store.getBaseline({ kind: "entity", id: "mx_01KTESTV3LINEAGE000000000" }, V3_NODE_ID))
+            .toMatchObject({ bodyHash: "body-v3" });
+        }
+        const snapshotRow = db.prepare("SELECT value FROM project_metadata WHERE key = ?")
+          .get(GRAPH_SNAPSHOT_METADATA_KEY) as { value: string };
+        expect(parseGraphSnapshot(snapshotRow.value)?.schemaVersion).toBe(DB_SCHEMA_VERSION);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  it("validates an already-v4 store without rewriting its lineage", () => {
+    const dbPath = join(temporaryRoot("mex-v4-lineage-"), "graph.db");
+    createCombinedDatabase(dbPath, true);
+    expect(upgradeGraphDatabase(dbPath)).toEqual({
+      fromVersion: DB_SCHEMA_VERSION,
+      toVersion: DB_SCHEMA_VERSION,
+      changed: false,
+      requiresRebuild: false,
+      lineage: "v4",
+    });
+  });
+
+  it("preserves integer fingerprint refs beyond JavaScript's safe-number range", () => {
+    const dbPath = join(temporaryRoot("mex-v4-int64-ref-"), "graph.db");
+    createCombinedDatabase(dbPath);
+    const db = openGraphDatabase(dbPath);
+    try {
+      const highRef = 9_007_199_254_740_993n;
+      db.prepare(
+        "DELETE FROM lsh_buckets WHERE ref = (SELECT ref FROM node_fingerprints WHERE node_id = ?)",
+      ).run(V3_NODE_ID);
+      db.prepare("UPDATE node_fingerprints SET ref = ? WHERE node_id = ?").run(highRef, V3_NODE_ID);
+
+      const store = new FingerprintStore(db);
+      store.upsert(V3_NODE_ID, V3_FINGERPRINT);
+      expect(db.prepare("SELECT CAST(ref AS TEXT) AS ref FROM node_fingerprints WHERE node_id = ?")
+        .get(V3_NODE_ID)).toEqual({ ref: highRef.toString() });
+      expect(store.lookup(V3_FINGERPRINT).map((entry) => entry.nodeId)).toContain(V3_NODE_ID);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("rejects a partial v3 shape before migration or stamping", () => {
+    const dbPath = join(temporaryRoot("mex-v3-partial-"), "graph.db");
+    createLineageDatabase(dbPath, "hybrid-v3");
+    const staged = openSqlite(dbPath);
+    try {
+      staged.exec("ALTER TABLE lsh_buckets ADD COLUMN node_id TEXT");
+    } finally {
+      staged.close();
+    }
+    const before = readFileSync(dbPath);
+
+    expect(() => upgradeGraphDatabase(dbPath)).toThrow(/ambiguous or partial lineage/u);
+    expect(readFileSync(dbPath)).toEqual(before);
+    expect(readSchemaVersionOf(dbPath)).toBe(3);
+  });
+
+  it("rolls back an undecodable integration-v3 fingerprint without stamping v4", () => {
+    const dbPath = join(temporaryRoot("mex-v3-invalid-fingerprint-"), "graph.db");
+    createLineageDatabase(dbPath, "integration-v3");
+    const staged = openSqlite(dbPath);
+    try {
+      staged.prepare("UPDATE node_fingerprints SET minhash = 'not-json' WHERE node_id = ?").run(V3_NODE_ID);
+    } finally {
+      staged.close();
+    }
+
+    expect(() => upgradeGraphDatabase(dbPath)).toThrow(/not losslessly decodable/u);
+    expect(readSchemaVersionOf(dbPath)).toBe(3);
+    const verifier = openSqlite(dbPath, { readOnly: true });
+    try {
+      expect((verifier.prepare("PRAGMA table_xinfo(node_fingerprints)").all() as Array<{ name: string }>)
+        .map((column) => column.name)).not.toContain("ref");
+    } finally {
+      verifier.close();
     }
   });
 });

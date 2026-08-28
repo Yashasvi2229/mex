@@ -918,6 +918,21 @@ describe("mex capabilities manifest", () => {
 
     expect(safe.data.commands.apply.map((entry) => entry.id)).toContain("graph.rebuild");
     expect(safe.data.nextInitializationAction?.command).toBe("mex graph rebuild --json");
+
+    const repairable = await inspectCapabilities(root, {
+      inspectGraphIndex: async () => inspection("degraded", [{
+        code: "GRAPH_INDEX_SIDECAR_ACTIVE",
+        message: "A stranded WAL prevents immutable reads.",
+        remediation: [{ command: "mex graph repair" }],
+      }]),
+      inspectWikiIndex: async () => inspection("fresh"),
+    });
+    expect(repairable.data.commands.apply.map((entry) => entry.id)).toContain("graph.repair");
+    expect(repairable.data.commands.apply.map((entry) => entry.id)).not.toContain("graph.refresh");
+    expect(repairable.data.nextInitializationAction).toEqual({
+      command: "mex graph repair --json",
+      reason: "Repair the recognized Code Graph index safely.",
+    });
   });
 
   it("suppresses Team commands when the tracked scaffold identity has changed", async () => {

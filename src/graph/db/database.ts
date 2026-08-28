@@ -16,12 +16,19 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { schemaPath } from "../assets.js";
+import { GRAPH_CORPUS_LIMITS } from "../corpus-policy.js";
 import { GraphRebuildRequiredError } from "../errors.js";
+import { bandHashInts, bandHashes, decodeMinhash, encodeMinhash } from "../fingerprint.js";
+import type { Fingerprint } from "../reconcile.js";
+import {
+  GRAPH_SNAPSHOT_METADATA_KEY,
+  parseGraphSnapshot,
+  serializeGraphSnapshot,
+} from "../snapshot.js";
 import { openSqlite, type SqliteDatabase } from "./sqlite.js";
 
 /** The schema version this build writes/expects (matches schema.sql's seed). */
-export const DB_SCHEMA_VERSION = 3;
-
+export const DB_SCHEMA_VERSION = 4;
 /** @deprecated Prefer the explicit DB_SCHEMA_VERSION name. */
 export const CURRENT_SCHEMA_VERSION = DB_SCHEMA_VERSION;
 
@@ -76,40 +83,63 @@ export function openGraphDatabase(
   const db = openSqlite(dbPath);
   configureConnection(db);
 
-  const schema = readFileSync(schemaPath(), "utf-8");
+  try {
+    initializeWritableGraphDatabase(db, readFileSync(schemaPath(), "utf-8"), options);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
+function initializeWritableGraphDatabase(
+  db: SqliteDatabase,
+  schema: string,
+  options: OpenGraphDatabaseOptions,
+): void {
   const hasVersions = tableExists(db, "schema_versions");
   if (!hasVersions) {
+    const userTable = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1",
+    ).get();
+    if (userTable) {
+      throw incompatibleSchema("The graph index has tables but no schema version metadata.");
+    }
     db.exec(schema);
+    validateCombinedSchema(db);
   } else {
-    const current = readSchemaVersion(db) ?? 1;
+    const current = readSchemaVersion(db);
+    if (current === null) {
+      throw incompatibleSchema("the schema version table has no valid version row.");
+    }
     if (current > DB_SCHEMA_VERSION) {
-      db.close();
-      throw new GraphRebuildRequiredError(
+      throw incompatibleSchema(
         `This mex build supports graph schema ${DB_SCHEMA_VERSION}, but the index uses ${current}.`,
       );
     }
     if (current < DB_SCHEMA_VERSION) {
       if (!options.allowRebuild) {
-        db.close();
-        throw new GraphRebuildRequiredError(
-          `This mex build expects graph schema ${DB_SCHEMA_VERSION}; the index uses ${current}. Run \`mex graph rebuild\`.`,
+        throw incompatibleSchema(
+          `This mex build expects graph schema ${DB_SCHEMA_VERSION}; the index uses ${current}.`,
         );
       }
       migrate(db, schema, current);
-    } else db.exec(schema);
+    } else {
+      // Never let CREATE IF NOT EXISTS conceal a partial database that merely
+      // claims to be v4. Establish the complete shape before reasserting indexes.
+      assertCombinedSchemaShape(db);
+      db.exec(schema);
+    }
   }
 
-  // Belt-and-suspenders: guarantee the version row exists even if the SQL seed
-  // is ever changed, so the schema_versions table is never dead (migration
-  // safety — Phase 0 shipped this table for exactly this reason).
+  // The schema seed may have inserted v4 while a lower migration rung was
+  // running. The ladder trims that row after every rung; only this final,
+  // fully-validated point is allowed to assert the current version.
   writeSchemaVersion(db, DB_SCHEMA_VERSION);
 
   if (!options.allowRebuild && graphRequiresRebuild(db)) {
-    db.close();
     throw new GraphRebuildRequiredError();
   }
-
-  return db;
 }
 
 function validateReadOnlyGraphDatabase(db: SqliteDatabase): SqliteDatabase {
@@ -117,6 +147,7 @@ function validateReadOnlyGraphDatabase(db: SqliteDatabase): SqliteDatabase {
   if (!tableExists(db, "schema_versions") || readSchemaVersion(db) !== DB_SCHEMA_VERSION) {
     throw new GraphRebuildRequiredError();
   }
+  assertCombinedSchemaShape(db);
   if (graphRequiresRebuild(db)) throw new GraphRebuildRequiredError();
   return db;
 }
@@ -185,8 +216,12 @@ function stampSchemaVersion(db: SqliteDatabase, version: number): void {
 export function readSchemaVersion(db: SqliteDatabase): number | null {
   const row = db
     .prepare("SELECT version FROM schema_versions ORDER BY version DESC LIMIT 1")
-    .get() as { version: number } | undefined;
-  return row ? row.version : null;
+    .get() as { version: unknown } | undefined;
+  return typeof row?.version === "number"
+    && Number.isSafeInteger(row.version)
+    && row.version >= 1
+    ? row.version
+    : null;
 }
 
 /** Mark a successfully validated graph snapshot safe for readers. */
@@ -226,6 +261,100 @@ function columns(db: SqliteDatabase, table: string): Set<string> {
   );
 }
 
+/** Includes generated columns, which PRAGMA table_info intentionally omits. */
+function allColumns(db: SqliteDatabase, table: string): Set<string> {
+  return new Set(
+    (db.prepare(`PRAGMA table_xinfo(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+  );
+}
+
+function sameColumns(actual: Set<string>, expected: readonly string[]): boolean {
+  return actual.size === expected.length && expected.every((column) => actual.has(column));
+}
+
+interface TableColumnShape {
+  name: string;
+  type: string;
+  notnull: number;
+  pk: number;
+  hidden: number;
+}
+
+function tableColumnShapes(db: SqliteDatabase, table: string): Map<string, TableColumnShape> {
+  const rows = db.prepare(`PRAGMA table_xinfo(${table})`).all() as TableColumnShape[];
+  return new Map(rows.map((row) => [row.name, { ...row, type: row.type.toUpperCase() }]));
+}
+
+function hasExactColumnShapes(
+  db: SqliteDatabase,
+  table: string,
+  expected: Readonly<Record<string, { type: string; pk?: number; hidden?: number; notnull?: number }>>,
+): boolean {
+  const actual = tableColumnShapes(db, table);
+  const entries = Object.entries(expected);
+  return actual.size === entries.length && entries.every(([name, shape]) => {
+    const column = actual.get(name);
+    return Boolean(column
+      && column.type === shape.type
+      && (shape.pk === undefined || column.pk === shape.pk)
+      && (shape.hidden === undefined || column.hidden === shape.hidden)
+      && (shape.notnull === undefined || column.notnull === shape.notnull));
+  });
+}
+
+function hasForeignKey(
+  db: SqliteDatabase,
+  table: string,
+  from: string,
+  targetTable: string,
+  targetColumn: string,
+): boolean {
+  const rows = db.prepare(`PRAGMA foreign_key_list(${table})`).all() as Array<{
+    table: string;
+    from: string;
+    to: string;
+    on_delete: string;
+  }>;
+  return rows.some((row) => row.table === targetTable
+    && row.from === from
+    && row.to === targetColumn
+    && row.on_delete.toUpperCase() === "CASCADE");
+}
+
+function tableDefinition(db: SqliteDatabase, table: string): string {
+  const row = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+  ).get(table) as { sql?: unknown } | undefined;
+  return typeof row?.sql === "string" ? row.sql : "";
+}
+
+function indexHasColumns(
+  db: SqliteDatabase,
+  table: string,
+  expected: readonly string[],
+  options: { name?: string; unique?: boolean } = {},
+): boolean {
+  const indexes = db.prepare(`PRAGMA index_list(${table})`).all() as Array<{
+    name: string;
+    unique: number;
+  }>;
+  return indexes.some((index) => {
+    if (options.name !== undefined && index.name !== options.name) return false;
+    if (options.unique !== undefined && Boolean(index.unique) !== options.unique) return false;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(index.name)) return false;
+    const columns = (db.prepare(`PRAGMA index_info(${index.name})`).all() as Array<{
+      seqno: number;
+      name: string;
+    }>).sort((left, right) => left.seqno - right.seqno).map((entry) => entry.name);
+    return columns.length === expected.length
+      && expected.every((column, position) => columns[position] === column);
+  });
+}
+
+function incompatibleSchema(message: string): GraphRebuildRequiredError {
+  return new GraphRebuildRequiredError(`Unsupported graph schema: ${message}`);
+}
+
 function addColumn(db: SqliteDatabase, table: string, name: string, definition: string): void {
   if (!columns(db, table).has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
 }
@@ -261,6 +390,7 @@ interface MigrationStep {
 const MIGRATIONS: readonly MigrationStep[] = [
   { from: 1, to: 2, run: migrateV1ToV2 },
   { from: 2, to: 3, run: migrateV2ToV3 },
+  { from: 3, to: 4, run: migrateV3ToV4 },
 ];
 
 /** The ladder, exposed for the test that checks it has no gaps. */
@@ -270,6 +400,7 @@ export function migrationSteps(): ReadonlyArray<{ from: number; to: number }> {
 
 /** Apply every migration above `current`, in order, stamping each as it lands. */
 function migrate(db: SqliteDatabase, schema: string, current: number): void {
+  detectGraphSchemaLineage(db, current);
   setAsideLegacyBaseline(db);
   let version = current;
   for (const step of MIGRATIONS) {
@@ -280,7 +411,7 @@ function migrate(db: SqliteDatabase, schema: string, current: number): void {
   }
 }
 
-/** Where a pre-v3 grounding baseline waits while the v3 table is created. */
+/** Where a file-keyed grounding baseline waits while the v4 table is created. */
 const LEGACY_GROUNDED_SOURCE = "_mex_grounded_source_v2";
 
 /**
@@ -364,48 +495,484 @@ function migrateV1ToV2(db: SqliteDatabase, schema: string): void {
 }
 
 /**
- * v3 generalizes the grounding baseline's key from a scaffold file to a
- * subject, so a wiki entity can carry its own baseline (D1: one baseline
- * store, never two).
- *
- * SQLite cannot alter a primary key, so this is a table rebuild. It runs only
- * for an explicitly isolated rebuild candidate (`allowRebuild: true`). Status
- * and ordinary readers classify a live v2 database as rebuild-required; they
- * never migrate the user's live bytes as a side effect of retrieval.
- *
- * Two things here are not obvious and both are load-bearing:
- *
- * **The old table's shape is not knowable in advance.** A database that
- * reached v2 by migrating from v1 still has the *v1* grounding table, because
- * {@link migrateV1ToV2} creates new tables with `CREATE TABLE IF NOT EXISTS`,
- * which leaves an existing table alone — so it never gained `source` or
- * `fingerprint`. A copy that names those columns unconditionally fails on
- * exactly the v1-to-v3 path, which is the path most likely to exist in the
- * wild and least likely to be tested. Missing columns are copied as empty
- * strings: a baseline with no captured source can still be re-grounded, and
- * pretending otherwise would mean dropping the row.
- *
- * **The new table comes from the frozen schema, not from SQL repeated here.**
- * The old table is renamed out of the way first, so `exec(schema)` creates the
- * v3 shape from the one definition that ships. A second copy of the DDL in
- * TypeScript is a copy that drifts.
+ * Schema v2 → v3 keeps main's lossless compact fingerprint/LSH encoding as the
+ * canonical storage baseline. Grounding remains staged until the v4 rung.
  */
-function migrateV2ToV3(db: SqliteDatabase, schema: string): void {
+function migrateV2ToV3(db: SqliteDatabase, _schema: string): void {
+  const shape = fingerprintStorageShape(db);
+  if (shape === "compact") return;
+  if (shape !== "legacy") {
+    throw incompatibleSchema("schema v2 has an incomplete fingerprint/LSH subsystem.");
+  }
+  db.transaction(() => convertLegacyFingerprintStorage(db));
+}
+
+/**
+ * Schema v3 had two released lineages: main compacted fingerprints, while the
+ * integration stack generalized grounding subjects. V4 is their validated
+ * union. This step is deliberately shape-driven because the version number
+ * alone cannot distinguish those incompatible v3 layouts.
+ */
+function migrateV3ToV4(db: SqliteDatabase, schema: string): void {
   db.transaction(() => {
-    // Creates the v3 table and both its indexes from the frozen schema. A
-    // second copy of that DDL in TypeScript is a copy that drifts.
+    if (fingerprintStorageShape(db) === "legacy") convertLegacyFingerprintStorage(db);
+
+    // The old table was moved aside before any current-schema indexes could be
+    // asserted against it. The frozen schema is the single source of v4 DDL.
     db.exec(schema);
-    if (!tableExists(db, LEGACY_GROUNDED_SOURCE)) return;
+    if (tableExists(db, LEGACY_GROUNDED_SOURCE)) {
+      const existing = allColumns(db, LEGACY_GROUNDED_SOURCE);
+      const subjectId = existing.has("subject_id") ? "subject_id" : "scaffold_file";
+      const carried = (column: string): string => (existing.has(column) ? column : "''");
+      db.exec(
+        `INSERT OR IGNORE INTO _mex_grounded_source
+           (subject_kind, subject_id, node_id, source, body_hash, fingerprint)
+         SELECT 'scaffold', ${subjectId}, node_id, ${carried("source")},
+                ${carried("body_hash")}, ${carried("fingerprint")}
+         FROM ${LEGACY_GROUNDED_SOURCE}`,
+      );
+      db.exec(`DROP TABLE ${LEGACY_GROUNDED_SOURCE}`);
+    }
 
-    const existing = columns(db, LEGACY_GROUNDED_SOURCE);
-    const subjectId = existing.has("subject_id") ? "subject_id" : "scaffold_file";
-    const carried = (column: string): string => (existing.has(column) ? column : "''");
+    updateSnapshotSchemaVersion(db);
 
-    db.exec(
-      `INSERT OR IGNORE INTO _mex_grounded_source (subject_kind, subject_id, node_id, source, body_hash, fingerprint)
-       SELECT 'scaffold', ${subjectId}, node_id, ${carried("source")}, ${carried("body_hash")}, ${carried("fingerprint")}
-       FROM ${LEGACY_GROUNDED_SOURCE}`,
-    );
-    db.exec(`DROP TABLE ${LEGACY_GROUNDED_SOURCE}`);
+    // V4 is stamped by the ladder only after all storage, relational, and
+    // semantic invariants have passed inside this transaction.
+    validateCombinedSchema(db);
   });
+}
+
+function updateSnapshotSchemaVersion(db: SqliteDatabase): void {
+  if (!tableExists(db, "project_metadata")) return;
+  const row = db.prepare(
+    `SELECT value, typeof(value) AS storage_type,
+            length(CAST(value AS BLOB)) AS byte_length
+     FROM project_metadata WHERE key = ?`,
+  ).get(GRAPH_SNAPSHOT_METADATA_KEY) as {
+    value?: unknown;
+    storage_type?: unknown;
+    byte_length?: unknown;
+  } | undefined;
+  if (!row) return;
+  if (
+    row.storage_type !== "text"
+    || typeof row.value !== "string"
+    || typeof row.byte_length !== "number"
+    || !Number.isSafeInteger(row.byte_length)
+    || row.byte_length > GRAPH_CORPUS_LIMITS.maxSnapshotMetadataBytes
+  ) {
+    throw incompatibleSchema("graph snapshot metadata is not safely bounded for migration.");
+  }
+  const snapshot = parseGraphSnapshot(row.value);
+  if (!snapshot || snapshot.schemaVersion < 1 || snapshot.schemaVersion > DB_SCHEMA_VERSION) {
+    throw incompatibleSchema("graph snapshot metadata does not match a recognized older schema.");
+  }
+  // A structurally complete store can be left with an older highest version
+  // row after an interrupted/manual stamp while its canonical snapshot already
+  // names v4. Full schema and semantic validation still runs below; preserve
+  // that already-current provenance byte-for-byte.
+  if (snapshot.schemaVersion === DB_SCHEMA_VERSION) return;
+  db.prepare("UPDATE project_metadata SET value = ? WHERE key = ?").run(
+    serializeGraphSnapshot({ ...snapshot, schemaVersion: DB_SCHEMA_VERSION }),
+    GRAPH_SNAPSHOT_METADATA_KEY,
+  );
+}
+
+function validateLegacyFingerprintStorage(db: SqliteDatabase): void {
+  const oversized = db.prepare(
+    `SELECT 1 FROM node_fingerprints
+     WHERE typeof(node_id) <> 'text' OR length(CAST(node_id AS BLOB)) > 4096
+        OR typeof(minhash) <> 'text' OR length(CAST(minhash AS BLOB)) > 4096
+        OR typeof(neighbors) <> 'text'
+        OR length(CAST(neighbors AS BLOB)) > ${GRAPH_CORPUS_LIMITS.maxSnapshotMetadataBytes}
+     LIMIT 1`,
+  ).get() ?? db.prepare(
+    `SELECT 1 FROM lsh_buckets
+     WHERE typeof(node_id) <> 'text' OR length(CAST(node_id AS BLOB)) > 4096
+        OR typeof(band_hash) <> 'text' OR length(CAST(band_hash AS BLOB)) > 128
+     LIMIT 1`,
+  ).get();
+  if (oversized) throw incompatibleSchema("legacy fingerprint state exceeds its bounded value policy.");
+
+  const buckets = db.prepare(
+    `SELECT node_id, band, band_hash FROM lsh_buckets
+     ORDER BY node_id COLLATE BINARY, band, band_hash, rowid`,
+  ).iterate()[Symbol.iterator]() as IterableIterator<{
+    node_id: unknown;
+    band: unknown;
+    band_hash: unknown;
+  }>;
+  let bucket = buckets.next();
+  const fingerprints = db.prepare(
+    `SELECT node_id, minhash, neighbors, token_count FROM node_fingerprints
+     ORDER BY node_id COLLATE BINARY`,
+  ).iterate() as IterableIterator<{
+    node_id: unknown;
+    minhash: unknown;
+    neighbors: unknown;
+    token_count: unknown;
+  }>;
+  for (const row of fingerprints) {
+    if (typeof row.node_id !== "string"
+      || typeof row.minhash !== "string"
+      || typeof row.neighbors !== "string"
+      || typeof row.token_count !== "number"
+      || !Number.isSafeInteger(row.token_count)
+      || row.token_count < 0) {
+      throw incompatibleSchema("a legacy fingerprint row is malformed.");
+    }
+    let fingerprint: Fingerprint;
+    try {
+      fingerprint = {
+        minhash: JSON.parse(row.minhash) as number[],
+        neighbors: JSON.parse(row.neighbors) as string[],
+        tokenCount: row.token_count,
+      };
+      bandHashInts(fingerprint);
+    } catch {
+      throw incompatibleSchema(`fingerprint ${JSON.stringify(row.node_id)} is not losslessly decodable.`);
+    }
+    if (!bucket.done) {
+      if (typeof bucket.value.node_id !== "string") {
+        throw incompatibleSchema("a legacy LSH bucket owner is malformed.");
+      }
+      if (Buffer.compare(Buffer.from(bucket.value.node_id), Buffer.from(row.node_id)) < 0) {
+        throw incompatibleSchema("legacy LSH contains rows without a fingerprint owner.");
+      }
+    }
+    const expected = bandHashes(fingerprint);
+    for (let band = 0; band < expected.length; band += 1) {
+      if (bucket.done
+        || bucket.value.node_id !== row.node_id
+        || bucket.value.band !== band
+        || bucket.value.band_hash !== expected[band]) {
+        throw incompatibleSchema(`legacy LSH buckets for ${JSON.stringify(row.node_id)} are not lossless.`);
+      }
+      bucket = buckets.next();
+    }
+    if (!bucket.done && bucket.value.node_id === row.node_id) {
+      throw incompatibleSchema(`legacy LSH buckets for ${JSON.stringify(row.node_id)} contain duplicates.`);
+    }
+  }
+  if (!bucket.done) throw incompatibleSchema("legacy LSH contains rows without a fingerprint owner.");
+}
+
+function convertLegacyFingerprintStorage(db: SqliteDatabase): void {
+  validateLegacyFingerprintStorage(db);
+  db.exec(`CREATE TABLE node_fingerprints_v4 (
+    ref          INTEGER PRIMARY KEY,
+    node_id      TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
+    minhash      BLOB NOT NULL,
+    neighbors    TEXT NOT NULL,
+    token_count  INTEGER NOT NULL
+  )`);
+  const rows = db.prepare(
+    "SELECT node_id, minhash, neighbors, token_count FROM node_fingerprints ORDER BY node_id",
+  ).iterate() as IterableIterator<{
+    node_id: string;
+    minhash: string;
+    neighbors: string;
+    token_count: number;
+  }>;
+  const insertFingerprint = db.prepare(
+    "INSERT INTO node_fingerprints_v4 (node_id, minhash, neighbors, token_count) VALUES (?, ?, ?, ?)",
+  );
+  for (const row of rows) {
+    let fingerprint: Fingerprint;
+    try {
+      fingerprint = {
+        minhash: JSON.parse(row.minhash) as number[],
+        neighbors: JSON.parse(row.neighbors) as string[],
+        tokenCount: row.token_count,
+      };
+      // Validates all decoded fields before a single legacy row can be lost.
+      bandHashInts(fingerprint);
+    } catch {
+      throw incompatibleSchema(`fingerprint ${JSON.stringify(row.node_id)} is not losslessly decodable.`);
+    }
+    insertFingerprint.run(
+      row.node_id,
+      encodeMinhash(fingerprint.minhash),
+      row.neighbors,
+      row.token_count,
+    );
+  }
+
+  db.exec("DROP TABLE lsh_buckets");
+  db.exec("DROP TABLE node_fingerprints");
+  db.exec("ALTER TABLE node_fingerprints_v4 RENAME TO node_fingerprints");
+  db.exec(`CREATE TABLE lsh_buckets (
+    band      INTEGER NOT NULL,
+    band_hash INTEGER NOT NULL,
+    ref       INTEGER NOT NULL REFERENCES node_fingerprints(ref) ON DELETE CASCADE,
+    PRIMARY KEY (band, band_hash, ref)
+  ) WITHOUT ROWID`);
+
+  const insertBucket = db.prepare("INSERT INTO lsh_buckets (band, band_hash, ref) VALUES (?, ?, ?)");
+  const compactRows = db.prepare(
+    `SELECT ref, node_id, minhash, neighbors, token_count FROM node_fingerprints
+     ORDER BY node_fingerprints.ref`,
+  ).iterate() as IterableIterator<{
+    ref: number | bigint;
+    node_id: string;
+    minhash: Uint8Array;
+    neighbors: string;
+    token_count: number;
+  }>;
+  for (const row of compactRows) {
+    const ref = typeof row.ref === "bigint" ? row.ref : BigInt(row.ref);
+    const fingerprint: Fingerprint = {
+      minhash: decodeMinhash(row.minhash),
+      neighbors: JSON.parse(row.neighbors) as string[],
+      tokenCount: row.token_count,
+    };
+    bandHashInts(fingerprint).forEach((bandHash, band) => insertBucket.run(band, bandHash, ref));
+  }
+}
+
+type FingerprintStorageShape = "missing" | "legacy" | "compact";
+type GroundingStorageShape = "missing" | "legacy" | "generalized";
+
+export type GraphSchemaLineage =
+  | "v1"
+  | "v2"
+  | "main-v3"
+  | "integration-v3"
+  | "hybrid-v3"
+  | "v4";
+
+function fingerprintStorageShape(db: SqliteDatabase): FingerprintStorageShape {
+  const fingerprints = tableExists(db, "node_fingerprints");
+  const buckets = tableExists(db, "lsh_buckets");
+  if (!fingerprints && !buckets) return "missing";
+  if (!fingerprints || !buckets || tableExists(db, "node_fingerprints_v4")) {
+    throw incompatibleSchema("fingerprint and LSH tables are only partially present.");
+  }
+  const legacy = hasExactColumnShapes(db, "node_fingerprints", {
+    node_id: { type: "TEXT", pk: 1, hidden: 0 },
+    minhash: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+    neighbors: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+    token_count: { type: "INTEGER", pk: 0, hidden: 0, notnull: 1 },
+  }) && hasExactColumnShapes(db, "lsh_buckets", {
+    band: { type: "INTEGER", pk: 0, hidden: 0, notnull: 1 },
+    band_hash: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+    node_id: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+  }) && hasForeignKey(db, "node_fingerprints", "node_id", "nodes", "id")
+    && hasForeignKey(db, "lsh_buckets", "node_id", "nodes", "id")
+    && indexHasColumns(db, "lsh_buckets", ["band", "band_hash"], { name: "idx_lsh" });
+  if (legacy) return "legacy";
+
+  const compact = hasExactColumnShapes(db, "node_fingerprints", {
+    ref: { type: "INTEGER", pk: 1, hidden: 0 },
+    node_id: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+    minhash: { type: "BLOB", pk: 0, hidden: 0, notnull: 1 },
+    neighbors: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+    token_count: { type: "INTEGER", pk: 0, hidden: 0, notnull: 1 },
+  }) && hasExactColumnShapes(db, "lsh_buckets", {
+    band: { type: "INTEGER", pk: 1, hidden: 0, notnull: 1 },
+    band_hash: { type: "INTEGER", pk: 2, hidden: 0, notnull: 1 },
+    ref: { type: "INTEGER", pk: 3, hidden: 0, notnull: 1 },
+  }) && hasForeignKey(db, "node_fingerprints", "node_id", "nodes", "id")
+    && hasForeignKey(db, "lsh_buckets", "ref", "node_fingerprints", "ref")
+    && indexHasColumns(db, "node_fingerprints", ["node_id"], { unique: true })
+    && /\bWITHOUT\s+ROWID\b/iu.test(tableDefinition(db, "lsh_buckets"));
+  if (compact) return "compact";
+  throw incompatibleSchema("fingerprint and LSH columns form an ambiguous or partial lineage.");
+}
+
+function groundingStorageShape(db: SqliteDatabase, allowEarlyLegacy: boolean): GroundingStorageShape {
+  const active = tableExists(db, "_mex_grounded_source");
+  const staged = tableExists(db, LEGACY_GROUNDED_SOURCE);
+  if (active && staged) throw incompatibleSchema("both active and staged grounding tables are present.");
+  if (!active && !staged) return "missing";
+  const table = active ? "_mex_grounded_source" : LEGACY_GROUNDED_SOURCE;
+  const actual = allColumns(db, table);
+  const generalized = active && hasExactColumnShapes(db, table, {
+    subject_kind: { type: "TEXT", pk: 1, hidden: 0, notnull: 1 },
+    subject_id: { type: "TEXT", pk: 2, hidden: 0, notnull: 1 },
+    node_id: { type: "TEXT", pk: 3, hidden: 0, notnull: 1 },
+    source: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+    body_hash: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+    fingerprint: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+    scaffold_file: { type: "TEXT", pk: 0, hidden: 2 },
+  }) && /subject_kind\s+TEXT\s+NOT\s+NULL\s+DEFAULT\s+'scaffold'/iu.test(tableDefinition(db, table))
+    && /scaffold_file\s+TEXT\s+GENERATED\s+ALWAYS\s+AS\s*\(\s*CASE\s+WHEN\s+subject_kind\s*=\s*'scaffold'\s+THEN\s+subject_id\s+END\s*\)\s+VIRTUAL/iu
+      .test(tableDefinition(db, table))
+    && indexHasColumns(db, table, ["node_id"], { name: "idx_grounded_node" })
+    && indexHasColumns(db, table, ["subject_kind", "subject_id"], { name: "idx_grounded_subject" });
+  if (generalized) return "generalized";
+  const legacy = hasExactColumnShapes(db, table, {
+    scaffold_file: { type: "TEXT", pk: 1, hidden: 0, notnull: 1 },
+    node_id: { type: "TEXT", pk: 2, hidden: 0, notnull: 1 },
+    source: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+    body_hash: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+    fingerprint: { type: "TEXT", pk: 0, hidden: 0, notnull: 1 },
+  }) && (!active || indexHasColumns(db, table, ["node_id"], { name: "idx_grounded_node" }));
+  if (legacy) return "legacy";
+  if (
+    allowEarlyLegacy
+    && actual.has("scaffold_file")
+    && actual.has("node_id")
+    && actual.has("body_hash")
+    && !actual.has("subject_kind")
+  ) return "legacy";
+  throw incompatibleSchema("grounding columns form an ambiguous or partial lineage.");
+}
+
+/** Structurally identify exactly which historical schema is being upgraded. */
+export function detectGraphSchemaLineage(db: SqliteDatabase, version: number): GraphSchemaLineage {
+  if (version === 1) {
+    fingerprintStorageShape(db);
+    groundingStorageShape(db, true);
+    return "v1";
+  }
+  if (version === 2) {
+    const fingerprints = fingerprintStorageShape(db);
+    const grounding = groundingStorageShape(db, true);
+    if (fingerprints === "missing" || grounding === "missing") {
+      throw incompatibleSchema("schema v2 is missing a required derived-storage table.");
+    }
+    return "v2";
+  }
+  if (version === 3) {
+    const fingerprints = fingerprintStorageShape(db);
+    const grounding = groundingStorageShape(db, false);
+    if (fingerprints === "compact" && grounding === "legacy") return "main-v3";
+    if (fingerprints === "legacy" && grounding === "generalized") return "integration-v3";
+    if (fingerprints === "compact" && grounding === "generalized") return "hybrid-v3";
+    throw incompatibleSchema("schema v3 does not match the main, integration, or complete hybrid lineage.");
+  }
+  if (version === DB_SCHEMA_VERSION) {
+    assertCombinedSchemaShape(db);
+    return "v4";
+  }
+  throw incompatibleSchema(`version ${version} is not a recognized migration source.`);
+}
+
+function assertCombinedSchemaShape(db: SqliteDatabase): void {
+  if (fingerprintStorageShape(db) !== "compact") {
+    throw incompatibleSchema("schema v4 does not use compact fingerprints and integer-ref LSH.");
+  }
+  if (groundingStorageShape(db, false) !== "generalized") {
+    throw incompatibleSchema("schema v4 does not use subject-generalized grounding.");
+  }
+}
+
+/** Full candidate validation performed before schema v4 can be stamped. */
+function validateCombinedSchema(db: SqliteDatabase): void {
+  assertCombinedSchemaShape(db);
+
+  const integrity = db.prepare("PRAGMA integrity_check").all() as Array<{ integrity_check: string }>;
+  if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok") {
+    throw incompatibleSchema(`SQLite integrity_check failed: ${integrity.map((row) => row.integrity_check).join("; ")}.`);
+  }
+  const foreignKeys = db.prepare("PRAGMA foreign_key_check").all();
+  if (foreignKeys.length > 0) throw incompatibleSchema("foreign-key validation failed.");
+
+  const bucketIterator = db.prepare(
+    `SELECT CAST(ref AS TEXT) AS ref, band, CAST(band_hash AS TEXT) AS band_hash
+     FROM lsh_buckets ORDER BY lsh_buckets.ref, band, band_hash`,
+  ).iterate()[Symbol.iterator]() as IterableIterator<{ ref: string; band: number; band_hash: string }>;
+  let bucketStep = bucketIterator.next();
+
+  const fingerprints = db.prepare(
+    `SELECT CAST(ref AS TEXT) AS ref, node_id, minhash, typeof(minhash) AS storage_type,
+            neighbors, token_count
+     FROM node_fingerprints ORDER BY node_fingerprints.ref`,
+  ).iterate() as IterableIterator<{
+    ref: string;
+    node_id: string;
+    minhash: Uint8Array;
+    storage_type: string;
+    neighbors: string;
+    token_count: number;
+  }>;
+  for (const row of fingerprints) {
+    let fingerprint: Fingerprint;
+    try {
+      if (row.storage_type !== "blob" || !(row.minhash instanceof Uint8Array)) throw new Error("not a BLOB");
+      fingerprint = {
+        minhash: decodeMinhash(row.minhash),
+        neighbors: JSON.parse(row.neighbors) as string[],
+        tokenCount: row.token_count,
+      };
+      bandHashInts(fingerprint);
+    } catch {
+      throw incompatibleSchema(`compact fingerprint ${JSON.stringify(row.node_id)} is invalid.`);
+    }
+    const expected = bandHashInts(fingerprint).map((hash, band) => ({ band, hash: hash.toString() }));
+    if (!bucketStep.done && BigInt(bucketStep.value.ref) < BigInt(row.ref)) {
+      throw incompatibleSchema("LSH contains rows without a fingerprint owner.");
+    }
+    for (const entry of expected) {
+      if (
+        bucketStep.done
+        || bucketStep.value.ref !== row.ref
+        || bucketStep.value.band !== entry.band
+        || bucketStep.value.band_hash !== entry.hash
+      ) {
+        throw incompatibleSchema(`LSH buckets for ${JSON.stringify(row.node_id)} do not match its fingerprint.`);
+      }
+      bucketStep = bucketIterator.next();
+    }
+    if (!bucketStep.done && bucketStep.value.ref === row.ref) {
+      throw incompatibleSchema(`LSH buckets for ${JSON.stringify(row.node_id)} do not match its fingerprint.`);
+    }
+  }
+  if (!bucketStep.done) throw incompatibleSchema("LSH contains rows without a fingerprint owner.");
+
+  const invalidGrounding = db.prepare(
+    `SELECT 1 FROM _mex_grounded_source
+     WHERE subject_kind NOT IN ('scaffold', 'entity') OR subject_id = '' OR node_id = ''
+        OR (subject_kind = 'scaffold' AND scaffold_file IS NOT subject_id)
+        OR (subject_kind = 'entity' AND scaffold_file IS NOT NULL)
+     LIMIT 1`,
+  ).get();
+  if (invalidGrounding) throw incompatibleSchema("subject grounding projection is invalid.");
+}
+
+export interface GraphDatabaseUpgradeResult {
+  fromVersion: number;
+  toVersion: number;
+  changed: boolean;
+  requiresRebuild: boolean;
+  lineage: GraphSchemaLineage;
+}
+
+/**
+ * Upgrade and validate an already-isolated graph candidate. Publication and
+ * maintenance locking remain the caller's responsibility.
+ */
+export function upgradeGraphDatabase(dbPath: string): GraphDatabaseUpgradeResult {
+  if (!existsSync(dbPath)) throw incompatibleSchema("the graph upgrade candidate does not exist.");
+  const probe = openSqlite(dbPath, { readOnly: true });
+  let fromVersion: number;
+  let lineage: GraphSchemaLineage;
+  try {
+    if (!tableExists(probe, "schema_versions")) {
+      throw incompatibleSchema("the graph upgrade candidate has no schema version metadata.");
+    }
+    const recordedVersion = readSchemaVersion(probe);
+    if (recordedVersion === null) {
+      throw incompatibleSchema("the graph upgrade candidate has no valid schema version row.");
+    }
+    fromVersion = recordedVersion;
+    lineage = detectGraphSchemaLineage(probe, fromVersion);
+  } finally {
+    probe.close();
+  }
+
+  const db = openGraphDatabase(dbPath, { allowRebuild: true });
+  try {
+    validateCombinedSchema(db);
+    return {
+      fromVersion,
+      toVersion: DB_SCHEMA_VERSION,
+      changed: fromVersion !== DB_SCHEMA_VERSION,
+      requiresRebuild: graphRequiresRebuild(db),
+      lineage,
+    };
+  } finally {
+    db.close();
+  }
 }

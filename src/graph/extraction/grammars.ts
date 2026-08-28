@@ -151,10 +151,17 @@ export function parse(source: string, language: Language): TSTree | null {
   return tree as unknown as TSTree;
 }
 
-/** Release one native tree as soon as its single-file extraction completes. */
+/**
+ * Free a parsed tree's WASM-heap memory. web-tree-sitter trees are allocated in
+ * the Emscripten heap and are not reclaimed by JavaScript GC, so every parsed
+ * tree must be deleted at the extraction boundary.
+ */
 export function disposeTree(tree: TSTree): void {
-  (tree as TSTree & { delete?: () => void }).delete?.();
+  (tree as unknown as { delete(): void }).delete();
 }
+
+/** Compatibility name used by the v0.7.3 extraction implementation. */
+export const freeTree = disposeTree;
 
 /** Free all cached parsers + reset the runtime flag (tests / teardown). */
 export function disposeParsers(): void {

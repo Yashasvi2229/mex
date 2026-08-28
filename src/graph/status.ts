@@ -20,7 +20,7 @@ import type {
   GraphStatusKind,
 } from "../team/contracts/graph.js";
 import type { Diagnostic, RepoState } from "../team/contracts/shared.js";
-import { DB_SCHEMA_VERSION } from "./db/database.js";
+import { DB_SCHEMA_VERSION, detectGraphSchemaLineage } from "./db/database.js";
 import { openSqlite, type SqliteDatabase } from "./db/sqlite.js";
 import { BANDS, K } from "./config.js";
 import {
@@ -36,7 +36,7 @@ import {
 } from "./corpus-policy.js";
 import { graphManifest } from "./engine-impl.js";
 import { isSupportedSourceFile } from "./extraction/grammars.js";
-import { bandHashes } from "./fingerprint.js";
+import { bandHashInts, decodeMinhash } from "./fingerprint.js";
 import type { Fingerprint } from "./reconcile.js";
 import {
   computeSourceCorpusDigest,
@@ -102,7 +102,6 @@ const REQUIRED_SCHEMA_OBJECTS = {
     "idx_grounded_subject",
     "idx_import_bindings_file",
     "idx_import_bindings_local",
-    "idx_lsh",
     "idx_nodes_container_id",
     "idx_nodes_file_line",
     "idx_nodes_file_path",
@@ -158,8 +157,8 @@ const REQUIRED_TABLE_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   nodes_fts_docsize: ["id", "sz"],
   nodes_fts_idx: ["segid", "term", "pgno"],
   project_metadata: ["key", "value", "updated_at"],
-  node_fingerprints: ["node_id", "minhash", "neighbors", "token_count"],
-  lsh_buckets: ["band", "band_hash", "node_id"],
+  node_fingerprints: ["ref", "node_id", "minhash", "neighbors", "token_count"],
+  lsh_buckets: ["band", "band_hash", "ref"],
   _mex_grounded_source: [
     "subject_kind", "subject_id", "node_id", "source", "body_hash", "fingerprint", "scaffold_file",
   ],
@@ -592,18 +591,56 @@ async function inspectGraphStatusAttempt(
         }));
     }
     if (schemaVersion !== DB_SCHEMA_VERSION) {
-      diagnostics.push(rebuildDiagnostic(
-        `This mex build expects graph schema ${DB_SCHEMA_VERSION}; the index uses ${schemaVersion}.`,
-      ));
+      if (schemaVersion > DB_SCHEMA_VERSION) {
+        diagnostics.push(rebuildDiagnostic(
+          `This mex build supports graph schema ${DB_SCHEMA_VERSION}, but the index uses ${schemaVersion}.`,
+        ));
+      } else try {
+        const lineage = detectGraphSchemaLineage(db, schemaVersion);
+        diagnostics.push(lineage === "v1"
+          ? rebuildDiagnostic(
+              `This mex build expects graph schema ${DB_SCHEMA_VERSION}; the index uses non-lossless schema v1.`,
+            )
+          : repairDiagnostic(
+              `The ${lineage} graph can be upgraded losslessly to schema ${DB_SCHEMA_VERSION}.`,
+            ));
+      } catch (error) {
+        diagnostics.push({
+          code: "GRAPH_INDEX_SCHEMA_INVALID",
+          severity: "error",
+          message: `The older graph schema is partial or unsafe to migrate: ${errorMessage(error)}`,
+        });
+      }
       return finishDatabaseResult(graphStatus({
-          status: "rebuild_required",
+          status: diagnostics.at(-1)?.code === "GRAPH_INDEX_SCHEMA_INVALID" ? "corrupt" : "rebuild_required",
           observedAt,
           currentRepo,
           schemaVersion,
           parseHealth: emptyParseHealth(),
           changes: changesWithoutIndex(live, currentRepo, maxChangedPaths),
           diagnostics,
-        }));
+      }));
+    }
+
+    try {
+      if (detectGraphSchemaLineage(db, schemaVersion) !== "v4") {
+        throw new Error("unexpected current schema lineage");
+      }
+    } catch {
+      diagnostics.push({
+        code: "GRAPH_INDEX_SCHEMA_INVALID",
+        severity: "error",
+        message: "The current graph schema has incompatible column, key, or generated-table structure.",
+      });
+      return finishDatabaseResult(graphStatus({
+        status: "corrupt",
+        observedAt,
+        currentRepo,
+        schemaVersion,
+        parseHealth: emptyParseHealth(),
+        changes: changesWithoutIndex(live, currentRepo, maxChangedPaths),
+        diagnostics,
+      }));
     }
 
     const schemaFailures = inspectRequiredSchema(db);
@@ -1104,12 +1141,17 @@ function emptySourceChanges(): GraphSourceChanges {
 
 function sidecarDiagnostic(probe: GraphSidecarProbe): Diagnostic {
   const paths = probe.paths.join(", ");
+  const repairableWal = probe.state === "active"
+    && probe.paths.length > 0
+    && probe.paths.every((path) => path.endsWith("-wal"));
   return probe.state === "active"
     ? {
         code: "GRAPH_INDEX_SIDECAR_ACTIVE",
         severity: "warning",
         message: `Graph maintenance or recovery is active (${paths}); immutable inspection was skipped.`,
-        remediation: [{ label: "Retry after graph maintenance finishes" }],
+        remediation: repairableWal
+          ? [{ label: "Repair a stranded graph WAL", command: "mex graph repair" }]
+          : [{ label: "Retry after graph maintenance finishes" }],
       }
     : {
         code: "GRAPH_INDEX_SIDECAR_UNAVAILABLE",
@@ -1906,7 +1948,7 @@ function inspectRequiredSchema(db: SqliteDatabase): string[] {
       throw new CorruptGraphIndexError("The required graph schema list contains an invalid identifier.");
     }
     if (missingTables.has(table)) continue;
-    // table_xinfo includes generated columns such as schema-v3's scaffold_file
+    // table_xinfo includes generated columns such as schema-v4's scaffold_file
     // compatibility projection; table_info deliberately hides them.
     const rows = db.prepare(`PRAGMA table_xinfo("${table}")`).all() as Array<{ name?: unknown }>;
     const columns = new Set(rows.map((row) => row.name).filter((name): name is string => typeof name === "string"));
@@ -1991,13 +2033,14 @@ function inspectCoreInvariants(db: SqliteDatabase): string[] {
     `],
     ["LSH bucket(s) without a node", `
       SELECT COUNT(*) AS count FROM lsh_buckets b
-      LEFT JOIN nodes n ON n.id = b.node_id
+      LEFT JOIN node_fingerprints f ON f.ref = b.ref
+      LEFT JOIN nodes n ON n.id = f.node_id
       WHERE n.id IS NULL
     `],
     ["LSH bucket(s) without a fingerprint", `
       SELECT COUNT(*) AS count FROM lsh_buckets b
-      LEFT JOIN node_fingerprints f ON f.node_id = b.node_id
-      WHERE f.node_id IS NULL
+      LEFT JOIN node_fingerprints f ON f.ref = b.ref
+      WHERE f.ref IS NULL
     `],
     ["node(s) missing from full-text search", `
       SELECT COUNT(*) AS count FROM nodes n
@@ -2030,6 +2073,7 @@ function inspectCoreInvariants(db: SqliteDatabase): string[] {
 }
 
 interface StoredFingerprintRow {
+  ref: unknown;
   node_id: unknown;
   minhash: unknown;
   neighbors: unknown;
@@ -2037,7 +2081,7 @@ interface StoredFingerprintRow {
 }
 
 interface StoredLshBucketRow {
-  node_id: unknown;
+  ref: unknown;
   band: unknown;
   band_hash: unknown;
 }
@@ -2052,7 +2096,6 @@ function inspectFingerprintInvariants(db: SqliteDatabase): string[] {
     `SELECT 1 FROM node_fingerprints
      WHERE typeof(node_id) <> 'text'
         OR length(CAST(node_id AS BLOB)) > 4096
-        OR typeof(minhash) <> 'text'
         OR length(CAST(minhash AS BLOB)) > 4096
         OR typeof(neighbors) <> 'text'
         OR length(CAST(neighbors AS BLOB)) > ${GRAPH_CORPUS_LIMITS.maxSnapshotMetadataBytes}
@@ -2060,9 +2103,7 @@ function inspectFingerprintInvariants(db: SqliteDatabase): string[] {
   ).get();
   const oversizedBucket = db.prepare(
     `SELECT 1 FROM lsh_buckets
-     WHERE typeof(node_id) <> 'text'
-        OR length(CAST(node_id AS BLOB)) > 4096
-        OR typeof(band_hash) <> 'text'
+     WHERE length(CAST(ref AS BLOB)) > 128
         OR length(CAST(band_hash AS BLOB)) > 128
      LIMIT 1`,
   ).get();
@@ -2077,13 +2118,13 @@ function inspectFingerprintInvariants(db: SqliteDatabase): string[] {
   let wrongBandHashes = 0;
 
   const bucketIterator = db.prepare(
-    `SELECT node_id, band, band_hash FROM lsh_buckets
-     ORDER BY node_id COLLATE BINARY, band, band_hash, rowid`,
+    `SELECT CAST(ref AS TEXT) AS ref, band, CAST(band_hash AS TEXT) AS band_hash
+     FROM lsh_buckets ORDER BY lsh_buckets.ref, band, band_hash`,
   ).iterate()[Symbol.iterator]() as IterableIterator<StoredLshBucketRow>;
   let bucketStep = bucketIterator.next();
 
   const advanceMalformedBucketOwners = (): void => {
-    while (!bucketStep.done && typeof bucketStep.value.node_id !== "string") {
+    while (!bucketStep.done && typeof bucketStep.value.ref !== "string") {
       malformedBucketOwners += 1;
       bucketStep = bucketIterator.next();
     }
@@ -2091,26 +2132,27 @@ function inspectFingerprintInvariants(db: SqliteDatabase): string[] {
   advanceMalformedBucketOwners();
 
   const fingerprints = db.prepare(
-    `SELECT node_id, minhash, neighbors, token_count FROM node_fingerprints
-     ORDER BY node_id COLLATE BINARY`,
+    `SELECT CAST(ref AS TEXT) AS ref, node_id, minhash, neighbors, token_count
+     FROM node_fingerprints ORDER BY node_fingerprints.ref`,
   ).iterate() as IterableIterator<StoredFingerprintRow>;
   for (const row of fingerprints) {
-    if (typeof row.node_id !== "string") {
+    if (typeof row.ref !== "string" || typeof row.node_id !== "string") {
       malformedFingerprints += 1;
       continue;
     }
-    const nodeId = row.node_id;
+    const ref = BigInt(row.ref);
     while (!bucketStep.done
-      && compareSqliteText(bucketStep.value.node_id as string, nodeId) < 0) {
+      && BigInt(bucketStep.value.ref as string) < ref) {
+      malformedBucketOwners += 1;
       bucketStep = bucketIterator.next();
       advanceMalformedBucketOwners();
     }
 
     const fingerprint = decodeStoredFingerprint(row);
     if (!fingerprint) malformedFingerprints += 1;
-    const expectedHashes = fingerprint ? bandHashes(fingerprint) : null;
+    const expectedHashes = fingerprint ? bandHashInts(fingerprint).map(String) : null;
     const bandCounts = Array.from({ length: BANDS }, () => 0);
-    while (!bucketStep.done && bucketStep.value.node_id === nodeId) {
+    while (!bucketStep.done && bucketStep.value.ref === row.ref) {
       const bucket = bucketStep.value;
       if (typeof bucket.band !== "number"
         || !Number.isSafeInteger(bucket.band)
@@ -2130,6 +2172,10 @@ function inspectFingerprintInvariants(db: SqliteDatabase): string[] {
       if (count === 0) missingBands += 1;
       else if (count > 1) duplicateBuckets += count - 1;
     }
+  }
+  while (!bucketStep.done) {
+    malformedBucketOwners += 1;
+    bucketStep = bucketIterator.next();
   }
 
   const failures: string[] = [];
@@ -2153,7 +2199,7 @@ function inspectFingerprintInvariants(db: SqliteDatabase): string[] {
 }
 
 function decodeStoredFingerprint(row: StoredFingerprintRow): Fingerprint | null {
-  if (typeof row.minhash !== "string"
+  if (!(row.minhash instanceof Uint8Array)
     || typeof row.neighbors !== "string"
     || typeof row.token_count !== "number"
     || !Number.isSafeInteger(row.token_count)
@@ -2161,7 +2207,7 @@ function decodeStoredFingerprint(row: StoredFingerprintRow): Fingerprint | null 
   let minhash: unknown;
   let neighbors: unknown;
   try {
-    minhash = JSON.parse(row.minhash);
+    minhash = decodeMinhash(row.minhash);
     neighbors = JSON.parse(row.neighbors);
   } catch {
     return null;
@@ -2177,11 +2223,6 @@ function decodeStoredFingerprint(row: StoredFingerprintRow): Fingerprint | null 
     || !Array.isArray(neighbors)
     || neighbors.some((value) => typeof value !== "string")) return null;
   return { minhash, neighbors, tokenCount: row.token_count };
-}
-
-/** Match SQLite's BINARY ordering for the ASCII ids emitted by the engine. */
-function compareSqliteText(left: string, right: string): number {
-  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 }
 
 function readCount(db: SqliteDatabase, sql: string): number {
@@ -2391,10 +2432,20 @@ function rebuildDiagnostic(message: string, executable = true): Diagnostic {
   };
 }
 
+function repairDiagnostic(message: string): Diagnostic {
+  return {
+    code: "GRAPH_INDEX_REPAIR_AVAILABLE",
+    severity: "warning",
+    message,
+    remediation: [{ label: "Upgrade graph schema", command: "mex graph repair" }],
+  };
+}
+
 function isGraphMaintenanceCommand(command: string | undefined): boolean {
   return command === "mex graph"
     || command === "mex graph refresh"
-    || command === "mex graph rebuild";
+    || command === "mex graph rebuild"
+    || command === "mex graph repair";
 }
 
 function resolveNow(now: InspectGraphStatusOptions["now"]): Date {

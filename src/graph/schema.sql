@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS schema_versions (
 );
 
 INSERT OR IGNORE INTO schema_versions (version, applied_at, description)
-VALUES (3, strftime('%s', 'now') * 1000, 'Subject-generalized grounding baseline (scaffold files and wiki entities)');
+VALUES (4, strftime('%s', 'now') * 1000, 'Compact fingerprint/LSH storage with subject-generalized grounding');
 
 -- =============================================================================
 -- Core tables (ported from CodeGraph — kept as-is except node.body_hash)
@@ -283,22 +283,34 @@ CREATE TABLE IF NOT EXISTS project_metadata (
 -- Per-node fingerprint: a MinHash sketch of the node's normalized-AST trigrams
 -- plus its caller/callee neighborhood. Survives rename/move (which the
 -- line-independent id does NOT), enabling reconciliation.
+-- Schema v4 retains main-v3's compact re-encode (issue #140 storage
+-- follow-up): the v2 encoding stored
+-- the minhash as a JSON text array (~600 B where 256 B of BLOB suffice) and
+-- 32 LSH rows per node each repeating the full TEXT node id and a 64-char hex
+-- band hash, doubled again by idx_lsh — together ~40-50% of every graph store.
+-- main-v3 and v4 store the sketch as a 256-byte big-endian BLOB, key LSH rows by a
+-- stable INTEGER ref, truncates band hashes to their first 8 bytes as int64
+-- (collisions merely add an LSH candidate, which full minhash scoring then
+-- rejects), and makes the primary key serve as the only index. The decoded
+-- Fingerprint values and every reconciler outcome are unchanged.
 CREATE TABLE IF NOT EXISTS node_fingerprints (
-    node_id      TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-    minhash      TEXT NOT NULL,   -- JSON array of K=64 uint32 (spec §4: K)
-    neighbors    TEXT NOT NULL,   -- JSON array of caller+callee Tier-1 ids (sorted)
+    ref          INTEGER PRIMARY KEY, -- rowid alias: stable under VACUUM
+    node_id      TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
+    minhash      BLOB NOT NULL,  -- K=64 uint32 values, big-endian (spec §4: K)
+    neighbors    TEXT NOT NULL,  -- JSON array of caller+callee Tier-1 ids (sorted)
     token_count  INTEGER NOT NULL -- < ~MIN_TOKENS (30) => don't trust the fingerprint
 );
 
 -- LSH banding index over `node_fingerprints.minhash`. Each fingerprint is split
 -- into BANDS=32 bands of ROWS=2 rows; `LSH_lookup` fetches candidate node ids
--- that share a band hash with the query fingerprint (spec §4 step 2).
+-- that share a band hash with the query fingerprint (spec §4 step 2). The
+-- composite primary key IS the lookup index — no secondary index needed.
 CREATE TABLE IF NOT EXISTS lsh_buckets (
-    band      INTEGER NOT NULL,   -- 0..BANDS-1 (0..31)
-    band_hash TEXT NOT NULL,
-    node_id   TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_lsh ON lsh_buckets(band, band_hash);
+    band      INTEGER NOT NULL,  -- 0..BANDS-1 (0..31)
+    band_hash INTEGER NOT NULL,  -- first 8 bytes of the band's sha256, as int64
+    ref       INTEGER NOT NULL REFERENCES node_fingerprints(ref) ON DELETE CASCADE,
+    PRIMARY KEY (band, band_hash, ref)
+) WITHOUT ROWID;
 
 -- =============================================================================
 -- Grounding baseline  (NET-NEW — spec §3, §5, §6.  ours.)
@@ -310,7 +322,7 @@ CREATE INDEX IF NOT EXISTS idx_lsh ON lsh_buckets(band, band_hash);
 -- checker and `sync` hand the agent an old-vs-new diff without the pre-edit
 -- file content (which is gone after save).
 --
--- SCHEMA v3 GENERALIZES THE KEY FROM A FILE TO A SUBJECT.
+-- SCHEMA v4 RETAINS INTEGRATION-v3'S GENERALIZED SUBJECT KEY.
 --
 -- v2 keyed this by `scaffold_file`, because grounding was authored in scaffold
 -- frontmatter and a markdown file was therefore the grounding unit. The wiki
