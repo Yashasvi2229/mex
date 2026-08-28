@@ -21,6 +21,7 @@ const lazyWorkbenchSources = [
   "src/pages/CapabilityPage.tsx",
   "src/pages/WorkstreamsPage.tsx",
   "src/pages/SpecsPage.tsx",
+  "src/pages/InboxPage.tsx",
   "src/pages/MembersPage.tsx",
   "src/pages/ActivityPage.tsx",
   "src/pages/JobsPage.tsx",
@@ -85,6 +86,11 @@ const forbiddenFixtureData = [
   "Project Hub read boundaries",
   "mx_01K36WVM6H7JK8M9NPQRSTVVWX",
   "member_01K36WVM6H7JK8M9NPQRSTVVWX",
+  "Release benchmark local draft Requirement",
+  "Release benchmark pending Spec update",
+  "inbox_00000000000000000000000000000001",
+  "proposal_01000000000000000000001720",
+  "mx_01000000000000000000000001",
 ];
 
 for (const file of filesUnder(outputRoot)) {

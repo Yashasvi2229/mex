@@ -66,6 +66,7 @@ export async function runHubCommand(options: RunHubCommandOptions): Promise<void
       jobs,
       team,
       workstreams: team,
+      inbox: team,
       specs: createSpecReadService(wiki),
       graph,
       wiki,

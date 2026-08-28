@@ -157,6 +157,12 @@ export const HubCapabilitiesSchema = z.object({
   specs: z.object({
     read: CapabilityStatusSchema,
   }).strict(),
+  inbox: z.object({
+    read: CapabilityStatusSchema,
+    draftMutation: CapabilityStatusSchema,
+    proposalMutation: CapabilityStatusSchema,
+    specApproval: CapabilityStatusSchema,
+  }).strict(),
   jobs: CapabilityStatusSchema,
   graph: z.object({
     read: CapabilityStatusSchema,
@@ -274,7 +280,9 @@ const teamActivityAction = teamText(128).refine(
 const teamRepositoryPath = utf8Text(4_096).refine((value) => {
   if (value.includes("\0") || value.includes("\\") || value.startsWith("/")) return false;
   if (/^[A-Za-z]:\//.test(value)) return false;
-  if (value.normalize("NFC") !== value || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(value)) {
+  if (value.normalize("NFC") !== value
+    || inboxHasLoneSurrogate(value)
+    || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(value)) {
     return false;
   }
   return value.split("/").every(
@@ -755,6 +763,543 @@ export const TeamOperationApplyResponseSchema = z.object({
   localChanges: z.array(TeamLocalChangeSchema).max(16),
   members: z.array(TeamMemberSchema).max(1),
   workstreams: z.array(TeamWorkstreamSchema).max(1),
+  events: z.array(TeamActivityEventSchema).max(1),
+}).strict();
+
+export const InboxSpecKindSchema = z.enum([
+  "spec",
+  "requirement",
+  "constraint",
+  "acceptance_criterion",
+]);
+
+export const InboxProposalStateSchema = z.enum([
+  "pending",
+  "approved",
+  "rejected",
+  "withdrawn",
+  "stale",
+]);
+
+export const InboxDraftIdSchema = z.string().min(1).refine(
+  (value) => new TextEncoder().encode(value).byteLength <= 256
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value),
+  "Invalid Inbox draft ID.",
+);
+export const InboxProposalIdSchema = z.string()
+  .regex(/^proposal_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Inbox proposal ID.");
+const inboxSpecEntityId = z.string()
+  .regex(/^mx_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Spec entity ID.");
+
+function inboxHasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+const inboxCanonicalText = (maximum: number, required: boolean) => z.string().refine(
+  (value) => new TextEncoder().encode(value).byteLength <= maximum
+    && value.normalize("NFC") === value
+    && !inboxHasLoneSurrogate(value)
+    && !/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/u.test(value)
+    && (!required || value.trim().length > 0),
+  `Text is invalid or exceeds the ${maximum}-byte canonical limit.`,
+);
+const inboxText = (maximum: number) => inboxCanonicalText(maximum, true);
+const inboxOptionalText = (maximum: number) => inboxCanonicalText(maximum, false);
+
+const inboxSpecRef = z.object({
+  id: inboxSpecEntityId,
+  kind: InboxSpecKindSchema,
+  title: inboxText(512).optional(),
+}).strict();
+
+const inboxCreateRelation = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("derived_from"),
+    target: inboxSpecRef.extend({ kind: z.literal("spec") }),
+  }).strict(),
+  z.object({
+    type: z.literal("verified_by"),
+    target: inboxSpecRef.extend({ kind: z.enum(["spec", "requirement"]) }),
+  }).strict(),
+  z.object({
+    type: z.literal("constrained_by"),
+    target: inboxSpecRef.extend({ kind: z.literal("constraint") }),
+  }).strict(),
+  z.object({
+    type: z.literal("refines"),
+    target: inboxSpecRef.extend({ kind: z.literal("requirement") }),
+  }).strict(),
+]);
+
+const inboxSpecCreateChangeObject = z.object({
+  kind: z.literal("spec.create"),
+  entityKind: InboxSpecKindSchema,
+  title: inboxText(512),
+  body: inboxText(16 * 1024),
+  summary: inboxOptionalText(2 * 1024).optional(),
+  status: z.enum(["in_flight", "promoted"]),
+  topics: z.array(inboxSpecEntityId).max(64).refine(
+    (values) => new Set(values).size === values.length,
+    "Spec topic references must be unique.",
+  ).optional(),
+  relation: inboxCreateRelation.optional(),
+}).strict();
+
+export const InboxSpecCreateChangeSchema = inboxSpecCreateChangeObject.superRefine((value, context) => {
+  if (value.relation === undefined) return;
+  const accepted = value.relation.type === "derived_from"
+    ? value.entityKind === "requirement"
+    : value.relation.type === "verified_by"
+      ? value.entityKind === "acceptance_criterion"
+      : value.relation.type === "refines"
+        ? value.entityKind === "requirement"
+        : true;
+  if (!accepted) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["relation"],
+      message: "The create-time relation direction is invalid for this Spec kind.",
+    });
+  }
+});
+
+const inboxSpecUpdatePatch = z.object({
+  title: inboxText(512).optional(),
+  summary: inboxOptionalText(2 * 1024).optional(),
+  body: inboxText(16 * 1024).optional(),
+}).strict().refine(
+  (value) => Object.values(value).some((item) => item !== undefined),
+  "A Spec update requires at least one title, summary, or body field.",
+);
+
+export const InboxSpecUpdateChangeSchema = z.object({
+  kind: z.literal("spec.update"),
+  target: inboxSpecRef,
+  patch: inboxSpecUpdatePatch,
+}).strict();
+
+export const InboxSpecChangeSchema = z.union([
+  InboxSpecCreateChangeSchema,
+  InboxSpecUpdateChangeSchema,
+]);
+
+const inboxEntityRevisionExpectation = z.object({
+  target: z.object({ kind: z.literal("entity"), id: inboxSpecEntityId }).strict(),
+  revision,
+  semanticRevision: z.number().int().positive(),
+}).strict();
+
+const inboxSingleLineText = (maximum: number) => utf8Text(maximum).refine(
+  (value) => value.length > 0
+    && value.trim() === value
+    && value.normalize("NFC") === value
+    && !inboxHasLoneSurrogate(value)
+    && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(value),
+  "Text must be trimmed canonical Unicode without control or line-separator characters.",
+);
+
+const inboxEvidenceEntityRef = z.object({
+  id: inboxSingleLineText(256),
+  kind: inboxSingleLineText(64),
+  title: inboxSingleLineText(512).optional(),
+}).strict();
+const inboxEvidenceCodeRef = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("symbol"),
+    symbolId: inboxSingleLineText(1_024),
+    fingerprint: inboxSingleLineText(1_024).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("file"),
+    path: teamRepositoryPath,
+    fingerprint: inboxSingleLineText(1_024).optional(),
+  }).strict(),
+]);
+const inboxExternalUri = inboxSingleLineText(4 * 1024).refine((value) => {
+  if (!/^https?:\/\/\S+$/u.test(value)) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return (parsed.protocol === "http:" || parsed.protocol === "https:")
+    && parsed.username === ""
+    && parsed.password === "";
+}, "External evidence must be an HTTP(S) URL without credentials.");
+
+export const InboxEvidenceRefSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("entity"), entity: inboxEvidenceEntityRef }).strict(),
+  z.object({ kind: z.literal("code"), code: inboxEvidenceCodeRef }).strict(),
+  z.object({ kind: z.literal("commit"), hash: gitObjectId }).strict(),
+  z.object({ kind: z.literal("file"), path: teamRepositoryPath }).strict(),
+  z.object({
+    kind: z.literal("external"),
+    uri: inboxExternalUri,
+    label: inboxSingleLineText(512).optional(),
+  }).strict(),
+  z.object({ kind: z.literal("manual"), note: inboxText(4 * 1024) }).strict(),
+]);
+
+function inboxSpecDependencyIds(change: z.infer<typeof InboxSpecChangeSchema>): string[] {
+  if (change.kind === "spec.update") return [change.target.id];
+  return [...new Set([
+    ...(change.topics ?? []),
+    ...(change.relation ? [change.relation.target.id] : []),
+  ])].sort();
+}
+
+function validateInboxDependencyCoverage(
+  change: z.infer<typeof InboxSpecChangeSchema>,
+  targetRevisions: readonly z.infer<typeof inboxEntityRevisionExpectation>[],
+  context: z.RefinementCtx,
+): void {
+  const expected = inboxSpecDependencyIds(change);
+  const actual = targetRevisions.map((item) => item.target.id).sort();
+  if (
+    new Set(actual).size !== actual.length
+    || expected.length !== actual.length
+    || expected.some((id, index) => id !== actual[index])
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["targetRevisions"],
+      message: "Exact revisions must cover every Spec dependency once.",
+    });
+  }
+}
+
+export const InboxDraftInputSchema = z.object({
+  change: InboxSpecChangeSchema,
+  rationale: inboxText(8 * 1024),
+  evidence: z.array(InboxEvidenceRefSchema).max(64),
+  targetRevisions: z.array(inboxEntityRevisionExpectation).max(64),
+}).strict().superRefine((value, context) => {
+  validateInboxDependencyCoverage(value.change, value.targetRevisions, context);
+  if (jsonByteLength(value) > HUB_LIMITS.maxMutationBodyBytes) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "The Inbox draft input exceeds 64 KiB.",
+    });
+  }
+});
+
+export const InboxDraftSummarySchema = z.object({
+  id: InboxDraftIdSchema,
+  revision,
+  updatedAt: isoTimestamp,
+  changeKind: z.enum(["spec.create", "spec.update"]),
+  entityKind: InboxSpecKindSchema,
+  title: inboxText(512),
+  rationaleExcerpt: utf8Text(240),
+}).strict();
+
+export const InboxDraftDetailSchema = InboxDraftSummarySchema.extend({
+  input: InboxDraftInputSchema,
+}).strict();
+
+const inboxProposalRef = z.object({
+  id: InboxProposalIdSchema,
+  kind: z.literal("proposal"),
+  title: inboxText(512).optional(),
+}).strict();
+
+const inboxProposalSummaryObject = z.object({
+  schemaVersion: z.literal(1),
+  ref: inboxProposalRef,
+  sourcePath: teamRepositoryPath,
+  revision,
+  state: InboxProposalStateSchema,
+  author: TeamActorRefSchema,
+  changeKind: z.enum(["spec.create", "spec.update"]),
+  entityKind: InboxSpecKindSchema,
+  title: inboxText(512),
+  rationaleExcerpt: utf8Text(240),
+  reviewer: TeamActorRefSchema.optional(),
+  reviewedAt: isoTimestamp.optional(),
+}).strict();
+
+function validateInboxProposalPath(
+  value: z.infer<typeof inboxProposalSummaryObject>,
+  context: z.RefinementCtx,
+): void {
+  if (value.sourcePath !== `.mex/inbox/${value.ref.id}.md`) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sourcePath"],
+      message: "Proposal source path must match its ID.",
+    });
+  }
+}
+
+function validateInboxProposalReviewState(
+  value: z.infer<typeof inboxProposalSummaryObject> & { reviewRationale?: string },
+  context: z.RefinementCtx,
+  requireRejectedRationale = false,
+): void {
+  const hasReviewer = value.reviewer !== undefined;
+  const hasReviewedAt = value.reviewedAt !== undefined;
+  if (hasReviewer !== hasReviewedAt) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [hasReviewer ? "reviewedAt" : "reviewer"],
+      message: "Proposal reviewer and review time must be recorded together.",
+    });
+  }
+  const terminal = value.state === "approved"
+    || value.state === "rejected"
+    || value.state === "withdrawn";
+  if (terminal && !hasReviewer) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reviewer"],
+      message: "Terminal proposals require reviewer authority and review time.",
+    });
+  }
+  if ((value.state === "pending" || value.state === "stale") && hasReviewer) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reviewer"],
+      message: "Pending and stale proposals must not carry reviewer authority.",
+    });
+  }
+  if (value.reviewRationale !== undefined && !hasReviewer) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reviewRationale"],
+      message: "Proposal review rationale requires reviewer authority.",
+    });
+  }
+  if (requireRejectedRationale
+    && value.state === "rejected"
+    && value.reviewRationale === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["reviewRationale"],
+      message: "Rejected proposals require review rationale.",
+    });
+  }
+}
+
+export const InboxProposalSummarySchema = inboxProposalSummaryObject.superRefine((value, context) => {
+  validateInboxProposalPath(value, context);
+  validateInboxProposalReviewState(value, context);
+});
+
+export const InboxProposalDetailSchema = inboxProposalSummaryObject.extend({
+  change: InboxSpecChangeSchema,
+  rationale: inboxText(8 * 1024),
+  evidence: z.array(InboxEvidenceRefSchema).max(64),
+  targetRevisions: z.array(inboxEntityRevisionExpectation).max(64),
+  reviewRationale: inboxText(8 * 1024).optional(),
+}).strict().superRefine((value, context) => {
+  validateInboxProposalPath(value, context);
+  validateInboxProposalReviewState(value, context, true);
+  validateInboxDependencyCoverage(value.change, value.targetRevisions, context);
+});
+
+export const InboxDraftListRequestSchema = z.object({
+  cursor: cursor.optional(),
+  limit: z.coerce.number().int().min(1).max(HUB_LIMITS.maxPageSize)
+    .default(HUB_LIMITS.defaultPageSize),
+}).strict();
+
+export const InboxProposalListRequestSchema = z.object({
+  states: z.array(InboxProposalStateSchema).min(1).max(5).refine(
+    (values) => new Set(values).size === values.length,
+    "Proposal states must be unique.",
+  ).optional(),
+  cursor: cursor.optional(),
+  limit: z.coerce.number().int().min(1).max(HUB_LIMITS.maxPageSize)
+    .default(HUB_LIMITS.defaultPageSize),
+}).strict();
+
+const inboxPageFields = {
+  nextCursor: cursor.nullable(),
+  truncated: z.boolean(),
+  sourceTruncated: z.boolean(),
+  deterministicRevision: revision,
+  diagnostics: z.array(HubDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
+  diagnosticsTruncated: z.boolean(),
+} as const;
+
+export const InboxDraftListResponseSchema = z.object({
+  items: z.array(InboxDraftSummarySchema).max(HUB_LIMITS.maxPageSize),
+  ...inboxPageFields,
+}).strict().superRefine((value, context) => {
+  if (value.truncated !== (value.nextCursor !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["truncated"], message: "Draft truncation must match cursor presence." });
+  }
+});
+
+export const InboxProposalListResponseSchema = z.object({
+  items: z.array(InboxProposalSummarySchema).max(HUB_LIMITS.maxPageSize),
+  ...inboxPageFields,
+}).strict().superRefine((value, context) => {
+  if (value.truncated !== (value.nextCursor !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["truncated"], message: "Proposal truncation must match cursor presence." });
+  }
+});
+
+const inboxCommandExpectation = z.union([
+  z.object({
+    target: z.object({
+      kind: z.literal("local"),
+      namespace: z.literal("inbox-draft"),
+      id: InboxDraftIdSchema,
+    }).strict(),
+    revision,
+  }).strict(),
+  z.object({
+    target: z.object({
+      kind: z.literal("artifact"),
+      path: teamRepositoryPath,
+    }).strict(),
+    revision,
+  }).strict(),
+]);
+
+const inboxAction = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("inbox.draft.save"),
+    draftId: InboxDraftIdSchema.optional(),
+    draft: InboxDraftInputSchema,
+  }).strict(),
+  z.object({ kind: z.literal("inbox.draft.delete"), draftId: InboxDraftIdSchema }).strict(),
+  z.object({ kind: z.literal("inbox.publish"), draftId: InboxDraftIdSchema }).strict(),
+  z.object({ kind: z.literal("inbox.approve"), proposalId: InboxProposalIdSchema }).strict(),
+  z.object({
+    kind: z.literal("inbox.reject"),
+    proposalId: InboxProposalIdSchema,
+    rationale: inboxText(8 * 1024),
+  }).strict(),
+  z.object({
+    kind: z.literal("inbox.withdraw"),
+    proposalId: InboxProposalIdSchema,
+    rationale: inboxText(8 * 1024).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("inbox.mark-stale"),
+    proposalId: InboxProposalIdSchema,
+    rationale: inboxText(8 * 1024),
+  }).strict(),
+  z.object({
+    kind: z.literal("inbox.repair"),
+    proposalId: InboxProposalIdSchema,
+    replacement: InboxDraftInputSchema,
+  }).strict(),
+]);
+
+export const InboxOperationPreviewRequestSchema = z.object({
+  operationId: teamOperationId,
+  action: inboxAction,
+  expectedRevisions: z.array(inboxCommandExpectation).max(64),
+}).strict().superRefine((value, context) => {
+  let expectedTarget: string | null = null;
+  if (value.action.kind === "inbox.draft.save") {
+    expectedTarget = value.action.draftId === undefined
+      ? null
+      : `local:${value.action.draftId}`;
+  } else if (value.action.kind === "inbox.draft.delete" || value.action.kind === "inbox.publish") {
+    expectedTarget = `local:${value.action.draftId}`;
+  } else {
+    expectedTarget = `artifact:.mex/inbox/${value.action.proposalId}.md`;
+  }
+  const actual = value.expectedRevisions.map((item) => item.target.kind === "local"
+    ? `local:${item.target.id}`
+    : `artifact:${item.target.path}`);
+  if (
+    (expectedTarget === null && actual.length !== 0)
+    || (expectedTarget !== null && (actual.length !== 1 || actual[0] !== expectedTarget))
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["expectedRevisions"],
+      message: "The command requires the exact target revision once.",
+    });
+  }
+  if (jsonByteLength(value) > HUB_LIMITS.maxMutationBodyBytes) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "The Inbox command exceeds 64 KiB." });
+  }
+});
+
+export const InboxLocalChangeSchema = z.object({
+  namespace: z.literal("inbox-draft"),
+  id: InboxDraftIdSchema,
+  beforeRevision: revision.nullable(),
+  afterRevision: revision.nullable(),
+  summary: inboxText(2 * 1024),
+}).strict();
+
+const inboxPublicPreview = z.object({
+  valid: z.boolean(),
+  scope: z.enum(["canonical", "local", "mixed"]),
+  changes: z.array(TeamFileChangeSchema).max(16),
+  localChanges: z.array(InboxLocalChangeSchema).max(16),
+  diagnostics: z.array(HubDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
+}).strict();
+
+const inboxPurposeId = z.discriminatedUnion("purpose", [
+  z.object({ purpose: z.literal("inbox-draft"), id: InboxDraftIdSchema }).strict(),
+  z.object({ purpose: z.literal("proposal"), id: InboxProposalIdSchema }).strict(),
+  z.object({ purpose: z.literal("activity"), id: teamEventId }).strict(),
+  z.object({ purpose: z.literal("spec-entity"), id: inboxSpecEntityId }).strict(),
+]);
+
+export const InboxOperationReceiptSchema = z.object({
+  schemaVersion: z.literal(1),
+  authority: z.object({
+    actor: TeamActorRefSchema,
+    occurredAt: isoTimestamp,
+    repoState: teamRepositoryState,
+  }).strict(),
+  purposeIds: z.array(inboxPurposeId).max(2),
+  requestRevision: revision,
+  presentationRevision: revision,
+  previewRevision: revision,
+}).strict().superRefine((value, context) => {
+  const keys = value.purposeIds.map(({ purpose, id }) => `${purpose}\0${id}`);
+  if (new Set(keys).size !== keys.length || keys.some((key, index) => (
+    index > 0 && key <= keys[index - 1]!
+  ))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["purposeIds"], message: "Purpose IDs must be unique and sorted." });
+  }
+  if (jsonByteLength(value) > 8 * 1024) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "The Inbox receipt exceeds 8 KiB." });
+  }
+});
+
+export const InboxOperationPreviewResponseSchema = z.object({
+  schemaVersion: z.literal(1),
+  request: InboxOperationPreviewRequestSchema,
+  preview: inboxPublicPreview,
+  receipt: InboxOperationReceiptSchema,
+}).strict().superRefine((value, context) => {
+  if (jsonByteLength(value) > HUB_LIMITS.maxMutationBodyBytes) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "The Inbox preview exceeds 64 KiB." });
+  }
+});
+
+export const InboxOperationApplyRequestSchema = InboxOperationPreviewResponseSchema;
+
+export const InboxOperationApplyResponseSchema = z.object({
+  operationId: teamOperationId,
+  previewRevision: revision,
+  applied: z.literal(true),
+  idempotentReplay: z.boolean(),
+  changes: z.array(TeamFileChangeSchema).max(16),
+  localChanges: z.array(InboxLocalChangeSchema).max(16),
+  proposals: z.array(InboxProposalDetailSchema).max(1),
   events: z.array(TeamActivityEventSchema).max(1),
 }).strict();
 
@@ -1829,6 +2374,29 @@ export type TeamOperationPreviewResponse = z.infer<typeof TeamOperationPreviewRe
 export type TeamOperationApplyRequest = z.infer<typeof TeamOperationApplyRequestSchema>;
 export type TeamActivityEvent = z.infer<typeof TeamActivityEventSchema>;
 export type TeamOperationApplyResponse = z.infer<typeof TeamOperationApplyResponseSchema>;
+export type InboxSpecKind = z.infer<typeof InboxSpecKindSchema>;
+export type InboxProposalState = z.infer<typeof InboxProposalStateSchema>;
+export type InboxDraftId = z.infer<typeof InboxDraftIdSchema>;
+export type InboxProposalId = z.infer<typeof InboxProposalIdSchema>;
+export type InboxEvidenceRef = z.infer<typeof InboxEvidenceRefSchema>;
+export type InboxSpecCreateChange = z.infer<typeof InboxSpecCreateChangeSchema>;
+export type InboxSpecUpdateChange = z.infer<typeof InboxSpecUpdateChangeSchema>;
+export type InboxSpecChange = z.infer<typeof InboxSpecChangeSchema>;
+export type InboxDraftInput = z.infer<typeof InboxDraftInputSchema>;
+export type InboxDraftSummary = z.infer<typeof InboxDraftSummarySchema>;
+export type InboxDraftDetail = z.infer<typeof InboxDraftDetailSchema>;
+export type InboxProposalSummary = z.infer<typeof InboxProposalSummarySchema>;
+export type InboxProposalDetail = z.infer<typeof InboxProposalDetailSchema>;
+export type InboxDraftListRequest = z.infer<typeof InboxDraftListRequestSchema>;
+export type InboxProposalListRequest = z.infer<typeof InboxProposalListRequestSchema>;
+export type InboxDraftListResponse = z.infer<typeof InboxDraftListResponseSchema>;
+export type InboxProposalListResponse = z.infer<typeof InboxProposalListResponseSchema>;
+export type InboxOperationPreviewRequest = z.infer<typeof InboxOperationPreviewRequestSchema>;
+export type InboxLocalChange = z.infer<typeof InboxLocalChangeSchema>;
+export type InboxOperationReceipt = z.infer<typeof InboxOperationReceiptSchema>;
+export type InboxOperationPreviewResponse = z.infer<typeof InboxOperationPreviewResponseSchema>;
+export type InboxOperationApplyRequest = z.infer<typeof InboxOperationApplyRequestSchema>;
+export type InboxOperationApplyResponse = z.infer<typeof InboxOperationApplyResponseSchema>;
 export type GraphSymbolId = z.infer<typeof GraphSymbolIdSchema>;
 export type GraphSymbol = z.infer<typeof GraphSymbolSchema>;
 export type WikiEntityId = z.infer<typeof WikiEntityIdSchema>;

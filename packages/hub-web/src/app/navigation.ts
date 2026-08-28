@@ -51,8 +51,8 @@ export const navigation: NavigationGroup[] = [
     label: "Team",
     items: [
       { label: "Members", path: "/members", icon: UsersRound, capability: "members" },
-      { label: "Inbox", path: "/inbox", icon: Inbox, capability: "team" },
-      { label: "Relays", path: "/relays", icon: Send, capability: "team" },
+      { label: "Inbox", path: "/inbox", icon: Inbox, capability: "inbox" },
+      { label: "Relays", path: "/relays", icon: Send, structuralUnavailable: true },
       { label: "Activity", path: "/activity", icon: Activity, capability: "activity" },
     ],
   },

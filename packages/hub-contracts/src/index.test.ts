@@ -11,6 +11,11 @@ import {
   HomeResponseSchema,
   HubCapabilitiesSchema,
   HubJobIdSchema,
+  InboxDraftListResponseSchema,
+  InboxEvidenceRefSchema,
+  InboxOperationPreviewRequestSchema,
+  InboxOperationPreviewResponseSchema,
+  InboxProposalDetailSchema,
   SearchRequestSchema,
   SearchResponseSchema,
   SpecDetailResponseSchema,
@@ -50,6 +55,213 @@ describe("Hub API contracts", () => {
     });
   });
 
+  it("locks the bounded body-free Inbox list and one-change mutation contract", () => {
+    const revision = "a".repeat(64);
+    const draftSummary = {
+      id: "inbox_00000000000000000000000000000001",
+      revision,
+      updatedAt: "2026-08-23T00:00:00.000Z",
+      changeKind: "spec.create",
+      entityKind: "requirement",
+      title: "Release benchmark local draft Requirement",
+      rationaleExcerpt: "Review this typed requirement.",
+    } as const;
+    const page = {
+      items: [draftSummary],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: revision,
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    };
+    expect(InboxDraftListResponseSchema.parse(page)).toEqual(page);
+    expect(InboxDraftListResponseSchema.safeParse({
+      ...page,
+      items: [{ ...draftSummary, input: { body: "must not leak" } }],
+    }).success).toBe(false);
+
+    const create = {
+      operationId: "hub_inbox_create_1",
+      action: {
+        kind: "inbox.draft.save",
+        draft: {
+          change: {
+            kind: "spec.create",
+            entityKind: "requirement",
+            title: "Typed requirement",
+            body: "The reviewed behavior is explicit.\n\n- It permits a typed body.\n\t- Tabs remain canonical.",
+            status: "in_flight",
+          },
+          rationale: "Make the requirement reviewable before publication.\nKeep the review context intact.",
+          evidence: [{
+            kind: "manual",
+            note: "A manual observation can keep its line breaks.\n\tIndented evidence remains canonical.",
+          }],
+          targetRevisions: [],
+        },
+      },
+      expectedRevisions: [],
+    } as const;
+    expect(InboxOperationPreviewRequestSchema.parse(create)).toEqual(create);
+    expect(InboxOperationPreviewRequestSchema.safeParse({
+      ...create,
+      action: {
+        ...create.action,
+        draft: {
+          ...create.action.draft,
+          change: { ...create.action.draft.change, operations: [] },
+        },
+      },
+    }).success).toBe(false);
+    expect(InboxOperationPreviewRequestSchema.safeParse({
+      ...create,
+      action: {
+        ...create.action,
+        draft: {
+          ...create.action.draft,
+          evidence: [{
+            kind: "external",
+            uri: "https://example.test/evidence",
+            label: "External labels\nmust remain single-line",
+          }],
+        },
+      },
+    }).success).toBe(false);
+    expect(InboxOperationPreviewRequestSchema.safeParse({
+      ...create,
+      action: {
+        ...create.action,
+        draft: {
+          ...create.action.draft,
+          evidence: [{
+            kind: "external",
+            uri: " https://example.test/evidence ",
+          }],
+        },
+      },
+    }).success).toBe(false);
+
+    const proposal = {
+      schemaVersion: 1,
+      ref: { id: "proposal_01000000000000000000001720", kind: "proposal" },
+      sourcePath: ".mex/inbox/proposal_01000000000000000000001720.md",
+      revision,
+      state: "pending",
+      author: { kind: "unknown" },
+      changeKind: "spec.update",
+      entityKind: "spec",
+      title: "Release benchmark pending Spec update",
+      rationaleExcerpt: "Review this exact update.",
+      change: {
+        kind: "spec.update",
+        target: { id: "mx_01000000000000000000000001", kind: "spec" },
+        patch: { summary: "A bounded reviewed update." },
+      },
+      rationale: "Review this exact update.",
+      evidence: [],
+      targetRevisions: [{
+        target: { kind: "entity", id: "mx_01000000000000000000000001" },
+        revision,
+        semanticRevision: 1,
+      }],
+    } as const;
+    expect(InboxProposalDetailSchema.parse(proposal)).toEqual(proposal);
+    expect(InboxProposalDetailSchema.safeParse({
+      ...proposal,
+      targetRevisions: [],
+    }).success).toBe(false);
+    expect(InboxProposalDetailSchema.safeParse({
+      ...proposal,
+      targetRevisions: [proposal.targetRevisions[0], proposal.targetRevisions[0]],
+    }).success).toBe(false);
+    expect(InboxProposalDetailSchema.safeParse({
+      ...proposal,
+      reviewer: { kind: "unknown" },
+      reviewedAt: "2026-08-23T00:00:00.000Z",
+    }).success).toBe(false);
+    expect(InboxProposalDetailSchema.safeParse({
+      ...proposal,
+      state: "rejected",
+      reviewer: { kind: "unknown" },
+      reviewedAt: "2026-08-23T00:00:00.000Z",
+    }).success).toBe(false);
+
+    const approval = {
+      schemaVersion: 1,
+      request: {
+        operationId: "hub_inbox_approve_1",
+        action: { kind: "inbox.approve", proposalId: proposal.ref.id },
+        expectedRevisions: [{
+          target: { kind: "artifact", path: proposal.sourcePath },
+          revision,
+        }],
+      },
+      preview: {
+        valid: true,
+        scope: "canonical",
+        changes: [],
+        localChanges: [],
+        diagnostics: [],
+      },
+      receipt: {
+        schemaVersion: 1,
+        authority: {
+          actor: { kind: "unknown" },
+          occurredAt: "2026-08-23T00:00:00.000Z",
+          repoState: {
+            branch: "feature/inbox",
+            head: "b".repeat(40),
+            dirty: false,
+            observedAt: "2026-08-23T00:00:00.000Z",
+          },
+        },
+        purposeIds: [{
+          purpose: "activity",
+          id: "event_01000000000000000000001720",
+        }, {
+          purpose: "spec-entity",
+          id: "mx_02000000000000000000000001",
+        }],
+        requestRevision: "c".repeat(64),
+        presentationRevision: "d".repeat(64),
+        previewRevision: "e".repeat(64),
+      },
+    } as const;
+    expect(InboxOperationPreviewResponseSchema.parse(approval)).toEqual(approval);
+    expect(InboxOperationPreviewResponseSchema.safeParse({
+      ...approval,
+      receipt: {
+        ...approval.receipt,
+        purposeIds: [...approval.receipt.purposeIds].reverse(),
+      },
+    }).success).toBe(false);
+  });
+
+  it("keeps Inbox structural evidence single-line while governed prose remains multiline", () => {
+    const hostile = [
+      { kind: "entity", entity: { id: "mx_reference", kind: "spec", title: "C1\u0085title" } },
+      { kind: "code", code: { kind: "symbol", symbolId: "symbol\u2028boundary" } },
+      { kind: "code", code: { kind: "symbol", symbolId: "symbol.valid", fingerprint: "bad\u2029fingerprint" } },
+      { kind: "external", uri: "https://example.test/evidence", label: "Broken \ud800 label" },
+      { kind: "external", uri: "https://example.test/Cafe\u0301" },
+      { kind: "external", uri: "https://example.test/evidence", label: " padded label " },
+      { kind: "external", uri: "HTTPS://example.test/evidence" },
+      { kind: "external", uri: "http:example.test/evidence" },
+      { kind: "external", uri: "https://example.test/evidence note" },
+    ];
+    for (const evidence of hostile) {
+      expect(InboxEvidenceRefSchema.safeParse(evidence).success).toBe(false);
+    }
+    expect(InboxEvidenceRefSchema.parse({
+      kind: "manual",
+      note: "First governed observation.\n\tIndented second observation.",
+    })).toEqual({
+      kind: "manual",
+      note: "First governed observation.\n\tIndented second observation.",
+    });
+  });
+
   it("locks the team member and capability contract golden", () => {
     const available = { availability: "available" } as const;
     const unavailable = {
@@ -68,6 +280,12 @@ describe("Hub API contracts", () => {
       },
       workstreams: { read: available, canonicalMutation: available },
       specs: { read: unavailable },
+      inbox: {
+        read: unavailable,
+        draftMutation: unavailable,
+        proposalMutation: unavailable,
+        specApproval: unavailable,
+      },
       jobs: available,
       graph: { read: unavailable, refresh: unavailable, rebuild: unavailable },
       wiki: { read: unavailable, refresh: unavailable, rebuild: unavailable },

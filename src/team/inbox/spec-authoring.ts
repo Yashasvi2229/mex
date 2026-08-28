@@ -33,6 +33,7 @@ import type {
   WikiRevisionExpectation,
 } from "../contracts/wiki.js";
 import { artifactError } from "../artifacts/errors.js";
+import { normalizeInboxEvidence } from "../artifacts/workflow-codecs.js";
 import { isEntityId } from "../../wiki/model/ids.js";
 
 const PAYLOAD_KIND = "mex.team.inbox.spec-change.v1" as const;
@@ -489,8 +490,12 @@ function normalizeDraftInput(value: unknown): TeamInboxSpecDraftInput {
     TEAM_INBOX_SPEC_LIMITS.maxRationaleBytes,
     true,
   );
-  if (!Array.isArray(value.evidence)) throw invalidRequest();
-  const evidence = cloneJson(value.evidence) as TeamInboxSpecDraftInput["evidence"];
+  let evidence: TeamInboxSpecDraftInput["evidence"];
+  try {
+    evidence = normalizeInboxEvidence(value.evidence);
+  } catch {
+    throw invalidRequest();
+  }
   const targetRevisions = normalizeEntityExpectations(value.targetRevisions);
   assertDependencyCoverage(change, targetRevisions);
   return deepFreeze({ change, rationale, evidence, targetRevisions });
@@ -675,7 +680,7 @@ function normalizeTopics(value: unknown): readonly string[] {
 
 function normalizeEntityExpectations(value: unknown): readonly RevisionExpectation[] {
   if (!Array.isArray(value) || value.length > TEAM_INBOX_SPEC_LIMITS.maxExpectations) {
-    throw invalidSpec("Spec revision expectations exceed the bounded collection.");
+    throw invalidRequest();
   }
   const seen = new Set<string>();
   const expectations = value.map((item) => {
@@ -684,7 +689,7 @@ function normalizeEntityExpectations(value: unknown): readonly RevisionExpectati
     if (!isPlainObject(item.target)) throw invalidRequest();
     exactKeys(item.target, ["kind", "id"], [], invalidRequest);
     if (item.target.kind !== "entity" || !isWikiMintedId(item.target.id)) {
-      throw invalidSpec("Spec dependencies require exact Wiki entity expectations.");
+      throw invalidRequest();
     }
     if (
       typeof item.revision !== "string"
@@ -692,7 +697,7 @@ function normalizeEntityExpectations(value: unknown): readonly RevisionExpectati
       || !Number.isSafeInteger(item.semanticRevision)
       || (item.semanticRevision as number) < 1
     ) {
-      throw invalidSpec("Spec dependencies require semantic and exact file revisions.");
+      throw invalidRequest();
     }
     if (seen.has(item.target.id)) {
       throw invalidSpec("Spec dependency expectations must be unique.");
@@ -724,9 +729,9 @@ function normalizeCommandExpectations(value: unknown): readonly RevisionExpectat
       exactKeys(item.target, ["kind", "namespace", "id"], [], invalidRequest);
       if (
         item.target.namespace !== "inbox-draft"
-        || typeof item.target.id !== "string"
         || Object.hasOwn(item, "semanticRevision")
       ) throw invalidRequest();
+      assertLocalId(item.target.id);
       return cloneJson(item) as unknown as RevisionExpectation;
     }
     if (item.target.kind === "artifact") {
@@ -1217,7 +1222,7 @@ function boundedText(
     || Buffer.byteLength(value, "utf8") > maxBytes
     || !isCanonicalInboxString(value)
     || (required && value.trim().length === 0)
-  ) throw invalidSpec(`${label} is invalid or exceeds ${maxBytes} UTF-8 bytes.`);
+  ) throw invalidRequest();
   return value;
 }
 
@@ -1232,7 +1237,7 @@ function hasLoneSurrogate(value: string): boolean {
     const code = value.charCodeAt(index);
     if (code >= 0xd800 && code <= 0xdbff) {
       const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) return true;
+      if (!Number.isFinite(next) || next < 0xdc00 || next > 0xdfff) return true;
       index += 1;
     } else if (code >= 0xdc00 && code <= 0xdfff) {
       return true;
@@ -1257,16 +1262,15 @@ function exactKeys(
 function assertLocalId(value: unknown): asserts value is string {
   if (
     typeof value !== "string"
-    || value.length === 0
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value)
     || Buffer.byteLength(value, "utf8") > 256
-    || /[\0-\x1f\x7f]/u.test(value)
   ) throw invalidRequest();
 }
 
 function assertProposalId(value: unknown): asserts value is string {
   if (
     typeof value !== "string"
-    || !/^proposal_[0-9A-HJKMNP-TV-Z]{26}$/u.test(value)
+    || !/^proposal_[0-7][0-9A-HJKMNP-TV-Z]{25}$/u.test(value)
   ) throw invalidRequest();
 }
 

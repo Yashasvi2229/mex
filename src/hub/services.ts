@@ -19,6 +19,23 @@ import {
   type HubActor,
   type HubCapabilities,
   type HubJobSnapshot,
+  type InboxDraftDetail,
+  type InboxDraftInput,
+  type InboxDraftListRequest,
+  type InboxDraftListResponse,
+  type InboxDraftSummary,
+  type InboxEvidenceRef,
+  type InboxLocalChange,
+  type InboxOperationApplyRequest,
+  type InboxOperationApplyResponse,
+  type InboxOperationPreviewRequest,
+  type InboxOperationPreviewResponse,
+  type InboxProposalDetail,
+  type InboxProposalListRequest,
+  type InboxProposalListResponse,
+  type InboxProposalSummary,
+  type InboxSpecChange,
+  type TeamFileChange,
   type SearchRequest,
   type SearchResponse,
   type SpecDetailResponse,
@@ -64,15 +81,29 @@ import {
   type EntityRef,
   type JsonValue,
   type RevisionExpectation,
+  type FileChange,
 } from "../team/contracts/shared.js";
 import type {
   ActivityEvent,
   ActivitySubjectRef,
   StoredActivityEvent,
+  TeamEvidenceRef,
   TeamActivityListRequest,
   TeamCurrentActor,
   TeamIdentityActivityCommand,
   TeamIdentityActivityPreviewEnvelope,
+  TeamInboxDraftListRequest,
+  TeamInboxProposalListRequest,
+  TeamInboxSpecApplyResult,
+  TeamInboxSpecCommand,
+  TeamInboxSpecDraftDetail,
+  TeamInboxSpecDraftSummary,
+  TeamInboxSpecDraftInput,
+  TeamInboxSpecPage,
+  TeamInboxSpecPreviewEnvelope,
+  TeamInboxSpecProposalDetail,
+  TeamInboxSpecProposalSummary,
+  TeamInboxSpecRef,
   TeamMember,
   TeamMemberListRequest,
   TeamPage,
@@ -109,6 +140,7 @@ import {
 import { createRepositoryGitPort } from "../team/git/git-port.js";
 import { ActorResolver } from "../team/identity/actor-resolver.js";
 import { MemberRepository } from "../team/identity/member-repository.js";
+import { normalizeTeamInboxSpecCommand } from "../team/inbox/spec-authoring.js";
 import type { HubReadServices } from "./app.js";
 import { HubHttpError } from "./http/errors.js";
 import type {
@@ -177,12 +209,27 @@ export interface HubTeamWorkstreamService {
   ): Promise<TeamWorkflowResult<JsonValue>>;
 }
 
+/** Exact private Checkpoint E facade consumed by the loopback Hub only. */
+export interface HubInboxSpecAuthoringService {
+  getInboxDraft(draftId: string): Promise<TeamInboxSpecDraftDetail | null>;
+  listInboxDrafts(
+    request?: TeamInboxDraftListRequest,
+  ): Promise<TeamInboxSpecPage<TeamInboxSpecDraftSummary>>;
+  getInboxProposal(proposalId: string): Promise<TeamInboxSpecProposalDetail | null>;
+  listInboxProposals(
+    request?: TeamInboxProposalListRequest,
+  ): Promise<TeamInboxSpecPage<TeamInboxSpecProposalSummary>>;
+  previewInbox(command: TeamInboxSpecCommand): Promise<TeamInboxSpecPreviewEnvelope>;
+  applyInbox(envelope: TeamInboxSpecPreviewEnvelope): Promise<TeamInboxSpecApplyResult>;
+}
+
 export interface LocalHubReadServicesOptions {
   readonly projectRoot: string;
   readonly scaffoldId: string;
   readonly jobs: HubJobReader;
   readonly team: HubTeamIdentityActivityService;
   readonly workstreams?: HubTeamWorkstreamService;
+  readonly inbox?: HubInboxSpecAuthoringService;
   readonly specs?: SpecReadService;
   readonly git?: GitPort;
   readonly graph?: HubGraphReadService;
@@ -206,6 +253,7 @@ export function createLocalHubReadServices(
   const wiki = options.wiki;
   const team = options.team;
   const workstreams = options.workstreams;
+  const inbox = options.inbox;
   const specs = options.specs;
   // Activity's existing workbench includes bounded legacy JSONL alongside
   // canonical events and resolves today's effective member separately from the
@@ -239,6 +287,16 @@ export function createLocalHubReadServices(
         specs: {
           read: specs ? available() : unavailable("The read-only Spec service is not connected in this build."),
         },
+        inbox: {
+          read: inbox ? available() : unavailable("Inbox reads are not connected in this build."),
+          draftMutation: inbox ? available() : unavailable("Inbox draft mutations are not connected in this build."),
+          proposalMutation: inbox
+            ? available()
+            : unavailable("Inbox proposal mutations are not connected in this build."),
+          specApproval: inbox && wiki
+            ? available()
+            : unavailable("Inbox Spec approval requires exact Wiki planning and apply."),
+        },
         jobs: available(),
         graph: {
           read: graph ? available() : unavailable("The GraphPort is not connected in this build."),
@@ -254,10 +312,11 @@ export function createLocalHubReadServices(
     },
 
     async home(): Promise<HomeResponse> {
-      const [repository, actorResolution, workstreamSummary] = await Promise.all([
+      const [repository, actorResolution, workstreamSummary, inboxSummary] = await Promise.all([
         git.getRepoState(),
         team.getCurrentActor(),
         homeWorkstreamSummary(workstreams),
+        homeInboxSummary(inbox),
       ]);
       const jobs = options.jobs.list({ limit: 100 }).items;
       const active = jobs.filter((job) => job.state === "queued" || job.state === "running");
@@ -287,7 +346,7 @@ export function createLocalHubReadServices(
         sections: {
           workstreams: workstreamSummary,
           relays: unavailableSection("Relays are not connected in this foundation build."),
-          inbox: unavailableSection("Inbox workflows are not connected in this foundation build."),
+          inbox: inboxSummary,
           activity,
         },
         activeJobs: active.length,
@@ -362,6 +421,99 @@ export function createLocalHubReadServices(
       if (workstreams === undefined) throw unavailableWorkstreams();
       const item = await workstreams.getWorkstream(workstreamId);
       return item === null ? null : projectTeamWorkstream(item);
+    },
+
+    async inboxDrafts(request: InboxDraftListRequest): Promise<InboxDraftListResponse> {
+      if (inbox === undefined) throw unavailableInbox();
+      let pageLimit = request.limit;
+      while (true) {
+        const page = await inbox.listInboxDrafts({
+          limit: pageLimit,
+          ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+        });
+        const diagnostics = page.diagnostics.map(projectDiagnostic);
+        const response: InboxDraftListResponse = {
+          items: page.items.map(projectInboxDraftSummary),
+          nextCursor: page.nextCursor,
+          truncated: page.truncated,
+          sourceTruncated: page.sourceTruncated,
+          deterministicRevision: page.deterministicRevision,
+          diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+          diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+        };
+        if (Buffer.byteLength(JSON.stringify(response), "utf8") <= HUB_LIMITS.maxJsonResponseBytes) {
+          return response;
+        }
+        if (pageLimit <= 1) return response;
+        pageLimit = Math.max(1, Math.floor(pageLimit / 2));
+      }
+    },
+
+    async inboxDraft(draftId: string): Promise<InboxDraftDetail | null> {
+      if (inbox === undefined) throw unavailableInbox();
+      const draft = await inbox.getInboxDraft(draftId);
+      return draft === null ? null : projectInboxDraftDetail(draft);
+    },
+
+    async inboxProposals(
+      request: InboxProposalListRequest,
+    ): Promise<InboxProposalListResponse> {
+      if (inbox === undefined) throw unavailableInbox();
+      let pageLimit = request.limit;
+      while (true) {
+        const page = await inbox.listInboxProposals({
+          limit: pageLimit,
+          ...(request.states === undefined ? {} : { states: request.states }),
+          ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+        });
+        const diagnostics = page.diagnostics.map(projectDiagnostic);
+        const response: InboxProposalListResponse = {
+          items: page.items.map(projectInboxProposalSummary),
+          nextCursor: page.nextCursor,
+          truncated: page.truncated,
+          sourceTruncated: page.sourceTruncated,
+          deterministicRevision: page.deterministicRevision,
+          diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+          diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+        };
+        if (Buffer.byteLength(JSON.stringify(response), "utf8") <= HUB_LIMITS.maxJsonResponseBytes) {
+          return response;
+        }
+        if (pageLimit <= 1) return response;
+        pageLimit = Math.max(1, Math.floor(pageLimit / 2));
+      }
+    },
+
+    async inboxProposal(proposalId: string): Promise<InboxProposalDetail | null> {
+      if (inbox === undefined) throw unavailableInbox();
+      const proposal = await inbox.getInboxProposal(proposalId);
+      return proposal === null ? null : projectInboxProposalDetail(proposal);
+    },
+
+    async previewInboxOperation(
+      request: InboxOperationPreviewRequest,
+    ): Promise<InboxOperationPreviewResponse> {
+      if (inbox === undefined) throw unavailableInbox();
+      return projectInboxPreviewEnvelope(await inbox.previewInbox(
+        projectInboxCommandToService(request),
+      ));
+    },
+
+    async applyInboxOperation(
+      request: InboxOperationApplyRequest,
+    ): Promise<InboxOperationApplyResponse> {
+      if (inbox === undefined) throw unavailableInbox();
+      const result = await inbox.applyInbox(projectInboxEnvelopeToService(request));
+      return {
+        operationId: result.operationId,
+        previewRevision: result.previewRevision,
+        applied: true,
+        idempotentReplay: result.idempotentReplay,
+        changes: result.changes.map(projectInboxFileChange),
+        localChanges: result.localChanges.map(projectInboxLocalChange),
+        proposals: result.proposals.map(projectInboxProposalDetail),
+        events: result.events.map(projectTeamActivityEvent),
+      };
     },
 
     async specs(request: SpecListRequest): Promise<SpecListResponse> {
@@ -1614,6 +1766,748 @@ function invalidGraphProjection(): HubHttpError {
   );
 }
 
+function invalidInboxProjection(): HubHttpError {
+  return new HubHttpError(
+    500,
+    "INTERNAL_ERROR",
+    "Invalid Inbox projection",
+    "The Inbox adapter returned an invalid bounded Spec-authoring result.",
+  );
+}
+
+function projectInboxDraftSummary(
+  draft: TeamInboxSpecDraftSummary,
+): InboxDraftSummary {
+  return {
+    id: draft.id,
+    revision: draft.revision,
+    updatedAt: draft.updatedAt,
+    changeKind: draft.changeKind,
+    entityKind: draft.entityKind,
+    title: draft.title,
+    rationaleExcerpt: draft.rationaleExcerpt,
+  };
+}
+
+function projectInboxDraftDetail(
+  draft: TeamInboxSpecDraftDetail,
+): InboxDraftDetail {
+  return {
+    ...projectInboxDraftSummary(draft),
+    input: projectInboxDraftInput(draft.input),
+  };
+}
+
+function projectInboxDraftInput(
+  input: TeamInboxSpecDraftInput,
+): InboxDraftInput {
+  return {
+    change: projectInboxSpecChange(input.change),
+    rationale: input.rationale,
+    evidence: input.evidence.map(projectInboxEvidence),
+    targetRevisions: input.targetRevisions.map(projectInboxEntityExpectation),
+  };
+}
+
+function projectInboxProposalSummary(
+  proposal: TeamInboxSpecProposalSummary,
+): InboxProposalSummary {
+  if (proposal.ref.kind !== "proposal") throw invalidInboxProjection();
+  return {
+    schemaVersion: 1,
+    ref: {
+      id: proposal.ref.id,
+      kind: "proposal",
+      ...(proposal.ref.title === undefined ? {} : { title: proposal.ref.title }),
+    },
+    sourcePath: proposal.sourcePath,
+    revision: proposal.revision,
+    state: proposal.state,
+    author: projectInboxActor(proposal.author),
+    changeKind: proposal.changeKind,
+    entityKind: proposal.entityKind,
+    title: proposal.title,
+    rationaleExcerpt: proposal.rationaleExcerpt,
+    ...(proposal.reviewer === undefined
+      ? {}
+      : { reviewer: projectInboxActor(proposal.reviewer) }),
+    ...(proposal.reviewedAt === undefined ? {} : { reviewedAt: proposal.reviewedAt }),
+  };
+}
+
+function projectInboxProposalDetail(
+  proposal: TeamInboxSpecProposalDetail,
+): InboxProposalDetail {
+  return {
+    ...projectInboxProposalSummary(proposal),
+    change: projectInboxSpecChange(proposal.change),
+    rationale: proposal.rationale,
+    evidence: proposal.evidence.map(projectInboxEvidence),
+    targetRevisions: proposal.targetRevisions.map(projectInboxEntityExpectation),
+    ...(proposal.reviewRationale === undefined
+      ? {}
+      : { reviewRationale: proposal.reviewRationale }),
+  };
+}
+
+function projectInboxSpecChange(
+  change: TeamInboxSpecDraftInput["change"],
+): InboxSpecChange {
+  if (change.kind === "spec.update") {
+    return {
+      kind: "spec.update",
+      target: projectInboxSpecRef(change.target),
+      patch: {
+        ...(change.patch.title === undefined ? {} : { title: change.patch.title }),
+        ...(change.patch.summary === undefined ? {} : { summary: change.patch.summary }),
+        ...(change.patch.body === undefined ? {} : { body: change.patch.body }),
+      },
+    };
+  }
+  return {
+    kind: "spec.create",
+    entityKind: change.entityKind,
+    title: change.title,
+    body: change.body,
+    ...(change.summary === undefined ? {} : { summary: change.summary }),
+    status: change.status,
+    ...(change.topics === undefined ? {} : { topics: [...change.topics] }),
+    ...(change.relation === undefined
+      ? {}
+      : { relation: projectInboxRelation(change.relation) }),
+  };
+}
+
+function projectInboxSpecRef(
+  ref: TeamInboxSpecRef,
+): Extract<InboxSpecChange, { kind: "spec.update" }>["target"] {
+  return {
+    id: ref.id,
+    kind: ref.kind,
+    ...(ref.title === undefined ? {} : { title: ref.title }),
+  };
+}
+
+function projectInboxRelation(
+  relation: NonNullable<Extract<TeamInboxSpecDraftInput["change"], { kind: "spec.create" }>["relation"]>,
+): NonNullable<Extract<InboxSpecChange, { kind: "spec.create" }>["relation"]> {
+  const title = relation.target.title === undefined
+    ? {}
+    : { title: relation.target.title };
+  switch (relation.type) {
+    case "derived_from":
+      if (relation.target.kind !== "spec") throw invalidInboxProjection();
+      return {
+        type: "derived_from",
+        target: { id: relation.target.id, kind: "spec", ...title },
+      };
+    case "verified_by":
+      if (relation.target.kind !== "spec" && relation.target.kind !== "requirement") {
+        throw invalidInboxProjection();
+      }
+      return {
+        type: "verified_by",
+        target: { id: relation.target.id, kind: relation.target.kind, ...title },
+      };
+    case "constrained_by":
+      if (relation.target.kind !== "constraint") throw invalidInboxProjection();
+      return {
+        type: "constrained_by",
+        target: { id: relation.target.id, kind: "constraint", ...title },
+      };
+    case "refines":
+      if (relation.target.kind !== "requirement") throw invalidInboxProjection();
+      return {
+        type: "refines",
+        target: { id: relation.target.id, kind: "requirement", ...title },
+      };
+  }
+}
+
+function projectInboxEvidence(evidence: TeamEvidenceRef): InboxEvidenceRef {
+  switch (evidence.kind) {
+    case "entity":
+      return {
+        kind: "entity",
+        entity: {
+          id: evidence.entity.id,
+          kind: evidence.entity.kind,
+          ...(evidence.entity.title === undefined ? {} : { title: evidence.entity.title }),
+        },
+      };
+    case "code":
+      return evidence.code.kind === "file"
+        ? {
+            kind: "code",
+            code: {
+              kind: "file",
+              path: evidence.code.path,
+              ...(evidence.code.fingerprint === undefined
+                ? {}
+                : { fingerprint: evidence.code.fingerprint }),
+            },
+          }
+        : {
+            kind: "code",
+            code: {
+              kind: "symbol",
+              symbolId: evidence.code.symbolId,
+              ...(evidence.code.fingerprint === undefined
+                ? {}
+                : { fingerprint: evidence.code.fingerprint }),
+            },
+          };
+    case "commit":
+      return { kind: "commit", hash: evidence.hash };
+    case "file":
+      return { kind: "file", path: evidence.path };
+    case "external":
+      return {
+        kind: "external",
+        uri: evidence.uri,
+        ...(evidence.label === undefined ? {} : { label: evidence.label }),
+      };
+    case "manual":
+      return { kind: "manual", note: evidence.note };
+  }
+}
+
+function projectInboxEntityExpectation(
+  expectation: RevisionExpectation,
+): InboxDraftInput["targetRevisions"][number] {
+  if (
+    expectation.target.kind !== "entity"
+    || expectation.revision === null
+    || expectation.semanticRevision === undefined
+    || expectation.semanticRevision === null
+  ) {
+    throw invalidInboxProjection();
+  }
+  return {
+    target: { kind: "entity", id: expectation.target.id },
+    revision: expectation.revision,
+    semanticRevision: expectation.semanticRevision,
+  };
+}
+
+function projectInboxActor(actor: ActorRef): InboxProposalSummary["author"] {
+  if (actor.kind === "unknown") return { kind: "unknown" };
+  if (actor.kind === "git") {
+    return { kind: "git", name: actor.name, email: actor.email };
+  }
+  return {
+    kind: "member",
+    memberId: actor.memberId,
+    ...(actor.displayName === undefined ? {} : { displayName: actor.displayName }),
+  };
+}
+
+function projectInboxCommandToWire(
+  command: TeamInboxSpecCommand,
+): InboxOperationPreviewRequest {
+  const expectedRevisions = command.expectedRevisions.map(projectInboxCommandExpectation);
+  switch (command.action.kind) {
+    case "inbox.draft.save":
+      return {
+        operationId: command.operationId,
+        action: {
+          kind: "inbox.draft.save",
+          ...(command.action.draftId === undefined ? {} : { draftId: command.action.draftId }),
+          draft: projectInboxDraftInput(command.action.draft),
+        },
+        expectedRevisions,
+      };
+    case "inbox.draft.delete":
+    case "inbox.publish":
+      return {
+        operationId: command.operationId,
+        action: { kind: command.action.kind, draftId: command.action.draftId },
+        expectedRevisions,
+      };
+    case "inbox.approve":
+      return {
+        operationId: command.operationId,
+        action: { kind: "inbox.approve", proposalId: command.action.proposalId },
+        expectedRevisions,
+      };
+    case "inbox.reject":
+    case "inbox.mark-stale":
+      return {
+        operationId: command.operationId,
+        action: {
+          kind: command.action.kind,
+          proposalId: command.action.proposalId,
+          rationale: command.action.rationale,
+        },
+        expectedRevisions,
+      };
+    case "inbox.withdraw":
+      return {
+        operationId: command.operationId,
+        action: {
+          kind: "inbox.withdraw",
+          proposalId: command.action.proposalId,
+          ...(command.action.rationale === undefined
+            ? {}
+            : { rationale: command.action.rationale }),
+        },
+        expectedRevisions,
+      };
+    case "inbox.repair":
+      return {
+        operationId: command.operationId,
+        action: {
+          kind: "inbox.repair",
+          proposalId: command.action.proposalId,
+          replacement: projectInboxDraftInput(command.action.replacement),
+        },
+        expectedRevisions,
+      };
+  }
+}
+
+function projectInboxCommandExpectation(
+  expectation: RevisionExpectation,
+): InboxOperationPreviewRequest["expectedRevisions"][number] {
+  if (expectation.semanticRevision !== undefined || expectation.revision === null) {
+    throw invalidInboxProjection();
+  }
+  if (expectation.target.kind === "artifact") {
+    return {
+      target: { kind: "artifact", path: expectation.target.path },
+      revision: expectation.revision,
+    };
+  }
+  if (
+    expectation.target.kind === "local"
+    && expectation.target.namespace === "inbox-draft"
+  ) {
+    return {
+      target: {
+        kind: "local",
+        namespace: "inbox-draft",
+        id: expectation.target.id,
+      },
+      revision: expectation.revision,
+    };
+  }
+  throw invalidInboxProjection();
+}
+
+function projectInboxCommandToService(
+  request: InboxOperationPreviewRequest,
+): TeamInboxSpecCommand {
+  return normalizeTeamInboxSpecCommand({
+    operationId: request.operationId,
+    action: projectInboxActionToService(request.action),
+    expectedRevisions: request.expectedRevisions.map((expectation) => (
+      expectation.target.kind === "artifact"
+        ? {
+            target: { kind: "artifact", path: expectation.target.path },
+            revision: expectation.revision,
+          }
+        : {
+            target: {
+              kind: "local",
+              namespace: "inbox-draft",
+              id: expectation.target.id,
+            },
+            revision: expectation.revision,
+          }
+    )),
+  });
+}
+
+function projectInboxActionToService(
+  action: InboxOperationPreviewRequest["action"],
+): Readonly<Record<string, unknown>> {
+  switch (action.kind) {
+    case "inbox.draft.save":
+      return {
+        kind: "inbox.draft.save",
+        ...(action.draftId === undefined ? {} : { draftId: action.draftId }),
+        draft: projectInboxDraftInputToService(action.draft),
+      };
+    case "inbox.draft.delete":
+    case "inbox.publish":
+      return { kind: action.kind, draftId: action.draftId };
+    case "inbox.approve":
+      return { kind: "inbox.approve", proposalId: action.proposalId };
+    case "inbox.reject":
+    case "inbox.mark-stale":
+      return {
+        kind: action.kind,
+        proposalId: action.proposalId,
+        rationale: action.rationale,
+      };
+    case "inbox.withdraw":
+      return {
+        kind: "inbox.withdraw",
+        proposalId: action.proposalId,
+        ...(action.rationale === undefined ? {} : { rationale: action.rationale }),
+      };
+    case "inbox.repair":
+      return {
+        kind: "inbox.repair",
+        proposalId: action.proposalId,
+        replacement: projectInboxDraftInputToService(action.replacement),
+      };
+  }
+}
+
+function projectInboxDraftInputToService(
+  input: InboxDraftInput,
+): Readonly<Record<string, unknown>> {
+  return {
+    change: projectInboxSpecChangeToService(input.change),
+    rationale: input.rationale,
+    evidence: input.evidence.map(projectInboxEvidenceToService),
+    targetRevisions: input.targetRevisions.map((expectation) => ({
+      target: { kind: "entity", id: expectation.target.id },
+      revision: expectation.revision,
+      semanticRevision: expectation.semanticRevision,
+    })),
+  };
+}
+
+function projectInboxSpecChangeToService(
+  change: InboxSpecChange,
+): Readonly<Record<string, unknown>> {
+  if (change.kind === "spec.update") {
+    return {
+      kind: "spec.update",
+      target: {
+        id: change.target.id,
+        kind: change.target.kind,
+        ...(change.target.title === undefined ? {} : { title: change.target.title }),
+      },
+      patch: {
+        ...(change.patch.title === undefined ? {} : { title: change.patch.title }),
+        ...(change.patch.summary === undefined ? {} : { summary: change.patch.summary }),
+        ...(change.patch.body === undefined ? {} : { body: change.patch.body }),
+      },
+    };
+  }
+  return {
+    kind: "spec.create",
+    entityKind: change.entityKind,
+    title: change.title,
+    body: change.body,
+    ...(change.summary === undefined ? {} : { summary: change.summary }),
+    status: change.status,
+    ...(change.topics === undefined ? {} : { topics: [...change.topics] }),
+    ...(change.relation === undefined
+      ? {}
+      : {
+          relation: {
+            type: change.relation.type,
+            target: {
+              id: change.relation.target.id,
+              kind: change.relation.target.kind,
+              ...(change.relation.target.title === undefined
+                ? {}
+                : { title: change.relation.target.title }),
+            },
+          },
+        }),
+  };
+}
+
+function projectInboxEvidenceToService(
+  evidence: InboxEvidenceRef,
+): Readonly<Record<string, unknown>> {
+  switch (evidence.kind) {
+    case "entity":
+      return {
+        kind: "entity",
+        entity: {
+          id: evidence.entity.id,
+          kind: evidence.entity.kind,
+          ...(evidence.entity.title === undefined ? {} : { title: evidence.entity.title }),
+        },
+      };
+    case "code":
+      return evidence.code.kind === "file"
+        ? {
+            kind: "code",
+            code: {
+              kind: "file",
+              path: evidence.code.path,
+              ...(evidence.code.fingerprint === undefined
+                ? {}
+                : { fingerprint: evidence.code.fingerprint }),
+            },
+          }
+        : {
+            kind: "code",
+            code: {
+              kind: "symbol",
+              symbolId: evidence.code.symbolId,
+              ...(evidence.code.fingerprint === undefined
+                ? {}
+                : { fingerprint: evidence.code.fingerprint }),
+            },
+          };
+    case "commit":
+      return { kind: "commit", hash: evidence.hash };
+    case "file":
+      return { kind: "file", path: evidence.path };
+    case "external":
+      return {
+        kind: "external",
+        uri: evidence.uri,
+        ...(evidence.label === undefined ? {} : { label: evidence.label }),
+      };
+    case "manual":
+      return { kind: "manual", note: evidence.note };
+  }
+}
+
+function projectInboxFileChange(change: FileChange): TeamFileChange {
+  switch (change.kind) {
+    case "create":
+      return {
+        kind: "create",
+        path: change.path,
+        diff: change.diff,
+        beforeRevision: null,
+        afterRevision: change.afterRevision,
+      };
+    case "update":
+      return {
+        kind: "update",
+        path: change.path,
+        diff: change.diff,
+        beforeRevision: change.beforeRevision,
+        afterRevision: change.afterRevision,
+      };
+    case "delete":
+      return {
+        kind: "delete",
+        path: change.path,
+        diff: change.diff,
+        beforeRevision: change.beforeRevision,
+        afterRevision: null,
+      };
+    case "move":
+      return {
+        kind: "move",
+        path: change.path,
+        previousPath: change.previousPath,
+        diff: change.diff,
+        beforeRevision: change.beforeRevision,
+        afterRevision: change.afterRevision,
+      };
+  }
+}
+
+function projectInboxFileChangeToService(change: TeamFileChange): FileChange {
+  switch (change.kind) {
+    case "create":
+      return {
+        kind: "create",
+        path: change.path,
+        diff: change.diff,
+        beforeRevision: null,
+        afterRevision: change.afterRevision,
+      };
+    case "update":
+      return {
+        kind: "update",
+        path: change.path,
+        diff: change.diff,
+        beforeRevision: change.beforeRevision,
+        afterRevision: change.afterRevision,
+      };
+    case "delete":
+      return {
+        kind: "delete",
+        path: change.path,
+        diff: change.diff,
+        beforeRevision: change.beforeRevision,
+        afterRevision: null,
+      };
+    case "move":
+      return {
+        kind: "move",
+        path: change.path,
+        previousPath: change.previousPath,
+        diff: change.diff,
+        beforeRevision: change.beforeRevision,
+        afterRevision: change.afterRevision,
+      };
+  }
+}
+
+function projectInboxLocalChange(
+  change: TeamInboxSpecApplyResult["localChanges"][number],
+): InboxLocalChange {
+  if (change.namespace !== "inbox-draft") throw invalidInboxProjection();
+  return {
+    namespace: "inbox-draft",
+    id: change.id,
+    beforeRevision: change.beforeRevision,
+    afterRevision: change.afterRevision,
+    summary: change.summary,
+  };
+}
+
+function projectInboxLocalChangeToService(
+  change: InboxLocalChange,
+): TeamInboxSpecPreviewEnvelope["preview"]["localChanges"][number] {
+  return {
+    namespace: "inbox-draft",
+    id: change.id,
+    beforeRevision: change.beforeRevision,
+    afterRevision: change.afterRevision,
+    summary: change.summary,
+  };
+}
+
+function projectInboxPreviewDiagnostic(
+  diagnostic: Diagnostic,
+): InboxOperationPreviewResponse["preview"]["diagnostics"][number] {
+  const allowedKeys = new Set(["code", "severity", "message", "path"]);
+  if (Object.keys(diagnostic).some((key) => !allowedKeys.has(key))) {
+    throw invalidInboxProjection();
+  }
+  if (
+    !/^[A-Z0-9_]{1,128}$/.test(diagnostic.code)
+    || diagnostic.message !== inboxDiagnosticMessage(diagnostic.code)
+    || (diagnostic.path !== undefined && (
+      !isCanonicalRepoPath(diagnostic.path)
+      || Buffer.byteLength(diagnostic.path, "utf8") > 4_096
+    ))
+  ) {
+    throw invalidInboxProjection();
+  }
+  return {
+    code: diagnostic.code,
+    severity: diagnostic.severity,
+    message: diagnostic.message,
+    ...(diagnostic.path === undefined ? {} : { path: diagnostic.path }),
+  };
+}
+
+function inboxDiagnosticMessage(code: string): string {
+  switch (code) {
+    case "ENVELOPE_TOO_LARGE":
+      return "The Inbox operation exceeded its bounded preview envelope.";
+    case "PATH_OUTSIDE_PROJECT":
+      return "An Inbox preview path was rejected at the repository boundary.";
+    case "REVISION_CONFLICT":
+      return "The Inbox operation no longer matches the observed repository revision.";
+    case "VALIDATION_FAILED":
+      return "The Inbox operation failed bounded validation.";
+    default:
+      return "The Inbox operation reported a bounded diagnostic.";
+  }
+}
+
+function projectInboxPurposeId(
+  purposeId: TeamInboxSpecPreviewEnvelope["receipt"]["purposeIds"][number],
+): InboxOperationPreviewResponse["receipt"]["purposeIds"][number] {
+  switch (purposeId.purpose) {
+    case "inbox-draft":
+      return { purpose: "inbox-draft", id: purposeId.id };
+    case "proposal":
+      return { purpose: "proposal", id: purposeId.id };
+    case "activity":
+      return { purpose: "activity", id: purposeId.id };
+    case "spec-entity":
+      return { purpose: "spec-entity", id: purposeId.id };
+  }
+}
+
+function projectInboxPreviewEnvelope(
+  envelope: TeamInboxSpecPreviewEnvelope,
+): InboxOperationPreviewResponse {
+  return {
+    schemaVersion: 1,
+    request: projectInboxCommandToWire(envelope.request),
+    preview: {
+      valid: envelope.preview.valid,
+      scope: envelope.preview.scope,
+      changes: envelope.preview.changes.map(projectInboxFileChange),
+      localChanges: envelope.preview.localChanges.map(projectInboxLocalChange),
+      diagnostics: envelope.preview.diagnostics.map(projectInboxPreviewDiagnostic),
+    },
+    receipt: {
+      schemaVersion: 1,
+      authority: {
+        actor: projectInboxActor(envelope.receipt.authority.actor),
+        occurredAt: envelope.receipt.authority.occurredAt,
+        repoState: {
+          branch: envelope.receipt.authority.repoState.branch,
+          head: envelope.receipt.authority.repoState.head,
+          dirty: envelope.receipt.authority.repoState.dirty,
+          observedAt: envelope.receipt.authority.repoState.observedAt,
+        },
+      },
+      purposeIds: envelope.receipt.purposeIds.map(projectInboxPurposeId),
+      requestRevision: envelope.receipt.requestRevision,
+      presentationRevision: envelope.receipt.presentationRevision,
+      previewRevision: envelope.receipt.previewRevision,
+    },
+  };
+}
+
+function projectInboxEnvelopeToService(
+  envelope: InboxOperationApplyRequest,
+): TeamInboxSpecPreviewEnvelope {
+  const command = projectInboxCommandToService(envelope.request);
+  return {
+    schemaVersion: 1,
+    request: command,
+    preview: {
+      valid: envelope.preview.valid,
+      scope: envelope.preview.scope,
+      changes: envelope.preview.changes.map(projectInboxFileChangeToService),
+      localChanges: envelope.preview.localChanges.map(projectInboxLocalChangeToService),
+      diagnostics: envelope.preview.diagnostics.map((diagnostic) => ({
+        code: diagnostic.code,
+        severity: diagnostic.severity,
+        message: diagnostic.message,
+        ...(diagnostic.path === undefined ? {} : { path: diagnostic.path }),
+      })),
+    },
+    receipt: {
+      schemaVersion: 1,
+      authority: {
+        actor: projectInboxActorToService(envelope.receipt.authority.actor),
+        occurredAt: envelope.receipt.authority.occurredAt,
+        repoState: {
+          branch: envelope.receipt.authority.repoState.branch,
+          head: envelope.receipt.authority.repoState.head,
+          dirty: envelope.receipt.authority.repoState.dirty,
+          observedAt: envelope.receipt.authority.repoState.observedAt,
+        },
+      },
+      purposeIds: envelope.receipt.purposeIds.map((purposeId) => ({
+        purpose: purposeId.purpose,
+        id: purposeId.id,
+      })),
+      requestRevision: envelope.receipt.requestRevision,
+      presentationRevision: envelope.receipt.presentationRevision,
+      previewRevision: envelope.receipt.previewRevision,
+    },
+  };
+}
+
+function projectInboxActorToService(
+  actor: InboxProposalSummary["author"],
+): ActorRef {
+  if (actor.kind === "unknown") return { kind: "unknown" };
+  if (actor.kind === "git") {
+    return { kind: "git", name: actor.name, email: actor.email };
+  }
+  return {
+    kind: "member",
+    memberId: actor.memberId,
+    ...(actor.displayName === undefined ? {} : { displayName: actor.displayName }),
+  };
+}
+
 function projectTeamMember(member: TeamMember): HubTeamMember {
   return {
     schemaVersion: 1,
@@ -2216,6 +3110,38 @@ async function homeWorkstreamSummary(
   }
 }
 
+async function homeInboxSummary(
+  inbox: HubInboxSpecAuthoringService | undefined,
+): Promise<HomeResponse["sections"]["inbox"]> {
+  if (inbox === undefined) {
+    return unavailableSection("Inbox workflows are not connected in this build.");
+  }
+  try {
+    let cursor: string | undefined;
+    let count = 0;
+    let pages = 0;
+    do {
+      const page = await inbox.listInboxProposals({
+        states: ["pending", "stale"],
+        limit: 100,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      if (page.sourceTruncated || page.diagnostics.length > 0) {
+        return unavailableSection("The actionable Inbox summary could not establish a complete diagnostic-free corpus.");
+      }
+      count += page.items.length;
+      cursor = page.nextCursor ?? undefined;
+      pages += 1;
+      if (pages > 21 || count > 2_048) {
+        return unavailableSection("The actionable Inbox summary exceeded its bounded canonical corpus.");
+      }
+    } while (cursor !== undefined);
+    return { availability: "available", count };
+  } catch {
+    return unavailableSection("Inbox proposals could not be read safely.");
+  }
+}
+
 function unavailableWorkstreams(): HubHttpError {
   return new HubHttpError(
     503,
@@ -2231,6 +3157,15 @@ function unavailableSpecs(): HubHttpError {
     "CAPABILITY_UNAVAILABLE",
     "Capability unavailable",
     "Spec reads are not connected in this build.",
+  );
+}
+
+function unavailableInbox(): HubHttpError {
+  return new HubHttpError(
+    503,
+    "CAPABILITY_UNAVAILABLE",
+    "Capability unavailable",
+    "Inbox workflows are not connected in this build.",
   );
 }
 

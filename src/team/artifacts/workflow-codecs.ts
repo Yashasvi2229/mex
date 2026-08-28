@@ -264,13 +264,18 @@ export function normalizeInboxDraftInput<TPayload>(
   );
   return {
     request: portableWikiRequest<TPayload>(value.request),
-    rationale: text(value.rationale, "Inbox draft rationale", 8 * 1024),
-    evidence: evidenceList(value.evidence),
+    rationale: inboxText(value.rationale, "Inbox draft rationale", 8 * 1024),
+    evidence: evidenceList(value.evidence, true),
     targetRevisions: portableWorkflowRevisionExpectations(
       value.targetRevisions,
       "Inbox draft target revisions",
     ),
   };
+}
+
+/** Closed governed-Inbox evidence projection for product request validation. */
+export function normalizeInboxEvidence(value: unknown): readonly TeamEvidenceRef[] {
+  return evidenceList(value, true);
 }
 
 /** Strict canonical projection used before a local Relay draft is persisted. */
@@ -351,7 +356,7 @@ function normalizeProposal<TPayload>(input: InboxProposalArtifactInput<TPayload>
   const reviewer = value.reviewer === undefined ? undefined : actor(value.reviewer, "proposal reviewer");
   const reviewRationale = value.reviewRationale === undefined
     ? undefined
-    : text(value.reviewRationale, "proposal review rationale", 8 * 1024);
+    : inboxText(value.reviewRationale, "proposal review rationale", 8 * 1024);
   const reviewedAt = value.reviewedAt === undefined ? undefined : timestamp(value.reviewedAt, "proposal review time");
   const state = enumValue(value.state, PROPOSAL_STATES, "proposal state");
   if ((reviewer === undefined) !== (reviewedAt === undefined)) {
@@ -373,8 +378,8 @@ function normalizeProposal<TPayload>(input: InboxProposalArtifactInput<TPayload>
     id: artifactId(value.id, "proposal", "proposal ID"),
     state,
     author: actor(value.author, "proposal author"),
-    rationale: text(value.rationale, "proposal rationale", 8 * 1024),
-    evidence: evidenceList(value.evidence),
+    rationale: inboxText(value.rationale, "proposal rationale", 8 * 1024),
+    evidence: evidenceList(value.evidence, true),
     request: portableWikiRequest<TPayload>(value.request),
     targetRevisions: portableWorkflowRevisionExpectations(
       value.targetRevisions,
@@ -567,7 +572,10 @@ function portableWorkflowRevisionExpectations(
   return expectations;
 }
 
-function evidenceList(value: unknown): readonly TeamEvidenceRef[] {
+function evidenceList(
+  value: unknown,
+  inboxCanonicalText = false,
+): readonly TeamEvidenceRef[] {
   return array(value, "proposal/relay evidence", WORKFLOW_ARTIFACT_MAX_COLLECTION_ENTRIES).map((entry, index) => {
     const item = record(entry, `evidence ${index}`);
     if (item.kind === "entity") {
@@ -588,12 +596,17 @@ function evidenceList(value: unknown): readonly TeamEvidenceRef[] {
     }
     if (item.kind === "external") {
       exactObject(item, ["kind", "uri"], ["label"], `external evidence ${index}`);
-      const uri = externalUri(item.uri, `external evidence ${index}`);
+      const uri = externalUri(item.uri, `external evidence ${index}`, inboxCanonicalText);
       return { kind: "external" as const, uri, ...(item.label === undefined ? {} : { label: text(item.label, `external evidence ${index} label`, 512) }) };
     }
     if (item.kind === "manual") {
       exactObject(item, ["kind", "note"], [], `manual evidence ${index}`);
-      return { kind: "manual" as const, note: text(item.note, `manual evidence ${index} note`, 4 * 1024) };
+      return {
+        kind: "manual" as const,
+        note: inboxCanonicalText
+          ? inboxText(item.note, `manual evidence ${index} note`, 4 * 1024)
+          : text(item.note, `manual evidence ${index} note`, 4 * 1024),
+      };
     }
     invalid(`Evidence ${index} kind is invalid.`);
   });
@@ -807,9 +820,40 @@ function timestamp(value: unknown, label: string): string {
 
 function text(value: unknown, label: string, maxBytes: number): string {
   if (typeof value !== "string" || value.length === 0 || value.trim() !== value) invalid(`${label} must be a nonblank trimmed string.`);
-  if (value.normalize("NFC") !== value || /[\u0000-\u001f\u007f]/u.test(value)) invalid(`${label} contains non-canonical or control characters.`);
+  if (
+    value.normalize("NFC") !== value
+    || hasLoneSurrogate(value)
+    || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(value)
+  ) invalid(`${label} contains non-canonical or control characters.`);
   if (Buffer.byteLength(value, "utf8") > maxBytes) invalid(`${label} exceeds ${maxBytes} bytes.`);
   return value;
+}
+
+/** E1 governed prose permits TAB/LF but no other controls or non-canonical Unicode. */
+function inboxText(value: unknown, label: string, maxBytes: number): string {
+  if (
+    typeof value !== "string"
+    || value.trim().length === 0
+    || Buffer.byteLength(value, "utf8") > maxBytes
+    || value.normalize("NFC") !== value
+    || hasLoneSurrogate(value)
+    || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/u.test(value)
+  ) invalid(`${label} contains invalid text or exceeds ${maxBytes} bytes.`);
+  return value;
+}
+
+function hasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!Number.isFinite(next) || next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function identifier(value: unknown, label: string): string {
@@ -846,8 +890,11 @@ function revision(value: unknown, label: string): Revision {
   return value;
 }
 
-function externalUri(value: unknown, label: string): string {
+function externalUri(value: unknown, label: string, requireCanonicalAbsolute = false): string {
   const result = text(value, `${label} URI`, 4 * 1024);
+  if (requireCanonicalAbsolute && (!/^https?:\/\//u.test(result) || /\s/u.test(result))) {
+    invalid(`${label} URI must use a whitespace-free lower-case absolute http:// or https:// spelling.`);
+  }
   let parsed: URL;
   try { parsed = new URL(result); } catch { invalid(`${label} URI is invalid.`); }
   if (!(parsed.protocol === "https:" || parsed.protocol === "http:") || parsed.username !== "" || parsed.password !== "") invalid(`${label} URI must be an HTTP(S) URL without credentials.`);

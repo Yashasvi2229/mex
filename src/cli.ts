@@ -30,6 +30,10 @@ import {
   buildSpecCommand,
   type SpecCliServiceFactory,
 } from "./team/specs/cli/index.js";
+import {
+  buildInboxCommand,
+  type TeamInboxSpecCliServiceFactory,
+} from "./team/inbox/cli/index.js";
 
 /**
  * Load config for a CLI command and backfill scaffold identity on the way.
@@ -100,6 +104,8 @@ export function isTelemetryExemptCommand(
     || parentName === "member"
     || parentName === "activity"
     || parentName === "workstream"
+    || parentName === "inbox"
+    || actionCommandHasAncestor(parentName, "inbox")
     || parentName === "spec"
     || commandName === "hub"
     || commandName === "capabilities";
@@ -112,7 +118,14 @@ export function isFirstRunNoticeExemptCommand(commandName?: string): boolean {
     || commandName === "member"
     || commandName === "activity"
     || commandName === "workstream"
+    || commandName === "inbox"
     || commandName === "spec";
+}
+
+function actionCommandHasAncestor(parentName: string | undefined, expected: string): boolean {
+  // Commander exposes only the immediate parent here. Inbox has one extra
+  // draft/proposal level, so those names are treated as Team-only leaves.
+  return expected === "inbox" && (parentName === "draft" || parentName === "proposal");
 }
 
 async function runTuiCommand(): Promise<void> {
@@ -219,6 +232,7 @@ const teamWorkflowCliService = async () => {
 };
 const teamIdentityActivityService: TeamIdentityActivityCliServiceFactory = teamWorkflowCliService;
 const teamWorkstreamService: TeamWorkstreamCliServiceFactory = teamWorkflowCliService;
+const teamInboxSpecService: TeamInboxSpecCliServiceFactory = teamWorkflowCliService;
 const specReadService: SpecCliServiceFactory = async () => {
   const projectRoot = locateTeamRepositoryRoot();
   // Specs are a read-only Wiki projection and do not depend on Team's tracked
@@ -249,6 +263,10 @@ for (const command of buildTeamIdentityActivityCommands({
 }
 program.addCommand(buildWorkstreamCommand({
   service: teamWorkstreamService,
+  io: processTeamCommandIo(),
+}));
+program.addCommand(buildInboxCommand({
+  service: teamInboxSpecService,
   io: processTeamCommandIo(),
 }));
 program.addCommand(buildSpecCommand({
@@ -489,6 +507,7 @@ function wikiIo(): import("./wiki/cli/commands.js").CommandIo {
     projectRoot: config.projectRoot,
     ...(config.wiki?.exclude === undefined ? {} : { exclude: config.wiki.exclude }),
     ...(config.wiki?.readOnly === undefined ? {} : { readOnly: config.wiki.readOnly }),
+    enforceInboxSpecBoundary: true,
   };
 }
 
@@ -1071,7 +1090,7 @@ interface TeamJsonInvocationContext {
 function inspectTeamJsonInvocation(argv: readonly string[]): TeamJsonInvocationContext | null {
   if (!argv.includes("--json") || argv.includes("--help") || argv.includes("-h")) return null;
   const family = argv[0];
-  if (family !== "member" && family !== "activity" && family !== "workstream" && family !== "spec") return null;
+  if (family !== "member" && family !== "activity" && family !== "workstream" && family !== "inbox" && family !== "spec") return null;
   const leaf = argv[1];
   const applyRequested = argv.some((value) => value === "--apply" || value.startsWith("--apply="));
   if (family === "member") {
@@ -1104,6 +1123,39 @@ function inspectTeamJsonInvocation(argv: readonly string[]): TeamJsonInvocationC
       };
     }
     return { command: "workstream", mode: "read" };
+  }
+  if (family === "inbox") {
+    const group = argv[1];
+    const nestedLeaf = argv[2];
+    if (group === "contract") return { command: "inbox.contract", mode: "read" };
+    if (group === "draft") {
+      if (nestedLeaf === "list" || nestedLeaf === "show") {
+        return { command: `inbox.draft.${nestedLeaf}`, mode: "read" };
+      }
+      if (nestedLeaf === "save" || nestedLeaf === "delete") {
+        return {
+          command: `inbox.draft.${nestedLeaf}`,
+          mode: applyRequested ? "apply" : "preview",
+        };
+      }
+      return { command: "inbox.draft", mode: "read" };
+    }
+    if (group === "proposal") {
+      if (nestedLeaf === "list" || nestedLeaf === "show") {
+        return { command: `inbox.proposal.${nestedLeaf}`, mode: "read" };
+      }
+      if (["approve", "reject", "withdraw", "mark-stale", "repair"].includes(nestedLeaf ?? "")) {
+        return {
+          command: `inbox.proposal.${nestedLeaf}` as TeamCliCommandName,
+          mode: applyRequested ? "apply" : "preview",
+        };
+      }
+      return { command: "inbox.proposal", mode: "read" };
+    }
+    if (group === "publish") {
+      return { command: "inbox.publish", mode: applyRequested ? "apply" : "preview" };
+    }
+    return { command: "inbox", mode: "read" };
   }
   if (leaf === "list" || leaf === "show") {
     return { command: `spec.${leaf}`, mode: "read" };
@@ -1147,7 +1199,7 @@ function isInvalidCapabilitiesJsonInvocation(argv: readonly string[]): boolean {
 
 function buildCompletion(shell: string): string {
   const commands = [
-    "setup", "capabilities", "member", "activity", "workstream", "spec", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
+    "setup", "capabilities", "member", "activity", "workstream", "inbox", "spec", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
     "heartbeat", "doctor", "watch", "tui", "commands", "completion",
     "telemetry", "config", "feedback", "hub",
   ];

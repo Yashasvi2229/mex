@@ -1,10 +1,13 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -15,9 +18,9 @@ const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const MAX_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 export const RELEASE_FIXTURE_PROFILES = Object.freeze({
-  small: Object.freeze({ sourceFiles: 4, wikiEntities: 4, workstreams: 1, activityEvents: 4 }),
-  medium: Object.freeze({ sourceFiles: 16, wikiEntities: 16, workstreams: 1, activityEvents: 16 }),
-  large: Object.freeze({ sourceFiles: 48, wikiEntities: 48, workstreams: 1, activityEvents: 48 }),
+  small: Object.freeze({ sourceFiles: 4, wikiEntities: 4, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 4 }),
+  medium: Object.freeze({ sourceFiles: 16, wikiEntities: 16, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 16 }),
+  large: Object.freeze({ sourceFiles: 48, wikiEntities: 48, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 48 }),
 });
 
 export function createReleaseFixture({
@@ -25,6 +28,7 @@ export function createReleaseFixture({
   profileName,
   cliPath,
   environment,
+  fixtureTools,
 }) {
   const profile = RELEASE_FIXTURE_PROFILES[profileName];
   if (!profile) throw new Error(`Unknown release benchmark profile: ${profileName}`);
@@ -34,6 +38,8 @@ export function createReleaseFixture({
   const scaffold = join(root, ".mex");
   mkdirSync(join(root, "src"), { recursive: true });
   mkdirSync(join(scaffold, "context"), { recursive: true });
+  mkdirSync(join(scaffold, "inbox"), { recursive: true });
+  mkdirSync(join(scaffold, "specs"), { recursive: true });
   mkdirSync(join(scaffold, "workstreams"), { recursive: true });
   mkdirSync(join(scaffold, "events", "activity", "2026-08"), { recursive: true });
 
@@ -85,8 +91,11 @@ export function createReleaseFixture({
   for (let index = 0; index < wikiIds.length; index += 1) {
     const suffix = String(index).padStart(4, "0");
     const nextId = wikiIds[(index + 1) % wikiIds.length];
+    const wikiPath = index < 4
+      ? join(scaffold, "specs", `${wikiIds[index]}.md`)
+      : join(scaffold, "context", `benchmark-${suffix}.md`);
     writeFileSync(
-      join(scaffold, "context", `benchmark-${suffix}.md`),
+      wikiPath,
       wikiDocument({
         id: wikiIds[index],
         nextId,
@@ -98,37 +107,141 @@ export function createReleaseFixture({
     );
   }
 
-  const workstreamId = fixedId("ws_", 20_000);
-  writeFileSync(
-    join(scaffold, "workstreams", `${workstreamId}.md`),
-    workstreamDocument(workstreamId),
-  );
-
-  for (let index = 0; index < profile.activityEvents; index += 1) {
-    const id = fixedId("event_", 10_000 + index);
-    const timestamp = new Date(Date.UTC(2026, 7, 1, 0, 0, index)).toISOString();
-    writeFileSync(
-      join(scaffold, "events", "activity", "2026-08", `${id}.md`),
-      activityDocument({ id, index, timestamp }),
-    );
+  const draftId = "inbox_00000000000000000000000000000001";
+  const proposalId = fixedId("proposal_", 40_000);
+  const ownedFixtureTools = fixtureTools === undefined
+    ? prepareReleaseFixtureTools({ cliPath, environment })
+    : null;
+  const fixtureTool = (fixtureTools ?? ownedFixtureTools)?.inboxFixtureTool;
+  if (typeof fixtureTool !== "string" || !existsSync(fixtureTool)) {
+    ownedFixtureTools?.cleanup();
+    throw new Error("The prepared release Inbox fixture tool is unavailable.");
   }
+  try {
+    seedInboxFixture({
+      fixtureTool,
+      mode: "canonical",
+      root,
+      scaffoldId: fixtureUuid(profileName),
+      draftId,
+      proposalId,
+      specId: wikiIds[0],
+      specPath: `.mex/specs/${wikiIds[0]}.md`,
+      environment,
+    });
 
-  initializeReleaseFixtureGit(root, environment);
+    const workstreamId = fixedId("ws_", 20_000);
+    writeFileSync(
+      join(scaffold, "workstreams", `${workstreamId}.md`),
+      workstreamDocument(workstreamId),
+    );
 
-  run(process.execPath, [cliPath, "graph", "rebuild", "--root", root, "--json"], root, environment, 180_000);
-  run(process.execPath, [cliPath, "wiki", "rebuild-index", "--json"], root, environment, 180_000);
+    for (let index = 0; index < profile.activityEvents; index += 1) {
+      const id = fixedId("event_", 10_000 + index);
+      const timestamp = new Date(Date.UTC(2026, 7, 1, 0, 0, index)).toISOString();
+      writeFileSync(
+        join(scaffold, "events", "activity", "2026-08", `${id}.md`),
+        activityDocument({ id, index, timestamp }),
+      );
+    }
 
-  const input = fixtureInputSizes(root);
-  return {
-    profileName,
+    initializeReleaseFixtureGit(root, environment);
+
+    run(process.execPath, [cliPath, "graph", "rebuild", "--root", root, "--json"], root, environment, 180_000);
+    run(process.execPath, [cliPath, "wiki", "rebuild-index", "--json"], root, environment, 180_000);
+    seedInboxFixture({
+      fixtureTool,
+      mode: "local",
+      root,
+      scaffoldId: fixtureUuid(profileName),
+      draftId,
+      proposalId,
+      specId: wikiIds[0],
+      specPath: `.mex/specs/${wikiIds[0]}.md`,
+      environment,
+    });
+
+    const input = fixtureInputSizes(root);
+    return {
+      profileName,
+      root,
+      profile,
+      firstWikiEntityId: wikiIds[0],
+      firstSpecId: wikiIds[0],
+      firstWorkstreamId: workstreamId,
+      firstInboxDraftId: draftId,
+      firstInboxProposalId: proposalId,
+      inboxDraftTitle: "Release benchmark local draft Requirement",
+      inboxProposalTitle: "Release benchmark pending Spec update",
+      mutableWikiPath: `.mex/specs/${wikiIds[0]}.md`,
+      input,
+    };
+  } finally {
+    ownedFixtureTools?.cleanup();
+  }
+}
+
+export function prepareReleaseFixtureTools({ cliPath, environment }) {
+  const repositoryRoot = resolve(dirname(cliPath), "..");
+  const tsupCli = join(repositoryRoot, "node_modules", "tsup", "dist", "cli-default.js");
+  const source = join(repositoryRoot, "scripts", "release-benchmark", "seed-inbox-fixture.ts");
+  const outputParent = join(
+    repositoryRoot,
+    "test-results",
+    "release-benchmark",
+    "fixture-tools",
+  );
+  mkdirSync(outputParent, { recursive: true });
+  const output = mkdtempSync(join(outputParent, `fixture-tool-${process.pid}-`));
+  try {
+    run(process.execPath, [
+      tsupCli,
+      source,
+      "--no-config",
+      "--format", "esm",
+      "--platform", "node",
+      "--target", "node22",
+      "--out-dir", output,
+      "--clean",
+    ], repositoryRoot, environment, 180_000);
+    const built = join(output, "seed-inbox-fixture.js");
+    if (!existsSync(built)) throw new Error("The release Inbox fixture tool did not build.");
+    let cleaned = false;
+    return Object.freeze({
+      inboxFixtureTool: built,
+      cleanup() {
+        if (cleaned) return;
+        cleaned = true;
+        rmSync(output, { recursive: true, force: true });
+      },
+    });
+  } catch (error) {
+    rmSync(output, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function seedInboxFixture({
+  fixtureTool,
+  mode,
+  root,
+  scaffoldId,
+  draftId,
+  proposalId,
+  specId,
+  specPath,
+  environment,
+}) {
+  run(process.execPath, [
+    fixtureTool,
+    mode,
     root,
-    profile,
-    firstWikiEntityId: wikiIds[0],
-    firstSpecId: wikiIds[0],
-    firstWorkstreamId: workstreamId,
-    mutableWikiPath: ".mex/context/benchmark-0000.md",
-    input,
-  };
+    scaffoldId,
+    draftId,
+    proposalId,
+    specId,
+    specPath,
+  ], root, environment, 30_000);
 }
 
 export function initializeReleaseFixtureGit(root, environment) {
@@ -218,6 +331,51 @@ export function sqliteFamilySize(databasePath) {
   return [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]
     .filter(existsSync)
     .reduce((total, path) => total + statSync(path).size, 0);
+}
+
+const SQLITE_READER_COORDINATION_PATHS = new Set([
+  ".mex/graph.db-shm",
+  ".mex/wiki.db-shm",
+  ".mex/local/team.db-shm",
+]);
+
+/**
+ * Exact ordinary-read proof captured after Hub startup (the explicit local
+ * write boundary) and before any maintenance job. SQLite shared-memory files
+ * carry reader coordination bits, so bind the durable database and WAL bytes
+ * while inventorying the complete family separately.
+ */
+export function snapshotReleaseReadState(root, environment) {
+  const mexRoot = join(root, ".mex");
+  const files = filesUnder(mexRoot)
+    .map((path) => ({ path, relativePath: toPosix(relative(root, path)) }))
+    .filter(({ relativePath }) => !SQLITE_READER_COORDINATION_PATHS.has(relativePath))
+    .map(({ path, relativePath }) => {
+      const stats = statSync(path);
+      return {
+        path: relativePath,
+        bytes: stats.size,
+        mode: stats.mode,
+        mtimeMs: stats.mtimeMs,
+        sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
+      };
+    });
+  const sqliteFamilies = filesUnder(mexRoot)
+    .map((path) => toPosix(relative(root, path)))
+    .filter((path) => /(?:graph|wiki|team)\.db(?:-wal|-shm)?$/u.test(path))
+    .sort();
+  return {
+    gitHead: run("git", ["rev-parse", "--verify", "HEAD"], root, environment).trim(),
+    gitBranch: run("git", ["rev-parse", "--abbrev-ref", "HEAD"], root, environment).trim(),
+    gitStatus: run(
+      "git",
+      ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      root,
+      environment,
+    ),
+    files,
+    sqliteFamilies,
+  };
 }
 
 function sourceModule(index, suffix, previous) {

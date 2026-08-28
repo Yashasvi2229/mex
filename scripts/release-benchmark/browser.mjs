@@ -1,4 +1,5 @@
 import { releaseWorkbenchPaths } from "./routes.mjs";
+import { assertInboxFixturePage } from "./hub.mjs";
 
 const PAGE_READY_TIMEOUT_MS = 30_000;
 
@@ -15,6 +16,10 @@ export async function measureWorkbenchHeap({
   knowledgeEntityId,
   specEntityId,
   codeSymbolId,
+  inboxDraftId,
+  inboxDraftTitle,
+  inboxProposalId,
+  inboxProposalTitle,
 }) {
   const { chromium } = await import("@playwright/test");
   const browser = await chromium.launch({ headless: true });
@@ -51,7 +56,12 @@ export async function measureWorkbenchHeap({
           if (!response?.ok()) {
             throw new Error(`${route} returned HTTP ${String(response?.status() ?? "none")}.`);
           }
-          await assertCheckpointDRouteReady(page, route);
+          await assertReleaseRouteReady(page, route, {
+            inboxDraftId,
+            inboxDraftTitle,
+            inboxProposalId,
+            inboxProposalTitle,
+          });
           // Give React one task turn to commit route content after network idle.
           await page.waitForTimeout(50);
           if (outbound.size > 0) {
@@ -82,7 +92,7 @@ export async function measureWorkbenchHeap({
   };
 }
 
-async function assertCheckpointDRouteReady(page, route) {
+async function assertReleaseRouteReady(page, route, inboxFixture) {
   if (route === "workstreams") {
     await page.getByRole("heading", { name: "Release benchmark Workstream", exact: true })
       .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
@@ -92,6 +102,42 @@ async function assertCheckpointDRouteReady(page, route) {
       .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
     await page.getByText("Release benchmark knowledge 0001", { exact: true })
       .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+  }
+  if (route === "inbox") {
+    const draft = page.locator(`[data-inbox-draft-id="${inboxFixture.inboxDraftId}"]`);
+    const proposal = page.locator(`[data-inbox-proposal-id="${inboxFixture.inboxProposalId}"]`);
+    await page.locator('[data-inbox-workbench="ready"]')
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    await draft.waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    await proposal.waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    await draft.getByText(inboxFixture.inboxDraftTitle, { exact: true })
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    await proposal.getByText(inboxFixture.inboxProposalTitle, { exact: true })
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    const [draftResponse, proposalResponse] = await page.evaluate(async () => Promise.all([
+      "/api/v1/inbox/drafts?limit=25",
+      "/api/v1/inbox/proposals?state=pending,stale&limit=25",
+    ].map(async (path) => {
+      const response = await fetch(path, {
+        headers: { accept: "application/json, application/problem+json" },
+      });
+      return { status: response.status, body: await response.json() };
+    })));
+    if (draftResponse.status !== 200 || proposalResponse.status !== 200) {
+      throw new Error("The Inbox route fixture APIs did not both return HTTP 200.");
+    }
+    const draftPage = draftResponse.body;
+    const proposalPage = proposalResponse.body;
+    assertInboxFixturePage(draftPage, {
+      kind: "draft",
+      id: inboxFixture.inboxDraftId,
+      title: inboxFixture.inboxDraftTitle,
+    });
+    assertInboxFixturePage(proposalPage, {
+      kind: "proposal",
+      id: inboxFixture.inboxProposalId,
+      title: inboxFixture.inboxProposalTitle,
+    });
   }
 }
 

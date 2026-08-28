@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  defineTeamInboxDirectWikiSpecBypassContract,
   defineTeamInboxSpecAuthoringContract,
   TEAM_INBOX_SPEC_KINDS,
   type TeamInboxSpecAuthoringContractPort,
@@ -39,6 +40,9 @@ import {
   type TeamInboxSpecSnapshot,
   type TeamInboxSpecTwoCloneHarness,
   type TeamInboxValidCreateCase,
+  type TeamInboxDirectBypassCase,
+  type TeamInboxDirectBypassSurface,
+  type TeamInboxDirectWikiSpecContractFactory,
 } from "./contracts/team-inbox-spec-authoring.contract.js";
 import { parseActivityArtifact } from "../src/team/artifacts/codecs.js";
 import { generateArtifactId } from "../src/team/artifacts/ulid.js";
@@ -66,6 +70,7 @@ import {
   createRepositoryWikiPort,
   type RepositoryWikiPort,
 } from "../src/wiki/application-adapter.js";
+import { assertNoDirectWikiSpecMutation } from "../src/wiki/cli/spec-authoring-boundary.js";
 
 const NOW = "2026-08-28T04:05:06.000Z";
 const SCAFFOLD_ID = "team_inbox_spec_authoring_v1";
@@ -108,6 +113,12 @@ const factory: TeamInboxSpecContractFactory = {
 };
 
 defineTeamInboxSpecAuthoringContract("repository adapter", factory);
+
+const directWikiFactory: TeamInboxDirectWikiSpecContractFactory = {
+  open: (scenario) => RepositoryInboxSpecHarness.open(scenario),
+};
+
+defineTeamInboxDirectWikiSpecBypassContract("repository CLI boundary", directWikiFactory);
 
 class RepositoryInboxSpecHarness implements TeamInboxSpecContractHarness {
   readonly fixture = {
@@ -234,6 +245,21 @@ class RepositoryInboxSpecHarness implements TeamInboxSpecContractHarness {
       populatedProposal,
       privacySentinels: PRIVACY_SENTINELS,
     };
+  }
+
+  async attemptDirectWikiSpecMutation(
+    surface: TeamInboxDirectBypassSurface,
+    kind: TeamInboxDirectBypassCase,
+  ): Promise<void> {
+    const base = {
+      opId: `direct_${surface}_${kind}`,
+      actor: { kind: "human", id: "member_direct_guard" },
+      timestamp: NOW,
+    };
+    const operation = directWikiBypassOperation(base, kind);
+    assertNoDirectWikiSpecMutation(operation, {
+      scaffoldRoot: join(this.#boundRoot, ".mex"),
+    });
   }
 
   #openAdapters(): void {
@@ -1506,6 +1532,121 @@ function isRealDirectory(path: string): boolean {
 
 function humanKind(kind: TeamInboxSpecKind): string {
   return kind.replaceAll("_", " ");
+}
+
+function directWikiBypassOperation(
+  base: Readonly<Record<string, unknown>>,
+  kind: TeamInboxDirectBypassCase,
+): unknown {
+  const nonSpecUpdate = {
+    ...base,
+    type: "update-entry",
+    entityId: NON_SPEC_ID,
+    payload: { summary: "Direct non-Spec administration." },
+  };
+  switch (kind) {
+    case "create":
+      return {
+        ...base,
+        type: "create-entry",
+        payload: {
+          file: "context/direct-spec.md",
+          insertAt: { at: "end-of-file" },
+          type: "spec",
+          title: "Direct Spec",
+          body: "This must be Inbox governed.",
+        },
+      };
+    case "existing-target":
+      return { ...nonSpecUpdate, entityId: SPEC_ID };
+    case "relation-endpoint":
+      return {
+        ...base,
+        type: "add-relation",
+        entityId: NON_SPEC_ID,
+        payload: { relation: { type: "related_to", target: SPEC_ID } },
+      };
+    case "type-conversion-into":
+      return {
+        ...base,
+        type: "set-property",
+        entityId: NON_SPEC_ID,
+        payload: { property: "type", value: "requirement" },
+      };
+    case "type-conversion-out-of":
+      return {
+        ...base,
+        type: "set-property",
+        entityId: SPEC_ID,
+        payload: { property: "type", value: "decision" },
+      };
+    case "supersede-existing-replacement":
+      return {
+        ...base,
+        type: "supersede-entry",
+        entityId: NON_SPEC_ID,
+        payload: { replacementId: REQUIREMENT_ID },
+      };
+    case "supersede-inline-replacement":
+      return {
+        ...base,
+        type: "supersede-entry",
+        entityId: NON_SPEC_ID,
+        payload: {
+          replacement: {
+            file: "context/direct-replacement.md",
+            insertAt: { at: "end-of-file" },
+            type: "constraint",
+            title: "Direct replacement",
+            body: "This must be Inbox governed.",
+          },
+        },
+      };
+    case "supersede-inline-relation-endpoint":
+      return {
+        ...base,
+        type: "supersede-entry",
+        entityId: NON_SPEC_ID,
+        payload: {
+          replacement: {
+            file: "context/direct-replacement.md",
+            insertAt: { at: "end-of-file" },
+            type: "decision",
+            title: "Direct non-Spec replacement",
+            body: "The replacement itself is non-Spec, but its relation endpoint is governed.",
+            relations: [{ type: "related_to", target: SPEC_ID }],
+          },
+        },
+      };
+    case "spec-path":
+      return {
+        ...base,
+        type: "create-entry",
+        payload: {
+          file: "specs/direct-decision.md",
+          insertAt: { at: "end-of-file" },
+          type: "decision",
+          title: "Wrong path",
+          body: "A non-Spec type still cannot claim the Spec root.",
+        },
+      };
+    case "hidden-batch":
+      return {
+        ...nonSpecUpdate,
+        payload: {
+          operations: [{
+            type: "create-entry",
+            payload: {
+              file: "context/hidden-spec.md",
+              insertAt: { at: "end-of-file" },
+              type: "acceptance_criterion",
+              title: "Hidden direct Spec",
+              body: "Nested batch escape.",
+            },
+          }],
+        },
+      };
+  }
 }
 
 function hash(value: string | Buffer): Revision {

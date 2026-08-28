@@ -326,6 +326,68 @@ describe("built CLI main-module guard", () => {
     }
   });
 
+  it("resolves Inbox contracts before repository readiness with structured parse failures", () => {
+    const project = mkdtempSync(join(tmpdir(), "mex-inbox-contract-cli-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-inbox-contract-home-"));
+    try {
+      const projectBefore = snapshotProcessTree(project);
+      const homeBefore = snapshotProcessTree(userHome);
+      const environment = {
+        ...process.env,
+        HOME: userHome,
+        MEX_TELEMETRY: "0",
+        DO_NOT_TRACK: "1",
+        NO_COLOR: "1",
+      };
+      const resolved = spawnSync(
+        process.execPath,
+        [cliPath, "inbox", "contract", "--json"],
+        { cwd: project, encoding: "utf8", env: environment },
+      );
+      expect(resolved.status, resolved.stderr).toBe(0);
+      expect(Buffer.byteLength(resolved.stdout, "utf8")).toBeLessThanOrEqual(65_536);
+      expect(JSON.parse(resolved.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "inbox.contract",
+        mode: "read",
+        ok: true,
+        data: {
+          catalogVersion: 1,
+          contractId: "team.inbox.contract-catalog.v1",
+          requestFile: { schemaRef: "https://mex.dev/contracts/team-inbox-request-v1.json", examples: [{}, {}] },
+          applyFile: { schemaRef: "https://mex.dev/contracts/team-inbox-preview-envelope-v1.json" },
+        },
+      });
+      expect(snapshotProcessTree(project)).toEqual(projectBefore);
+      expect(snapshotProcessTree(userHome)).toEqual(homeBefore);
+
+      for (const args of [
+        ["inbox", "contract", "--json", "unexpected"],
+        ["inbox", "contract", "--json", "--unknown"],
+      ] as const) {
+        const malformed = spawnSync(process.execPath, [cliPath, ...args], {
+          cwd: project,
+          encoding: "utf8",
+          env: environment,
+        });
+        expect(malformed.status, args.join(" ")).toBe(2);
+        expect(malformed.stderr, args.join(" ")).toBe("");
+        expect(JSON.parse(malformed.stdout)).toMatchObject({
+          schemaVersion: 1,
+          command: "inbox.contract",
+          mode: "read",
+          ok: false,
+          problem: { code: "INVALID_REQUEST" },
+        });
+      }
+      expect(snapshotProcessTree(project)).toEqual(projectBefore);
+      expect(snapshotProcessTree(userHome)).toEqual(homeBefore);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  });
+
   it("does not auto-parse when dist/cli.js is imported as a module", () => {
     const result = spawnSync(
       process.execPath,
@@ -547,6 +609,292 @@ Canonical read-only release requirements.
     } finally {
       rmSync(fixture, { recursive: true, force: true });
       rmSync(userHome, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  it("runs the nested Inbox command tree with read-only discovery and exact --apply= envelopes", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-inbox-cli-process-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-inbox-cli-home-"));
+    const requestRoot = mkdtempSync(join(tmpdir(), "mex-inbox-cli-request-"));
+    try {
+      const mexPath = join(fixture, ".mex");
+      mkdirSync(mexPath, { recursive: true });
+      writeFileSync(join(fixture, ".gitignore"), ".mex/local/\n");
+      writeFileSync(join(mexPath, "ROUTER.md"), "# Router\n");
+      writeFileSync(join(mexPath, "config.json"), JSON.stringify({
+        scaffold_id: "scaffold-inbox-cli-process-001",
+      }));
+      execFileSync("git", ["init", "--quiet"], { cwd: fixture });
+      execFileSync("git", ["config", "user.email", "local-identity"], { cwd: fixture });
+      execFileSync("git", ["config", "user.name", "Inbox CLI Contract"], { cwd: fixture });
+      execFileSync("git", ["add", ".gitignore", ".mex/ROUTER.md", ".mex/config.json"], { cwd: fixture });
+      execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: fixture });
+      const environment = {
+        ...process.env,
+        HOME: userHome,
+        MEX_TELEMETRY: "0",
+        DO_NOT_TRACK: "1",
+        NO_COLOR: "1",
+      };
+      const run = (args: readonly string[]) => spawnSync(process.execPath, [cliPath, ...args], {
+        cwd: fixture,
+        encoding: "utf8",
+        env: environment,
+      });
+
+      const projectBeforeReads = snapshotProcessTree(fixture);
+      const homeBeforeReads = snapshotProcessTree(userHome);
+      for (const args of [
+        ["inbox", "draft", "list", "--json"],
+        ["inbox", "proposal", "list", "--state", "pending", "--json"],
+      ] as const) {
+        const result = run(args);
+        expect(result.status, `${args.join(" ")}\n${result.stderr}`).toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({ schemaVersion: 1, ok: true, mode: "read" });
+      }
+      expect(snapshotProcessTree(fixture)).toEqual(projectBeforeReads);
+      expect(snapshotProcessTree(userHome)).toEqual(homeBeforeReads);
+
+      const invalidId = run(["inbox", "draft", "show", "nested/draft", "--json"]);
+      expect(invalidId.status).toBe(2);
+      expect(JSON.parse(invalidId.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "inbox.draft.show",
+        mode: "read",
+        ok: false,
+        problem: { code: "INVALID_REQUEST" },
+      });
+
+      const malformedPath = join(requestRoot, "malformed.json");
+      writeFileSync(malformedPath, "{ not JSON", "utf8");
+      const malformed = run(["inbox", "draft", "save", malformedPath, "--json"]);
+      expect(malformed.status).toBe(2);
+      expect(JSON.parse(malformed.stdout)).toMatchObject({
+        command: "inbox.draft.save",
+        mode: "preview",
+        ok: false,
+        problem: { code: "INVALID_REQUEST" },
+      });
+
+      const requestPath = join(requestRoot, "save.json");
+      const saveRequest = {
+        operationId: "inbox-draft-save-process-001",
+        action: {
+          kind: "inbox.draft.save",
+          draft: {
+            change: {
+              kind: "spec.create",
+              entityKind: "spec",
+              title: "Release contract",
+              body: "Reviewed scope for the process-level command test.",
+              status: "in_flight",
+            },
+            rationale: "Review this exact scope.",
+            evidence: [],
+            targetRevisions: [],
+          },
+        },
+        expectedRevisions: [],
+      };
+      const beforeInvalidEvidence = snapshotProcessTree(fixture);
+      const evidenceCases = [
+        { name: "unknown", value: [{ kind: "unknown-evidence" }] },
+        { name: "manual-number", value: [{ kind: "manual", note: 42 }] },
+        { name: "manual-whitespace", value: [{ kind: "manual", note: "\t\n" }] },
+        { name: "entity-extra", value: [{ kind: "entity", entity: { id: "mx_01ARZ3NDEKTSV4RRFFQ69G5FAV", kind: "spec", extra: true } }] },
+        { name: "entity-trim", value: [{ kind: "entity", entity: { id: " entity ", kind: "spec" } }] },
+        { name: "external-label-trim", value: [{ kind: "external", uri: "https://example.test/evidence", label: " Label " }] },
+        { name: "external-upper-scheme", value: [{ kind: "external", uri: "HTTPS://example.test/evidence" }] },
+        { name: "external-nonabsolute", value: [{ kind: "external", uri: "http:example.test" }] },
+        { name: "external-whitespace", value: [{ kind: "external", uri: "https://example.test/a b" }] },
+        { name: "external-missing-host", value: [{ kind: "external", uri: "https://" }] },
+      ];
+      for (const entry of evidenceCases) {
+        const candidate = structuredClone(saveRequest) as any;
+        candidate.action.draft.evidence = entry.value;
+        const candidatePath = join(requestRoot, `invalid-evidence-${entry.name}.json`);
+        writeFileSync(candidatePath, JSON.stringify(candidate), "utf8");
+        const result = run(["inbox", "draft", "save", candidatePath, "--json"]);
+        expect(result.status, `${entry.name}\n${result.stderr}`).toBe(2);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          command: "inbox.draft.save", mode: "preview", ok: false,
+          problem: { code: "INVALID_REQUEST" },
+        });
+      }
+      for (const [name, mutate] of [
+        ["whitespace-title", (candidate: any) => { candidate.action.draft.change.title = "   "; }],
+        ["whitespace-body", (candidate: any) => { candidate.action.draft.change.body = "\t\n"; }],
+        ["whitespace-rationale", (candidate: any) => { candidate.action.draft.rationale = " \t\n"; }],
+        ["unsafe-semantic-revision", (candidate: any) => {
+          candidate.action.draft.change.topics = ["mx_01ARZ3NDEKTSV4RRFFQ69G5FAV"];
+          candidate.action.draft.targetRevisions = [{
+            target: { kind: "entity", id: "mx_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+            revision: "a".repeat(64),
+            semanticRevision: 9_007_199_254_740_992,
+          }];
+        }],
+      ] as const) {
+        const candidate = structuredClone(saveRequest) as any;
+        mutate(candidate);
+        const candidatePath = join(requestRoot, `invalid-request-${name}.json`);
+        writeFileSync(candidatePath, JSON.stringify(candidate), "utf8");
+        const result = run(["inbox", "draft", "save", candidatePath, "--json"]);
+        expect(result.status, `${name}\n${result.stderr}`).toBe(2);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          command: "inbox.draft.save", mode: "preview", ok: false,
+          problem: { code: "INVALID_REQUEST" },
+        });
+      }
+      const repairWithInvalidEvidence = {
+        operationId: "inbox-repair-invalid-evidence-process-001",
+        action: {
+          kind: "inbox.repair",
+          proposalId: "proposal_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          replacement: {
+            ...saveRequest.action.draft,
+            evidence: [{ kind: "manual", note: 42 }],
+          },
+        },
+        expectedRevisions: [{
+          target: { kind: "artifact", path: ".mex/inbox/proposal_01ARZ3NDEKTSV4RRFFQ69G5FAV.md" },
+          revision: "a".repeat(64),
+        }],
+      };
+      const invalidRepairPath = join(requestRoot, "invalid-repair-evidence.json");
+      writeFileSync(invalidRepairPath, JSON.stringify(repairWithInvalidEvidence), "utf8");
+      const invalidRepair = run(["inbox", "proposal", "repair", invalidRepairPath, "--json"]);
+      expect(invalidRepair.status, invalidRepair.stderr).toBe(2);
+      expect(JSON.parse(invalidRepair.stdout)).toMatchObject({
+        command: "inbox.proposal.repair", mode: "preview", ok: false,
+        problem: { code: "INVALID_REQUEST" },
+      });
+      expect(snapshotProcessTree(fixture)).toEqual(beforeInvalidEvidence);
+
+      writeFileSync(requestPath, JSON.stringify(saveRequest), "utf8");
+      const preview = run(["inbox", "draft", "save", requestPath, "--json"]);
+      expect(preview.status, preview.stderr).toBe(0);
+      const previewEnvelope = JSON.parse(preview.stdout) as any;
+      expect(previewEnvelope).toMatchObject({
+        schemaVersion: 1,
+        command: "inbox.draft.save",
+        mode: "preview",
+        ok: true,
+      });
+      expect(previewEnvelope.data.receipt.authority.actor).toEqual({
+        kind: "git", name: "Inbox CLI Contract", email: "local-identity",
+      });
+      const draftId = previewEnvelope.data.receipt.purposeIds
+        .find((entry) => entry.purpose === "inbox-draft")?.id;
+      expect(draftId).toMatch(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+      const previewPath = join(requestRoot, "preview.json");
+      writeFileSync(previewPath, preview.stdout, "utf8");
+
+      const expectInvalidApply = (
+        candidate: unknown,
+        name: string,
+        args: readonly string[] = ["inbox", "draft", "save"],
+      ): void => {
+        const path = join(requestRoot, `invalid-apply-${name}.json`);
+        writeFileSync(path, JSON.stringify(candidate), "utf8");
+        const result = run([...args, `--apply=${path}`, "--json"]);
+        expect(result.status, `${name}\n${result.stderr}`).toBe(2);
+        expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, problem: { code: "INVALID_REQUEST" } });
+      };
+      const validDiagnostic = {
+        code: "INBOX_TEST",
+        severity: "warning",
+        message: "Review the target.",
+        path: "specs/release.md",
+        location: { path: "specs/release.md", startLine: 1 },
+        entity: { id: "mx_01ARZ3NDEKTSV4RRFFQ69G5FAV", kind: "spec" },
+        remediation: [{ label: "Inspect", command: "mex inbox draft list --json" }],
+        detail: { safe: true },
+      };
+      for (const [name, diagnostic] of [
+        ["diagnostic-path", { ...validDiagnostic, path: 123 }],
+        ["diagnostic-location", { ...validDiagnostic, location: "bad" }],
+        ["diagnostic-entity", { ...validDiagnostic, entity: [] }],
+        ["diagnostic-remediation", { ...validDiagnostic, remediation: "bad" }],
+        ["diagnostic-detail", { ...validDiagnostic, detail: [] }],
+      ] as const) {
+        const candidate = structuredClone(previewEnvelope);
+        candidate.diagnostics = [diagnostic];
+        candidate.data.preview.diagnostics = [diagnostic];
+        expectInvalidApply(candidate, name);
+      }
+      const invalidTimestamp = structuredClone(previewEnvelope);
+      invalidTimestamp.data.receipt.authority.occurredAt = "2026-99-99T00:00:00.000Z";
+      expectInvalidApply(invalidTimestamp, "timestamp");
+      for (const [name, purposeIds] of [
+        ["purpose-missing", []],
+        ["purpose-wrong", [{ purpose: "activity", id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAV" }]],
+        ["purpose-duplicate", [previewEnvelope.data.receipt.purposeIds[0], previewEnvelope.data.receipt.purposeIds[0]]],
+        ["purpose-invalid-id", [{ purpose: "inbox-draft", id: "nested/draft" }]],
+      ] as const) {
+        const candidate = structuredClone(previewEnvelope);
+        candidate.data.receipt.purposeIds = purposeIds;
+        expectInvalidApply(candidate, name);
+      }
+
+      const applied = run(["inbox", "draft", "save", `--apply=${previewPath}`, "--json"]);
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(JSON.parse(applied.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "inbox.draft.save",
+        mode: "apply",
+        ok: true,
+        data: { applied: true },
+      });
+
+      const listed = run(["inbox", "draft", "list", "--limit", "1", "--json"]);
+      expect(listed.status, listed.stderr).toBe(0);
+      expect(JSON.parse(listed.stdout)).toMatchObject({
+        command: "inbox.draft.list",
+        mode: "read",
+        ok: true,
+        data: { items: [{ id: draftId }] },
+      });
+      const shown = run(["inbox", "draft", "show", draftId!, "--json"]);
+      expect(shown.status, shown.stderr).toBe(0);
+      const shownEnvelope = JSON.parse(shown.stdout) as any;
+      expect(shownEnvelope).toMatchObject({
+        command: "inbox.draft.show",
+        mode: "read",
+        ok: true,
+        data: { id: draftId, input: { rationale: "Review this exact scope." } },
+      });
+
+      const publishRequest = {
+        operationId: "inbox-publish-process-001",
+        action: { kind: "inbox.publish", draftId },
+        expectedRevisions: [{
+          target: { kind: "local", namespace: "inbox-draft", id: draftId },
+          revision: shownEnvelope.data.revision,
+        }],
+      };
+      const publishEnvelope = structuredClone(previewEnvelope);
+      publishEnvelope.command = "inbox.publish";
+      publishEnvelope.data.request = publishRequest;
+      publishEnvelope.data.receipt.purposeIds = [
+        { purpose: "activity", id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+        { purpose: "proposal", id: "proposal_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+      ];
+      const publishPurposes = publishEnvelope.data.receipt.purposeIds;
+      for (const [name, purposeIds] of [
+        ["publish-purpose-reversed", [...publishPurposes].reverse()],
+        ["publish-purpose-missing", publishPurposes.slice(0, 1)],
+        ["publish-purpose-duplicate", [publishPurposes[0], publishPurposes[0]]],
+        ["publish-purpose-duplicate-id", [publishPurposes[0], { ...publishPurposes[1], id: publishPurposes[0].id }]],
+        ["publish-purpose-invalid-id", [{ purpose: "activity", id: "event_Z1ARZ3NDEKTSV4RRFFQ69G5FAV" }, publishPurposes[1]]],
+      ] as const) {
+        const candidate = structuredClone(publishEnvelope);
+        candidate.data.receipt.purposeIds = purposeIds;
+        expectInvalidApply(candidate, name, ["inbox", "publish"]);
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+      rmSync(requestRoot, { recursive: true, force: true });
     }
   }, 40_000);
 

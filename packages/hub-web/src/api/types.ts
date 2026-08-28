@@ -30,6 +30,24 @@ export type {
   HubJobSnapshot as JobSummary,
   HubJobState as JobState,
   HubProblemDetails as ProblemDetails,
+  InboxDraftDetail,
+  InboxDraftInput,
+  InboxDraftListRequest,
+  InboxDraftListResponse,
+  InboxDraftSummary,
+  InboxEvidenceRef,
+  InboxLocalChange,
+  InboxOperationApplyRequest,
+  InboxOperationApplyResponse,
+  InboxOperationPreviewRequest,
+  InboxOperationPreviewResponse,
+  InboxProposalDetail,
+  InboxProposalListRequest,
+  InboxProposalListResponse,
+  InboxProposalState,
+  InboxProposalSummary,
+  InboxSpecChange,
+  InboxSpecKind,
   JobPageResponse as JobsResponse,
   JobStartRequest as StartJobRequest,
   SearchRequest,
@@ -84,5 +102,5 @@ export type {
   WikiSource,
 } from "@mex/hub-contracts";
 
-export type CapabilityName = "graph" | "wiki" | "jobs" | "activity" | "members" | "workstreams" | "specs" | "team";
+export type CapabilityName = "graph" | "wiki" | "jobs" | "activity" | "members" | "workstreams" | "specs" | "inbox";
 export type Tone = "neutral" | "info" | "success" | "warning" | "danger";

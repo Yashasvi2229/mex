@@ -1,6 +1,6 @@
 # Human-Team Memory Contract Lock
 
-Status: Checkpoint E1 internal Inbox-governed Spec authoring service implemented; product surfaces unregistered
+Status: Checkpoints E1-E4 implemented; pinned release calibration and final enforcement pending
 
 This brief records the application boundary for the MEX OSS human-team memory
 program. The contract remains an internal, provisional API until a separate
@@ -279,6 +279,11 @@ The exact boundary is recorded in
   Spec-family creates/targets, type conversions, inline replacements, hidden
   batch items, and `.mex/specs/**` writes. Non-Spec Wiki administration and
   declared migration/maintenance remain separately gated.
+- Inbox capability descriptors use stable public request/preview `$ref` roots
+  and name the static `mex inbox contract --json` resolver. Those roots require
+  the resolver catalog; its bounded repository-independent envelope contains
+  the complete strict schemas, both examples, exact apply-envelope requirement,
+  and unchanged Team exit table even before repository readiness.
 - Relay, Playbook, Catch Up, new MCP, agent, Git mutation, hosted, and direct
   Wiki/Spec editing surfaces remain outside E.
 
@@ -341,10 +346,12 @@ adds bounded Workstream lifecycle and cross-process preview/apply coverage plus
 fresh-only Spec projection tests against the real Wiki adapter. Checkpoint E1
 adds the internal governed Inbox/Spec service and real repository conformance,
 including local drafts, portable proposals, exact Spec create/update approval,
-stale/repair, crash recovery, containment, privacy, and two-clone transfer.
-Product Inbox commands, routes, UI, capability advertisement, direct-Wiki
-bypass guards, fixtures, and release gates remain unimplemented. Relay,
-Playbook, and Catch Up remain assigned to later checkpoints.
+stale/repair, crash recovery, containment, privacy, and two-clone transfer. E2
+registers the guarded CLI and bounded static contract resolver, E3 registers the
+private Hub and lazy Inbox workbench, and E4 adds the deterministic fixture plus
+release measurements. Inbox's numeric release budgets and final enforcing
+pinned run remain pending. Relay, Playbook, and Catch Up remain assigned to
+later checkpoints.
 
 ## Verification commands
 

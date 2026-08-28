@@ -318,6 +318,7 @@ export type TeamInboxDirectBypassCase =
   | "type-conversion-out-of"
   | "supersede-existing-replacement"
   | "supersede-inline-replacement"
+  | "supersede-inline-relation-endpoint"
   | "spec-path"
   | "hidden-batch";
 
@@ -1441,6 +1442,7 @@ export function defineTeamInboxDirectWikiSpecBypassContract(
             "type-conversion-out-of",
             "supersede-existing-replacement",
             "supersede-inline-replacement",
+            "supersede-inline-relation-endpoint",
             "spec-path",
             "hidden-batch",
           ] as const) {

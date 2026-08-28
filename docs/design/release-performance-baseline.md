@@ -29,6 +29,17 @@ three fixtures. Only the exact Workstreams and Specs list/detail asset
 candidates and their per-profile browser-heap candidates were copied; every
 pre-Checkpoint-D budget remains frozen.
 
+Checkpoint E's release-gate implementation now measures the real Inbox route,
+draft/proposal list reads, and Inbox heap, but its numeric limits are not yet
+calibrated. No local macOS measurement is eligible for a committed budget. The
+first retained Ubuntu 24.04/Node 22 characterization report must measure only
+`assets.routes.inbox`, each profile's
+`apiLatencyMs.inboxDrafts`/`apiLatencyMs.inboxProposals`, and each profile's
+`browserHeapBytes.inbox`. Missing Inbox API budgets fail closed with a bounded
+`budget_missing` violation while the report still retains their candidates.
+After those exact values are copied with the existing formulas, an enforcing
+pinned rerun must pass; every unrelated budget remains frozen.
+
 ## Runner contract
 
 `npm run benchmark:release` builds the package and writes the bounded JSON
@@ -38,26 +49,31 @@ contracts are versioned by
 `scripts/release-benchmark/budgets.schema.json`.
 
 The benchmark generates three fixed Git repositories. Small contains four
-source files, four Wiki entities, one Workstream, and four canonical Activity
-events; medium contains sixteen source files, Wiki entities, and Activity
-events plus one Workstream; large contains forty-eight source files, Wiki
-entities, and Activity events plus one Workstream. IDs, contents, timestamps,
-Git identity, commit timestamp, and repository shape are deterministic. Graph
-and Wiki indexes are built only by explicit setup in the benchmark. Reads never
+source files, four Wiki entities, one Workstream, one checkout-local Inbox
+draft, one pending canonical proposal, and four canonical Activity events;
+medium contains sixteen source files, Wiki entities, and Activity events plus
+the same one Workstream/draft/proposal shape; large contains forty-eight source
+files, Wiki entities, and Activity events plus that same bounded shape. The
+first four existing Wiki entity IDs form a root
+Spec/requirement/constraint/acceptance-criterion slice under `.mex/specs/**`;
+no extra Wiki entities are added. IDs, contents, timestamps, Git identity,
+commit timestamp, and repository shape are deterministic. Graph and Wiki
+indexes are built only by explicit setup in the benchmark. Reads never
 initialize storage or maintain either index.
 
 Each profile records:
 
 - ten cold Hub readiness timings;
 - five idle server RSS and CPU samples over a two-second quiet window;
-- ten exact Hub API timings for Search, Code, Knowledge, and Activity;
+- ten exact Hub API timings for Search, Code, Knowledge, Activity, Inbox draft
+  listing, and pending/stale Inbox proposal listing;
 - ten timings for each Graph/Wiki refresh and rebuild, with five peak-RSS
   samples for each operation;
 - Graph and Wiki SQLite-family bytes relative to their indexed input bytes.
 
 Every profile additionally records five Chromium heap samples after every
 registered Hub route: Home, Search, Knowledge browse/detail, Code search/symbol,
-Workstreams, Specs browse/detail, the three honest unavailable capability
+Workstreams, Specs browse/detail, Inbox, the two honest unavailable capability
 routes, Members, Activity, Jobs, Health, and the wildcard not-found route.
 Every browser context begins empty. Its request audit fails if a route contacts
 any origin other than the exact loopback Hub origin.
@@ -66,9 +82,10 @@ Production asset accounting starts from Vite's manifest. It records the
 initial static import closure and the incremental JavaScript, CSS, and font
 bytes for every registered route. Fonts referenced from global CSS are counted
 as initial assets even when Vite does not attach them to a manifest entry.
-Home must not statically close over Code, Knowledge, Workstreams, Specs,
-Members, Activity, its nested recorder, or setup code, and the largest
-JavaScript chunk is checked explicitly.
+The initial shell and Home must not statically close over Code, Knowledge,
+Workstreams, Specs, Inbox, the Inbox editor, Members, Activity, its nested
+recorder, or setup code, and the largest JavaScript chunk is checked explicitly.
+Production assets are also scanned for exact development-fixture sentinels.
 
 ## Enforcement
 
@@ -158,16 +175,18 @@ exit 2.
 The installed-capability inventory includes the secure Project Hub, Team
 identity, canonical Activity read/record, Graph, and Wiki surfaces. Checkpoint C
 adds registered structured Member and Activity commands; Checkpoint D adds
-registered Workstream reads/mutations and read-only Spec reads. Every Team
+registered Workstream reads/mutations and read-only Spec reads; Checkpoint E
+adds registered Inbox draft/proposal reads and governed Spec-authoring preview/
+apply commands. Every Team
 mutation advertises distinct preview and apply invocations plus a bounded
 machine-readable request schema, complete examples, the exact preview-envelope
 apply rule, and the typed process-exit table. Read, preview, and apply
 invocations remain separate fixed arrays, Graph's existing protocol-v3 commands
 remain JSONL byte-compatible, and unavailable states carry static safe reasons
 plus the next initialization action. Writable legacy Wiki synthesis commands
-remain omitted from the governed agent surface. Inbox, Relays, Playbooks, Catch
-Up, governed Spec writes, and future team actions remain absent until their
-application services and structured CLI contracts exist.
+remain omitted from the governed agent surface. Relays, Playbooks, Catch Up,
+and future team actions remain absent until their application services and
+structured CLI contracts exist.
 
 Generated agent anchors direct supported tools to discover this manifest,
 prefer its structured reads, preview mutations, and wait for explicit human

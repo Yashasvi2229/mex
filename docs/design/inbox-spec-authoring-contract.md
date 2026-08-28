@@ -1,14 +1,15 @@
 # Inbox-Governed Spec Authoring Contract
 
-Status: Checkpoint E1 internal authoring service implemented; product surfaces remain unregistered
+Status: Checkpoints E1-E4 implemented; pinned release calibration and final enforcement pending
 
 This brief freezes the minimum product boundary for checkout-local Inbox drafts,
-portable canonical proposals, and explicitly reviewed Spec changes. It does not
-claim that the CLI, capability, Hub, browser, compatibility guard, fixtures, or
-performance gates described here have shipped. E0 remains the locked contract;
-E1 implements only its internal repository service, exact Wiki authoring seams,
-and real consumer conformance. Product registration remains assigned to E2 and
-later checkpoints.
+portable canonical proposals, and explicitly reviewed Spec changes. E0 remains
+the locked contract. E1 implements the internal repository service, exact Wiki
+authoring seams, and real consumer conformance; E2 registers the CLI, capability
+resolver, and direct-Wiki bypass guard; E3 registers the private Hub and lazy
+Inbox workbench; and E4 implements deterministic fixtures and release
+measurement. Numeric Inbox budgets still require a retained pinned Ubuntu
+characterization report followed by a green enforcing rerun.
 
 The authority order, repository pins, provisional-package policy, canonical
 ownership rules, stable errors, and exclusions in
@@ -296,7 +297,7 @@ invoked as an ordinary product authoring bypass.
 
 ## Capability discovery
 
-E implementation will add two installed capability identities to capability
+E2 adds two installed capability identities to capability
 schema v1:
 
 - `team_inbox` for bounded draft/proposal reads and the Inbox lifecycle;
@@ -317,19 +318,27 @@ freshness semantics. Command arrays remain the exact source of partial
 availability.
 
 A compact `team.inbox.request.v1` and
-`team.inbox.preview-envelope.v1` machine contract carries strict schemas,
-examples, exact-envelope apply requirements, and the exit table. It reuses
-shared definitions rather than embedding the generic Wiki engine schema, and
-the complete `mex capabilities --json` envelope remains within 32 KiB. Raw
-Wiki Spec mutation is neither described nor advertised as Spec authoring.
+`team.inbox.preview-envelope.v1` machine contract is discovered through the
+static, repository-independent `mex inbox contract --json` resolver. The
+capability manifest publishes stable public `$ref` roots and marks every Inbox
+descriptor with that resolver; those roots are deliberately unusable until the
+advertised resolver catalog is loaded. The bounded resolver envelope carries
+the complete strict JSON Schema 2020-12 catalog, both request examples, the
+exact-envelope apply requirement, and the exact Team exit table. The resolver
+is advertised in every repository lifecycle state and never opens Git, `.mex`,
+or the workflow service. Keeping this E-only catalog out of line preserves the
+existing Team v1 examples and exit semantics while the complete
+`mex capabilities --json` envelope remains within 32 KiB. Raw Wiki Spec
+mutation is neither described nor advertised as Spec authoring.
 
 E1 activates the internal real-adapter Inbox/Spec consumer conformance suite.
-Until E2 production registration exists, no E command descriptor, installed
-capability, or machine request contract is advertised.
+E2 advertises the installed capability, command descriptors, compact contract
+roots, and their repository-independent resolver without weakening the 32 KiB
+capability-discovery bound.
 
 ## Private Hub contract
 
-E implementation will add only these authenticated loopback Hub routes:
+E3 adds only these authenticated loopback Hub routes:
 
 ```text
 GET  /api/v1/inbox/drafts
@@ -346,7 +355,7 @@ all list routes use revision/filter-bound cursors. The dedicated mutation routes
 use the same product command and envelope as the CLI rather than widening the
 C/D Team-operation union.
 
-Hub capabilities will add:
+E3 Hub capabilities add:
 
 ```text
 inbox.read
@@ -367,10 +376,9 @@ no-store`. Request bodies, proposal contents, and diffs are not logged.
 
 ## Hub workbench and accessibility
 
-After implementation, only `/inbox` will change from its honest placeholder to
-a lazy `InboxPage`. Relay and Playbook routes will remain placeholders. Inbox
-will receive its own navigation capability; it will not reuse a broad `team`
-switch.
+Checkpoint E3 changes only `/inbox` from its honest placeholder to a lazy
+`InboxPage`. Relay and Playbook routes remain placeholders. Inbox has its own
+navigation capability; it does not reuse a broad `team` switch.
 
 The minimum desktop workbench has a local-draft rail, an actionable canonical
 proposal queue, and selected detail/review content. It fetches at most 25
@@ -424,16 +432,16 @@ transition. Divergent state fails closed.
 
 ## Performance and deterministic fixtures
 
-Implementation will extend the deterministic small, medium, and large release
+Checkpoint E4 extends the deterministic small, medium, and large release
 fixtures with exactly one checkout-local Inbox draft, one pending canonical
 proposal, and a fresh root Spec/requirement/constraint/acceptance-criterion
 slice under `.mex/specs/**`. Fixture IDs, contents, timestamps, Git identity,
 and counts are fixed; indexes are built only during explicit fixture setup and
 the browser makes no request outside the exact loopback Hub origin.
 
-The release route manifest will change `/inbox` from `CapabilityPage` to the
-lazy `InboxPage`. Route readiness will assert exact fixture draft/proposal
-content rather than only the shell. The performance report will record bounded
+The release route manifest maps `/inbox` to the lazy `InboxPage`. Route
+readiness asserts exact fixture draft/proposal content rather than only the
+shell. The performance report records bounded
 draft-list and proposal-list API reads plus `/inbox` browser heap for all three
 profiles. It will not repeatedly apply a state-changing approval inside one
 benchmark fixture.
@@ -462,5 +470,6 @@ Checkpoint E does not add:
 
 E1 adds focused repository-contract, two-process portability,
 failure-atomicity, containment, privacy, and two-clone coverage for the internal
-service. HTTP security, accessibility, product fixtures, performance, packed
-install, compatibility, capability, CLI, and Hub gates remain required in E2-E4.
+service. E2-E4 add the HTTP security, accessibility, product fixture,
+performance, packed-install, compatibility, capability, CLI, and Hub gates;
+only pinned numeric calibration and the final enforcing release run remain.

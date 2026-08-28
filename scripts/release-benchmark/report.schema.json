@@ -145,6 +145,8 @@
             "sourceFiles": { "type": "integer", "minimum": 1 },
             "wikiEntities": { "type": "integer", "minimum": 1 },
             "workstreams": { "type": "integer", "minimum": 1 },
+            "inboxDrafts": { "const": 1 },
+            "inboxProposals": { "const": 1 },
             "activityEvents": { "type": "integer", "minimum": 1 },
             "input": {
               "type": "object",
@@ -211,7 +213,9 @@
         "search": { "$ref": "#/$defs/summary10" },
         "code": { "$ref": "#/$defs/summary10" },
         "knowledge": { "$ref": "#/$defs/summary10" },
-        "activity": { "$ref": "#/$defs/summary10" }
+        "activity": { "$ref": "#/$defs/summary10" },
+        "inboxDrafts": { "$ref": "#/$defs/summary10" },
+        "inboxProposals": { "$ref": "#/$defs/summary10" }
       }
     },
     "maintenanceMeasurement": {

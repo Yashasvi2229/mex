@@ -9,6 +9,14 @@ import {
   HubCapabilitiesSchema,
   HubJobSnapshotSchema,
   HubProblemDetailsSchema,
+  InboxDraftDetailSchema,
+  InboxDraftIdSchema,
+  InboxDraftListResponseSchema,
+  InboxOperationApplyResponseSchema,
+  InboxOperationPreviewResponseSchema,
+  InboxProposalDetailSchema,
+  InboxProposalIdSchema,
+  InboxProposalListResponseSchema,
   JobPageResponseSchema,
   SearchResponseSchema,
   SessionResponseSchema,
@@ -41,6 +49,16 @@ import type {
   CodeWorkspaceResponse,
   HealthResponse,
   HomeResponse,
+  InboxDraftDetail,
+  InboxDraftListRequest,
+  InboxDraftListResponse,
+  InboxOperationApplyRequest,
+  InboxOperationApplyResponse,
+  InboxOperationPreviewRequest,
+  InboxOperationPreviewResponse,
+  InboxProposalDetail,
+  InboxProposalListRequest,
+  InboxProposalListResponse,
   JobsResponse,
   JobSummary,
   ProblemDetails,
@@ -101,6 +119,12 @@ export interface HubApi {
   getCurrentActor(): Promise<TeamCurrentActorResponse>;
   getWorkstreams(request: TeamWorkstreamListRequest): Promise<TeamWorkstreamListResponse>;
   getWorkstream(id: string): Promise<TeamWorkstream>;
+  getInboxDrafts(request: InboxDraftListRequest): Promise<InboxDraftListResponse>;
+  getInboxDraft(id: string): Promise<InboxDraftDetail>;
+  getInboxProposals(request: InboxProposalListRequest): Promise<InboxProposalListResponse>;
+  getInboxProposal(id: string): Promise<InboxProposalDetail>;
+  previewInboxOperation(request: InboxOperationPreviewRequest): Promise<InboxOperationPreviewResponse>;
+  applyInboxOperation(request: InboxOperationApplyRequest): Promise<InboxOperationApplyResponse>;
   listSpecs(request: SpecListRequest): Promise<SpecListResponse>;
   getSpec(id: string): Promise<SpecDetailResponse>;
   previewTeamOperation(request: TeamOperationPreviewRequest): Promise<TeamOperationPreviewResponse>;
@@ -191,6 +215,22 @@ function assertSafeTeamWorkstreamId(value: string): string {
   const parsed = TeamWorkstreamIdSchema.safeParse(value);
   if (!parsed.success) {
     throw new HubApiError(fallbackProblem(400, "The Workstream identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+function assertSafeInboxDraftId(value: string): string {
+  const parsed = InboxDraftIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The Inbox draft identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+function assertSafeInboxProposalId(value: string): string {
+  const parsed = InboxProposalIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The Inbox proposal identifier is invalid."));
   }
   return parsed.data;
 }
@@ -289,6 +329,55 @@ export class HttpHubApi implements HubApi {
     return await this.#request(
       `/workstreams/${encodeURIComponent(assertSafeTeamWorkstreamId(id))}`,
       TeamWorkstreamSchema,
+    );
+  }
+
+  getInboxDrafts(request: InboxDraftListRequest): Promise<InboxDraftListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/inbox/drafts?${params}`, InboxDraftListResponseSchema);
+  }
+
+  async getInboxDraft(id: string): Promise<InboxDraftDetail> {
+    return await this.#request(
+      `/inbox/drafts/${encodeURIComponent(assertSafeInboxDraftId(id))}`,
+      InboxDraftDetailSchema,
+    );
+  }
+
+  getInboxProposals(request: InboxProposalListRequest): Promise<InboxProposalListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.states?.length) params.set("state", request.states.join(","));
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/inbox/proposals?${params}`, InboxProposalListResponseSchema);
+  }
+
+  async getInboxProposal(id: string): Promise<InboxProposalDetail> {
+    return await this.#request(
+      `/inbox/proposals/${encodeURIComponent(assertSafeInboxProposalId(id))}`,
+      InboxProposalDetailSchema,
+    );
+  }
+
+  previewInboxOperation(
+    request: InboxOperationPreviewRequest,
+  ): Promise<InboxOperationPreviewResponse> {
+    return this.#request(
+      "/inbox/operations/preview",
+      InboxOperationPreviewResponseSchema,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+    );
+  }
+
+  applyInboxOperation(
+    request: InboxOperationApplyRequest,
+  ): Promise<InboxOperationApplyResponse> {
+    return this.#request(
+      "/inbox/operations/apply",
+      InboxOperationApplyResponseSchema,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
     );
   }
 
