@@ -409,16 +409,39 @@ describe("inspectGraphStatus", () => {
     const dbPath = await build(root);
     const db = openSqlite(dbPath);
     try {
-      const row = db.prepare(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'node_fingerprints'",
-      ).get() as { sql: string };
-      const malformed = row.sql.replace(/\bminhash\s+BLOB\b/u, "minhash TEXT");
-      expect(malformed).not.toBe(row.sql);
-      db.exec("PRAGMA writable_schema = ON");
-      db.prepare("UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = 'node_fingerprints'")
-        .run(malformed);
-      db.exec("PRAGMA writable_schema = OFF");
-      db.pragma("schema_version = 99");
+      // Rebuild only the compact tables with a deliberately wrong declared
+      // type. Mutating sqlite_master through writable_schema is rejected by
+      // newer Node 24 SQLite builds, and the fixture should exercise our
+      // schema validator rather than depend on that unsafe escape hatch.
+      db.exec(`
+        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
+        CREATE TEMP TABLE saved_lsh AS
+          SELECT band, band_hash, ref FROM lsh_buckets;
+        CREATE TABLE node_fingerprints_malformed (
+          ref INTEGER PRIMARY KEY,
+          node_id TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
+          minhash TEXT NOT NULL,
+          neighbors TEXT NOT NULL,
+          token_count INTEGER NOT NULL
+        );
+        INSERT INTO node_fingerprints_malformed
+          SELECT ref, node_id, CAST(minhash AS TEXT), neighbors, token_count
+          FROM node_fingerprints;
+        DROP TABLE lsh_buckets;
+        DROP TABLE node_fingerprints;
+        ALTER TABLE node_fingerprints_malformed RENAME TO node_fingerprints;
+        CREATE TABLE lsh_buckets (
+          band INTEGER NOT NULL,
+          band_hash INTEGER NOT NULL,
+          ref INTEGER NOT NULL REFERENCES node_fingerprints(ref) ON DELETE CASCADE,
+          PRIMARY KEY (band, band_hash, ref)
+        ) WITHOUT ROWID;
+        INSERT INTO lsh_buckets SELECT band, band_hash, ref FROM saved_lsh;
+        DROP TABLE saved_lsh;
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+      `);
     } finally {
       db.close();
     }
