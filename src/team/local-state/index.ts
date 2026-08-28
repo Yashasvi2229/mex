@@ -56,6 +56,7 @@ const HUB_JOB_ID = /^job_[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 const GIT_HEAD = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const LOCAL_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const WORKFLOW_NAMESPACE = /^[a-z][a-z0-9-]{0,63}$/;
+const JOURNAL_ENTITY_KIND_EXCEPTIONS = new Set(["acceptance_criterion"]);
 const MAX_JOB_PROBLEM_JSON_BYTES = 4_096;
 const DEFAULT_JOB_PAGE_SIZE = 25;
 const MAX_JOB_PAGE_SIZE = 100;
@@ -2597,11 +2598,22 @@ function normalizeJournalEntityRef(value: unknown, label: string): EntityRef {
   assertOnlyKeys(value, ["id", "kind", "title"], label);
   return {
     id: validateLocalIdentifier(value.id, `${label} ID`),
-    kind: validateWorkflowNamespace(value.kind),
+    kind: validateJournalEntityKind(value.kind),
     ...(value.title === undefined
       ? {}
       : { title: validateBoundedAuditText(value.title, `${label} title`, 512) }),
   };
+}
+
+function validateJournalEntityKind(value: unknown): string {
+  if (
+    typeof value !== "string"
+    || (!WORKFLOW_NAMESPACE.test(value)
+      && !JOURNAL_ENTITY_KIND_EXCEPTIONS.has(value))
+  ) {
+    throw validationError("Activity subject entity kind is invalid.");
+  }
+  return value;
 }
 
 function normalizeJournalCodeRef(value: unknown, index: number): CodeRef {

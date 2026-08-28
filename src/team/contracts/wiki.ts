@@ -353,6 +353,57 @@ export interface WikiOperationPreview<TOperationPlan = unknown> {
   recoveryManifest?: WikiOperationRecoveryManifest;
 }
 
+/**
+ * Package-private exact entity projection used by governed Team authoring.
+ * It is intentionally omitted from `contracts/index.ts` and the package root:
+ * ordinary consumers continue to depend only on {@link WikiPort}.
+ */
+export interface WikiExactEntityAttestation {
+  id: EntityId;
+  entity: {
+    ref: EntityRef;
+    version: EntityVersion;
+  } | null;
+}
+
+/** One ordered entity set released from one immutable, revalidated Wiki view. */
+export interface WikiExactEntityAttestationView {
+  indexedRevision: Revision;
+  observedAt: IsoTimestamp;
+  entities: readonly WikiExactEntityAttestation[];
+}
+
+/**
+ * Package-private authoring seam. A receipt may pin create IDs, but no opaque
+ * executable plan is ever made portable or added to the public WikiPort.
+ */
+export interface WikiForcedCreatedIdPreviewPort<
+  TOperationPayload = JsonValue,
+  TOperationPlan = unknown,
+> {
+  readExactEntityAttestations(
+    entityIds: readonly EntityId[],
+  ): Promise<WikiExactEntityAttestationView>;
+  previewOperationsWithCreatedIds(
+    request: WikiOperationRequest<TOperationPayload>,
+    createdIds: readonly EntityId[],
+  ): Promise<WikiOperationPreview<TOperationPlan>>;
+}
+
+/**
+ * Package-private governed-update seam. Public Wiki previews retain ordinary
+ * whole-corpus freshness; this path tolerates only Team-owned publication
+ * drift around one exact Wiki-owned update.
+ */
+export interface WikiExactAuthoringPreviewPort<
+  TOperationPayload = JsonValue,
+  TOperationPlan = unknown,
+> {
+  previewAuthoringOperations(
+    request: WikiOperationRequest<TOperationPayload>,
+  ): Promise<WikiOperationPreview<TOperationPlan>>;
+}
+
 export interface WikiOperationRecoveryManifest {
   schemaVersion: 1;
   requestHash: Revision;

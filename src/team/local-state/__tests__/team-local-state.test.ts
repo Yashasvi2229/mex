@@ -1159,6 +1159,53 @@ describe("TeamLocalState", () => {
     });
     expect(store.getIncompleteWorkflowOperation()).toBeNull();
 
+    const specSubjectEffect = {
+      ...activity,
+      action: "inbox.approved",
+      subjects: [{
+        kind: "entity" as const,
+        entity: {
+          id: "mx_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          kind: "acceptance_criterion",
+          title: "Exact acceptance criterion",
+        },
+      }],
+    };
+    const specSubjectEntry = store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-spec-subject",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [specSubjectEffect],
+    }).entry;
+    expect(specSubjectEntry.effects).toEqual([specSubjectEffect]);
+    expect(store.getWorkflowOperation("operation-spec-subject")).toEqual(
+      specSubjectEntry,
+    );
+    store.abandonWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: specSubjectEntry.operationId,
+      commandRevision: specSubjectEntry.commandRevision,
+      previewRevision: specSubjectEntry.previewRevision,
+      expectedRevision: specSubjectEntry.revision,
+    });
+    expectCode(() => store.beginWorkflowOperation({
+      leaseToken: LEASE_A,
+      operationId: "operation-invalid-spec-subject",
+      commandRevision: COMMAND_A,
+      previewRevision: PREVIEW_A,
+      effects: [{
+        ...specSubjectEffect,
+        subjects: [{
+          kind: "entity" as const,
+          entity: {
+            id: "mx_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            kind: "acceptance__criterion",
+          },
+        }],
+      }],
+    }), "VALIDATION_FAILED");
+
     const receiptEffect = {
       kind: "identity_activity_receipt" as const,
       envelopeRevision: "7".repeat(64),

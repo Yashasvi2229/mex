@@ -34,6 +34,166 @@ export const TEAM_IDENTITY_ACTIVITY_LIMITS = {
   maxFutureClockSkewMs: 5_000,
 } as const;
 
+/** Internal Checkpoint E Inbox/Spec product bounds. */
+export const TEAM_INBOX_SPEC_LIMITS = {
+  maxEnvelopeBytes: 64 * 1024,
+  maxReceiptBytes: 8 * 1024,
+  maxReceiptDepth: 8,
+  maxReceiptNodes: 128,
+  maxPurposeIds: 2,
+  maxPortableRequestBytes: 32 * 1024,
+  maxPayloadDepth: 8,
+  maxPayloadNodes: 1_024,
+  maxStringBytes: 16 * 1024,
+  maxTitleBytes: 512,
+  maxSummaryBytes: 2 * 1024,
+  maxRationaleBytes: 8 * 1024,
+  maxTopics: 64,
+  maxExpectations: 64,
+  maxRationaleExcerptBytes: 240,
+  defaultPageSize: 50,
+  maxPageSize: 100,
+  maxCursorBytes: 4 * 1024,
+  maxPreviewAgeMs: 30 * 60 * 1_000,
+  maxFutureClockSkewMs: 5_000,
+} as const;
+
+export const TEAM_INBOX_SPEC_KINDS = [
+  "spec",
+  "requirement",
+  "constraint",
+  "acceptance_criterion",
+] as const;
+
+export type TeamInboxSpecKind = (typeof TEAM_INBOX_SPEC_KINDS)[number];
+
+export interface TeamInboxSpecRef<
+  TKind extends TeamInboxSpecKind = TeamInboxSpecKind,
+> {
+  id: string;
+  kind: TKind;
+  title?: string;
+}
+
+type TeamInboxRefinesRelation = {
+  type: "refines";
+  target: TeamInboxSpecRef<"requirement">;
+};
+
+type TeamInboxConstrainedByRelation = {
+  type: "constrained_by";
+  target: TeamInboxSpecRef<"constraint">;
+};
+
+export type TeamInboxSpecCreateRelation<
+  TKind extends TeamInboxSpecKind,
+> = TKind extends "spec"
+  ? TeamInboxConstrainedByRelation
+  : TKind extends "requirement"
+    ? { type: "derived_from"; target: TeamInboxSpecRef<"spec"> }
+      | TeamInboxRefinesRelation
+      | TeamInboxConstrainedByRelation
+    : TKind extends "constraint"
+      ? TeamInboxConstrainedByRelation
+      : {
+          type: "verified_by";
+          target: TeamInboxSpecRef<"requirement" | "spec">;
+        }
+        | TeamInboxConstrainedByRelation;
+
+export type TeamInboxSpecCreateChange = {
+  [TKind in TeamInboxSpecKind]: {
+    kind: "spec.create";
+    entityKind: TKind;
+    title: string;
+    body: string;
+    summary?: string;
+    status: "in_flight" | "promoted";
+    topics?: readonly string[];
+    relation?: TeamInboxSpecCreateRelation<TKind>;
+  };
+}[TeamInboxSpecKind];
+
+export type TeamInboxSpecUpdatePatch =
+  | { title: string; summary?: string; body?: string }
+  | { title?: string; summary: string; body?: string }
+  | { title?: string; summary?: string; body: string };
+
+export interface TeamInboxSpecUpdateChange {
+  kind: "spec.update";
+  target: TeamInboxSpecRef;
+  patch: TeamInboxSpecUpdatePatch;
+}
+
+/** Closed one-change product request. It deliberately has no raw Wiki slot. */
+export type TeamInboxSpecChange =
+  | TeamInboxSpecCreateChange
+  | TeamInboxSpecUpdateChange;
+
+export interface TeamInboxSpecDraftInput {
+  change: TeamInboxSpecChange;
+  rationale: string;
+  evidence: readonly TeamEvidenceRef[];
+  targetRevisions: readonly RevisionExpectation[];
+}
+
+export interface TeamInboxSpecDraftSummary {
+  id: string;
+  revision: Revision;
+  updatedAt: string;
+  changeKind: TeamInboxSpecChange["kind"];
+  entityKind: TeamInboxSpecKind;
+  title: string;
+  rationaleExcerpt: string;
+}
+
+export interface TeamInboxSpecDraftDetail extends TeamInboxSpecDraftSummary {
+  input: TeamInboxSpecDraftInput;
+}
+
+export interface TeamInboxSpecProposalSummary {
+  schemaVersion: 1;
+  ref: EntityRef;
+  sourcePath: RepoRelativePath;
+  revision: Revision;
+  state: ProposalState;
+  author: ActorRef;
+  changeKind: TeamInboxSpecChange["kind"];
+  entityKind: TeamInboxSpecKind;
+  title: string;
+  rationaleExcerpt: string;
+  reviewer?: ActorRef;
+  reviewedAt?: string;
+}
+
+export interface TeamInboxSpecProposalDetail
+  extends TeamInboxSpecProposalSummary {
+  change: TeamInboxSpecChange;
+  rationale: string;
+  evidence: readonly TeamEvidenceRef[];
+  targetRevisions: readonly RevisionExpectation[];
+  reviewRationale?: string;
+}
+
+export interface TeamInboxSpecPage<T> {
+  items: readonly T[];
+  nextCursor: string | null;
+  truncated: boolean;
+  sourceTruncated: boolean;
+  deterministicRevision: Revision;
+  diagnostics: readonly Diagnostic[];
+}
+
+export interface TeamInboxDraftListRequest extends PageRequest {
+  changeKinds?: readonly TeamInboxSpecChange["kind"][];
+  entityKinds?: readonly TeamInboxSpecKind[];
+}
+
+export interface TeamInboxProposalListRequest
+  extends TeamInboxDraftListRequest {
+  states?: readonly ProposalState[];
+}
+
 export const WORKSTREAM_STATES = [
   "planned",
   "active",
@@ -433,6 +593,7 @@ export type TeamWorkflowRevisionBoundAction<TWikiOperationPlan> =
   | { kind: "inbox.approve"; proposalId: string }
   | { kind: "inbox.reject"; proposalId: string; rationale: string }
   | { kind: "inbox.withdraw"; proposalId: string; rationale?: string }
+  | { kind: "inbox.mark-stale"; proposalId: string; rationale: string }
   | {
       kind: "inbox.repair";
       proposalId: string;
@@ -637,6 +798,102 @@ export interface TeamWorkstreamPreviewEnvelope {
   request: TeamWorkstreamCommand;
   preview: TeamIdentityActivityPublicPreview;
   receipt: TeamWorkstreamReceipt;
+}
+
+export type TeamInboxSpecAction =
+  | {
+      kind: "inbox.draft.save";
+      draftId?: string;
+      draft: TeamInboxSpecDraftInput;
+    }
+  | { kind: "inbox.draft.delete"; draftId: string }
+  | { kind: "inbox.publish"; draftId: string }
+  | { kind: "inbox.approve"; proposalId: string }
+  | { kind: "inbox.reject"; proposalId: string; rationale: string }
+  | { kind: "inbox.withdraw"; proposalId: string; rationale?: string }
+  | { kind: "inbox.mark-stale"; proposalId: string; rationale: string }
+  | {
+      kind: "inbox.repair";
+      proposalId: string;
+      replacement: TeamInboxSpecDraftInput;
+    };
+
+/** Caller-owned Checkpoint E intent. Authority has no product input slot. */
+export interface TeamInboxSpecCommand {
+  operationId: string;
+  action: TeamInboxSpecAction;
+  expectedRevisions: readonly RevisionExpectation[];
+  actor?: never;
+  occurredAt?: never;
+  repoState?: never;
+  authority?: never;
+}
+
+export interface TeamInboxSpecPublicPreview {
+  valid: boolean;
+  scope: "canonical" | "local" | "mixed";
+  changes: readonly FileChange[];
+  localChanges: readonly TeamInboxSpecLocalChange[];
+  diagnostics: readonly Diagnostic[];
+}
+
+export interface TeamInboxSpecLocalChange {
+  namespace: "inbox-draft";
+  id: string;
+  beforeRevision: Revision | null;
+  afterRevision: Revision | null;
+  summary: string;
+}
+
+export interface TeamInboxSpecPurposeId {
+  purpose: "inbox-draft" | "proposal" | "activity" | "spec-entity";
+  id: string;
+}
+
+export interface TeamInboxSpecReceipt {
+  schemaVersion: 1;
+  authority: TeamWorkflowAuthority;
+  purposeIds: readonly TeamInboxSpecPurposeId[];
+  requestRevision: Revision;
+  presentationRevision: Revision;
+  previewRevision: Revision;
+}
+
+/** Signed, exact and cross-process Checkpoint E review envelope. */
+export interface TeamInboxSpecPreviewEnvelope {
+  schemaVersion: 1;
+  request: TeamInboxSpecCommand;
+  preview: TeamInboxSpecPublicPreview;
+  receipt: TeamInboxSpecReceipt;
+}
+
+export interface TeamInboxSpecApplyResult {
+  operationId: string;
+  previewRevision: Revision;
+  applied: true;
+  idempotentReplay: boolean;
+  changes: readonly FileChange[];
+  localChanges: readonly TeamInboxSpecLocalChange[];
+  proposals: readonly TeamInboxSpecProposalDetail[];
+  events: readonly StoredActivityEvent[];
+}
+
+/** Internal product facade; intentionally absent from the package root. */
+export interface TeamInboxSpecAuthoringPort {
+  getInboxDraft(id: string): Promise<TeamInboxSpecDraftDetail | null>;
+  listInboxDrafts(
+    request?: TeamInboxDraftListRequest,
+  ): Promise<TeamInboxSpecPage<TeamInboxSpecDraftSummary>>;
+  getInboxProposal(id: string): Promise<TeamInboxSpecProposalDetail | null>;
+  listInboxProposals(
+    request?: TeamInboxProposalListRequest,
+  ): Promise<TeamInboxSpecPage<TeamInboxSpecProposalSummary>>;
+  previewInbox(
+    command: TeamInboxSpecCommand,
+  ): Promise<TeamInboxSpecPreviewEnvelope>;
+  applyInbox(
+    envelope: TeamInboxSpecPreviewEnvelope,
+  ): Promise<TeamInboxSpecApplyResult>;
 }
 
 export interface TeamWorkflowApplyRequest<TWikiOperationPlan> {

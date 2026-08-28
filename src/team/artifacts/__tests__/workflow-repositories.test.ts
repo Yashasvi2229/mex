@@ -125,6 +125,69 @@ describe("canonical workflow repositories", () => {
     expect((await runRepository.apply(completed, completed.previewRevision)).artifact).toMatchObject({ state: "completed", entityRevision: 2 });
   });
 
+  it("allows explicit proposal staleness and repair while keeping terminal review immutable", async () => {
+    const root = temporaryRoot();
+    const repository = new InboxProposalRepository<{ summary: string }>(root);
+    const createdPlan = await repository.previewCreate({
+      id: PROPOSAL,
+      author: ACTOR,
+      rationale: "Govern a Spec prose update",
+      evidence: [],
+      request: {
+        operation: { opId: "op-stale", type: "update-entry", payload: { summary: "Before drift" } },
+        expectedRevisions: [],
+      },
+      targetRevisions: [],
+    });
+    const pending = (await repository.apply(createdPlan, createdPlan.previewRevision)).artifact;
+
+    const stalePlan = await repository.previewUpdate(PROPOSAL, {
+      state: "stale",
+      author: pending.author,
+      rationale: pending.rationale,
+      evidence: pending.evidence,
+      request: pending.request,
+      targetRevisions: pending.targetRevisions,
+    }, pending.revision);
+    const stale = (await repository.apply(stalePlan, stalePlan.previewRevision)).artifact;
+    expect(stale.state).toBe("stale");
+
+    const repairedRequest = {
+      operation: { opId: "op-repaired", type: "update-entry" as const, payload: { summary: "After rebase" } },
+      expectedRevisions: [],
+    };
+    const repairPlan = await repository.previewUpdate(PROPOSAL, {
+      state: "pending",
+      author: stale.author,
+      rationale: stale.rationale,
+      evidence: stale.evidence,
+      request: repairedRequest,
+      targetRevisions: [],
+    }, stale.revision);
+    const repaired = (await repository.apply(repairPlan, repairPlan.previewRevision)).artifact;
+    expect(repaired).toMatchObject({ state: "pending", request: repairedRequest });
+
+    const approvedPlan = await repository.previewUpdate(PROPOSAL, {
+      state: "approved",
+      author: repaired.author,
+      rationale: repaired.rationale,
+      evidence: repaired.evidence,
+      request: repaired.request,
+      targetRevisions: repaired.targetRevisions,
+      reviewer: ACTOR,
+      reviewedAt: LATER,
+    }, repaired.revision);
+    const approved = (await repository.apply(approvedPlan, approvedPlan.previewRevision)).artifact;
+    await expect(repository.previewUpdate(PROPOSAL, {
+      state: "stale",
+      author: approved.author,
+      rationale: approved.rationale,
+      evidence: approved.evidence,
+      request: approved.request,
+      targetRevisions: approved.targetRevisions,
+    }, approved.revision)).rejects.toThrow(/immutable/iu);
+  });
+
   it("rejects caller-forged lifecycle jumps", async () => {
     const root = temporaryRoot();
     const repository = new RelayRepository(root);

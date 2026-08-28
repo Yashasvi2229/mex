@@ -12,6 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { openSqlite } from "../../graph/db/sqlite.js";
 import { MexPortError } from "../../team/contracts/shared.js";
 import type { WikiOperationRequest, WikiOperationType } from "../../team/contracts/wiki.js";
 import {
@@ -22,6 +23,7 @@ import {
 import { prepareWikiRebuild } from "../index/rebuild.js";
 import { WIKI_CORPUS_LIMITS } from "../index/corpus-policy.js";
 import { OPERATION_LOG_MAX_BYTES } from "../operations/audit.js";
+import { withWikiContractReadSession } from "../query/contract-session.js";
 
 const ENTITY = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
 const TARGET = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJE";
@@ -526,6 +528,405 @@ New bounded Wiki content.
     expect(replay.idempotentReplay).toBe(true);
   });
 
+  it("attests an ordered Spec endpoint set under one fresh immutable Wiki view", async () => {
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+
+    const emptyView = await port.readExactEntityAttestations([]);
+    expect(emptyView.indexedRevision).toMatch(/^[a-f0-9]{64}$/u);
+    expect(emptyView.entities).toEqual([]);
+    const view = await port.readExactEntityAttestations([TARGET, FOURTH, ENTITY]);
+    expect(view.indexedRevision).toMatch(/^[a-f0-9]{64}$/u);
+    expect(view.entities.map((entry) => entry.id)).toEqual([TARGET, FOURTH, ENTITY]);
+    expect(view.entities[0]?.entity).toMatchObject({
+      ref: { id: TARGET, kind: "component", title: "Durable queue" },
+      version: { semanticRevision: 1, contentHash: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+    });
+    expect(view.entities[1]?.entity).toBeNull();
+    expect(view.entities[2]?.entity?.ref).toMatchObject({ id: ENTITY, kind: "architecture" });
+
+    await expectCode(() => port.readExactEntityAttestations([ENTITY, ENTITY]), "INVALID_REQUEST");
+    await expectCode(() => port.readExactEntityAttestations([WORKSTREAM]), "INVALID_REQUEST");
+
+    writeFileSync(target.firstPath, `${readFileSync(target.firstPath, "utf8")}\nManual drift.\n`, "utf8");
+    await expectCode(() => port.readExactEntityAttestations([ENTITY]), "INDEX_STALE");
+  });
+
+  it("rejects an indexed mx entity whose canonical source is Team-owned", async () => {
+    const target = project();
+    const inbox = join(target.root, ".mex", "inbox");
+    mkdirSync(inbox, { recursive: true });
+    writeFileSync(join(inbox, "claimed-spec.md"), `<!-- mex:entity
+id: ${FOURTH}
+type: spec
+status: in_flight
+revision: 1
+-->
+## Team-owned claimant
+
+Inbox bytes cannot become an exact Wiki authoring source.
+`, "utf8");
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+
+    await expectCode(
+      () => port.readExactEntityAttestations([FOURTH]),
+      "REVISION_CONFLICT",
+    );
+  });
+
+  it("rejects a structurally valid entity row that differs from current source bytes", async () => {
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const db = openSqlite(join(target.root, ".mex", "wiki.db"));
+    try {
+      db.prepare("UPDATE wiki_entities SET title = ? WHERE id = ?")
+        .run("Forged indexed title", ENTITY);
+    } finally {
+      db.close();
+    }
+    expect((await port.inspectIndex()).state).toBe("fresh");
+    await expectCode(
+      () => port.readExactEntityAttestations([ENTITY]),
+      "REVISION_CONFLICT",
+    );
+  });
+
+  it.each([
+    {
+      column: "entity_key",
+      value: "context/component.md#0000009999",
+    },
+    {
+      column: "metadata_kind",
+      value: "frontmatter",
+    },
+    {
+      column: "provenance",
+      value: '{"createdBy":{"id":"member_forged","kind":"system"}}',
+    },
+    {
+      column: "metadata",
+      value: '{"forged":true}',
+    },
+  ] as const)("rejects a structurally valid forged $column entity-row field", async ({
+    column,
+    value,
+  }) => {
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const db = openSqlite(join(target.root, ".mex", "wiki.db"));
+    try {
+      db.prepare(`UPDATE wiki_entities SET ${column} = ? WHERE id = ?`)
+        .run(value, TARGET);
+    } finally {
+      db.close();
+    }
+    expect((await port.inspectIndex()).state).toBe("fresh");
+    await expectCode(
+      () => port.readExactEntityAttestations([TARGET]),
+      "REVISION_CONFLICT",
+    );
+  });
+
+  it("ignores only Team-owned publication drift during exact authoring attestation", async () => {
+    const target = project();
+    const inbox = join(target.root, ".mex", "inbox");
+    const activity = join(target.root, ".mex", "events", "activity", "2026-08");
+    mkdirSync(inbox, { recursive: true });
+    mkdirSync(activity, { recursive: true });
+    const proposalPath = join(inbox, "proposal_01K4FAM7W8N9R3T5Y6Q2ZBCHJK.md");
+    const activityPath = join(activity, "activity_01K4FAM7W8N9R3T5Y6Q2ZBCHJM.md");
+    writeFileSync(proposalPath, "# Governed Spec proposal\n\nDraft.\n", "utf8");
+    writeFileSync(activityPath, "# Proposal drafted\n\nThe draft was saved.\n", "utf8");
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+
+    writeFileSync(proposalPath, "# Governed Spec proposal\n\nPending review.\n", "utf8");
+    writeFileSync(
+      activityPath,
+      "# Proposal published\n\nThe canonical proposal was published.\n",
+      "utf8",
+    );
+    writeFileSync(
+      join(inbox, "proposal_01K4FAM7W8N9R3T5Y6Q2ZBCHJN.md"),
+      "# Second governed proposal\n\nNew Team-owned publication.\n",
+      "utf8",
+    );
+
+    expect((await port.inspectIndex()).state).toBe("stale");
+    await expect(port.readExactEntityAttestations([])).resolves.toMatchObject({ entities: [] });
+    await expect(port.readExactEntityAttestations([ENTITY, TARGET])).resolves.toMatchObject({
+      entities: [
+        { id: ENTITY, entity: { ref: { id: ENTITY } } },
+        { id: TARGET, entity: { ref: { id: TARGET } } },
+      ],
+    });
+
+    const unrelatedPath = join(target.root, ".mex", "context", "worker.md");
+    const unrelatedBytes = readFileSync(unrelatedPath, "utf8");
+    writeFileSync(unrelatedPath, `${unrelatedBytes}\nUnrelated Wiki drift.\n`, "utf8");
+    await expectCode(() => port.readExactEntityAttestations([]), "INDEX_STALE");
+
+    writeFileSync(unrelatedPath, unrelatedBytes, "utf8");
+    const addedWikiPath = join(target.root, ".mex", "context", "unindexed.md");
+    writeFileSync(addedWikiPath, "# Unindexed Wiki-owned source\n", "utf8");
+    await expectCode(() => port.readExactEntityAttestations([ENTITY]), "INDEX_STALE");
+    rmSync(addedWikiPath);
+
+    rmSync(unrelatedPath);
+    await expectCode(() => port.readExactEntityAttestations([ENTITY]), "INDEX_STALE");
+    writeFileSync(unrelatedPath, unrelatedBytes, "utf8");
+
+    await expect(port.readExactEntityAttestations([ENTITY])).resolves.toMatchObject({
+      entities: [{ id: ENTITY, entity: { ref: { id: ENTITY } } }],
+    });
+    writeFileSync(target.firstPath, `${readFileSync(target.firstPath, "utf8")}\nRequested Wiki drift.\n`, "utf8");
+    await expectCode(() => port.readExactEntityAttestations([ENTITY]), "INDEX_STALE");
+  });
+
+  it("does not launder a degraded Wiki-owned diagnostic through later Team drift", async () => {
+    const target = project();
+    const componentPath = join(target.root, ".mex", "context", "component.md");
+    writeFileSync(
+      componentPath,
+      readFileSync(componentPath, "utf8").replace(
+        "revision: 1\n",
+        `revision: 1
+relations:
+  - type: depends_on
+    target: ${FOURTH}
+`,
+      ),
+      "utf8",
+    );
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    expect((await port.inspectIndex()).state).toBe("degraded");
+
+    const inbox = join(target.root, ".mex", "inbox");
+    mkdirSync(inbox, { recursive: true });
+    writeFileSync(
+      join(inbox, "proposal_01K4FAM7W8N9R3T5Y6Q2ZBCHJR.md"),
+      "# Team publication after degraded Wiki index\n",
+      "utf8",
+    );
+    expect((await port.inspectIndex()).state).toBe("stale");
+    await expectCode(
+      () => port.readExactEntityAttestations([TARGET]),
+      "INDEX_STALE",
+    );
+  });
+
+  it("previews one governed update across Team-only drift while keeping public preview behavior", async () => {
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const entity = await port.getEntity(ENTITY);
+    if (entity === null) throw new Error("fixture entity missing");
+    const request: WikiOperationRequest<RepositoryWikiOperationPayload> = {
+      operation: {
+        opId: "operation_adapter_exact_authoring_update",
+        type: "update-entry",
+        entityId: ENTITY,
+        baseRevision: entity.version.semanticRevision,
+        baseContentHash: entity.version.contentHash,
+        actor: { kind: "human", id: "member_adapter_reviewer" },
+        reason: "Apply one reviewed governed Spec update.",
+        timestamp: "2026-08-28T06:00:00.000Z",
+        payload: { body: "The governed update keeps exact Wiki authority." },
+      },
+      expectedRevisions: [{
+        target: { kind: "entity", id: ENTITY },
+        version: entity.version,
+      }],
+    };
+
+    const inbox = join(target.root, ".mex", "inbox");
+    mkdirSync(inbox, { recursive: true });
+    writeFileSync(
+      join(inbox, "proposal_01K4FAM7W8N9R3T5Y6Q2ZBCHJP.md"),
+      "# Published proposal\n\nTeam-owned bytes advanced after Wiki indexing.\n",
+      "utf8",
+    );
+    await expect(port.previewOperations(request)).resolves.toMatchObject({ valid: true });
+
+    const preview = await port.previewAuthoringOperations(request);
+    expect(preview.valid).toBe(true);
+    expect(preview.affectedEntities).toEqual([{
+      id: ENTITY,
+      kind: "architecture",
+      title: "Architecture",
+    }]);
+
+    const proposalPath = join(inbox, "proposal_01K4FAM7W8N9R3T5Y6Q2ZBCHJP.md");
+    const proposalBytes = readFileSync(proposalPath, "utf8");
+    writeFileSync(
+      proposalPath,
+      readFileSync(target.firstPath, "utf8").replace(ENTITY, FOURTH),
+      "utf8",
+    );
+    await expect(port.readExactEntityAttestations([ENTITY])).resolves.toMatchObject({
+      entities: [{ id: ENTITY, entity: { ref: { id: ENTITY } } }],
+    });
+    writeFileSync(proposalPath, readFileSync(target.firstPath, "utf8"), "utf8");
+    await expectCode(
+      () => port.readExactEntityAttestations([ENTITY]),
+      "REVISION_CONFLICT",
+    );
+    const duplicatePreview = await port.previewAuthoringOperations(request);
+    expect(duplicatePreview.valid).toBe(true);
+    if (!duplicatePreview.plan.valid) throw new Error("expected a structurally valid duplicate-claim preview");
+    await expectCode(() => port.applyOperations({
+      ...request,
+      plan: duplicatePreview.plan,
+      expectedPreviewRevision: duplicatePreview.previewRevision,
+    }), "REVISION_CONFLICT");
+    writeFileSync(proposalPath, proposalBytes, "utf8");
+
+    writeFileSync(
+      join(target.root, ".mex", "context", "unrelated.md"),
+      "# Unreviewed Wiki-owned source\n",
+      "utf8",
+    );
+    await expectCode(() => port.previewAuthoringOperations(request), "INDEX_STALE");
+  });
+
+  it("keeps exact authoring reads bound to containment, root identity, and index identity", async () => {
+    if (process.platform === "win32") return;
+
+    const unsafe = project();
+    const unsafePort = createRepositoryWikiPort(unsafe.root);
+    await unsafePort.rebuildIndex();
+    const outside = mkdtempSync(join(tmpdir(), "mex-wiki-authoring-outside-"));
+    roots.push(outside);
+    const inbox = join(unsafe.root, ".mex", "inbox");
+    mkdirSync(inbox, { recursive: true });
+    const outsidePath = join(outside, "escaped.md");
+    writeFileSync(outsidePath, "# Escaped Team source\n", "utf8");
+    symlinkSync(outsidePath, join(inbox, "escaped.md"));
+    await expectCode(
+      () => unsafePort.readExactEntityAttestations([ENTITY]),
+      "PATH_OUTSIDE_PROJECT",
+    );
+
+    const swappedRoot = project();
+    const rootPort = createRepositoryWikiPort(swappedRoot.root);
+    await rootPort.rebuildIndex();
+    renameSync(join(swappedRoot.root, ".mex"), join(swappedRoot.root, ".mex-original"));
+    mkdirSync(join(swappedRoot.root, ".mex"));
+    await expectCode(
+      () => rootPort.readExactEntityAttestations([ENTITY]),
+      "PATH_OUTSIDE_PROJECT",
+    );
+
+    const swappedIndex = project();
+    await createRepositoryWikiPort(swappedIndex.root).rebuildIndex();
+    const indexPath = join(swappedIndex.root, ".mex", "wiki.db");
+    const previousPath = join(swappedIndex.root, ".mex", "wiki-previous.db");
+    const indexBytes = readFileSync(indexPath);
+    let armed = true;
+    const indexPort = createRepositoryWikiPort(swappedIndex.root, {
+      __internal: {
+        read(options, callback) {
+          return withWikiContractReadSession({
+            ...options,
+            hooks: {
+              afterInitialIndexBind() {
+                if (!armed) return;
+                armed = false;
+                renameSync(indexPath, previousPath);
+                writeFileSync(indexPath, indexBytes);
+              },
+            },
+          }, callback);
+        },
+      },
+    });
+    await expectCode(
+      () => indexPort.readExactEntityAttestations([ENTITY]),
+      "REVISION_CONFLICT",
+    );
+  });
+
+  it("forces and reports exactly one receipt-pinned create ID", async () => {
+    const target = project();
+    const port = createRepositoryWikiPort(target.root);
+    await port.rebuildIndex();
+    const sourcePath = `.mex/specs/${FOURTH}.md` as const;
+    const request: WikiOperationRequest<RepositoryWikiOperationPayload> = {
+      operation: {
+        opId: "operation_adapter_forced_spec_create",
+        type: "create-entry",
+        actor: { kind: "human", id: "member_adapter_test" },
+        reason: "Apply the reviewed governed Spec proposal.",
+        timestamp: "2026-08-27T05:00:00.000Z",
+        payload: {
+          file: `specs/${FOURTH}.md`,
+          insertAt: { at: "end-of-file" },
+          type: "spec",
+          status: "in_flight",
+          title: "Pin cross-process create identity",
+          summary: "Use the receipt-minted entity identity.",
+          body: "A fresh process must reproduce the exact reviewed Spec ID.",
+          headingDepth: 2,
+        },
+      },
+      expectedRevisions: [{ target: { kind: "artifact", path: sourcePath }, contentHash: null }],
+    };
+
+    const inbox = join(target.root, ".mex", "inbox");
+    mkdirSync(inbox, { recursive: true });
+    writeFileSync(
+      join(inbox, "proposal_01K4FAM7W8N9R3T5Y6Q2ZBCHJQ.md"),
+      "# Published create proposal\n\nTeam-owned bytes advanced after Wiki indexing.\n",
+      "utf8",
+    );
+    await expect(port.previewOperations(request)).resolves.toMatchObject({ valid: true });
+
+    const preview = await port.previewOperationsWithCreatedIds(request, [FOURTH]);
+    expect(preview.valid).toBe(true);
+    expect(preview.affectedEntities).toEqual([{
+      id: FOURTH,
+      kind: "spec",
+      title: "Pin cross-process create identity",
+    }]);
+    expect(preview.recoveryManifest?.items).toHaveLength(1);
+    expect(preview.recoveryManifest?.items[0]?.createdIds).toEqual([FOURTH]);
+    expect(preview.changes.find((change) => change.path === sourcePath)?.diff).toContain(FOURTH);
+
+    await expectCode(() => port.previewOperationsWithCreatedIds(request, []), "VALIDATION_FAILED");
+    await expectCode(
+      () => port.previewOperationsWithCreatedIds(request, [FOURTH, TARGET]),
+      "VALIDATION_FAILED",
+    );
+    await expectCode(() => port.previewOperationsWithCreatedIds({
+      ...request,
+      operation: {
+        ...request.operation,
+        payload: { operations: [{ type: "create-entry", payload: request.operation.payload }] },
+      },
+    }, [FOURTH]), "VALIDATION_FAILED");
+
+    if (!preview.plan.valid) throw new Error("expected a valid forced-ID preview");
+    const applied = await port.applyOperations({
+      ...request,
+      plan: preview.plan,
+      expectedPreviewRevision: preview.previewRevision,
+    });
+    expect(applied.resultingVersions[FOURTH]).toMatchObject({ semanticRevision: 1 });
+    expect(readFileSync(join(target.root, ...sourcePath.split("/")), "utf8")).toContain(FOURTH);
+    expect((await port.readExactEntityAttestations([FOURTH])).entities[0]?.entity?.ref)
+      .toEqual({
+        id: FOURTH,
+        kind: "spec",
+        title: "Pin cross-process create identity",
+      });
+  });
+
   it("re-previews an exact interrupted multi-file move without writing or accepting changed authority", async () => {
     const target = project();
     let crash = true;
@@ -809,11 +1210,11 @@ New bounded Wiki content.
     }
     const futureId = reviewed.recoveryManifest.items[1]?.createdIds[0];
     expect(futureId).toMatch(/^mx_/);
-    await expect(crashing.applyOperations({
+    await expectCode(() => crashing.applyOperations({
       ...request,
       plan: reviewed.plan,
       expectedPreviewRevision: reviewed.previewRevision,
-    })).rejects.toThrow();
+    }), "OPERATION_INTERRUPTED");
 
     const resumedPort = createRepositoryWikiPort(target.root);
     expect(resumedPort.inspectOperationRecovery(request)).toEqual({

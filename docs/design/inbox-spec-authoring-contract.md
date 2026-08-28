@@ -1,12 +1,14 @@
 # Inbox-Governed Spec Authoring Contract
 
-Status: Checkpoint E0 contract locked; Checkpoint E product not implemented
+Status: Checkpoint E1 internal authoring service implemented; product surfaces remain unregistered
 
 This brief freezes the minimum product boundary for checkout-local Inbox drafts,
 portable canonical proposals, and explicitly reviewed Spec changes. It does not
-claim that the CLI, capability, Hub, browser, compatibility guard, fixtures,
-tests, or performance gates described here have shipped. E0 is definition-only
-and remains unregistered until the production surface exists.
+claim that the CLI, capability, Hub, browser, compatibility guard, fixtures, or
+performance gates described here have shipped. E0 remains the locked contract;
+E1 implements only its internal repository service, exact Wiki authoring seams,
+and real consumer conformance. Product registration remains assigned to E2 and
+later checkpoints.
 
 The authority order, repository pins, provisional-package policy, canonical
 ownership rules, stable errors, and exclusions in
@@ -305,8 +307,14 @@ root command and production service registrations exist. `team_inbox` draft
 reads/save/delete and proposal reads depend only on safe repository Team state;
 a missing or stale Wiki index never suppresses them. Publish, repair,
 mark-stale, and `spec_authoring` approval additionally require a compatible
-Wiki adapter, and their execution must open one fresh exact Wiki view. Command
-arrays remain the exact source of partial availability.
+Wiki adapter, and their execution must open one exact Wiki-owned view. That
+package-private authoring view may disregard drift solely under the
+engine-reserved Team-owned Markdown roots, so publishing the reviewed proposal
+and Activity does not invalidate its own approval. Every Wiki-owned path,
+requested entity byte, index generation, root, and containment binding remains
+strict; public Wiki reads and previews retain their ordinary whole-corpus
+freshness semantics. Command arrays remain the exact source of partial
+availability.
 
 A compact `team.inbox.request.v1` and
 `team.inbox.preview-envelope.v1` machine contract carries strict schemas,
@@ -315,9 +323,9 @@ shared definitions rather than embedding the generic Wiki engine schema, and
 the complete `mex capabilities --json` envelope remains within 32 KiB. Raw
 Wiki Spec mutation is neither described nor advertised as Spec authoring.
 
-E0 defines these capability/conformance expectations only. Until production
-registration exists, no E command descriptor, installed capability, request
-contract, or E conformance suite is executable or claimed green.
+E1 activates the internal real-adapter Inbox/Spec consumer conformance suite.
+Until E2 production registration exists, no E command descriptor, installed
+capability, or machine request contract is advertised.
 
 ## Private Hub contract
 
@@ -452,7 +460,7 @@ Checkpoint E does not add:
   or background semantic work;
 - Git staging, commits, pushes, checkouts, or branch creation.
 
-E implementation must add focused contract, two-process portability,
-failure-atomicity, HTTP security, accessibility, fixture, performance, packed
-install, and compatibility coverage before this document's status can change.
-E0 itself claims only this locked contract and defines no executable green gate.
+E1 adds focused repository-contract, two-process portability,
+failure-atomicity, containment, privacy, and two-clone coverage for the internal
+service. HTTP security, accessibility, product fixtures, performance, packed
+install, compatibility, capability, CLI, and Hub gates remain required in E2-E4.

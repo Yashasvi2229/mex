@@ -250,14 +250,6 @@ function cacheKey(absolutePath: string, path: string, registry: EntityTypeRegist
   return `${absolutePath}\u0000${path}\u0000${registryKey(registry)}`;
 }
 
-/** Every claimant of `id` in one parsed file, in position order. */
-function claimantsIn(parsed: ParsedFile, id: string): { entity: WikiEntity; kind: EntityMetadataKind }[] {
-  return parsed.entities
-    .filter((candidate) => candidate.entity.id === id)
-    .map((candidate) => ({ entity: candidate.entity, kind: candidate.metadataKind }))
-    .sort((left, right) => left.entity.location.metadataStart - right.entity.location.metadataStart);
-}
-
 function located(
   path: string,
   absolutePath: string,
@@ -326,6 +318,13 @@ function claimantCountIsAmbiguous(count: 0 | 1 | 2): boolean {
   return count === 2;
 }
 
+interface ClaimantAccumulator {
+  winner: LocatedEntity | null;
+  preferredWinner: LocatedEntity | null;
+  claimantCount: 0 | 1 | 2;
+  claimantEvidence: Array<{ entityKey: string; path: string }>;
+}
+
 /**
  * Inspect canonical Markdown bytes for every current claimant of `id`.
  *
@@ -339,14 +338,27 @@ function scanEntityClaimants(
   options: LocateOptions,
   requireCompleteScan: boolean,
 ): AttestedEntityClaimants {
+  return scanEntityClaimantSet([id], options, requireCompleteScan).get(id)!;
+}
+
+/** One bounded discovery/read/parse pass for an exact requested ID set. */
+function scanEntityClaimantSet(
+  ids: readonly string[],
+  options: LocateOptions,
+  requireCompleteScan: boolean,
+): ReadonlyMap<string, AttestedEntityClaimants> {
+  const requested = [...new Set(ids)];
+  const accumulators = new Map<string, ClaimantAccumulator>(requested.map((id) => [id, {
+    winner: null,
+    preferredWinner: null,
+    claimantCount: 0,
+    claimantEvidence: [],
+  }]));
+  if (requested.length === 0) return new Map();
   const root = resolve(options.scaffoldRoot);
   let corpusBytes = 0;
   const countedPaths = new Set<string>();
   const scannedAbsolutePaths = new Set<string>();
-  let winner: LocatedEntity | null = null;
-  let preferredWinner: LocatedEntity | null = null;
-  let claimantCount: 0 | 1 | 2 = 0;
-  const claimantEvidence: Array<{ entityKey: string; path: string }> = [];
 
   const account = (path: string, text: string): void => {
     if (countedPaths.has(path)) return;
@@ -374,15 +386,28 @@ function scanEntityClaimants(
     }
     scannedAbsolutePaths.add(absolute);
     account(path, read.text);
-    for (const claimant of claimantsIn(read.parsed, id)) {
-      const candidate = located(path, absolute, read.text, read.parsed, claimant);
-      claimantCount = incrementClaimantCount(claimantCount);
-      if (claimantEvidence.length < 3) {
-        claimantEvidence.push({ entityKey: candidate.entityKey, path: candidate.path });
+    for (const parsed of read.parsed.entities) {
+      const accumulator = accumulators.get(parsed.entity.id);
+      if (accumulator === undefined) continue;
+      const candidate = located(path, absolute, read.text, read.parsed, {
+        entity: parsed.entity,
+        kind: parsed.metadataKind,
+      });
+      accumulator.claimantCount = incrementClaimantCount(accumulator.claimantCount);
+      if (accumulator.claimantEvidence.length < 3) {
+        accumulator.claimantEvidence.push({
+          entityKey: candidate.entityKey,
+          path: candidate.path,
+        });
       }
-      if (winner === null || candidate.entityKey < winner.entityKey) winner = candidate;
-      if (preferred && (preferredWinner === null || candidate.entityKey < preferredWinner.entityKey)) {
-        preferredWinner = candidate;
+      if (accumulator.winner === null || candidate.entityKey < accumulator.winner.entityKey) {
+        accumulator.winner = candidate;
+      }
+      if (preferred && (
+        accumulator.preferredWinner === null
+        || candidate.entityKey < accumulator.preferredWinner.entityKey
+      )) {
+        accumulator.preferredWinner = candidate;
       }
     }
   };
@@ -399,13 +424,12 @@ function scanEntityClaimants(
   }
   for (const file of discovery.files) inspect(file.path, file.absolutePath, false, true);
 
-  const resolvedWinner = preferredWinner ?? winner;
-  return {
-    winner: resolvedWinner,
-    claimantCount,
-    ambiguous: claimantCountIsAmbiguous(claimantCount),
-    claimantEvidence,
-  };
+  return new Map([...accumulators].map(([id, accumulator]) => [id, {
+    winner: accumulator.preferredWinner ?? accumulator.winner,
+    claimantCount: accumulator.claimantCount,
+    ambiguous: claimantCountIsAmbiguous(accumulator.claimantCount),
+    claimantEvidence: accumulator.claimantEvidence,
+  }]));
 }
 
 export function locateEntityClaimants(id: string, options: LocateOptions): LocatedEntityClaimants {
@@ -424,6 +448,17 @@ export function locateEntityClaimants(id: string, options: LocateOptions): Locat
  */
 export function attestEntityClaimants(id: string, options: LocateOptions): AttestedEntityClaimants {
   return scanEntityClaimants(id, options, true);
+}
+
+/**
+ * Complete bounded claimant attestation for several IDs in one corpus pass.
+ * The caller retains the surrounding before/after corpus lease.
+ */
+export function attestEntityClaimantsBatch(
+  ids: readonly string[],
+  options: LocateOptions,
+): ReadonlyMap<string, AttestedEntityClaimants> {
+  return scanEntityClaimantSet(ids, options, true);
 }
 
 /**

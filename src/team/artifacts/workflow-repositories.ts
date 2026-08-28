@@ -568,11 +568,11 @@ function proposalCodec<TPayload>(): RepositoryCodec<InboxProposal<TPayload>, Inb
     states: ["pending", "approved", "rejected", "withdrawn", "stale"], archivedState: null,
     createInput: (input, id) => ({ ...input, id, state: "pending" }), updateInput: (input, id) => ({ ...input, id }),
     assertTransition: (current, candidate) => {
-      assertStateTransition(current.state, candidate.state, PROPOSAL_TRANSITIONS, "inbox proposal");
-      if (JSON.stringify(current.author) !== JSON.stringify(candidate.author)) invalidUpdate("Inbox proposal author is immutable.");
       if (current.state === "approved" || current.state === "rejected" || current.state === "withdrawn") {
         invalidUpdate("Reviewed or withdrawn inbox proposals are immutable.");
       }
+      assertStateTransition(current.state, candidate.state, PROPOSAL_TRANSITIONS, "inbox proposal");
+      if (JSON.stringify(current.author) !== JSON.stringify(candidate.author)) invalidUpdate("Inbox proposal author is immutable.");
       if (current.state !== "stale" && JSON.stringify(current.request) !== JSON.stringify(candidate.request)) {
         invalidUpdate("Inbox proposal request may only change while repairing a stale proposal.");
       }

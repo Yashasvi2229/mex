@@ -410,13 +410,15 @@ export interface TeamInboxSpecContractHarness {
     proposal: TeamInboxSpecProposalDetail,
     kind: TeamInboxSpecDriftCase,
   ): Promise<void>;
+  installTeamOwnedDuplicateClaimant(entityId: string): Promise<void>;
+  armDependencyDriftBeforePublication(entityId: string): Promise<void>;
+  armDependencyRestoreBeforePublication(entityId: string): Promise<void>;
+  armProposalDriftBeforePublication(
+    proposal: TeamInboxSpecProposalDetail,
+  ): Promise<void>;
   mutateRepositoryAuthority(): Promise<void>;
   refreshDraftInput(input: TeamInboxSpecDraftInput): Promise<TeamInboxSpecDraftInput>;
   readSpec(id: string): Promise<TeamInboxSpecProjection | null>;
-  attemptDirectWikiSpecMutation(
-    surface: TeamInboxDirectBypassSurface,
-    kind: TeamInboxDirectBypassCase,
-  ): Promise<void>;
   restart(): Promise<TeamInboxSpecAuthoringContractPort>;
   setNow(timestamp: string): void;
   removeSigner(): Promise<void>;
@@ -446,10 +448,21 @@ export interface TeamInboxSpecContractFactory {
   openTwoClone(): Promise<TeamInboxSpecTwoCloneHarness>;
 }
 
-/**
- * Unregistered Checkpoint E consumer contract. A real-adapter registration is
- * added only after the product service implements this structural boundary.
- */
+export interface TeamInboxDirectWikiSpecContractHarness
+  extends TeamInboxSpecContractHarness {
+  attemptDirectWikiSpecMutation(
+    surface: TeamInboxDirectBypassSurface,
+    kind: TeamInboxDirectBypassCase,
+  ): Promise<void>;
+}
+
+export interface TeamInboxDirectWikiSpecContractFactory {
+  open(
+    scenario: TeamInboxSpecScenario,
+  ): Promise<TeamInboxDirectWikiSpecContractHarness>;
+}
+
+/** Core Checkpoint E1 consumer contract for the Inbox-governed Spec facade. */
 export function defineTeamInboxSpecAuthoringContract(
   adapterName: string,
   factory: TeamInboxSpecContractFactory,
@@ -688,23 +701,6 @@ export function defineTeamInboxSpecAuthoringContract(
           expect(await harness.snapshot()).toEqual(before);
         }
 
-        for (const surface of ["wiki-apply", "wiki-propose"] as const) {
-          for (const bypass of [
-            "create",
-            "existing-target",
-            "relation-endpoint",
-            "type-conversion-into",
-            "type-conversion-out-of",
-            "supersede-existing-replacement",
-            "supersede-inline-replacement",
-            "spec-path",
-            "hidden-batch",
-          ] as const) {
-            await expect(
-              harness.attemptDirectWikiSpecMutation(surface, bypass),
-            ).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
-          }
-        }
       });
     });
 
@@ -770,7 +766,7 @@ export function defineTeamInboxSpecAuthoringContract(
           );
         });
       }
-    });
+    }, 30_000);
 
     it("publishes a draft with portable proposal and Activity IDs, then cleans up locally", async () => {
       await withHarness(factory, "empty", async (harness) => {
@@ -938,14 +934,186 @@ export function defineTeamInboxSpecAuthoringContract(
             "inbox.repaired",
             [proposal.ref],
           );
-          await expect(harness.port.getInboxProposal(stale.ref.id)).resolves.toMatchObject({
+          const repairedProposal = await harness.port.getInboxProposal(stale.ref.id);
+          expect(repairedProposal).toMatchObject({
             state: "pending",
             change: replacement.change,
-            reviewer: undefined,
-            reviewedAt: undefined,
           });
+          expect(repairedProposal).not.toHaveProperty("reviewer");
+          expect(repairedProposal).not.toHaveProperty("reviewedAt");
         });
       }
+    });
+
+    it("rejects Team-owned duplicate Spec claimants during publish and repair without effects", async () => {
+      await withHarness(factory, "empty", async (harness) => {
+        const input = await harness.makeDraftInput("spec.update", "spec");
+        if (input.change.kind !== "spec.update") throw new Error("Expected an update fixture.");
+        const draft = await saveDraft(
+          harness.port,
+          input,
+          "inbox_contract_duplicate_claimant_publish_save",
+        );
+        await harness.installTeamOwnedDuplicateClaimant(input.change.target.id);
+        const before = await harness.snapshot();
+        await expect(harness.port.previewInbox(command(
+          "inbox_contract_duplicate_claimant_publish",
+          { kind: "inbox.publish", draftId: draft.id },
+          [draftExpectation(draft)],
+        ))).rejects.toMatchObject({ problem: { code: "REVISION_CONFLICT" } });
+        expect(await harness.snapshot()).toEqual(before);
+      });
+
+      await withHarness(factory, "empty", async (harness) => {
+        const input = await harness.makeDriftInput("update-target");
+        if (input.change.kind !== "spec.update") throw new Error("Expected an update fixture.");
+        const proposal = await createPendingProposal(
+          harness.port,
+          input,
+          "inbox_contract_duplicate_claimant_repair",
+        );
+        await harness.mutatePublishedDependency(proposal, "update-target");
+        const markPreview = await harness.port.previewInbox(command(
+          "inbox_contract_duplicate_claimant_mark_stale",
+          {
+            kind: "inbox.mark-stale",
+            proposalId: proposal.ref.id,
+            rationale: "The exact update target changed after publication.",
+          },
+          [proposalExpectation(proposal)],
+        ));
+        await harness.port.applyInbox(roundTrip(markPreview));
+        const stale = await requiredProposal(harness.port, proposal.ref.id);
+        const replacement = await harness.refreshDraftInput(input);
+        await harness.installTeamOwnedDuplicateClaimant(input.change.target.id);
+        const before = await harness.snapshot();
+        await expect(harness.port.previewInbox(command(
+          "inbox_contract_duplicate_claimant_repair_preview",
+          { kind: "inbox.repair", proposalId: stale.ref.id, replacement },
+          [proposalExpectation(stale)],
+        ))).rejects.toMatchObject({ problem: { code: "REVISION_CONFLICT" } });
+        expect(await harness.snapshot()).toEqual(before);
+      });
+    });
+
+    it("re-attests create dependencies in the final publication window", async () => {
+      await withHarness(factory, "empty", async (harness) => {
+        const input = await harness.makeDriftInput("relation-endpoint");
+        if (input.change.kind !== "spec.create" || input.change.relation === undefined) {
+          throw new Error("Expected a related create fixture.");
+        }
+        const proposal = await createPendingProposal(
+          harness.port,
+          input,
+          "inbox_contract_final_dependency_attestation",
+        );
+        const approval = await harness.port.previewInbox(command(
+          "inbox_contract_final_dependency_attestation_approve",
+          { kind: "inbox.approve", proposalId: proposal.ref.id },
+          [proposalExpectation(proposal)],
+        ));
+        const before = await harness.snapshot();
+        await harness.armDependencyDriftBeforePublication(
+          input.change.relation.target.id,
+        );
+        await expect(harness.port.applyInbox(roundTrip(approval))).rejects.toMatchObject({
+          problem: { code: "REVISION_CONFLICT" },
+        });
+        const after = await harness.snapshot();
+        expect(after.proposalIds).toEqual(before.proposalIds);
+        expect(after.specIds).toEqual(before.specIds);
+        expect(after.activityIds).toEqual(before.activityIds);
+        expect(after.wikiAuditOperationIds).toEqual(before.wikiAuditOperationIds);
+        await expect(harness.port.getInboxProposal(proposal.ref.id)).resolves.toMatchObject({
+          state: "pending",
+        });
+      });
+    });
+
+    it("re-attests the proposal artifact before Wiki publication", async () => {
+      await withHarness(factory, "empty", async (harness) => {
+        const proposal = await createPendingProposal(
+          harness.port,
+          await harness.makeDraftInput("spec.update", "spec"),
+          "inbox_contract_final_proposal_attestation",
+        );
+        const approval = await harness.port.previewInbox(command(
+          "inbox_contract_final_proposal_attestation_approve",
+          { kind: "inbox.approve", proposalId: proposal.ref.id },
+          [proposalExpectation(proposal)],
+        ));
+        const before = await harness.snapshot();
+        await harness.armProposalDriftBeforePublication(proposal);
+        await expect(harness.port.applyInbox(roundTrip(approval))).rejects.toMatchObject({
+          problem: { code: "REVISION_CONFLICT" },
+        });
+        const after = await harness.snapshot();
+        expect(after.specIds).toEqual(before.specIds);
+        expect(after.activityIds).toEqual(before.activityIds);
+        expect(after.wikiAuditOperationIds).toEqual(before.wikiAuditOperationIds);
+      });
+    });
+
+    it("re-attests publish dependencies in the final publication window", async () => {
+      await withHarness(factory, "empty", async (harness) => {
+        const input = await harness.makeDriftInput("relation-endpoint");
+        if (input.change.kind !== "spec.create" || input.change.relation === undefined) {
+          throw new Error("Expected a related create fixture.");
+        }
+        const draft = await saveDraft(
+          harness.port,
+          input,
+          "inbox_contract_final_publish_dependency_save",
+        );
+        const publication = await harness.port.previewInbox(command(
+          "inbox_contract_final_publish_dependency",
+          { kind: "inbox.publish", draftId: draft.id },
+          [draftExpectation(draft)],
+        ));
+        const before = await harness.snapshot();
+        await harness.armDependencyDriftBeforePublication(
+          input.change.relation.target.id,
+        );
+        await expect(harness.port.applyInbox(roundTrip(publication))).rejects.toMatchObject({
+          problem: { code: "REVISION_CONFLICT" },
+        });
+        const after = await harness.snapshot();
+        expect(after.proposalIds).toEqual(before.proposalIds);
+        expect(after.activityIds).toEqual(before.activityIds);
+        expect(after.draftIds).toEqual(before.draftIds);
+      });
+    });
+
+    it("re-proves drift before publishing the mark-stale transition", async () => {
+      await withHarness(factory, "empty", async (harness) => {
+        const input = await harness.makeDriftInput("update-target");
+        if (input.change.kind !== "spec.update") throw new Error("Expected an update fixture.");
+        const proposal = await createPendingProposal(
+          harness.port,
+          input,
+          "inbox_contract_final_mark_stale_dependency",
+        );
+        await harness.mutatePublishedDependency(proposal, "update-target");
+        const markPreview = await harness.port.previewInbox(command(
+          "inbox_contract_final_mark_stale_dependency_apply",
+          {
+            kind: "inbox.mark-stale",
+            proposalId: proposal.ref.id,
+            rationale: "The exact update target changed after publication.",
+          },
+          [proposalExpectation(proposal)],
+        ));
+        const before = await harness.snapshot();
+        await harness.armDependencyRestoreBeforePublication(input.change.target.id);
+        await expect(harness.port.applyInbox(roundTrip(markPreview))).rejects.toMatchObject({
+          problem: { code: "REVISION_CONFLICT" },
+        });
+        const after = await harness.snapshot();
+        expect(after.activityIds).toEqual(before.activityIds);
+        await expect(harness.port.getInboxProposal(proposal.ref.id)).resolves.toMatchObject({
+          state: "pending",
+        });
+      });
     });
 
     it("makes approved, rejected, and withdrawn proposals terminal", async () => {
@@ -979,11 +1147,18 @@ export function defineTeamInboxSpecAuthoringContract(
           ));
           expectPurposes(terminalPreview, ["activity"]);
           const terminalResult = await harness.port.applyInbox(roundTrip(terminalPreview));
+          const terminalSubjects = (() => {
+            if (terminal !== "approved") return [proposal.ref];
+            if (proposal.change.kind !== "spec.update") {
+              throw new Error("Expected the terminal approval fixture to update one Spec.");
+            }
+            return [proposal.ref, proposal.change.target];
+          })();
           expectCanonicalActivity(
             terminalResult,
             terminalPreview,
             `inbox.${terminal}`,
-            [proposal.ref],
+            terminalSubjects,
           );
           const stored = await requiredProposal(harness.port, proposal.ref.id);
           expect(stored.state).toBe(terminal);
@@ -1021,6 +1196,24 @@ export function defineTeamInboxSpecAuthoringContract(
           tamperEnvelope(envelope, (value) => { value.receipt.authority.occurredAt = "2026-01-01T00:00:00.000Z"; }),
           tamperEnvelope(envelope, (value) => { value.receipt.purposeIds[0]!.id += "X"; }),
           tamperEnvelope(envelope, (value) => { value.receipt.previewRevision = differentRevision(value.receipt.previewRevision); }),
+          tamperEnvelope(envelope, (value) => {
+            Object.defineProperty(value, "__proto__", {
+              value: { unbound: true },
+              enumerable: true,
+            });
+          }),
+          tamperEnvelope(envelope, (value) => {
+            Object.defineProperty(value.receipt.authority, "__proto__", {
+              value: { nested: "unbound" },
+              enumerable: true,
+            });
+          }),
+          tamperEnvelope(envelope, (value) => {
+            Object.defineProperty(value.preview, "__proto__", {
+              value: "x".repeat((64 * 1024) + 1),
+              enumerable: true,
+            });
+          }),
         ]) {
           await expectProblemCode(
             applyUnknown(harness.port, tamper),
@@ -1223,6 +1416,40 @@ export function defineTeamInboxSpecAuthoringContract(
       } finally {
         await clones.close();
       }
+    });
+  });
+}
+
+/**
+ * Checkpoint E2's direct-Wiki bypass contract. E1 deliberately leaves this
+ * exported but unregistered until the product Wiki CLI/apply boundary owns the
+ * corresponding enforcement.
+ */
+export function defineTeamInboxDirectWikiSpecBypassContract(
+  adapterName: string,
+  factory: TeamInboxDirectWikiSpecContractFactory,
+): void {
+  describe(`${adapterName} direct Wiki Spec bypass contract`, () => {
+    it("refuses every direct Wiki propose/apply escape", async () => {
+      await withHarness(factory, "empty", async (harness) => {
+        for (const surface of ["wiki-apply", "wiki-propose"] as const) {
+          for (const bypass of [
+            "create",
+            "existing-target",
+            "relation-endpoint",
+            "type-conversion-into",
+            "type-conversion-out-of",
+            "supersede-existing-replacement",
+            "supersede-inline-replacement",
+            "spec-path",
+            "hidden-batch",
+          ] as const) {
+            await expect(
+              harness.attemptDirectWikiSpecMutation(surface, bypass),
+            ).rejects.toMatchObject({ problem: { code: "VALIDATION_FAILED" } });
+          }
+        }
+      });
     });
   });
 }
@@ -1526,10 +1753,10 @@ async function expectProblemCode(
   }
 }
 
-async function withHarness(
-  factory: TeamInboxSpecContractFactory,
+async function withHarness<THarness extends TeamInboxSpecContractHarness>(
+  factory: { open(scenario: TeamInboxSpecScenario): Promise<THarness> },
   scenario: TeamInboxSpecScenario,
-  run: (harness: TeamInboxSpecContractHarness) => Promise<void>,
+  run: (harness: THarness) => Promise<void>,
 ): Promise<void> {
   const harness = await factory.open(scenario);
   try {

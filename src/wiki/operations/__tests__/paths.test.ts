@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   TEAM_OWNED_READ_ONLY_PATHS,
+  isTeamOwnedReadOnlyPath,
   isReadOnlyPath,
   readOnlyDiagnostic,
 } from "../paths.js";
@@ -44,5 +45,14 @@ describe("TeamWorkflowPort path ownership", () => {
   it("closes case-alias bypasses on case-insensitive filesystems", () => {
     expect(isReadOnlyPath("TEAM/members/example.md", [])).toBe(true);
     expect(isReadOnlyPath("Events/Activity/2026-08/example.md", [])).toBe(true);
+  });
+
+  it("classifies exact prefixes across case and path separators", () => {
+    expect(isTeamOwnedReadOnlyPath("inbox/proposal.md")).toBe(true);
+    expect(isTeamOwnedReadOnlyPath("INBOX/proposal.md")).toBe(true);
+    expect(isTeamOwnedReadOnlyPath("events\\activity\\2026-08\\event.md")).toBe(true);
+    expect(isTeamOwnedReadOnlyPath("inbox")).toBe(false);
+    expect(isTeamOwnedReadOnlyPath("inbox-notes/proposal.md")).toBe(false);
+    expect(isTeamOwnedReadOnlyPath("events/activity-log.md")).toBe(false);
   });
 });

@@ -1,6 +1,6 @@
 # Human-Team Memory Contract Lock
 
-Status: Checkpoint E0 Inbox-governed Spec authoring contract locked; product E not implemented
+Status: Checkpoint E1 internal Inbox-governed Spec authoring service implemented; product surfaces unregistered
 
 This brief records the application boundary for the MEX OSS human-team memory
 program. The contract remains an internal, provisional API until a separate
@@ -244,8 +244,11 @@ belong to Checkpoint E.
 
 ## Inbox-governed Spec authoring contract boundary
 
-Checkpoint E0 locks the product contract without claiming its CLI, capability,
-Hub, browser, compatibility guard, fixture, test, or performance implementation.
+Checkpoint E0 locks the product contract. Checkpoint E1 implements its internal
+repository service, exact governed Wiki authoring seams, signed portable
+preview/apply, lifecycle recovery, and real consumer conformance without
+claiming CLI, capability, Hub, browser, compatibility, fixture, or performance
+implementation.
 The exact boundary is recorded in
 [`inbox-spec-authoring-contract.md`](inbox-spec-authoring-contract.md).
 
@@ -335,11 +338,13 @@ Activity reads, signed cross-process preview/apply, v1-v4 apply-side migration,
 actor fallback, local-selection privacy, immutable recorded actors, exact
 replay, contention, two-clone convergence, and source truncation. Checkpoint D
 adds bounded Workstream lifecycle and cross-process preview/apply coverage plus
-fresh-only Spec projection tests against the real Wiki adapter. Checkpoint E0
-now locks the governed Inbox/Spec authoring contract, but product Inbox
-commands, routes, UI, capability advertisement, direct-Wiki bypass guards,
-fixtures, tests, and Spec mutation remain unimplemented. Relay, Playbook, and
-Catch Up remain assigned to later checkpoints.
+fresh-only Spec projection tests against the real Wiki adapter. Checkpoint E1
+adds the internal governed Inbox/Spec service and real repository conformance,
+including local drafts, portable proposals, exact Spec create/update approval,
+stale/repair, crash recovery, containment, privacy, and two-clone transfer.
+Product Inbox commands, routes, UI, capability advertisement, direct-Wiki
+bypass guards, fixtures, and release gates remain unimplemented. Relay,
+Playbook, and Catch Up remain assigned to later checkpoints.
 
 ## Verification commands
 
@@ -348,6 +353,7 @@ npx vitest run test/wiki-port-mock.contract.test.ts
 npx vitest run test/wiki-port-real.contract.test.ts
 npx vitest run test/team-workflow-port-real.contract.test.ts
 npx vitest run test/team-identity-activity-real.contract.test.ts
+npx vitest run test/team-inbox-spec-authoring-real.contract.test.ts
 npx vitest run src/team/workflow/__tests__/repository-team-workstreams.test.ts
 npx vitest run src/team/specs
 npx vitest run src/graph/__tests__/protocol-v3-golden.test.ts
