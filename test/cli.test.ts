@@ -697,54 +697,36 @@ Canonical read-only release requirements.
         expectedRevisions: [],
       };
       const beforeInvalidEvidence = snapshotProcessTree(fixture);
-      const evidenceCases = [
-        { name: "unknown", value: [{ kind: "unknown-evidence" }] },
-        { name: "manual-number", value: [{ kind: "manual", note: 42 }] },
-        { name: "manual-whitespace", value: [{ kind: "manual", note: "\t\n" }] },
-        { name: "entity-extra", value: [{ kind: "entity", entity: { id: "mx_01ARZ3NDEKTSV4RRFFQ69G5FAV", kind: "spec", extra: true } }] },
-        { name: "entity-trim", value: [{ kind: "entity", entity: { id: " entity ", kind: "spec" } }] },
-        { name: "external-label-trim", value: [{ kind: "external", uri: "https://example.test/evidence", label: " Label " }] },
-        { name: "external-upper-scheme", value: [{ kind: "external", uri: "HTTPS://example.test/evidence" }] },
-        { name: "external-nonabsolute", value: [{ kind: "external", uri: "http:example.test" }] },
-        { name: "external-whitespace", value: [{ kind: "external", uri: "https://example.test/a b" }] },
-        { name: "external-missing-host", value: [{ kind: "external", uri: "https://" }] },
-      ];
-      for (const entry of evidenceCases) {
-        const candidate = structuredClone(saveRequest) as any;
-        candidate.action.draft.evidence = entry.value;
-        const candidatePath = join(requestRoot, `invalid-evidence-${entry.name}.json`);
-        writeFileSync(candidatePath, JSON.stringify(candidate), "utf8");
-        const result = run(["inbox", "draft", "save", candidatePath, "--json"]);
-        expect(result.status, `${entry.name}\n${result.stderr}`).toBe(2);
-        expect(JSON.parse(result.stdout)).toMatchObject({
-          command: "inbox.draft.save", mode: "preview", ok: false,
-          problem: { code: "INVALID_REQUEST" },
-        });
-      }
-      for (const [name, mutate] of [
-        ["whitespace-title", (candidate: any) => { candidate.action.draft.change.title = "   "; }],
-        ["whitespace-body", (candidate: any) => { candidate.action.draft.change.body = "\t\n"; }],
-        ["whitespace-rationale", (candidate: any) => { candidate.action.draft.rationale = " \t\n"; }],
-        ["unsafe-semantic-revision", (candidate: any) => {
-          candidate.action.draft.change.topics = ["mx_01ARZ3NDEKTSV4RRFFQ69G5FAV"];
-          candidate.action.draft.targetRevisions = [{
-            target: { kind: "entity", id: "mx_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
-            revision: "a".repeat(64),
-            semanticRevision: 9_007_199_254_740_992,
-          }];
-        }],
-      ] as const) {
-        const candidate = structuredClone(saveRequest) as any;
-        mutate(candidate);
-        const candidatePath = join(requestRoot, `invalid-request-${name}.json`);
-        writeFileSync(candidatePath, JSON.stringify(candidate), "utf8");
-        const result = run(["inbox", "draft", "save", candidatePath, "--json"]);
-        expect(result.status, `${name}\n${result.stderr}`).toBe(2);
-        expect(JSON.parse(result.stdout)).toMatchObject({
-          command: "inbox.draft.save", mode: "preview", ok: false,
-          problem: { code: "INVALID_REQUEST" },
-        });
-      }
+      // Exhaustive evidence and string-shape matrices live in the direct
+      // command/capability contract suites. Keep a representative process-level
+      // rejection here so this smoke test exercises the built CLI boundary
+      // without synchronously launching a separate Node process per schema leaf.
+      const invalidEvidenceRequest = structuredClone(saveRequest) as any;
+      invalidEvidenceRequest.action.draft.evidence = [{ kind: "manual", note: 42 }];
+      const invalidEvidencePath = join(requestRoot, "invalid-evidence-manual-number.json");
+      writeFileSync(invalidEvidencePath, JSON.stringify(invalidEvidenceRequest), "utf8");
+      const invalidEvidence = run(["inbox", "draft", "save", invalidEvidencePath, "--json"]);
+      expect(invalidEvidence.status, invalidEvidence.stderr).toBe(2);
+      expect(JSON.parse(invalidEvidence.stdout)).toMatchObject({
+        command: "inbox.draft.save", mode: "preview", ok: false,
+        problem: { code: "INVALID_REQUEST" },
+      });
+
+      const unsafeRevisionRequest = structuredClone(saveRequest) as any;
+      unsafeRevisionRequest.action.draft.change.topics = ["mx_01ARZ3NDEKTSV4RRFFQ69G5FAV"];
+      unsafeRevisionRequest.action.draft.targetRevisions = [{
+        target: { kind: "entity", id: "mx_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+        revision: "a".repeat(64),
+        semanticRevision: 9_007_199_254_740_992,
+      }];
+      const unsafeRevisionPath = join(requestRoot, "invalid-request-unsafe-semantic-revision.json");
+      writeFileSync(unsafeRevisionPath, JSON.stringify(unsafeRevisionRequest), "utf8");
+      const unsafeRevision = run(["inbox", "draft", "save", unsafeRevisionPath, "--json"]);
+      expect(unsafeRevision.status, unsafeRevision.stderr).toBe(2);
+      expect(JSON.parse(unsafeRevision.stdout)).toMatchObject({
+        command: "inbox.draft.save", mode: "preview", ok: false,
+        problem: { code: "INVALID_REQUEST" },
+      });
       const repairWithInvalidEvidence = {
         operationId: "inbox-repair-invalid-evidence-process-001",
         action: {
@@ -810,31 +792,17 @@ Canonical read-only release requirements.
         remediation: [{ label: "Inspect", command: "mex inbox draft list --json" }],
         detail: { safe: true },
       };
-      for (const [name, diagnostic] of [
-        ["diagnostic-path", { ...validDiagnostic, path: 123 }],
-        ["diagnostic-location", { ...validDiagnostic, location: "bad" }],
-        ["diagnostic-entity", { ...validDiagnostic, entity: [] }],
-        ["diagnostic-remediation", { ...validDiagnostic, remediation: "bad" }],
-        ["diagnostic-detail", { ...validDiagnostic, detail: [] }],
-      ] as const) {
-        const candidate = structuredClone(previewEnvelope);
-        candidate.diagnostics = [diagnostic];
-        candidate.data.preview.diagnostics = [diagnostic];
-        expectInvalidApply(candidate, name);
-      }
+      const invalidDiagnostic = { ...validDiagnostic, detail: [] };
+      const diagnosticCandidate = structuredClone(previewEnvelope);
+      diagnosticCandidate.diagnostics = [invalidDiagnostic];
+      diagnosticCandidate.data.preview.diagnostics = [invalidDiagnostic];
+      expectInvalidApply(diagnosticCandidate, "diagnostic-detail");
       const invalidTimestamp = structuredClone(previewEnvelope);
       invalidTimestamp.data.receipt.authority.occurredAt = "2026-99-99T00:00:00.000Z";
       expectInvalidApply(invalidTimestamp, "timestamp");
-      for (const [name, purposeIds] of [
-        ["purpose-missing", []],
-        ["purpose-wrong", [{ purpose: "activity", id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAV" }]],
-        ["purpose-duplicate", [previewEnvelope.data.receipt.purposeIds[0], previewEnvelope.data.receipt.purposeIds[0]]],
-        ["purpose-invalid-id", [{ purpose: "inbox-draft", id: "nested/draft" }]],
-      ] as const) {
-        const candidate = structuredClone(previewEnvelope);
-        candidate.data.receipt.purposeIds = purposeIds;
-        expectInvalidApply(candidate, name);
-      }
+      const missingPurpose = structuredClone(previewEnvelope);
+      missingPurpose.data.receipt.purposeIds = [];
+      expectInvalidApply(missingPurpose, "purpose-missing");
 
       const applied = run(["inbox", "draft", "save", `--apply=${previewPath}`, "--json"]);
       expect(applied.status, applied.stderr).toBe(0);
@@ -879,18 +847,8 @@ Canonical read-only release requirements.
         { purpose: "activity", id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
         { purpose: "proposal", id: "proposal_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
       ];
-      const publishPurposes = publishEnvelope.data.receipt.purposeIds;
-      for (const [name, purposeIds] of [
-        ["publish-purpose-reversed", [...publishPurposes].reverse()],
-        ["publish-purpose-missing", publishPurposes.slice(0, 1)],
-        ["publish-purpose-duplicate", [publishPurposes[0], publishPurposes[0]]],
-        ["publish-purpose-duplicate-id", [publishPurposes[0], { ...publishPurposes[1], id: publishPurposes[0].id }]],
-        ["publish-purpose-invalid-id", [{ purpose: "activity", id: "event_Z1ARZ3NDEKTSV4RRFFQ69G5FAV" }, publishPurposes[1]]],
-      ] as const) {
-        const candidate = structuredClone(publishEnvelope);
-        candidate.data.receipt.purposeIds = purposeIds;
-        expectInvalidApply(candidate, name, ["inbox", "publish"]);
-      }
+      publishEnvelope.data.receipt.purposeIds.reverse();
+      expectInvalidApply(publishEnvelope, "publish-purpose-reversed", ["inbox", "publish"]);
     } finally {
       rmSync(fixture, { recursive: true, force: true });
       rmSync(userHome, { recursive: true, force: true });
