@@ -7,7 +7,6 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { BrowserHubApplication } from "./app/App";
 import { clearBootstrapFragment, readBootstrapToken, resolveApi } from "./api/client";
 import { createHubQueryClient } from "./api/query-client";
-import { TooltipProvider } from "./components/primitives/tooltip";
 import "./styles/global.css";
 
 const api = await resolveApi();
@@ -29,9 +28,7 @@ const queryClient = createHubQueryClient();
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <TooltipProvider delay={320}>
-        <BrowserHubApplication api={api} startupError={startupError} />
-      </TooltipProvider>
+      <BrowserHubApplication api={api} startupError={startupError} />
     </QueryClientProvider>
   </StrictMode>,
 );

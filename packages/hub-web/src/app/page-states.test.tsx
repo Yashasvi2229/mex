@@ -96,7 +96,7 @@ describe("Home states", () => {
     }));
 
     expect(await screen.findByText("Knowledge and code indexes are unavailable.")).toBeVisible();
-    expect(screen.getAllByText("Unavailable")).toHaveLength(4);
+    expect(within(screen.getByRole("main")).getAllByText("Unavailable")).toHaveLength(4);
   });
 });
 

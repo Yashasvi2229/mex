@@ -9,6 +9,9 @@ const packageRoot = dirname(fileURLToPath(import.meta.url));
 const fixtureModuleId = "virtual:mex-hub-fixture-api";
 
 export default defineConfig(({ command }) => ({
+  esbuild: {
+    legalComments: "eof",
+  },
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {

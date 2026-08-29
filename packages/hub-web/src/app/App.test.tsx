@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -30,6 +30,7 @@ describe("Project Hub routes", () => {
     ["/workstreams", "Workstreams"],
     ["/specs", "Specs"],
     ["/playbooks", "Playbooks"],
+    ["/catch-up", "Catch Up"],
     ["/inbox", "Inbox"],
     ["/relays", "Relays"],
     ["/members", "Members"],
@@ -50,10 +51,222 @@ describe("Project Hub routes", () => {
     skip.focus();
     expect(skip).toHaveFocus();
     await user.tab();
-    expect(screen.getByRole("link", { name: "Home" })).toHaveFocus();
+    expect(screen.getByRole("link", { name: "Search project" })).toHaveFocus();
+  });
+
+  it("renders the sidebar information architecture in its exact semantic order", async () => {
+    const user = userEvent.setup();
+    renderRoute("/");
+    await screen.findByRole("heading", { level: 1, name: "Overview" });
+
+    const sidebar = screen.getByRole("complementary", { name: "Project Hub navigation" });
+    expect(within(sidebar).getByRole("link", { name: "Search project" })).toHaveAttribute("href", "/search");
+
+    const primary = within(sidebar).getByRole("navigation", { name: "Primary" });
+    expect(within(primary).getAllByRole("link").map((link) => link.querySelector("span")?.textContent)).toEqual([
+      "Overview",
+      "Knowledge",
+      "Specs",
+      "Code",
+      "Workstreams",
+      "Inbox",
+      "Relays",
+      "Activity",
+    ]);
+    expect(within(primary).getByRole("region", { name: "Project Memory" })).toHaveTextContent(
+      "KnowledgeSpecsCode",
+    );
+    expect(within(within(primary).getByRole("region", { name: "Teamwork" }))
+      .getAllByRole("link")
+      .map((link) => link.querySelector("span")?.textContent))
+      .toEqual(["Workstreams", "Inbox", "Relays", "Activity"]);
+    const comingSoon = within(primary).getByRole("region", { name: "Coming Soon" });
+    expect(within(comingSoon).queryByRole("link", { name: /Playbooks/u })).not.toBeInTheDocument();
+    await user.click(within(comingSoon).getByRole("button", { name: "Coming Soon" }));
+    expect(within(comingSoon).getAllByRole("link").map((link) => link.querySelector("span")?.textContent))
+      .toEqual(["Playbooks", "Catch Up"]);
+    expect(within(comingSoon).getByRole("link", { name: "Playbooks Soon" })).toHaveAttribute("href", "/playbooks");
+    expect(within(comingSoon).getByRole("link", { name: "Catch Up Soon" })).toHaveAttribute("href", "/catch-up");
+
+    const utilities = within(sidebar).getByRole("navigation", { name: "Project utilities" });
+    expect(within(utilities).getAllByRole("link").map((link) => link.textContent)).toEqual([
+      "Team",
+    ]);
+    await user.click(within(utilities).getByRole("button", { name: /^System/u }));
+    expect(within(utilities).getAllByRole("link").map((link) => link.querySelector("span")?.textContent)).toEqual([
+      "Team",
+      "Health",
+      "Jobs",
+    ]);
+  });
+
+  it("keeps disclosure state independent and resets it after remount", async () => {
+    const user = userEvent.setup();
+    const first = renderRoute("/");
+    await screen.findByRole("heading", { level: 1, name: "Overview" });
+
+    const projectMemory = screen.getByRole("button", { name: "Project Memory" });
+    const teamwork = screen.getByRole("button", { name: "Teamwork" });
+    const comingSoon = screen.getByRole("button", { name: "Coming Soon" });
+    const system = screen.getByRole("button", { name: /^System/u });
+    expect(projectMemory).toHaveAttribute("aria-expanded", "true");
+    expect(teamwork).toHaveAttribute("aria-expanded", "true");
+    expect(comingSoon).toHaveAttribute("aria-expanded", "false");
+    expect(system).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(projectMemory);
+    await user.click(comingSoon);
+    await user.click(system);
+    expect(projectMemory).toHaveAttribute("aria-expanded", "false");
+    expect(teamwork).toHaveAttribute("aria-expanded", "true");
+    expect(comingSoon).toHaveAttribute("aria-expanded", "true");
+    expect(system).toHaveAttribute("aria-expanded", "true");
+
+    first.unmount();
+    renderRoute("/");
+    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    expect(screen.getByRole("button", { name: "Project Memory" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Teamwork" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Coming Soon" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByRole("button", { name: /^System/u })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it.each([
+    ["/knowledge/mx_01K36WVM6H7JK8M9NPQRSTVVWX", "Project Memory", "Knowledge"],
+    ["/specs/mx_01K36WVM6H7JK8M9NPQRSTVVWX", "Project Memory", "Specs"],
+    ["/code/symbols/sym.createHubServer", "Project Memory", "Code"],
+    ["/playbooks", "Coming Soon", "Playbooks"],
+    ["/catch-up", "Coming Soon", "Catch Up"],
+    ["/jobs", "System", "Jobs"],
+  ])("opens the active group and marks its nested route for %s", async (route, group, link) => {
+    renderRoute(route);
+    const disclosure = await screen.findByRole("button", { name: group });
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("link", { name: new RegExp(`^${link}(?: Soon| Unavailable)?$`, "u") }))
+      .toHaveAttribute("aria-current", "page");
+  });
+
+  it("keeps a manually collapsed active group visibly active", async () => {
+    const user = userEvent.setup();
+    renderRoute("/knowledge/mx_01K36WVM6H7JK8M9NPQRSTVVWX");
+    const disclosure = await screen.findByRole("button", { name: "Project Memory" });
+    await user.click(disclosure);
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(disclosure).toHaveAttribute("data-active", "true");
+    expect(screen.queryByRole("link", { name: "Knowledge" })).not.toBeInTheDocument();
+  });
+
+  it("reopens a group when navigation enters one of its routes", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    function RouteDriver() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate("/jobs")} type="button">Open jobs route</button>;
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <HubApiProvider api={createFixtureApi()}>
+          <MemoryRouter initialEntries={["/"]}>
+            <RouteDriver />
+            <AppRoutes />
+          </MemoryRouter>
+        </HubApiProvider>
+      </QueryClientProvider>,
+    );
+
+    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    expect(screen.getByRole("button", { name: /^System/u })).toHaveAttribute("aria-expanded", "false");
+    await user.click(screen.getByRole("button", { name: "Open jobs route" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Jobs" })).toBeVisible();
+    expect(screen.getByRole("button", { name: /^System/u })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("link", { name: "Jobs" })).toHaveAttribute("aria-current", "page");
+    expect(document.querySelector("#main-content")).toHaveFocus();
+  });
+
+  it("uses slash to open Search and focus its existing project input", async () => {
+    renderRoute("/");
+    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    expect(screen.getByRole("link", { name: "Search project" })).toHaveAttribute("aria-keyshortcuts", "/");
+
+    fireEvent.keyDown(document, { key: "/", shiftKey: true });
+    const input = await screen.findByRole("searchbox", { name: "Search project memory and code" });
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue("");
+  });
+
+  it("refocuses Search without clearing its query", async () => {
+    renderRoute("/search?q=alpha");
+    const input = await screen.findByRole("searchbox", { name: "Search project memory and code" });
+    expect(input).toHaveValue("alpha");
+    screen.getByRole("link", { name: "Search project" }).focus();
+
+    fireEvent.keyDown(document, { key: "/" });
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue("alpha");
+  });
+
+  it("consumes shortcut focus so a later ordinary Search navigation focuses main content", async () => {
+    const user = userEvent.setup();
+    renderRoute("/");
+    await screen.findByRole("heading", { level: 1, name: "Overview" });
+
+    fireEvent.keyDown(document, { key: "/" });
+    expect(await screen.findByRole("searchbox", { name: "Search project memory and code" })).toHaveFocus();
+
+    await user.click(screen.getByRole("link", { name: "Overview" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Overview" })).toBeVisible();
+    expect(document.querySelector("#main-content")).toHaveFocus();
+
+    await user.click(screen.getByRole("link", { name: "Search project" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Search" })).toBeVisible();
+    expect(document.querySelector("#main-content")).toHaveFocus();
+  });
+
+  it("ignores slash in editable controls, dialogs, and modified shortcuts", async () => {
+    renderRoute("/");
+    await screen.findByRole("heading", { level: 1, name: "Overview" });
+
+    for (const control of [
+      document.createElement("input"),
+      document.createElement("textarea"),
+      document.createElement("select"),
+    ]) {
+      document.body.append(control);
+      control.focus();
+      fireEvent.keyDown(control, { key: "/" });
+      expect(screen.queryByRole("heading", { level: 1, name: "Search" })).not.toBeInTheDocument();
+      control.remove();
+    }
+
+    const editable = document.createElement("div");
+    editable.setAttribute("contenteditable", "true");
+    editable.tabIndex = 0;
+    document.body.append(editable);
+    editable.focus();
+    fireEvent.keyDown(editable, { key: "/" });
+    expect(screen.queryByRole("heading", { level: 1, name: "Search" })).not.toBeInTheDocument();
+    editable.remove();
+
+    for (const role of ["dialog", "alertdialog"] as const) {
+      const dialog = document.createElement("div");
+      const trigger = document.createElement("button");
+      dialog.setAttribute("role", role);
+      dialog.append(trigger);
+      document.body.append(dialog);
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: "/" });
+      expect(screen.queryByRole("heading", { level: 1, name: "Search" })).not.toBeInTheDocument();
+      dialog.remove();
+    }
+
+    for (const modifier of ["ctrlKey", "metaKey", "altKey"] as const) {
+      fireEvent.keyDown(document, { key: "/", [modifier]: true });
+      expect(screen.queryByRole("heading", { level: 1, name: "Search" })).not.toBeInTheDocument();
+    }
   });
 
   it("marks both flat and read-scoped unavailable capabilities in navigation", async () => {
+    const user = userEvent.setup();
     const api = createFixtureApi();
     const capabilities = await api.getCapabilities();
     vi.spyOn(api, "getCapabilities").mockResolvedValue({
@@ -68,9 +281,47 @@ describe("Project Hub routes", () => {
     renderRoute("/", api);
     await screen.findByRole("heading", { level: 1, name: "Overview" });
 
-    expect(within(screen.getByRole("link", { name: /Jobs/u })).getByLabelText("Unavailable")).toBeVisible();
-    expect(within(screen.getByRole("link", { name: /Relays/u })).getByLabelText("Unavailable")).toBeVisible();
-    expect(within(screen.getByRole("link", { name: "Inbox" })).queryByLabelText("Unavailable")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("link", { name: /Relays/u })).getByText("Unavailable")).toBeVisible();
+    expect(within(screen.getByRole("link", { name: /^Inbox/u })).queryByText("Unavailable")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^System/u }));
+    expect(within(screen.getByRole("link", { name: /Jobs/u })).getByText("Unavailable")).toBeVisible();
+  });
+
+  it("fails closed when a Home refetch cannot refresh sidebar truth", async () => {
+    const api = createFixtureApi();
+    const initialHome = await api.getHome();
+    const getHome = vi.spyOn(api, "getHome")
+      .mockResolvedValueOnce(initialHome)
+      .mockRejectedValueOnce(new Error("Home projection is unavailable."));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <HubApiProvider api={api}>
+          <MemoryRouter initialEntries={["/search"]}>
+            <AppRoutes />
+          </MemoryRouter>
+        </HubApiProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Ada Lovelace")).toBeVisible();
+    const repositoryBar = screen.getByRole("banner", { name: "Repository context" });
+    expect(within(repositoryBar).getByText(initialHome.repository.name)).toBeVisible();
+    expect(screen.getByLabelText("1 proposals awaiting team review.")).toBeVisible();
+
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["home"] });
+    });
+
+    expect(await screen.findByText("Set team identity")).toBeVisible();
+    expect(within(repositoryBar).getByText("Current project")).toBeVisible();
+    expect(screen.queryByLabelText("1 proposals awaiting team review.")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("1 open Relays for you.")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("1 active system operations.")).not.toBeInTheDocument();
+    expect(getHome).toHaveBeenCalledTimes(2);
   });
 
   it("keeps routes behind a safe, retryable capabilities error", async () => {
@@ -117,10 +368,10 @@ describe("Project Hub routes", () => {
       "/jobs?job=job_01K36WVM6H7JK8M9NPQRSTVVWX",
     );
     expect(screen.getByRole("link", { name: "Activity" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "Members" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/members");
     expect(screen.getByRole("link", { name: /Open member identity for Ada Lovelace/ })).toHaveAttribute("href", "/members");
-    expect(screen.getByRole("link", { name: "Inbox" })).toHaveAttribute("href", "/inbox");
-    expect(screen.getByRole("link", { name: "Relays" })).toHaveAttribute("href", "/relays");
+    expect(screen.getByRole("link", { name: /^Inbox/u })).toHaveAttribute("href", "/inbox");
+    expect(screen.getByRole("link", { name: /^Relays/u })).toHaveAttribute("href", "/relays");
     const relaySection = within(screen.getByRole("region", { name: "Project sections" })).getByText("Relays").closest('[role="listitem"]');
     expect(relaySection).toHaveTextContent("Relays1");
     expect(screen.queryByText("Wiki unavailable")).not.toBeInTheDocument();

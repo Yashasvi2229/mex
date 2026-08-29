@@ -53,12 +53,14 @@ function frozenRelayCalibrationProjection(value) {
   const projected = structuredClone(value);
   projected.calibration.status = "__RELAY_CALIBRATION_STATUS__";
   projected.assets.routes.relays = { jsBytes: 0, cssBytes: 0, fontBytes: 0 };
+  delete projected.assets.routes.catchUp;
   for (const profile of ["small", "medium", "large"]) {
     delete projected.runtime.apiLatencyMs[profile].relayDrafts;
     delete projected.runtime.apiLatencyMs[profile].relays;
     projected.runtime.browserHeapBytes[profile].home = 0;
     projected.runtime.browserHeapBytes[profile].members = 0;
     projected.runtime.browserHeapBytes[profile].relays = 0;
+    delete projected.runtime.browserHeapBytes[profile].catchUp;
   }
   return projected;
 }
@@ -149,6 +151,11 @@ describe("release benchmark contract", () => {
       heap: { small: 7753875, medium: 7754561, large: 7748627 },
     });
     expect(budgets.assets.routes.code).toEqual(budgets.assets.routes.search);
+    expect(budgets.assets.routes.catchUp).toEqual(budgets.assets.routes.playbooks);
+    for (const profile of ["small", "medium", "large"]) {
+      expect(budgets.runtime.browserHeapBytes[profile].catchUp)
+        .toBe(budgets.runtime.browserHeapBytes[profile].playbooks);
+    }
     expect(budgets.provisional).toBe(false);
     expect(budgets.calibration).toEqual({
       status: "calibrated-from-pinned-runs-33005876613-33083122092-33117048710-E33169865368-F33249296778",
@@ -765,7 +772,7 @@ describe("release benchmark contract", () => {
     }
 
     const exactMetrics = committedConfirmableRuntimeMetrics();
-    expect(exactMetrics).toHaveLength(108);
+    expect(exactMetrics).toHaveLength(111);
     for (const metric of exactMetrics) {
       expect(runtimeMaterialityPolicy(metric)).not.toBeNull();
       const violation = runtimeViolation(metric);

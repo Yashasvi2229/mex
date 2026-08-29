@@ -27,14 +27,6 @@ async function normalizeEstablishedVisualGolden(
   page: Page,
   surface?: "home" | "activity",
 ): Promise<void> {
-  await page.getByRole("link", { name: "Members", exact: true }).evaluate((element) => element.remove());
-  const unavailableMarker = await page.getByRole("link", { name: /Playbooks/ }).locator('[aria-label="Unavailable"]')
-    .evaluate((element) => element.outerHTML);
-  for (const label of ["Workstreams", "Specs", "Inbox", "Relays"] as const) {
-    await page.getByRole("link", { name: label, exact: true }).evaluate((element, marker) => {
-      element.insertAdjacentHTML("beforeend", marker);
-    }, unavailableMarker);
-  }
   if (surface === "home") {
     const summary = page.getByRole("region", { name: "Project summary" });
     await summary.getByText("Canonical delivery threads", { exact: true }).evaluate((element) => {
@@ -832,7 +824,7 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     expect(requests.some((request) => request.includes("/src/pages/RelayPage.tsx"))).toBe(false);
 
-    await page.getByRole("link", { name: "Relays", exact: true }).click();
+    await page.getByRole("link", { name: /^Relays(?: |$)/ }).click();
     await expect(page.locator('[data-relay-workbench="ready"]')).toBeVisible();
     await page.waitForLoadState("networkidle");
     expect(requests.filter((request) => request === "GET /src/pages/RelayPage.tsx")).toHaveLength(1);
@@ -843,6 +835,230 @@ test.describe("populated development fixture", () => {
     expect(external).toEqual([]);
   });
 
+  test("renders the exact sidebar IA and keeps disclosures independent and reload-local", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/?fixture=populated");
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+
+    const sidebar = page.locator('aside[aria-label="Project Hub navigation"]');
+    const primary = page.getByRole("navigation", { name: "Primary" });
+    const utilities = page.getByRole("navigation", { name: "Project utilities" });
+    const projectMemory = primary.getByRole("region", { name: "Project Memory" });
+    const teamwork = primary.getByRole("region", { name: "Teamwork" });
+    const comingSoon = primary.getByRole("region", { name: "Coming Soon" });
+    const system = utilities.getByRole("region", { name: /^System/ });
+    const projectMemoryDisclosure = projectMemory.getByRole("button", { name: "Project Memory" });
+    const teamworkDisclosure = teamwork.getByRole("button", { name: "Teamwork" });
+    const comingSoonDisclosure = comingSoon.getByRole("button", { name: "Coming Soon" });
+    const systemDisclosure = system.getByRole("button", { name: /^System/ });
+
+    await expect(sidebar.getByRole("link", { name: "Search project", exact: true }))
+      .toHaveAttribute("aria-keyshortcuts", "/");
+    await expect(projectMemoryDisclosure).toHaveAttribute("aria-expanded", "true");
+    await expect(teamworkDisclosure).toHaveAttribute("aria-expanded", "true");
+    await expect(comingSoonDisclosure).toHaveAttribute("aria-expanded", "false");
+    await expect(systemDisclosure).toHaveAttribute("aria-expanded", "false");
+
+    await comingSoonDisclosure.click();
+    await systemDisclosure.click();
+    const primaryItems = await primary.getByRole("link").evaluateAll((links) => links.map((link) => ({
+      href: link.getAttribute("href"),
+      label: [...link.children].find((child) => (
+        child.tagName === "SPAN" && !child.hasAttribute("data-slot")
+      ))?.textContent,
+    })));
+    expect(primaryItems).toEqual([
+      { href: "/", label: "Overview" },
+      { href: "/knowledge", label: "Knowledge" },
+      { href: "/specs", label: "Specs" },
+      { href: "/code", label: "Code" },
+      { href: "/workstreams", label: "Workstreams" },
+      { href: "/inbox", label: "Inbox" },
+      { href: "/relays", label: "Relays" },
+      { href: "/activity", label: "Activity" },
+      { href: "/playbooks", label: "Playbooks" },
+      { href: "/catch-up", label: "Catch Up" },
+    ]);
+    const utilityItems = await utilities.getByRole("link").evaluateAll((links) => links.map((link) => ({
+      href: link.getAttribute("href"),
+      label: [...link.children].find((child) => (
+        child.tagName === "SPAN" && !child.hasAttribute("data-slot")
+      ))?.textContent,
+    })));
+    expect(utilityItems).toEqual([
+      { href: "/members", label: "Team" },
+      { href: "/health", label: "Health" },
+      { href: "/jobs", label: "Jobs" },
+    ]);
+    await expect(comingSoon.getByRole("link", { name: "Playbooks Soon" })).toBeVisible();
+    await expect(comingSoon.getByRole("link", { name: "Catch Up Soon" })).toBeVisible();
+
+    await projectMemoryDisclosure.click();
+    await expect(projectMemoryDisclosure).toHaveAttribute("aria-expanded", "false");
+    await expect(teamworkDisclosure).toHaveAttribute("aria-expanded", "true");
+    await expect(comingSoonDisclosure).toHaveAttribute("aria-expanded", "true");
+    await expect(systemDisclosure).toHaveAttribute("aria-expanded", "true");
+
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(projectMemoryDisclosure).toHaveAttribute("aria-expanded", "true");
+    await expect(teamworkDisclosure).toHaveAttribute("aria-expanded", "true");
+    await expect(comingSoonDisclosure).toHaveAttribute("aria-expanded", "false");
+    await expect(systemDisclosure).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("opens deep-linked groups, preserves nested aria-current, and marks a collapsed active group", async ({ page }) => {
+    await page.goto("/knowledge/mx_01K36WVM6H7JK8M9NPQRSTVVWX?fixture=populated");
+    const projectMemory = page.getByRole("region", { name: "Project Memory" });
+    const projectMemoryDisclosure = projectMemory.getByRole("button", { name: "Project Memory" });
+    await expect(projectMemoryDisclosure).toHaveAttribute("aria-expanded", "true");
+    await expect(projectMemory.getByRole("link", { name: "Knowledge", exact: true }))
+      .toHaveAttribute("aria-current", "page");
+    await projectMemoryDisclosure.click();
+    await expect(projectMemoryDisclosure).toHaveAttribute("aria-expanded", "false");
+    await expect(projectMemoryDisclosure).toHaveAttribute("data-active", "true");
+
+    await page.goto("/code/symbols/sym.createHubServer?fixture=populated");
+    await expect(page.getByRole("region", { name: "Project Memory" })
+      .getByRole("link", { name: "Code", exact: true })).toHaveAttribute("aria-current", "page");
+
+    await page.goto("/jobs?fixture=populated");
+    const system = page.getByRole("region", { name: /^System/ });
+    await expect(system.getByRole("button", { name: /^System/ })).toHaveAttribute("aria-expanded", "true");
+    await expect(system.getByRole("link", { name: "Jobs", exact: true })).toHaveAttribute("aria-current", "page");
+
+    await page.goto("/catch-up?fixture=populated");
+    const comingSoon = page.getByRole("region", { name: "Coming Soon" });
+    await expect(comingSoon.getByRole("button", { name: "Coming Soon" })).toHaveAttribute("aria-expanded", "true");
+    await expect(comingSoon.getByRole("link", { name: "Catch Up Soon" })).toHaveAttribute("aria-current", "page");
+    await expect(page.getByText(
+      "A personalized summary of project changes and team activity is planned but is not available in this release.",
+      { exact: true },
+    )).toBeVisible();
+  });
+
+  test("routes the slash launcher to Search, preserves the query, and allows Shift", async ({ page }) => {
+    await page.goto("/?fixture=populated");
+    await page.keyboard.press("/");
+    await expect(page).toHaveURL(/\/search$/);
+    const searchbox = page.getByRole("searchbox", { name: "Search project memory and code" });
+    await expect(searchbox).toBeFocused();
+    await searchbox.fill("hub");
+
+    await page.locator("#main-content").focus();
+    await page.keyboard.press("/");
+    await expect(searchbox).toBeFocused();
+    await expect(searchbox).toHaveValue("hub");
+
+    await page.getByRole("link", { name: "Overview", exact: true }).click();
+    await expect(page.locator("#main-content")).toBeFocused();
+    await page.getByRole("link", { name: "Search project", exact: true }).click();
+    await expect(page).toHaveURL(/\/search$/);
+    await expect(page.locator("#main-content")).toBeFocused();
+    await expect(searchbox).not.toBeFocused();
+
+    await page.getByRole("link", { name: "Overview", exact: true }).click();
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.locator("#main-content")).toBeFocused();
+    await page.evaluate(() => document.dispatchEvent(new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "/",
+      shiftKey: true,
+    })));
+    await expect(page).toHaveURL(/\/search$/);
+    await expect(searchbox).toBeFocused();
+  });
+
+  test("suppresses the slash shortcut in editables, dialogs, and with command modifiers", async ({ page }) => {
+    await page.goto("/?fixture=populated");
+    await page.evaluate(() => {
+      const textarea = document.createElement("textarea");
+      textarea.id = "shortcut-textarea";
+      const select = document.createElement("select");
+      select.id = "shortcut-select";
+      select.append(new Option("Option", "option"));
+      const editable = document.createElement("div");
+      editable.id = "shortcut-contenteditable";
+      editable.contentEditable = "true";
+      document.body.append(textarea, select, editable);
+    });
+    for (const id of ["shortcut-textarea", "shortcut-select", "shortcut-contenteditable"] as const) {
+      await page.locator(`#${id}`).focus();
+      await page.keyboard.press("/");
+      await expect(page).toHaveURL(/\/\?fixture=populated$/);
+    }
+    await page.locator("#main-content").focus();
+    for (const key of ["Control+/", "Meta+/", "Alt+/"] as const) {
+      await page.keyboard.press(key);
+      await expect(page).toHaveURL(/\/\?fixture=populated$/);
+    }
+
+    await page.goto("/activity?fixture=populated");
+    await page.getByRole("button", { name: "Record Activity" }).click();
+    const dialog = page.getByRole("dialog", { name: "Record Activity" });
+    const cancel = dialog.getByRole("button", { name: "Cancel" });
+    await cancel.focus();
+    await page.keyboard.press("/");
+    await expect(dialog).toBeVisible();
+    await expect(page).toHaveURL(/\/activity\?fixture=populated$/);
+  });
+
+  test("exposes neutral queue counts, team identity, and exact locality guidance", async ({ page }) => {
+    await page.goto("/?fixture=populated");
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    const sidebar = page.locator('aside[aria-label="Project Hub navigation"]');
+    await expect(sidebar.getByLabel("1 proposals awaiting team review.")).toHaveText("1");
+    await expect(sidebar.getByLabel("1 open Relays for you.")).toHaveText("1");
+    await expect(sidebar.getByLabel("1 active system operations.")).toHaveText("1");
+    await expect(sidebar.getByRole("link", { name: "Team", exact: true })).toHaveAttribute("href", "/members");
+    await expect(sidebar.getByText("Ada Lovelace", { exact: true })).toBeVisible();
+    await expect(sidebar.getByText("Runs locally", { exact: true })).toBeVisible();
+    await expect(sidebar.getByText("Shared records use Git", { exact: true })).toBeVisible();
+    const locality = sidebar.getByRole("note", { name: "Runs locally. Shared records use Git." });
+    const localityExplanation = "MEX runs on this device. Canonical team records are shared when committed and pushed; drafts and indexes remain local to this checkout.";
+    await locality.focus();
+    await expect(locality).toHaveAccessibleDescription(localityExplanation);
+    await expect(page.getByRole("tooltip")).toHaveText(localityExplanation);
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("tooltip")).toBeHidden();
+    await expectAccessible(page);
+  });
+
+  test("keeps both fully expanded and fully collapsed sidebar states accessible", async ({ page }) => {
+    await page.goto("/?fixture=populated");
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    const disclosures = {
+      projectMemory: page.getByRole("button", { name: "Project Memory" }),
+      teamwork: page.getByRole("button", { name: "Teamwork" }),
+      comingSoon: page.getByRole("button", { name: "Coming Soon" }),
+      system: page.getByRole("button", { name: /^System/ }),
+    };
+    await disclosures.comingSoon.click();
+    await disclosures.system.click();
+    for (const disclosure of Object.values(disclosures)) {
+      await expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    }
+    await expectAccessible(page);
+
+    for (const disclosure of Object.values(disclosures)) await disclosure.click();
+    for (const disclosure of Object.values(disclosures)) {
+      await expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    }
+    await expectAccessible(page);
+  });
+
+  test("captures the populated sidebar with counts and roadmap destinations", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/?fixture=populated");
+    await page.getByRole("button", { name: "Coming Soon" }).click();
+    await page.getByRole("button", { name: /^System/ }).click();
+    const sidebar = page.locator('aside[aria-label="Project Hub navigation"]');
+    await expect(sidebar.getByRole("link", { name: "Catch Up Soon" })).toBeVisible();
+    await expect(sidebar.getByLabel("1 active system operations.")).toBeVisible();
+    await expect(sidebar).toHaveScreenshot("hub-sidebar-populated.png");
+  });
+
   test("supports keyboard routing, focus restoration, every shell, and 404", async ({ page }) => {
     await page.goto("/?fixture=populated");
     await page.keyboard.press("Tab");
@@ -851,25 +1067,48 @@ test.describe("populated development fixture", () => {
     await expect(page.locator("#main-content")).toBeFocused();
 
     const routes = [
-      ["Knowledge", "Knowledge"],
-      ["Code", "Code"],
-      ["Workstreams", "Workstreams"],
-      ["Specs", "Specs"],
-      ["Playbooks", "Playbooks"],
-      ["Inbox", "Inbox"],
-      ["Relays", "Relays"],
-      ["Members", "Members"],
-      ["Activity", "Activity"],
+      [/^Knowledge$/, "Knowledge"],
+      [/^Specs$/, "Specs"],
+      [/^Code$/, "Code"],
+      [/^Workstreams$/, "Workstreams"],
+      [/^Inbox(?: |$)/, "Inbox"],
+      [/^Relays(?: |$)/, "Relays"],
+      [/^Activity$/, "Activity"],
     ] as const;
     for (const [link, heading] of routes) {
-      await page.getByRole("link", { name: new RegExp(`^${link}(?: Unavailable)?$`) }).click();
+      await page.getByRole("link", { name: link }).click();
       await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
-      if (link === "Knowledge") {
+      if (heading === "Knowledge") {
         await expect(page.getByText("All Knowledge records", { exact: true }).locator("..")).toBeFocused();
       } else {
         await expect(page.locator("#main-content")).toBeFocused();
       }
     }
+
+    await page.getByRole("button", { name: "Coming Soon" }).click();
+    for (const [link, heading, copy] of [
+      ["Playbooks Soon", "Playbooks", "Reusable team workflows are planned but are not available in this release."],
+      ["Catch Up Soon", "Catch Up", "A personalized summary of project changes and team activity is planned but is not available in this release."],
+    ] as const) {
+      await page.getByRole("link", { name: link }).click();
+      await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
+      await expect(page.getByText(copy, { exact: true })).toBeVisible();
+      await expect(page.locator("#main-content")).toBeFocused();
+    }
+
+    await page.getByRole("link", { name: "Team", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Members", exact: true })).toBeVisible();
+    await expect(page.locator("#main-content")).toBeFocused();
+    await page.getByRole("button", { name: /^System/ }).click();
+    for (const heading of ["Health", "Jobs"] as const) {
+      await page.getByRole("link", { name: heading, exact: true }).click();
+      await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
+      await expect(page.locator("#main-content")).toBeFocused();
+    }
+
+    await page.getByRole("link", { name: "Overview", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(page.locator("#main-content")).toBeFocused();
     await page.goto("/outside-the-workbench?fixture=populated");
     await expect(page.getByText("404", { exact: true })).toBeVisible();
   });
@@ -881,15 +1120,37 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("navigation", { name: "Primary" })).toBeHidden();
   });
 
-  for (const width of [1440, 1024] as const) {
-    test(`fits the complete desktop workbench at exactly ${width}px`, async ({ page }) => {
-      await page.setViewportSize({ width, height: 900 });
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1024, height: 768 },
+    { width: 1024, height: 520 },
+  ] as const) {
+    test(`fits the complete desktop workbench at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await page.setViewportSize(viewport);
       await page.goto("/?fixture=populated");
       await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
 
-      const sidebar = await page.locator('aside[aria-label="Project Hub navigation"]').boundingBox();
+      const sidebarLocator = page.locator('aside[aria-label="Project Hub navigation"]');
+      const navViewport = sidebarLocator.locator('[data-sidebar-scroll="true"]');
+      const footer = sidebarLocator.locator("footer");
+      const sidebar = await sidebarLocator.boundingBox();
+      const scroller = await navViewport.boundingBox();
+      const footerBeforeScroll = await footer.boundingBox();
       expect(sidebar?.width).toBe(232);
       expect(sidebar?.x).toBe(0);
+      expect(sidebar?.height).toBe(viewport.height);
+      expect(scroller).not.toBeNull();
+      expect(footerBeforeScroll).not.toBeNull();
+      expect(scroller!.y + scroller!.height).toBeLessThanOrEqual(footerBeforeScroll!.y + 1);
+      expect(footerBeforeScroll!.y + footerBeforeScroll!.height).toBeLessThanOrEqual(viewport.height + 1);
+      await expect(sidebarLocator.getByText("Runs locally", { exact: true })).toBeVisible();
+
+      await page.getByRole("button", { name: "Coming Soon" }).click();
+      await navViewport.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await expect(page.getByRole("link", { name: "Catch Up Soon" })).toBeVisible();
+      await expect(sidebarLocator.getByText("Runs locally", { exact: true })).toBeVisible();
+      const footerAfterScroll = await footer.boundingBox();
+      expect(footerAfterScroll?.y).toBe(footerBeforeScroll?.y);
       const geometry = await page.evaluate(() => ({
         viewportWidth: window.innerWidth,
         documentClientWidth: document.documentElement.clientWidth,
@@ -897,10 +1158,10 @@ test.describe("populated development fixture", () => {
         bodyScrollWidth: document.body.scrollWidth,
       }));
       expect(geometry).toEqual({
-        viewportWidth: width,
-        documentClientWidth: width,
-        documentScrollWidth: width,
-        bodyScrollWidth: width,
+        viewportWidth: viewport.width,
+        documentClientWidth: viewport.width,
+        documentScrollWidth: viewport.width,
+        bodyScrollWidth: viewport.width,
       });
     });
   }
@@ -911,7 +1172,7 @@ test.describe("populated development fixture", () => {
     await page.goto("/jobs?fixture=populated");
     await expect(page.getByRole("heading", { name: "Jobs", exact: true })).toBeVisible();
 
-    const navTransitionDuration = await page.getByRole("link", { name: "Home", exact: true })
+    const navTransitionDuration = await page.getByRole("link", { name: "Overview", exact: true })
       .evaluate((element) => getComputedStyle(element).transitionDuration);
     const spinner = page.locator("svg.lucide-loader-circle").first();
     await expect(spinner).toBeVisible();

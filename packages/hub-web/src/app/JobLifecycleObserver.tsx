@@ -32,6 +32,7 @@ export async function invalidateGraphReads(queryClient: QueryClient): Promise<vo
     queryClient.invalidateQueries({ queryKey: ["health"] }),
     queryClient.invalidateQueries({ queryKey: ["jobs"] }),
     queryClient.invalidateQueries({ queryKey: ["capabilities"] }),
+    queryClient.invalidateQueries({ queryKey: ["home"] }),
   ]);
 }
 
@@ -46,6 +47,7 @@ export async function invalidateWikiReads(queryClient: QueryClient): Promise<voi
     queryClient.invalidateQueries({ queryKey: ["health"] }),
     queryClient.invalidateQueries({ queryKey: ["jobs"] }),
     queryClient.invalidateQueries({ queryKey: ["capabilities"] }),
+    queryClient.invalidateQueries({ queryKey: ["home"] }),
   ]);
 }
 
@@ -54,6 +56,7 @@ export async function invalidateIndexOperationState(queryClient: QueryClient): P
     queryClient.invalidateQueries({ queryKey: ["health"] }),
     queryClient.invalidateQueries({ queryKey: ["jobs"] }),
     queryClient.invalidateQueries({ queryKey: ["capabilities"] }),
+    queryClient.invalidateQueries({ queryKey: ["home"] }),
   ]);
 }
 
@@ -154,6 +157,11 @@ export function JobLifecycleObserver({ channelScope }: { channelScope?: string }
     channel.onmessage = (event: MessageEvent<unknown>) => {
       const message = parseLifecycleMessage(event.data);
       if (!message) return;
+      const currentLifecycle = queryClient.getQueryData<JobsResponse>(["job-lifecycle"]);
+      const existingLifecycleJob = currentLifecycle?.items.find((job) => job.id === message.job.id);
+      const mergedLifecycleJob = mergeJobSnapshot(existingLifecycleJob, message.job);
+      const becameActive = isActiveJob(mergedLifecycleJob)
+        && (!existingLifecycleJob || !isActiveJob(existingLifecycleJob));
       queryClient.setQueryData<JobSummary>(["job", message.job.id], (current) => (
         mergeJobSnapshot(current, message.job)
       ));
@@ -161,6 +169,7 @@ export function JobLifecycleObserver({ channelScope }: { channelScope?: string }
         mergeLifecyclePage(current, message.job)
       ));
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      if (becameActive) void queryClient.invalidateQueries({ queryKey: ["home"] });
       observeTerminal(message.job);
     };
     return () => {

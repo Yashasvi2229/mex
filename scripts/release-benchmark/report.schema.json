@@ -105,7 +105,7 @@
         "routes": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "specsDetail", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
+          "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "specsDetail", "playbooks", "catchUp", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
           "properties": {
             "home": { "$ref": "#/$defs/assetGroup" },
             "search": { "$ref": "#/$defs/assetGroup" },
@@ -117,6 +117,7 @@
             "specs": { "$ref": "#/$defs/assetGroup" },
             "specsDetail": { "$ref": "#/$defs/assetGroup" },
             "playbooks": { "$ref": "#/$defs/assetGroup" },
+            "catchUp": { "$ref": "#/$defs/assetGroup" },
             "inbox": { "$ref": "#/$defs/assetGroup" },
             "relays": { "$ref": "#/$defs/assetGroup" },
             "members": { "$ref": "#/$defs/assetGroup" },
@@ -246,7 +247,7 @@
     "routeSummaries": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "specsDetail", "playbooks", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
+      "required": ["home", "search", "knowledge", "knowledgeDetail", "code", "codeSymbol", "workstreams", "specs", "specsDetail", "playbooks", "catchUp", "inbox", "relays", "members", "activity", "jobs", "health", "notFound"],
       "properties": {
         "home": { "$ref": "#/$defs/summary5" },
         "search": { "$ref": "#/$defs/summary5" },
@@ -258,6 +259,7 @@
         "specs": { "$ref": "#/$defs/summary5" },
         "specsDetail": { "$ref": "#/$defs/summary5" },
         "playbooks": { "$ref": "#/$defs/summary5" },
+        "catchUp": { "$ref": "#/$defs/summary5" },
         "inbox": { "$ref": "#/$defs/summary5" },
         "relays": { "$ref": "#/$defs/summary5" },
         "members": { "$ref": "#/$defs/summary5" },
