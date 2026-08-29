@@ -22,6 +22,7 @@ const lazyWorkbenchSources = [
   "src/pages/WorkstreamsPage.tsx",
   "src/pages/SpecsPage.tsx",
   "src/pages/InboxPage.tsx",
+  "src/pages/RelayPage.tsx",
   "src/pages/MembersPage.tsx",
   "src/pages/ActivityPage.tsx",
   "src/pages/JobsPage.tsx",
@@ -53,6 +54,22 @@ for (const entry of workbenchEntries) {
   if (entry !== homeEntry && homeChunks.has(entry.key)) {
     throw new Error(`The production Hub Home workbench eagerly imports ${entry.source}.`);
   }
+}
+const relayEntry = workbenchEntries.find((entry) => entry.source === "src/pages/RelayPage.tsx");
+const relayRuntimeKey = Object.keys(manifest).find((candidate) => {
+  const record = manifest[candidate] ?? {};
+  return [candidate, record.src].some((value) => (
+    typeof value === "string" && /(?:^|\/)src\/api\/relay-client\.tsx?$/u.test(value)
+  ));
+});
+if (!relayEntry || !relayRuntimeKey) {
+  throw new Error("The production Hub manifest has no private Relay runtime chunk.");
+}
+if (!(manifest[relayEntry.key].imports ?? []).includes(relayRuntimeKey)) {
+  throw new Error("The Relay workbench does not directly own its strict runtime contract and transport chunk.");
+}
+if (initialChunks.has(relayRuntimeKey) || homeChunks.has(relayRuntimeKey)) {
+  throw new Error("The strict Relay runtime contracts or transport leaked into the application shell or Home workbench.");
 }
 const activityEntry = workbenchEntries.find((entry) => entry.source === "src/pages/ActivityPage.tsx");
 const activityRecorderKey = Object.keys(manifest).find((candidate) => (
@@ -91,6 +108,9 @@ const forbiddenFixtureData = [
   "inbox_00000000000000000000000000000001",
   "proposal_01000000000000000000001720",
   "mx_01000000000000000000000001",
+  "relay-draft-01",
+  "relay_01000000000000000000000001",
+  "Exact fixture evidence for Relay UI validation.",
 ];
 
 for (const file of filesUnder(outputRoot)) {

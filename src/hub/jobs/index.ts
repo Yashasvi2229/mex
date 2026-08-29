@@ -369,13 +369,15 @@ export class HubJobManager implements HubJobService {
             ? { total: current.progress.total }
             : safeUpdate.total === undefined ? {} : { total: safeUpdate.total }),
         };
+    const phase = safeUpdate.phase ?? current.phase;
+    if (phase === current.phase && sameJobProgress(progress, current.progress)) return;
     try {
       const updated = this.localState.updateHubJobRecord({
         leaseToken: this.leaseToken,
         id: current.id,
         generation,
         expectedRevision: current.revision,
-        phase: safeUpdate.phase ?? current.phase,
+        phase,
         progress,
         cancelRequested: current.cancelRequested,
         state: "running",
@@ -707,6 +709,16 @@ function validateExecutorProgressUpdate(value: unknown): HubJobProgressUpdate {
 
 function isTerminal(job: HubJobSnapshot): boolean {
   return job.state === "succeeded" || job.state === "failed" || job.state === "interrupted";
+}
+
+function sameJobProgress(
+  left: HubJobSnapshot["progress"],
+  right: HubJobSnapshot["progress"],
+): boolean {
+  if (left === null || right === null) return left === right;
+  return left.completed === right.completed
+    && left.total === right.total
+    && left.message === right.message;
 }
 
 function isValidationFailure(error: unknown): boolean {

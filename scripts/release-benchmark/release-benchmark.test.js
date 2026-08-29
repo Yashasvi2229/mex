@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -26,7 +27,12 @@ import {
   RELEASE_FIXTURE_PROFILES,
   snapshotReleaseReadState,
 } from "./fixtures.mjs";
-import { assertInboxFixturePage, releaseCommonReadPaths, startHub } from "./hub.mjs";
+import {
+  assertInboxFixturePage,
+  assertRelayFixturePage,
+  releaseCommonReadPaths,
+  startHub,
+} from "./hub.mjs";
 import { enforceWithConfirmation } from "./enforce.mjs";
 import { candidateRuntimeBudgets, evaluateRuntimeBudgets } from "./runtime-budgets.mjs";
 import {
@@ -41,15 +47,53 @@ const budgets = JSON.parse(readFileSync(new URL("./budgets.json", import.meta.ur
 const budgetsSchema = JSON.parse(readFileSync(new URL("./budgets.schema.json", import.meta.url), "utf8"));
 const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 const reportSchema = JSON.parse(readFileSync(new URL("./report.schema.json", import.meta.url), "utf8"));
+const PRE_RELAY_FROZEN_BUDGETS_SHA256 = "29b2cb936db33977d452ea8361e010ad6bddc1b961dd3b0897b5f793763d3328";
+
+function frozenRelayCalibrationProjection(value) {
+  const projected = structuredClone(value);
+  projected.calibration.status = "__RELAY_CALIBRATION_STATUS__";
+  projected.assets.routes.relays = { jsBytes: 0, cssBytes: 0, fontBytes: 0 };
+  for (const profile of ["small", "medium", "large"]) {
+    delete projected.runtime.apiLatencyMs[profile].relayDrafts;
+    delete projected.runtime.apiLatencyMs[profile].relays;
+    projected.runtime.browserHeapBytes[profile].home = 0;
+    projected.runtime.browserHeapBytes[profile].members = 0;
+    projected.runtime.browserHeapBytes[profile].relays = 0;
+  }
+  return projected;
+}
 
 describe("release benchmark contract", () => {
+  it("permits calibration to change only the Checkpoint F Relay whitelist", () => {
+    const digest = (value) => createHash("sha256")
+      .update(JSON.stringify(frozenRelayCalibrationProjection(value)))
+      .digest("hex");
+    expect(digest(budgets)).toBe(PRE_RELAY_FROZEN_BUDGETS_SHA256);
+
+    const allowed = structuredClone(budgets);
+    allowed.calibration.status = "calibrated-from-pinned-run-example";
+    allowed.assets.routes.relays = { jsBytes: 123, cssBytes: 45, fontBytes: 0 };
+    for (const profile of ["small", "medium", "large"]) {
+      allowed.runtime.apiLatencyMs[profile].relayDrafts = 3;
+      allowed.runtime.apiLatencyMs[profile].relays = 4;
+      allowed.runtime.browserHeapBytes[profile].home += 1;
+      allowed.runtime.browserHeapBytes[profile].members += 1;
+      allowed.runtime.browserHeapBytes[profile].relays += 1;
+    }
+    expect(digest(allowed)).toBe(PRE_RELAY_FROZEN_BUDGETS_SHA256);
+
+    const forbidden = structuredClone(allowed);
+    forbidden.runtime.apiLatencyMs.small.search += 1;
+    expect(digest(forbidden)).not.toBe(PRE_RELAY_FROZEN_BUDGETS_SHA256);
+  });
+
   it("locks the sample counts and deterministic route budget surface", () => {
     expect(budgets.schemaVersion).toBe(1);
     expect(budgets.samples).toEqual({ timing: 10, idleMemory: 5 });
     expect(RELEASE_FIXTURE_PROFILES).toEqual({
-      small: { sourceFiles: 4, wikiEntities: 4, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 4 },
-      medium: { sourceFiles: 16, wikiEntities: 16, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 16 },
-      large: { sourceFiles: 48, wikiEntities: 48, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 48 },
+      small: { sourceFiles: 4, wikiEntities: 4, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, members: 2, relayDrafts: 1, relays: 1, activityEvents: 4 },
+      medium: { sourceFiles: 16, wikiEntities: 16, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, members: 2, relayDrafts: 1, relays: 1, activityEvents: 16 },
+      large: { sourceFiles: 48, wikiEntities: 48, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, members: 2, relayDrafts: 1, relays: 1, activityEvents: 48 },
     });
     expect(Object.keys(budgets.assets.routes)).toEqual(RELEASE_ROUTE_KEYS);
     expect(Object.keys(releaseWorkbenchPaths({
@@ -85,10 +129,29 @@ describe("release benchmark contract", () => {
       medium: { inboxDrafts: 7, inboxProposals: 6 },
       large: { inboxDrafts: 7, inboxProposals: 6 },
     });
+    expect({
+      assets: budgets.assets.routes.relays,
+      api: Object.fromEntries(["small", "medium", "large"].map((profile) => [profile, {
+        relayDrafts: budgets.runtime.apiLatencyMs[profile].relayDrafts,
+        relays: budgets.runtime.apiLatencyMs[profile].relays,
+      }])),
+      heap: Object.fromEntries(["small", "medium", "large"].map((profile) => [
+        profile,
+        budgets.runtime.browserHeapBytes[profile].relays,
+      ])),
+    }).toEqual({
+      assets: { jsBytes: 200128, cssBytes: 12285, fontBytes: 0 },
+      api: {
+        small: { relayDrafts: 5, relays: 15 },
+        medium: { relayDrafts: 3, relays: 12 },
+        large: { relayDrafts: 4, relays: 13 },
+      },
+      heap: { small: 7753875, medium: 7754561, large: 7748627 },
+    });
     expect(budgets.assets.routes.code).toEqual(budgets.assets.routes.search);
     expect(budgets.provisional).toBe(false);
     expect(budgets.calibration).toEqual({
-      status: "calibrated-from-pinned-runs-33005876613-33083122092-33117048710-E33169865368",
+      status: "calibrated-from-pinned-runs-33005876613-33083122092-33117048710-E33169865368-F33249296778",
       runtimeFormula: "ceil(measured p95 * 1.15)",
       assetFormula: "ceil(built bytes * 1.05)",
     });
@@ -109,6 +172,9 @@ describe("release benchmark contract", () => {
     expect(reportSchema.$defs.profile.properties.fixture.required).toContain("workstreams");
     expect(reportSchema.$defs.profile.properties.fixture.required).not.toContain("inboxDrafts");
     expect(reportSchema.$defs.profile.properties.fixture.required).not.toContain("inboxProposals");
+    expect(reportSchema.$defs.profile.properties.fixture.required).not.toContain("members");
+    expect(reportSchema.$defs.profile.properties.fixture.required).not.toContain("relayDrafts");
+    expect(reportSchema.$defs.profile.properties.fixture.required).not.toContain("relays");
     expect(reportSchema.$defs.profile.properties.fixture.properties.workstreams).toEqual({
       type: "integer",
       minimum: 1,
@@ -126,10 +192,14 @@ describe("release benchmark contract", () => {
       "activity",
       "inboxDrafts",
       "inboxProposals",
+      "relayDrafts",
+      "relays",
     ]);
     expect(budgetsSchema.$defs.readBudgets.properties).toEqual(expect.objectContaining({
       inboxDrafts: { $ref: "#/$defs/nonNegativeNumber" },
       inboxProposals: { $ref: "#/$defs/nonNegativeNumber" },
+      relayDrafts: { $ref: "#/$defs/nonNegativeNumber" },
+      relays: { $ref: "#/$defs/nonNegativeNumber" },
     }));
     const validateBudgets = new Ajv2020({ strict: true }).compile(budgetsSchema);
     expect(validateBudgets(budgets), JSON.stringify(validateBudgets.errors)).toBe(true);
@@ -181,10 +251,19 @@ describe("release benchmark contract", () => {
       input: { graphBytes: 1, graphFiles: 1, wikiBytes: 1, wikiFiles: 1 },
     };
     expect(validateFixture(generatedFixture), JSON.stringify(validateFixture.errors)).toBe(true);
-    expect(generatedFixture).toMatchObject({ inboxDrafts: 1, inboxProposals: 1 });
+    expect(generatedFixture).toMatchObject({
+      inboxDrafts: 1,
+      inboxProposals: 1,
+      members: 2,
+      relayDrafts: 1,
+      relays: 1,
+    });
     const {
       inboxDrafts: _inboxDrafts,
       inboxProposals: _inboxProposals,
+      members: _members,
+      relayDrafts: _relayDrafts,
+      relays: _relays,
       ...legacyFixture
     } = generatedFixture;
     expect(validateFixture(legacyFixture), JSON.stringify(validateFixture.errors)).toBe(true);
@@ -352,6 +431,27 @@ describe("release benchmark contract", () => {
     )).toThrow(/Home workbench still includes InboxPage/u);
   });
 
+  it("keeps the Relay workbench out of the initial and Home static closures", () => {
+    const manifest = {
+      "_relay-opaque.js": {
+        file: "assets/relay.js",
+        src: "src/pages/RelayPage.tsx",
+      },
+    };
+    expect(() => assertNoForbiddenWorkbench(
+      manifest,
+      new Set(["_relay-opaque.js"]),
+      "initial application shell",
+      ["RelayPage"],
+    )).toThrow(/initial application shell still includes RelayPage/u);
+    expect(() => assertNoForbiddenWorkbench(
+      manifest,
+      new Set(["_relay-opaque.js"]),
+      "Home workbench",
+      ["RelayPage"],
+    )).toThrow(/Home workbench still includes RelayPage/u);
+  });
+
   it("requires the exact one-item draft and pending proposal benchmark pages", () => {
     const page = (item) => ({
       items: [item],
@@ -414,6 +514,52 @@ describe("release benchmark contract", () => {
     })).toThrow(/diagnostic-free one-item page/u);
   });
 
+  it("requires the exact one-item local draft and published Relay benchmark pages", () => {
+    const page = (item) => ({
+      items: [item],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "a".repeat(64),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    });
+    expect(() => assertRelayFixturePage(page({
+      id: "relay-draft-fixed",
+      summary: "Local Relay fixture",
+    }), {
+      kind: "draft",
+      id: "relay-draft-fixed",
+      summary: "Local Relay fixture",
+    })).not.toThrow();
+    expect(() => assertRelayFixturePage(page({
+      ref: { id: "relay_fixed" },
+      summary: "Published Relay fixture",
+      state: "published",
+    }), {
+      kind: "relay",
+      id: "relay_fixed",
+      summary: "Published Relay fixture",
+    })).not.toThrow();
+    expect(() => assertRelayFixturePage(page({
+      ref: { id: "relay_fixed" },
+      summary: "Published Relay fixture",
+      state: "acknowledged",
+    }), {
+      kind: "relay",
+      id: "relay_fixed",
+      summary: "Published Relay fixture",
+    })).toThrow(/not published/u);
+    expect(() => assertRelayFixturePage({
+      ...page({ id: "relay-draft-fixed", summary: "Local Relay fixture" }),
+      diagnostics: [{ code: "RELAY_PUBLISHED_AT_MISSING" }],
+    }, {
+      kind: "draft",
+      id: "relay-draft-fixed",
+      summary: "Local Relay fixture",
+    })).toThrow(/diagnostic-free one-item page/u);
+  });
+
   it("keeps runtime candidates and enforcement scoped to each fixture profile", () => {
     const profiles = {
       small: runtimeProfile(100),
@@ -469,6 +615,43 @@ describe("release benchmark contract", () => {
       },
       {
         metric: "runtime.apiLatencyMs.large.inboxProposals",
+        measured: 3,
+        budget: null,
+        reason: "budget_missing",
+      },
+    ]));
+    expect(JSON.parse(JSON.stringify(violations))).toEqual(violations);
+  });
+
+  it("fails closed when the six calibrated Relay API leaves are absent", () => {
+    const profiles = Object.fromEntries(["small", "medium", "large"].map((profile) => [
+      profile,
+      {
+        ...runtimeProfile(100),
+        apiLatencyMs: {
+          search: { p95: 100 },
+          relayDrafts: { p95: 2 },
+          relays: { p95: 3 },
+        },
+      },
+    ]));
+    const missingRelayBudgets = structuredClone(budgets.runtime);
+    for (const profile of ["small", "medium", "large"]) {
+      delete missingRelayBudgets.apiLatencyMs[profile].relayDrafts;
+      delete missingRelayBudgets.apiLatencyMs[profile].relays;
+    }
+    const violations = evaluateRuntimeBudgets(profiles, missingRelayBudgets)
+      .filter(({ metric }) => metric.includes(".relay"));
+    expect(violations).toHaveLength(6);
+    expect(violations).toEqual(expect.arrayContaining([
+      {
+        metric: "runtime.apiLatencyMs.small.relayDrafts",
+        measured: 2,
+        budget: null,
+        reason: "budget_missing",
+      },
+      {
+        metric: "runtime.apiLatencyMs.large.relays",
         measured: 3,
         budget: null,
         reason: "budget_missing",
@@ -582,7 +765,7 @@ describe("release benchmark contract", () => {
     }
 
     const exactMetrics = committedConfirmableRuntimeMetrics();
-    expect(exactMetrics).toHaveLength(102);
+    expect(exactMetrics).toHaveLength(108);
     for (const metric of exactMetrics) {
       expect(runtimeMaterialityPolicy(metric)).not.toBeNull();
       const violation = runtimeViolation(metric);

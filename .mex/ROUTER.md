@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-08-28
+last_updated: 2026-08-29
 ---
 
 # Session Bootstrap
@@ -120,12 +120,22 @@ Then read this file fully before doing anything else in this session.
   measurements are active. Pinned Ubuntu Inbox asset, API, and heap candidates
   are calibrated from the retained schema-valid report; a clean enforcing CI
   run remains a mandatory merge gate and cannot widen earlier thresholds.
+- Checkpoints F1-F4 implement repository-native Relay handoffs: authority-free
+  checkout-local drafts, exact active-Member and Workstream publication,
+  first-recipient claim, sender-or-claimant close, schema-v1/v2 reads, and
+  Relay-specific signed portable preview/apply. The guarded CLI and static
+  resolver, private Hub API, lazy Relay workbench, deterministic two-Member
+  fixture, and owned release measurements are active. Pinned Ubuntu Relay
+  route, two Relay list API, and Relay heap candidates are calibrated from the
+  retained schema-valid report; Home, Members, and every shared budget remain
+  frozen. A separate clean enforcing run on the final exact head remains
+  mandatory.
 
 **Not Built:**
 - Wiki migration and synthesis UI, grounding-drift/review workbenches, product
-  Relay/Playbook commands and Hub routes, Catch Up actions, and later delivery
-  checkpoints from the human-team program. The workflow port remains internal;
-  Checkpoint E is the latest registered product surface.
+  Playbook commands and Hub routes, Catch Up actions, notifications, external
+  delivery, and later checkpoints from the human-team program. The workflow
+  port remains internal; Checkpoint F is the latest registered product surface.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**

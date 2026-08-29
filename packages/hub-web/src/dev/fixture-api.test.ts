@@ -13,6 +13,10 @@ import {
   InboxProposalDetailSchema,
   InboxProposalListResponseSchema,
   JobPageResponseSchema,
+  RelayDetailSchema,
+  RelayDraftDetailSchema,
+  RelayDraftListResponseSchema,
+  RelayListResponseSchema,
   SearchResponseSchema,
   SessionResponseSchema,
   SpecDetailResponseSchema,
@@ -61,7 +65,7 @@ describe("development-only populated fixture", () => {
     expect(ActivityResponseSchema.safeParse(activity).success).toBe(true);
     expect(home.sections.activity).toEqual({ availability: "available", count: 4 });
     expect(home.sections.inbox).toEqual({ availability: "available", count: 1 });
-    expect(home.sections.relays.availability).toBe("unavailable");
+    expect(home.sections.relays).toEqual({ availability: "available", count: 1 });
     expect(activity.items.some((item) => item.source === "activity")).toBe(true);
     expect(activity.items.some((item) => item.source === "legacy")).toBe(true);
     expect(SearchResponseSchema.safeParse(search).success).toBe(true);
@@ -89,6 +93,15 @@ describe("development-only populated fixture", () => {
     expect(Object.hasOwn(proposals.items[0]!, "change")).toBe(false);
     expect(InboxDraftDetailSchema.safeParse(await api.getInboxDraft(drafts.items[0]!.id)).success).toBe(true);
     expect(InboxProposalDetailSchema.safeParse(await api.getInboxProposal(proposals.items[0]!.ref.id)).success).toBe(true);
+
+    const [relayDrafts, relays] = await Promise.all([
+      api.getRelayDrafts({ limit: 25 }),
+      api.getRelays({ perspective: "mine", states: ["published", "acknowledged"], limit: 25 }),
+    ]);
+    expect(RelayDraftListResponseSchema.safeParse(relayDrafts).success).toBe(true);
+    expect(RelayListResponseSchema.safeParse(relays).success).toBe(true);
+    expect(RelayDraftDetailSchema.safeParse(await api.getRelayDraft(relayDrafts.items[0]!.id)).success).toBe(true);
+    expect(RelayDetailSchema.safeParse(await api.getRelay(relays.items[0]!.ref.id)).success).toBe(true);
 
     const members = await api.getMembers({ limit: 25 });
     const member = await api.getMember(members.items[0]!.id);

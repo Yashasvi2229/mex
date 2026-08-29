@@ -48,6 +48,23 @@ export type {
   InboxProposalSummary,
   InboxSpecChange,
   InboxSpecKind,
+  RelayDetail,
+  RelayDraftDetail,
+  RelayDraftInput,
+  RelayDraftListRequest,
+  RelayDraftListResponse,
+  RelayDraftSummary,
+  RelayEvidenceRef,
+  RelayListRequest,
+  RelayListResponse,
+  RelayLocalChange,
+  RelayOperationApplyRequest,
+  RelayOperationApplyResponse,
+  RelayOperationPreviewRequest,
+  RelayOperationPreviewResponse,
+  RelayPerspective,
+  RelayState,
+  RelaySummary,
   JobPageResponse as JobsResponse,
   JobStartRequest as StartJobRequest,
   SearchRequest,
@@ -102,5 +119,5 @@ export type {
   WikiSource,
 } from "@mex/hub-contracts";
 
-export type CapabilityName = "graph" | "wiki" | "jobs" | "activity" | "members" | "workstreams" | "specs" | "inbox";
+export type CapabilityName = "graph" | "wiki" | "jobs" | "activity" | "members" | "workstreams" | "specs" | "inbox" | "relays";
 export type Tone = "neutral" | "info" | "success" | "warning" | "danger";

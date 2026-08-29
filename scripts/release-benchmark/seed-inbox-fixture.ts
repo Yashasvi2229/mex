@@ -1,13 +1,24 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { InboxProposalRepository } from "../../src/team/artifacts/workflow-repositories.js";
+import {
+  activityArtifactPath,
+  memberArtifactPath,
+  serializeActivityArtifact,
+  serializeMemberArtifact,
+} from "../../src/team/artifacts/codecs.js";
+import { atomicCreateArtifact } from "../../src/team/artifacts/filesystem.js";
+import {
+  InboxProposalRepository,
+  RelayRepository,
+} from "../../src/team/artifacts/workflow-repositories.js";
 import {
   inboxDraftInputFromProduct,
   productDraftProjection,
   productProposalProjection,
 } from "../../src/team/inbox/spec-authoring.js";
 import { TeamLocalState } from "../../src/team/local-state/index.js";
+import { normalizeRelayProductDraftInput } from "../../src/team/relay/handoff.js";
 import type { JsonValue } from "../../src/team/contracts/shared.js";
 import type {
   TeamInboxSpecDraftInput,
@@ -20,7 +31,25 @@ const FIXTURE_ACTOR = Object.freeze({
   email: "release-benchmark@example.invalid",
 });
 
-const [mode, rootValue, scaffoldId, draftId, proposalId, specId, specPathValue] = process.argv.slice(2);
+const RELAY_PUBLISHED_AT = "2026-08-01T00:00:00.000Z";
+const RELAY_SUMMARY = "Release benchmark published Relay handoff";
+const RELAY_DRAFT_SUMMARY = "Release benchmark local Relay draft";
+
+const [
+  mode,
+  rootValue,
+  scaffoldId,
+  draftId,
+  proposalId,
+  specId,
+  specPathValue,
+  workstreamId,
+  publisherMemberId,
+  recipientMemberId,
+  relayDraftId,
+  relayId,
+  relayEventId,
+] = process.argv.slice(2);
 if (
   (mode !== "canonical" && mode !== "local")
   || !rootValue
@@ -29,8 +58,14 @@ if (
   || !proposalId
   || !specId
   || !specPathValue
+  || !workstreamId
+  || !publisherMemberId
+  || !recipientMemberId
+  || !relayDraftId
+  || !relayId
+  || !relayEventId
 ) {
-  throw new Error("Usage: seed-inbox-fixture <canonical|local> <root> <scaffold-id> <draft-id> <proposal-id> <spec-id> <spec-path>");
+  throw new Error("Usage: seed-inbox-fixture <canonical|local> <root> <scaffold-id> <draft-id> <proposal-id> <spec-id> <spec-path> <workstream-id> <publisher-member-id> <recipient-member-id> <relay-draft-id> <relay-id> <relay-event-id>");
 }
 
 const root = resolve(rootValue);
@@ -39,6 +74,21 @@ if (specPathValue !== `.mex/specs/${specId}.md`) {
 }
 const specPath = join(root, specPathValue);
 const specRevision = createHash("sha256").update(readFileSync(specPath)).digest("hex");
+const publisher = Object.freeze({
+  kind: "member" as const,
+  memberId: publisherMemberId,
+  displayName: "Release Benchmark Publisher",
+});
+const recipient = Object.freeze({
+  kind: "member" as const,
+  memberId: recipientMemberId,
+  displayName: "MEX Release Benchmark",
+});
+const workstream = Object.freeze({
+  id: workstreamId,
+  kind: "workstream" as const,
+  title: "Release benchmark Workstream",
+});
 
 const proposalInput: TeamInboxSpecDraftInput = {
   change: {
@@ -76,7 +126,47 @@ const localDraftInput: TeamInboxSpecDraftInput = {
   targetRevisions: [],
 };
 
+const relayDraftInput = normalizeRelayProductDraftInput({
+  recipients: [recipient],
+  workstream,
+  summary: RELAY_DRAFT_SUMMARY,
+  completed: ["Pinned the deterministic release fixture."],
+  inProgress: ["Exercise the local Relay draft projection."],
+  decisions: [],
+  blockers: [],
+  unresolvedQuestions: ["Will the release budget remain within its exact envelope?"],
+  changedFiles: ["src/module-0000.ts"],
+  code: [{ kind: "file" as const, path: "src/module-0000.ts" }],
+  evidence: [{ kind: "manual" as const, note: "Pinned release benchmark fixture" }],
+  nextActions: ["Review the retained release report."],
+});
+
 if (mode === "canonical") {
+  for (const member of [
+    {
+      id: publisherMemberId,
+      displayName: publisher.displayName,
+      gitAliases: [{
+        name: "Release Benchmark Publisher",
+        email: "relay-publisher@example.invalid",
+      }],
+    },
+    {
+      id: recipientMemberId,
+      displayName: recipient.displayName,
+      gitAliases: [{
+        name: FIXTURE_ACTOR.name,
+        email: FIXTURE_ACTOR.email,
+      }],
+    },
+  ]) {
+    const path = memberArtifactPath(member.id);
+    atomicCreateArtifact(root, path, serializeMemberArtifact({
+      ...member,
+      active: true,
+    }));
+  }
+
   const stored = inboxDraftInputFromProduct(
     proposalInput,
     "release_benchmark_pending_proposal",
@@ -113,6 +203,57 @@ if (mode === "canonical") {
   ) {
     throw new Error("The release proposal fixture does not round-trip through the production projection.");
   }
+
+
+  const relays = new RelayRepository(root, { idFactory: () => relayId });
+  const relayPreview = await relays.previewCreate({
+    sender: publisher,
+    recipients: [recipient],
+    workstream,
+    summary: RELAY_SUMMARY,
+    completed: ["Prepared the deterministic Relay fixture."],
+    inProgress: ["Measure the real Relay workbench."],
+    decisions: [],
+    blockers: [],
+    unresolvedQuestions: [],
+    changedFiles: ["src/module-0000.ts"],
+    code: [{ kind: "file", path: "src/module-0000.ts" }],
+    evidence: [{ kind: "manual", note: "Pinned release benchmark fixture" }],
+    nextActions: ["Claim the Relay from the My open queue."],
+    publishedAt: RELAY_PUBLISHED_AT,
+  });
+  const relay = (await relays.apply(relayPreview, relayPreview.previewRevision)).artifact;
+  const relayPage = await relays.list({ limit: 100, states: ["published"] });
+  if (
+    relay.schemaVersion !== 2
+    || relay.ref.id !== relayId
+    || relay.summary !== RELAY_SUMMARY
+    || relay.publishedAt !== RELAY_PUBLISHED_AT
+    || relayPage.items.length !== 1
+    || relayPage.items[0]?.ref.id !== relayId
+  ) {
+    throw new Error("The release Relay fixture does not round-trip through the production repository.");
+  }
+  const activity = {
+    schemaVersion: 1 as const,
+    id: relayEventId,
+    timestamp: RELAY_PUBLISHED_AT,
+    actor: publisher,
+    action: "relay.published",
+    subjects: [{ kind: "entity" as const, entity: relay.ref }],
+    workstream,
+    repoState: {
+      branch: "benchmark",
+      head: null,
+      dirty: false,
+      observedAt: RELAY_PUBLISHED_AT,
+    },
+  };
+  atomicCreateArtifact(
+    root,
+    activityArtifactPath(activity),
+    serializeActivityArtifact(activity),
+  );
 } else {
   const local = new TeamLocalState({
     projectRoot: root,
@@ -144,5 +285,23 @@ if (mode === "canonical") {
     || projection.title !== "Release benchmark local draft Requirement"
   ) {
     throw new Error("The release draft fixture does not round-trip through the production projection.");
+  }
+
+
+  const storedRelay = local.saveLocalDraft({
+    id: relayDraftId,
+    kind: "relay",
+    payload: relayDraftInput,
+    expectedRevision: null,
+    updatedAt: FIXED_TIME,
+  });
+  const relayPage = local.listLocalDrafts({ kind: "relay", limit: 100 });
+  if (
+    storedRelay.id !== relayDraftId
+    || storedRelay.payload.summary !== RELAY_DRAFT_SUMMARY
+    || relayPage.items.length !== 1
+    || relayPage.items[0]?.id !== relayDraftId
+  ) {
+    throw new Error("The release Relay draft fixture does not round-trip through local state.");
   }
 }

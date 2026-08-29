@@ -26,6 +26,19 @@ import {
   InboxProposalListRequestSchema,
   InboxProposalListResponseSchema,
   InboxProposalStateSchema,
+  RelayDetailSchema,
+  RelayDraftDetailSchema,
+  RelayDraftIdSchema,
+  RelayDraftListRequestSchema,
+  RelayDraftListResponseSchema,
+  RelayIdSchema,
+  RelayListRequestSchema,
+  RelayListResponseSchema,
+  RelayOperationApplyRequestSchema,
+  RelayOperationApplyResponseSchema,
+  RelayOperationPreviewRequestSchema,
+  RelayOperationPreviewResponseSchema,
+  RelayStateSchema,
   JobCancelRequestSchema,
   JobPageRequestSchema,
   JobPageResponseSchema,
@@ -78,6 +91,16 @@ import {
   type InboxProposalDetail,
   type InboxProposalListRequest,
   type InboxProposalListResponse,
+  type RelayDetail,
+  type RelayDraftDetail,
+  type RelayDraftListRequest,
+  type RelayDraftListResponse,
+  type RelayListRequest,
+  type RelayListResponse,
+  type RelayOperationApplyRequest,
+  type RelayOperationApplyResponse,
+  type RelayOperationPreviewRequest,
+  type RelayOperationPreviewResponse,
   type JobPageRequest,
   type SearchRequest,
   type SearchResponse,
@@ -183,6 +206,18 @@ export interface HubReadServices {
   applyInboxOperation?(
     request: InboxOperationApplyRequest,
   ): Promise<InboxOperationApplyResponse> | InboxOperationApplyResponse;
+  relayDrafts?(
+    request: RelayDraftListRequest,
+  ): Promise<RelayDraftListResponse> | RelayDraftListResponse;
+  relayDraft?(draftId: string): Promise<RelayDraftDetail | null> | RelayDraftDetail | null;
+  relays?(request: RelayListRequest): Promise<RelayListResponse> | RelayListResponse;
+  relay?(relayId: string): Promise<RelayDetail | null> | RelayDetail | null;
+  previewRelayOperation?(
+    request: RelayOperationPreviewRequest,
+  ): Promise<RelayOperationPreviewResponse> | RelayOperationPreviewResponse;
+  applyRelayOperation?(
+    request: RelayOperationApplyRequest,
+  ): Promise<RelayOperationApplyResponse> | RelayOperationApplyResponse;
   specs?(request: SpecListRequest): Promise<SpecListResponse> | SpecListResponse;
   spec?(specId: string): Promise<SpecDetailResponse> | SpecDetailResponse;
   currentActor?(): Promise<TeamCurrentActorResponse> | TeamCurrentActorResponse;
@@ -432,6 +467,63 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
     const apply = options.services.applyInboxOperation;
     if (apply === undefined) throw unavailable("Inbox mutations are not connected in this build.");
     return resourceResponse(InboxOperationApplyResponseSchema, await apply(request));
+  });
+
+  app.get("/api/v1/relays/drafts", async (context) => {
+    const request = parseInput(
+      RelayDraftListRequestSchema,
+      readStrictQuery(context.req.raw, ["cursor", "limit"]),
+    );
+    const drafts = options.services.relayDrafts;
+    if (drafts === undefined) throw unavailable("Relay draft reads are not connected in this build.");
+    return resourceResponse(RelayDraftListResponseSchema, await drafts(request));
+  });
+
+  app.get("/api/v1/relays/drafts/:id", async (context) => {
+    readStrictQuery(context.req.raw, []);
+    const draftId = parseInput(RelayDraftIdSchema, context.req.param("id"));
+    const readDraft = options.services.relayDraft;
+    if (readDraft === undefined) throw unavailable("Relay draft reads are not connected in this build.");
+    const draft = await readDraft(draftId);
+    if (draft === null) throw notFound("The requested Relay draft does not exist.");
+    return resourceResponse(RelayDraftDetailSchema, draft);
+  });
+
+  app.get("/api/v1/relays", async (context) => {
+    const request = parseInput(RelayListRequestSchema, readRelayListQuery(context.req.raw));
+    const relays = options.services.relays;
+    if (relays === undefined) throw unavailable("Relay reads are not connected in this build.");
+    return resourceResponse(RelayListResponseSchema, await relays(request));
+  });
+
+  app.get("/api/v1/relays/:id", async (context) => {
+    readStrictQuery(context.req.raw, []);
+    const relayId = parseInput(RelayIdSchema, context.req.param("id"));
+    const readRelay = options.services.relay;
+    if (readRelay === undefined) throw unavailable("Relay reads are not connected in this build.");
+    const relay = await readRelay(relayId);
+    if (relay === null) throw notFound("The requested Relay does not exist.");
+    return resourceResponse(RelayDetailSchema, relay);
+  });
+
+  app.post("/api/v1/relays/operations/preview", async (context) => {
+    const request = parseInput(
+      RelayOperationPreviewRequestSchema,
+      await readBoundedJson(context.req.raw),
+    );
+    const preview = options.services.previewRelayOperation;
+    if (preview === undefined) throw unavailable("Relay mutations are not connected in this build.");
+    return resourceResponse(RelayOperationPreviewResponseSchema, await preview(request));
+  });
+
+  app.post("/api/v1/relays/operations/apply", async (context) => {
+    const request = parseInput(
+      RelayOperationApplyRequestSchema,
+      await readBoundedJson(context.req.raw),
+    );
+    const apply = options.services.applyRelayOperation;
+    if (apply === undefined) throw unavailable("Relay mutations are not connected in this build.");
+    return resourceResponse(RelayOperationApplyResponseSchema, await apply(request));
   });
 
   app.get("/api/v1/specs", async (context) => {
@@ -829,6 +921,21 @@ function readInboxProposalListQuery(request: Request): Record<string, unknown> {
   }
   return {
     ...(states === undefined ? {} : { states }),
+    ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+    ...(query.limit === undefined ? {} : { limit: query.limit }),
+  };
+}
+
+function readRelayListQuery(request: Request): Record<string, unknown> {
+  const query = readStrictQuery(request, ["perspective", "state", "workstreamId", "cursor", "limit"]);
+  const states = query.state === undefined ? undefined : query.state.split(",");
+  if (states !== undefined) {
+    for (const state of states) parseInput(RelayStateSchema, state);
+  }
+  return {
+    ...(query.perspective === undefined ? {} : { perspective: query.perspective }),
+    ...(states === undefined ? {} : { states }),
+    ...(query.workstreamId === undefined ? {} : { workstreamId: query.workstreamId }),
     ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
     ...(query.limit === undefined ? {} : { limit: query.limit }),
   };

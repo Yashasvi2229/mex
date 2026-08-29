@@ -147,6 +147,9 @@
             "workstreams": { "type": "integer", "minimum": 1 },
             "inboxDrafts": { "const": 1 },
             "inboxProposals": { "const": 1 },
+            "members": { "const": 2 },
+            "relayDrafts": { "const": 1 },
+            "relays": { "const": 1 },
             "activityEvents": { "type": "integer", "minimum": 1 },
             "input": {
               "type": "object",
@@ -215,7 +218,9 @@
         "knowledge": { "$ref": "#/$defs/summary10" },
         "activity": { "$ref": "#/$defs/summary10" },
         "inboxDrafts": { "$ref": "#/$defs/summary10" },
-        "inboxProposals": { "$ref": "#/$defs/summary10" }
+        "inboxProposals": { "$ref": "#/$defs/summary10" },
+        "relayDrafts": { "$ref": "#/$defs/summary10" },
+        "relays": { "$ref": "#/$defs/summary10" }
       }
     },
     "maintenanceMeasurement": {

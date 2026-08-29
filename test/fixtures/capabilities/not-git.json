@@ -46,6 +46,15 @@
         }
       },
       {
+        "id": "team_relay",
+        "installed": true,
+        "availability": "unavailable",
+        "unavailableReason": {
+          "code": "NOT_GIT_REPOSITORY",
+          "detail": "Repository initialization is required before this capability can be used."
+        }
+      },
+      {
         "id": "spec_authoring",
         "installed": true,
         "availability": "unavailable",
@@ -114,6 +123,13 @@
           "usage": "mex inbox contract --json",
           "output": "json",
           "contractResolver": "inbox.contract"
+        },
+        {
+          "id": "relay.contract",
+          "path": "mex relay contract",
+          "usage": "mex relay contract --json",
+          "output": "json",
+          "contractResolver": "relay.contract"
         }
       ],
       "preview": [],

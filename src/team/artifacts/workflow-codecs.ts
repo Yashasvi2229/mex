@@ -68,6 +68,7 @@ const RELAY_REQUIRED_KEYS = [
   "blockers", "unresolved_questions", "changed_files", "code", "evidence",
   "next_actions",
 ] as const;
+const RELAY_V2_REQUIRED_KEYS = [...RELAY_REQUIRED_KEYS, "published_at"] as const;
 const RELAY_OPTIONAL_KEYS = ["acknowledged_by", "acknowledged_at", "closed_by", "closed_at"] as const;
 const PLAYBOOK_KEYS = [
   "schema_version", "id", "mex", "state", "title", "purpose", "trigger",
@@ -163,13 +164,15 @@ export function parseInboxProposalArtifact<TPayload = JsonValue>(bytes: string |
 
 export function serializeRelayArtifact(input: RelayArtifactInput): string {
   const value = normalizeRelay(input);
+  const schemaVersion = value.publishedAt === undefined ? 1 : 2;
   return encodeArtifact([
-    ["schema_version", 1], ["id", value.id],
+    ["schema_version", schemaVersion], ["id", value.id],
     ["mex", wikiMetadata(value.id, "relay", relayWikiState(value.state), value.entityRevision, `Relay ${value.id}`, value.summary)],
     ["state", value.state], ["sender", value.sender], ["recipients", value.recipients], ["workstream", value.workstream],
     ["summary", value.summary], ["completed", value.completed], ["in_progress", value.inProgress], ["decisions", value.decisions],
     ["blockers", value.blockers], ["unresolved_questions", value.unresolvedQuestions], ["changed_files", value.changedFiles],
     ["code", value.code], ["evidence", value.evidence], ["next_actions", value.nextActions],
+    ...(value.publishedAt === undefined ? [] : [["published_at", value.publishedAt] as const]),
     ...(value.acknowledgedBy === undefined ? [] : [["acknowledged_by", value.acknowledgedBy] as const]),
     ...(value.acknowledgedAt === undefined ? [] : [["acknowledged_at", value.acknowledgedAt] as const]),
     ...(value.closedBy === undefined ? [] : [["closed_by", value.closedBy] as const]),
@@ -178,8 +181,15 @@ export function serializeRelayArtifact(input: RelayArtifactInput): string {
 }
 
 export function parseRelayArtifact(bytes: string | Uint8Array, sourcePath: RepoRelativePath): Relay {
-  const { exactBytes, raw } = parseArtifact(bytes, sourcePath);
-  exactKeys(raw, RELAY_REQUIRED_KEYS, RELAY_OPTIONAL_KEYS, "relay", sourcePath);
+  const { exactBytes, raw } = parseArtifact(bytes, sourcePath, [1, 2]);
+  const schemaVersion = raw.schema_version as 1 | 2;
+  exactKeys(
+    raw,
+    schemaVersion === 2 ? RELAY_V2_REQUIRED_KEYS : RELAY_REQUIRED_KEYS,
+    RELAY_OPTIONAL_KEYS,
+    "relay",
+    sourcePath,
+  );
   const mex = parseWikiMetadata(raw.mex, sourcePath);
   const value = normalizeRelay({
     id: raw.id as string, entityRevision: mex.revision, state: raw.state as Relay["state"], sender: raw.sender as ActorRef,
@@ -187,6 +197,7 @@ export function parseRelayArtifact(bytes: string | Uint8Array, sourcePath: RepoR
     completed: raw.completed as string[], inProgress: raw.in_progress as string[], decisions: raw.decisions as EntityRef[],
     blockers: raw.blockers as string[], unresolvedQuestions: raw.unresolved_questions as string[], changedFiles: raw.changed_files as RepoRelativePath[],
     code: raw.code as CodeRef[], evidence: raw.evidence as TeamEvidenceRef[], nextActions: raw.next_actions as string[],
+    ...(schemaVersion === 1 ? {} : { publishedAt: raw.published_at as string }),
     ...(raw.acknowledged_by === undefined ? {} : { acknowledgedBy: raw.acknowledged_by as ActorRef }),
     ...(raw.acknowledged_at === undefined ? {} : { acknowledgedAt: raw.acknowledged_at as string }),
     ...(raw.closed_by === undefined ? {} : { closedBy: raw.closed_by as ActorRef }),
@@ -196,7 +207,14 @@ export function parseRelayArtifact(bytes: string | Uint8Array, sourcePath: RepoR
   if (sourcePath !== expectedPath) fail(`Relay path must be ${expectedPath}.`, sourcePath);
   assertWikiMetadata(mex, value.id, "relay", relayWikiState(value.state), value.entityRevision, `Relay ${value.id}`, value.summary, sourcePath);
   canonicalBytes(exactBytes, serializeRelayArtifact(value), sourcePath);
-  return { ...base(value.id, "relay", undefined, sourcePath, exactBytes), ...withoutId(value) };
+  return {
+    schemaVersion,
+    ref: { id: value.id, kind: "relay" },
+    kind: "relay",
+    sourcePath,
+    revision: revisionOf(exactBytes),
+    ...withoutId(value),
+  };
 }
 
 export function serializePlaybookArtifact(input: PlaybookArtifactInput): string {
@@ -396,8 +414,9 @@ function normalizeRelay(input: RelayArtifactInput): RelayArtifactInput {
   exactObject(value, [
     "id", "entityRevision", "state", "sender", "recipients", "workstream", "summary", "completed", "inProgress",
     "decisions", "blockers", "unresolvedQuestions", "changedFiles", "code", "evidence", "nextActions",
-  ], ["acknowledgedBy", "acknowledgedAt", "closedBy", "closedAt"], "relay");
+  ], ["publishedAt", "acknowledgedBy", "acknowledgedAt", "closedBy", "closedAt"], "relay");
   const state = enumValue(value.state, RELAY_STATES, "relay state");
+  const publishedAt = value.publishedAt === undefined ? undefined : timestamp(value.publishedAt, "relay publication time");
   const acknowledgedBy = value.acknowledgedBy === undefined ? undefined : actor(value.acknowledgedBy, "relay acknowledger");
   const acknowledgedAt = value.acknowledgedAt === undefined ? undefined : timestamp(value.acknowledgedAt, "relay acknowledgement time");
   const closedBy = value.closedBy === undefined ? undefined : actor(value.closedBy, "relay closer");
@@ -407,6 +426,7 @@ function normalizeRelay(input: RelayArtifactInput): RelayArtifactInput {
   if (state === "published" && (acknowledgedBy !== undefined || closedBy !== undefined)) invalid("Published relays must not carry acknowledgement or close authority.");
   if (state === "acknowledged" && (acknowledgedBy === undefined || closedBy !== undefined)) invalid("Acknowledged relays require acknowledgement authority and no close authority.");
   if (state === "closed" && (acknowledgedBy === undefined || closedBy === undefined)) invalid("Closed relays require acknowledgement and close authority.");
+  if (publishedAt !== undefined && acknowledgedAt !== undefined && publishedAt > acknowledgedAt) invalid("Relay publication cannot follow acknowledgement.");
   if (acknowledgedAt !== undefined && closedAt !== undefined && acknowledgedAt > closedAt) invalid("Relay acknowledgement cannot follow closure.");
   return {
     id: artifactId(value.id, "relay", "relay ID"),
@@ -418,6 +438,7 @@ function normalizeRelay(input: RelayArtifactInput): RelayArtifactInput {
     blockers: textList(value.blockers, "relay blockers"), unresolvedQuestions: textList(value.unresolvedQuestions, "relay unresolved questions"),
     changedFiles: pathSet(value.changedFiles, "relay changed files"), code: codeSet(value.code, "relay code references"),
     evidence: evidenceList(value.evidence), nextActions: textList(value.nextActions, "relay next actions"),
+    ...(publishedAt === undefined ? {} : { publishedAt }),
     ...(acknowledgedBy === undefined ? {} : { acknowledgedBy }), ...(acknowledgedAt === undefined ? {} : { acknowledgedAt }),
     ...(closedBy === undefined ? {} : { closedBy }), ...(closedAt === undefined ? {} : { closedAt }),
   };
@@ -741,7 +762,11 @@ function runWikiState(state: PlaybookRun["state"]): WikiMetadata["status"] {
   return state === "active" ? "in_flight" : "promoted";
 }
 
-function parseArtifact(bytes: string | Uint8Array, path: RepoRelativePath): { exactBytes: Uint8Array; raw: Record<string, unknown> } {
+function parseArtifact(
+  bytes: string | Uint8Array,
+  path: RepoRelativePath,
+  allowedSchemaVersions: readonly number[] = [1],
+): { exactBytes: Uint8Array; raw: Record<string, unknown> } {
   repoPath(path, "artifact source path");
   const exactBytes = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : bytes;
   if (exactBytes.byteLength > WORKFLOW_ARTIFACT_MAX_BYTES) fail(`Artifact exceeds ${WORKFLOW_ARTIFACT_MAX_BYTES} bytes.`, path);
@@ -760,7 +785,12 @@ function parseArtifact(bytes: string | Uint8Array, path: RepoRelativePath): { ex
     if (document.errors.length > 0) fail(`Invalid YAML: ${document.errors[0]!.message}`, path);
     const raw = document.toJS({ maxAliasCount: 0 }) as unknown;
     if (!isRecord(raw)) fail("Artifact frontmatter must be a mapping.", path);
-    if (raw.schema_version !== 1) fail("Artifact schema_version must be 1.", path);
+    if (
+      typeof raw.schema_version !== "number"
+      || !allowedSchemaVersions.includes(raw.schema_version)
+    ) {
+      fail(`Artifact schema_version must be ${allowedSchemaVersions.join(" or ")}.`, path);
+    }
     return { exactBytes, raw };
   } catch (error) {
     if (error instanceof Error && error.name === "MexPortError") throw error;
@@ -863,7 +893,14 @@ function identifier(value: unknown, label: string): string {
 }
 
 function repoPath(value: unknown, label: string): RepoRelativePath {
-  if (typeof value !== "string" || !isRepoRelativePath(value) || value.normalize("NFC") !== value || /[\u0000-\u001f\u007f]/u.test(value) || Buffer.byteLength(value, "utf8") > 4096) {
+  if (
+    typeof value !== "string"
+    || !isRepoRelativePath(value)
+    || value.normalize("NFC") !== value
+    || hasLoneSurrogate(value)
+    || /[\u0000-\u001f\u007f]/u.test(value)
+    || Buffer.byteLength(value, "utf8") > 4096
+  ) {
     throw artifactError("PATH_OUTSIDE_PROJECT", "Unsafe repository path", `${label} must be a canonical repository-relative path.`);
   }
   return value;

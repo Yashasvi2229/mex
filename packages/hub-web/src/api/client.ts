@@ -59,6 +59,16 @@ import type {
   InboxProposalDetail,
   InboxProposalListRequest,
   InboxProposalListResponse,
+  RelayDetail,
+  RelayDraftDetail,
+  RelayDraftListRequest,
+  RelayDraftListResponse,
+  RelayListRequest,
+  RelayListResponse,
+  RelayOperationApplyRequest,
+  RelayOperationApplyResponse,
+  RelayOperationPreviewRequest,
+  RelayOperationPreviewResponse,
   JobsResponse,
   JobSummary,
   ProblemDetails,
@@ -88,6 +98,7 @@ import type {
   WikiRelationsRequest,
   WikiRelationsResponse,
 } from "./types";
+import type { RelayTransport } from "./relay-client";
 
 const API_ROOT = "/api/v1";
 
@@ -125,6 +136,12 @@ export interface HubApi {
   getInboxProposal(id: string): Promise<InboxProposalDetail>;
   previewInboxOperation(request: InboxOperationPreviewRequest): Promise<InboxOperationPreviewResponse>;
   applyInboxOperation(request: InboxOperationApplyRequest): Promise<InboxOperationApplyResponse>;
+  getRelayDrafts(request: RelayDraftListRequest): Promise<RelayDraftListResponse>;
+  getRelayDraft(id: string): Promise<RelayDraftDetail>;
+  getRelays(request: RelayListRequest): Promise<RelayListResponse>;
+  getRelay(id: string): Promise<RelayDetail>;
+  previewRelayOperation(request: RelayOperationPreviewRequest): Promise<RelayOperationPreviewResponse>;
+  applyRelayOperation(request: RelayOperationApplyRequest): Promise<RelayOperationApplyResponse>;
   listSpecs(request: SpecListRequest): Promise<SpecListResponse>;
   getSpec(id: string): Promise<SpecDetailResponse>;
   previewTeamOperation(request: TeamOperationPreviewRequest): Promise<TeamOperationPreviewResponse>;
@@ -235,6 +252,8 @@ function assertSafeInboxProposalId(value: string): string {
   return parsed.data;
 }
 
+const loadRelayClient = () => import("./relay-client");
+
 export function readBootstrapToken(hash = window.location.hash): string | null {
   if (!hash || hash === "#") return null;
   const fragment = hash.slice(1);
@@ -251,6 +270,12 @@ export function clearBootstrapFragment(): void {
 
 export class HttpHubApi implements HubApi {
   #csrfToken: string | null = null;
+  #relayTransport: RelayTransport = {
+    request: (path, schema, init, mutation) => this.#request(path, schema, init, mutation),
+    invalidIdentifier: (detail) => {
+      throw new HubApiError(fallbackProblem(400, detail));
+    },
+  };
 
   async #request<T>(
     path: string,
@@ -379,6 +404,34 @@ export class HttpHubApi implements HubApi {
       { method: "POST", body: JSON.stringify(request) },
       true,
     );
+  }
+
+  async getRelayDrafts(request: RelayDraftListRequest): Promise<RelayDraftListResponse> {
+    return await (await loadRelayClient()).getRelayDrafts(this.#relayTransport, request);
+  }
+
+  async getRelayDraft(id: string): Promise<RelayDraftDetail> {
+    return await (await loadRelayClient()).getRelayDraft(this.#relayTransport, id);
+  }
+
+  async getRelays(request: RelayListRequest): Promise<RelayListResponse> {
+    return await (await loadRelayClient()).getRelays(this.#relayTransport, request);
+  }
+
+  async getRelay(id: string): Promise<RelayDetail> {
+    return await (await loadRelayClient()).getRelay(this.#relayTransport, id);
+  }
+
+  async previewRelayOperation(
+    request: RelayOperationPreviewRequest,
+  ): Promise<RelayOperationPreviewResponse> {
+    return await (await loadRelayClient()).previewRelayOperation(this.#relayTransport, request);
+  }
+
+  async applyRelayOperation(
+    request: RelayOperationApplyRequest,
+  ): Promise<RelayOperationApplyResponse> {
+    return await (await loadRelayClient()).applyRelayOperation(this.#relayTransport, request);
   }
 
   listSpecs(request: SpecListRequest): Promise<SpecListResponse> {

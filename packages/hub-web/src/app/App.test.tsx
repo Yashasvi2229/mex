@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -53,6 +53,26 @@ describe("Project Hub routes", () => {
     expect(screen.getByRole("link", { name: "Home" })).toHaveFocus();
   });
 
+  it("marks both flat and read-scoped unavailable capabilities in navigation", async () => {
+    const api = createFixtureApi();
+    const capabilities = await api.getCapabilities();
+    vi.spyOn(api, "getCapabilities").mockResolvedValue({
+      ...capabilities,
+      jobs: { availability: "unavailable", reason: "Job execution is disconnected." },
+      relays: {
+        ...capabilities.relays,
+        read: { availability: "unavailable", reason: "Relay reads are disconnected." },
+      },
+    });
+
+    renderRoute("/", api);
+    await screen.findByRole("heading", { level: 1, name: "Overview" });
+
+    expect(within(screen.getByRole("link", { name: /Jobs/u })).getByLabelText("Unavailable")).toBeVisible();
+    expect(within(screen.getByRole("link", { name: /Relays/u })).getByLabelText("Unavailable")).toBeVisible();
+    expect(within(screen.getByRole("link", { name: "Inbox" })).queryByLabelText("Unavailable")).not.toBeInTheDocument();
+  });
+
   it("keeps routes behind a safe, retryable capabilities error", async () => {
     const user = userEvent.setup();
     const api = createFixtureApi();
@@ -85,7 +105,7 @@ describe("Project Hub routes", () => {
     expect(screen.getByText("Source matches", { selector: "h2" })).toBeVisible();
   });
 
-  it("links Home to canonical Workstreams, Inbox, and Activity while Relays stay unavailable", async () => {
+  it("links Home to canonical Workstreams, Inbox, Relay, and Activity surfaces", async () => {
     renderRoute("/");
     const workstreamMetric = await screen.findByRole("link", { name: /Canonical delivery threads/ });
     expect(workstreamMetric).toHaveAttribute("href", "/workstreams");
@@ -100,15 +120,20 @@ describe("Project Hub routes", () => {
     expect(screen.getByRole("link", { name: "Members" })).toBeVisible();
     expect(screen.getByRole("link", { name: /Open member identity for Ada Lovelace/ })).toHaveAttribute("href", "/members");
     expect(screen.getByRole("link", { name: "Inbox" })).toHaveAttribute("href", "/inbox");
-    expect(screen.getByRole("link", { name: "Relays Unavailable" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "Relays" })).toHaveAttribute("href", "/relays");
+    const relaySection = within(screen.getByRole("region", { name: "Project sections" })).getByText("Relays").closest('[role="listitem"]');
+    expect(relaySection).toHaveTextContent("Relays1");
     expect(screen.queryByText("Wiki unavailable")).not.toBeInTheDocument();
   });
 
-  it("keeps the direct Relays route structurally unavailable when Inbox is connected", async () => {
+  it("loads the lazy Relay workbench when the private Relay service is connected", async () => {
     renderRoute("/relays");
-    expect(await screen.findByRole("heading", { level: 2, name: "Relays are unavailable." })).toBeVisible();
-    expect(screen.getByRole("status")).toHaveTextContent("Unavailable");
-    expect(screen.queryByText("Dependency connected")).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { level: 2, name: "Relay desk" })).toBeVisible();
+    expect(document.querySelector('[data-relay-workbench="ready"]')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(document.querySelector("[data-relay-draft-id]")).toBeInTheDocument();
+      expect(document.querySelector("[data-relay-id]")).toBeInTheDocument();
+    });
   });
 
   it("keeps the Search input synchronized with browser history", async () => {

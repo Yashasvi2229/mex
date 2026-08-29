@@ -20,6 +20,7 @@ const MembersPage = lazy(async () => ({ default: (await import("../pages/Members
 const WorkstreamsPage = lazy(async () => ({ default: (await import("../pages/WorkstreamsPage")).WorkstreamsPage }));
 const SpecsPage = lazy(async () => ({ default: (await import("../pages/SpecsPage")).SpecsPage }));
 const InboxPage = lazy(async () => ({ default: (await import("../pages/InboxPage")).InboxPage }));
+const RelayPage = lazy(async () => ({ default: (await import("../pages/RelayPage")).RelayPage }));
 const JobsPage = lazy(async () => ({ default: (await import("../pages/JobsPage")).JobsPage }));
 const HealthPage = lazy(async () => ({ default: (await import("../pages/HealthPage")).HealthPage }));
 
@@ -96,7 +97,7 @@ export function AppRoutes() {
         <Route path="specs/:id" element={<SpecsPage />} />
         <Route path="playbooks" element={<CapabilityPage page="playbooks" />} />
         <Route path="inbox" element={<InboxPage />} />
-        <Route path="relays" element={<CapabilityPage page="relays" />} />
+        <Route path="relays" element={<RelayPage />} />
         <Route path="members" element={<MembersPage />} />
         <Route path="activity" element={<ActivityPage />} />
         <Route path="jobs" element={<JobsPage />} />

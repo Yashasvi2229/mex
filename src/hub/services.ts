@@ -35,6 +35,21 @@ import {
   type InboxProposalListResponse,
   type InboxProposalSummary,
   type InboxSpecChange,
+  type RelayDetail,
+  type RelayDraftDetail,
+  type RelayDraftInput,
+  type RelayDraftListRequest,
+  type RelayDraftListResponse,
+  type RelayDraftSummary,
+  type RelayEvidenceRef,
+  type RelayListRequest,
+  type RelayListResponse,
+  type RelayLocalChange,
+  type RelayOperationApplyRequest,
+  type RelayOperationApplyResponse,
+  type RelayOperationPreviewRequest,
+  type RelayOperationPreviewResponse,
+  type RelaySummary,
   type TeamFileChange,
   type SearchRequest,
   type SearchResponse,
@@ -104,6 +119,16 @@ import type {
   TeamInboxSpecProposalDetail,
   TeamInboxSpecProposalSummary,
   TeamInboxSpecRef,
+  TeamRelayApplyResult,
+  TeamRelayCommand,
+  TeamRelayDetail,
+  TeamRelayDraftDetail,
+  TeamRelayDraftListRequest,
+  TeamRelayDraftSummary,
+  TeamRelayListRequest,
+  TeamRelayPage,
+  TeamRelayPreviewEnvelope,
+  TeamRelaySummary,
   TeamMember,
   TeamMemberListRequest,
   TeamPage,
@@ -223,6 +248,18 @@ export interface HubInboxSpecAuthoringService {
   applyInbox(envelope: TeamInboxSpecPreviewEnvelope): Promise<TeamInboxSpecApplyResult>;
 }
 
+/** Exact private Relay facade consumed by the loopback Hub only. */
+export interface HubRelayHandoffService {
+  getRelayDraft(draftId: string): Promise<TeamRelayDraftDetail | null>;
+  listRelayDrafts(
+    request?: TeamRelayDraftListRequest,
+  ): Promise<TeamRelayPage<TeamRelayDraftSummary>>;
+  getRelay(relayId: string): Promise<TeamRelayDetail | null>;
+  listRelays(request?: TeamRelayListRequest): Promise<TeamRelayPage<TeamRelaySummary>>;
+  previewRelay(command: TeamRelayCommand): Promise<TeamRelayPreviewEnvelope>;
+  applyRelay(envelope: TeamRelayPreviewEnvelope): Promise<TeamRelayApplyResult>;
+}
+
 export interface LocalHubReadServicesOptions {
   readonly projectRoot: string;
   readonly scaffoldId: string;
@@ -230,6 +267,7 @@ export interface LocalHubReadServicesOptions {
   readonly team: HubTeamIdentityActivityService;
   readonly workstreams?: HubTeamWorkstreamService;
   readonly inbox?: HubInboxSpecAuthoringService;
+  readonly relays?: HubRelayHandoffService;
   readonly specs?: SpecReadService;
   readonly git?: GitPort;
   readonly graph?: HubGraphReadService;
@@ -254,6 +292,7 @@ export function createLocalHubReadServices(
   const team = options.team;
   const workstreams = options.workstreams;
   const inbox = options.inbox;
+  const relays = options.relays;
   const specs = options.specs;
   // Activity's existing workbench includes bounded legacy JSONL alongside
   // canonical events and resolves today's effective member separately from the
@@ -297,6 +336,12 @@ export function createLocalHubReadServices(
             ? available()
             : unavailable("Inbox Spec approval requires exact Wiki planning and apply."),
         },
+        relays: {
+          read: relays ? available() : unavailable("Relay reads are not connected in this build."),
+          draftMutation: relays ? available() : unavailable("Relay draft mutations are not connected in this build."),
+          publish: relays ? available() : unavailable("Relay publication is not connected in this build."),
+          lifecycleMutation: relays ? available() : unavailable("Relay lifecycle mutations are not connected in this build."),
+        },
         jobs: available(),
         graph: {
           read: graph ? available() : unavailable("The GraphPort is not connected in this build."),
@@ -312,10 +357,11 @@ export function createLocalHubReadServices(
     },
 
     async home(): Promise<HomeResponse> {
-      const [repository, actorResolution, workstreamSummary, inboxSummary] = await Promise.all([
+      const [repository, actorResolution, workstreamSummary, relaySummary, inboxSummary] = await Promise.all([
         git.getRepoState(),
         team.getCurrentActor(),
         homeWorkstreamSummary(workstreams),
+        homeRelaySummary(relays, team),
         homeInboxSummary(inbox),
       ]);
       const jobs = options.jobs.list({ limit: 100 }).items;
@@ -345,7 +391,7 @@ export function createLocalHubReadServices(
         actor: actorResolution.actor as HubActor,
         sections: {
           workstreams: workstreamSummary,
-          relays: unavailableSection("Relays are not connected in this foundation build."),
+          relays: relaySummary,
           inbox: inboxSummary,
           activity,
         },
@@ -512,6 +558,99 @@ export function createLocalHubReadServices(
         changes: result.changes.map(projectInboxFileChange),
         localChanges: result.localChanges.map(projectInboxLocalChange),
         proposals: result.proposals.map(projectInboxProposalDetail),
+        events: result.events.map(projectTeamActivityEvent),
+      };
+    },
+
+    async relayDrafts(request: RelayDraftListRequest): Promise<RelayDraftListResponse> {
+      if (relays === undefined) throw unavailableRelays();
+      let pageLimit = request.limit;
+      while (true) {
+        const page = await relays.listRelayDrafts({
+          limit: pageLimit,
+          ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+        });
+        const diagnostics = page.diagnostics.map(projectDiagnostic);
+        const response: RelayDraftListResponse = {
+          items: page.items.map(projectRelayDraftSummary),
+          nextCursor: page.nextCursor,
+          truncated: page.truncated,
+          sourceTruncated: page.sourceTruncated,
+          deterministicRevision: page.deterministicRevision,
+          diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+          diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+        };
+        if (Buffer.byteLength(JSON.stringify(response), "utf8") <= HUB_LIMITS.maxJsonResponseBytes) {
+          return response;
+        }
+        if (pageLimit <= 1) return response;
+        pageLimit = Math.max(1, Math.floor(pageLimit / 2));
+      }
+    },
+
+    async relayDraft(draftId: string): Promise<RelayDraftDetail | null> {
+      if (relays === undefined) throw unavailableRelays();
+      const draft = await relays.getRelayDraft(draftId);
+      return draft === null ? null : projectRelayDraftDetail(draft);
+    },
+
+    async relays(request: RelayListRequest): Promise<RelayListResponse> {
+      if (relays === undefined) throw unavailableRelays();
+      let pageLimit = request.limit;
+      while (true) {
+        const page = await relays.listRelays({
+          perspective: request.perspective,
+          ...(request.states === undefined ? {} : { states: request.states }),
+          ...(request.workstreamId === undefined ? {} : { workstreamId: request.workstreamId }),
+          ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+          limit: pageLimit,
+        });
+        const diagnostics = page.diagnostics.map(projectDiagnostic);
+        const response: RelayListResponse = {
+          items: page.items.map(projectRelaySummary),
+          nextCursor: page.nextCursor,
+          truncated: page.truncated,
+          sourceTruncated: page.sourceTruncated,
+          deterministicRevision: page.deterministicRevision,
+          diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+          diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+        };
+        if (Buffer.byteLength(JSON.stringify(response), "utf8") <= HUB_LIMITS.maxJsonResponseBytes) {
+          return response;
+        }
+        if (pageLimit <= 1) return response;
+        pageLimit = Math.max(1, Math.floor(pageLimit / 2));
+      }
+    },
+
+    async relay(relayId: string): Promise<RelayDetail | null> {
+      if (relays === undefined) throw unavailableRelays();
+      const relay = await relays.getRelay(relayId);
+      return relay === null ? null : projectRelayDetail(relay);
+    },
+
+    async previewRelayOperation(
+      request: RelayOperationPreviewRequest,
+    ): Promise<RelayOperationPreviewResponse> {
+      if (relays === undefined) throw unavailableRelays();
+      return projectRelayPreviewEnvelope(await relays.previewRelay(
+        projectRelayCommandToService(request),
+      ));
+    },
+
+    async applyRelayOperation(
+      request: RelayOperationApplyRequest,
+    ): Promise<RelayOperationApplyResponse> {
+      if (relays === undefined) throw unavailableRelays();
+      const result = await relays.applyRelay(projectRelayEnvelopeToService(request));
+      return {
+        operationId: result.operationId,
+        previewRevision: result.previewRevision,
+        applied: true,
+        idempotentReplay: result.idempotentReplay,
+        changes: result.changes.map(projectInboxFileChange),
+        localChanges: result.localChanges.map(projectRelayLocalChange),
+        relays: result.relays.map(projectRelayDetail),
         events: result.events.map(projectTeamActivityEvent),
       };
     },
@@ -1764,6 +1903,306 @@ function invalidGraphProjection(): HubHttpError {
     "Invalid graph projection",
     "The graph adapter returned an invalid bounded workspace result.",
   );
+}
+
+function invalidRelayProjection(): HubHttpError {
+  return new HubHttpError(
+    500,
+    "INTERNAL_ERROR",
+    "Invalid Relay projection",
+    "The Relay adapter returned an invalid bounded handoff result.",
+  );
+}
+
+function projectRelayActor(actor: ActorRef): RelaySummary["sender"] {
+  return cloneActor(actor);
+}
+
+function projectRelayMemberActor(
+  actor: ActorRef,
+): RelayDraftInput["recipients"][number] {
+  if (actor.kind !== "member") throw invalidRelayProjection();
+  return {
+    kind: "member",
+    memberId: actor.memberId,
+    ...(actor.displayName === undefined ? {} : { displayName: actor.displayName }),
+  };
+}
+
+function projectRelayEntity(entity: EntityRef): { id: string; kind: string; title?: string } {
+  return {
+    id: entity.id,
+    kind: entity.kind,
+    ...(entity.title === undefined ? {} : { title: entity.title }),
+  };
+}
+
+function projectRelayWorkstream(entity: EntityRef): RelayDraftInput["workstream"] {
+  if (entity.kind !== "workstream") throw invalidRelayProjection();
+  return { ...projectRelayEntity(entity), kind: "workstream" };
+}
+
+function projectRelayCode(
+  code: TeamRelayDetail["code"][number],
+): RelayDraftInput["code"][number] {
+  return code.kind === "file"
+    ? {
+        kind: "file",
+        path: code.path,
+        ...(code.fingerprint === undefined ? {} : { fingerprint: code.fingerprint }),
+      }
+    : {
+        kind: "symbol",
+        symbolId: code.symbolId,
+        ...(code.fingerprint === undefined ? {} : { fingerprint: code.fingerprint }),
+      };
+}
+
+function projectRelayEvidence(evidence: TeamEvidenceRef): RelayEvidenceRef {
+  switch (evidence.kind) {
+    case "entity": return { kind: "entity", entity: projectRelayEntity(evidence.entity) };
+    case "code": return { kind: "code", code: projectRelayCode(evidence.code) };
+    case "commit": return { kind: "commit", hash: evidence.hash };
+    case "file": return { kind: "file", path: evidence.path };
+    case "external": return {
+      kind: "external",
+      uri: evidence.uri,
+      ...(evidence.label === undefined ? {} : { label: evidence.label }),
+    };
+    case "manual": return { kind: "manual", note: evidence.note };
+  }
+}
+
+function projectRelayDraftInput(input: TeamRelayDraftDetail["input"]): RelayDraftInput {
+  return {
+    recipients: input.recipients.map(projectRelayMemberActor),
+    workstream: projectRelayWorkstream(input.workstream),
+    summary: input.summary,
+    completed: [...input.completed],
+    inProgress: [...input.inProgress],
+    decisions: input.decisions.map(projectRelayEntity),
+    blockers: [...input.blockers],
+    unresolvedQuestions: [...input.unresolvedQuestions],
+    changedFiles: [...input.changedFiles],
+    code: input.code.map(projectRelayCode),
+    evidence: input.evidence.map(projectRelayEvidence),
+    nextActions: [...input.nextActions],
+  };
+}
+
+function projectRelayDraftSummary(draft: TeamRelayDraftSummary): RelayDraftSummary {
+  return {
+    id: draft.id,
+    revision: draft.revision,
+    updatedAt: draft.updatedAt,
+    summary: draft.summary,
+    recipients: draft.recipients.map(projectRelayMemberActor),
+    workstream: projectRelayWorkstream(draft.workstream),
+  };
+}
+
+function projectRelayDraftDetail(draft: TeamRelayDraftDetail): RelayDraftDetail {
+  return { ...projectRelayDraftSummary(draft), input: projectRelayDraftInput(draft.input) };
+}
+
+function projectRelaySummary(relay: TeamRelaySummary): RelaySummary {
+  if (relay.ref.kind !== "relay") throw invalidRelayProjection();
+  return {
+    schemaVersion: relay.schemaVersion,
+    ref: { ...projectRelayEntity(relay.ref), kind: "relay" },
+    sourcePath: relay.sourcePath,
+    revision: relay.revision,
+    state: relay.state,
+    sender: projectRelayActor(relay.sender),
+    recipients: relay.recipients.map(projectRelayActor),
+    workstream: projectRelayWorkstream(relay.workstream),
+    summary: relay.summary,
+    publishedAt: relay.publishedAt,
+    acknowledgedBy: relay.acknowledgedBy === undefined ? null : projectRelayActor(relay.acknowledgedBy),
+    acknowledgedAt: relay.acknowledgedAt ?? null,
+    closedBy: relay.closedBy === undefined ? null : projectRelayActor(relay.closedBy),
+    closedAt: relay.closedAt ?? null,
+  };
+}
+
+function projectRelayDetail(relay: TeamRelayDetail): RelayDetail {
+  const diagnostics = relay.diagnostics.map(projectDiagnostic);
+  return {
+    ...projectRelaySummary(relay),
+    completed: [...relay.completed],
+    inProgress: [...relay.inProgress],
+    decisions: relay.decisions.map(projectRelayEntity),
+    blockers: [...relay.blockers],
+    unresolvedQuestions: [...relay.unresolvedQuestions],
+    changedFiles: [...relay.changedFiles],
+    code: relay.code.map(projectRelayCode),
+    evidence: relay.evidence.map(projectRelayEvidence),
+    nextActions: [...relay.nextActions],
+    diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+    diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+  };
+}
+
+function projectRelayDraftInputToService(input: RelayDraftInput): TeamRelayDraftDetail["input"] {
+  return {
+    recipients: input.recipients.map((actor) => ({ ...actor })),
+    workstream: { ...input.workstream },
+    summary: input.summary,
+    completed: [...input.completed],
+    inProgress: [...input.inProgress],
+    decisions: input.decisions.map((entity) => ({ ...entity })),
+    blockers: [...input.blockers],
+    unresolvedQuestions: [...input.unresolvedQuestions],
+    changedFiles: [...input.changedFiles],
+    code: input.code.map((code) => ({ ...code })),
+    evidence: input.evidence.map((evidence) => {
+      if (evidence.kind === "entity") return { kind: "entity" as const, entity: { ...evidence.entity } };
+      if (evidence.kind === "code") return { kind: "code" as const, code: { ...evidence.code } };
+      return { ...evidence };
+    }),
+    nextActions: [...input.nextActions],
+  };
+}
+
+function projectRelayCommandToService(request: RelayOperationPreviewRequest): TeamRelayCommand {
+  const action = request.action;
+  return {
+    operationId: request.operationId,
+    action: action.kind === "relay.draft.save"
+      ? {
+          kind: "relay.draft.save",
+          ...(action.draftId === undefined ? {} : { draftId: action.draftId }),
+          draft: projectRelayDraftInputToService(action.draft),
+        }
+      : { ...action },
+    expectedRevisions: request.expectedRevisions.map((expectation) => expectation.target.kind === "local"
+      ? {
+          target: { kind: "local", namespace: "relay-draft", id: expectation.target.id },
+          revision: expectation.revision,
+        }
+      : { target: { kind: "artifact", path: expectation.target.path }, revision: expectation.revision }),
+  };
+}
+
+function projectRelayCommandToWire(command: TeamRelayCommand): RelayOperationPreviewRequest {
+  const action = command.action;
+  return {
+    operationId: command.operationId,
+    action: action.kind === "relay.draft.save"
+      ? {
+          kind: "relay.draft.save",
+          ...(action.draftId === undefined ? {} : { draftId: action.draftId }),
+          draft: projectRelayDraftInput(action.draft),
+        }
+      : { ...action },
+    expectedRevisions: command.expectedRevisions.map((expectation) => {
+      if (expectation.target.kind === "local") {
+        if (expectation.target.namespace !== "relay-draft" || expectation.revision === null) {
+          throw invalidRelayProjection();
+        }
+        return {
+          target: { kind: "local" as const, namespace: "relay-draft" as const, id: expectation.target.id },
+          revision: expectation.revision,
+        };
+      }
+      if (expectation.target.kind !== "artifact" || expectation.revision === null) {
+        throw invalidRelayProjection();
+      }
+      return {
+        target: { kind: "artifact" as const, path: expectation.target.path },
+        revision: expectation.revision,
+      };
+    }),
+  };
+}
+
+function projectRelayLocalChange(
+  change: TeamRelayApplyResult["localChanges"][number],
+): RelayLocalChange {
+  if (change.namespace !== "relay-draft") throw invalidRelayProjection();
+  return { ...change, namespace: "relay-draft" };
+}
+
+function projectRelayPreviewDiagnostic(
+  diagnostic: Diagnostic,
+): RelayOperationPreviewResponse["preview"]["diagnostics"][number] {
+  const allowedKeys = new Set(["code", "severity", "message", "path"]);
+  if (Object.keys(diagnostic).some((key) => !allowedKeys.has(key))) throw invalidRelayProjection();
+  if (
+    !/^[A-Z0-9_]{1,128}$/.test(diagnostic.code)
+    || diagnostic.message !== relayDiagnosticMessage(diagnostic.code)
+    || (diagnostic.path !== undefined && (
+      !isCanonicalRepoPath(diagnostic.path)
+      || Buffer.byteLength(diagnostic.path, "utf8") > 4_096
+    ))
+  ) throw invalidRelayProjection();
+  return { ...diagnostic };
+}
+
+function relayDiagnosticMessage(code: string): string {
+  switch (code) {
+    case "ENVELOPE_TOO_LARGE": return "The Relay operation exceeded its bounded preview envelope.";
+    case "PATH_OUTSIDE_PROJECT": return "A Relay preview path was rejected at the repository boundary.";
+    case "REVISION_CONFLICT": return "The Relay operation no longer matches the observed repository revision.";
+    case "VALIDATION_FAILED": return "The Relay operation failed bounded validation.";
+    default: return "The Relay operation reported a bounded diagnostic.";
+  }
+}
+
+function projectRelayPreviewEnvelope(
+  envelope: TeamRelayPreviewEnvelope,
+): RelayOperationPreviewResponse {
+  return {
+    schemaVersion: 1,
+    request: projectRelayCommandToWire(envelope.request),
+    preview: {
+      valid: envelope.preview.valid,
+      scope: envelope.preview.scope,
+      changes: envelope.preview.changes.map(projectInboxFileChange),
+      localChanges: envelope.preview.localChanges.map(projectRelayLocalChange),
+      diagnostics: envelope.preview.diagnostics.map(projectRelayPreviewDiagnostic),
+    },
+    receipt: {
+      schemaVersion: 1,
+      authority: {
+        actor: cloneActor(envelope.receipt.authority.actor),
+        occurredAt: envelope.receipt.authority.occurredAt,
+        repoState: { ...envelope.receipt.authority.repoState },
+      },
+      purposeIds: envelope.receipt.purposeIds.map((purposeId) => ({ ...purposeId })),
+      requestRevision: envelope.receipt.requestRevision,
+      presentationRevision: envelope.receipt.presentationRevision,
+      previewRevision: envelope.receipt.previewRevision,
+    },
+  };
+}
+
+function projectRelayEnvelopeToService(
+  envelope: RelayOperationApplyRequest,
+): TeamRelayPreviewEnvelope {
+  return {
+    schemaVersion: 1,
+    request: projectRelayCommandToService(envelope.request),
+    preview: {
+      valid: envelope.preview.valid,
+      scope: envelope.preview.scope,
+      changes: envelope.preview.changes.map(projectInboxFileChangeToService),
+      localChanges: envelope.preview.localChanges.map((change) => ({ ...change })),
+      diagnostics: envelope.preview.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+    },
+    receipt: {
+      schemaVersion: 1,
+      authority: {
+        actor: cloneActor(envelope.receipt.authority.actor),
+        occurredAt: envelope.receipt.authority.occurredAt,
+        repoState: { ...envelope.receipt.authority.repoState },
+      },
+      purposeIds: envelope.receipt.purposeIds.map((purposeId) => ({ ...purposeId })),
+      requestRevision: envelope.receipt.requestRevision,
+      presentationRevision: envelope.receipt.presentationRevision,
+      previewRevision: envelope.receipt.previewRevision,
+    },
+  };
 }
 
 function invalidInboxProjection(): HubHttpError {
@@ -3029,6 +3468,8 @@ function safeDiagnosticMessage(code: string): string {
       return "Git identity could not be inspected safely.";
     case "GIT_IDENTITY_INVALID":
       return "Git identity exceeded the bounded actor contract and was ignored.";
+    case "RELAY_LEGACY_PUBLICATION_TIME":
+      return "One or more legacy schema-v1 Relays have no canonical publication timestamp.";
     default:
       return "Activity history reported a local diagnostic.";
   }
@@ -3142,6 +3583,51 @@ async function homeInboxSummary(
   }
 }
 
+async function homeRelaySummary(
+  relays: HubRelayHandoffService | undefined,
+  team: HubTeamIdentityActivityService,
+): Promise<HomeResponse["sections"]["relays"]> {
+  if (relays === undefined) {
+    return unavailableSection("Relay workflows are not connected in this build.");
+  }
+  try {
+    const current = await team.getCurrentActor();
+    if (current.actor.kind !== "member") {
+      return unavailableSection("Select an active Member to see your open Relay handoffs.");
+    }
+    const member = await team.getMember(current.actor.memberId);
+    if (member?.active !== true) {
+      return unavailableSection("Select an active Member to see your open Relay handoffs.");
+    }
+    let cursor: string | undefined;
+    let count = 0;
+    let pages = 0;
+    do {
+      const page = await relays.listRelays({
+        perspective: "mine",
+        states: ["published", "acknowledged"],
+        limit: 100,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      const hasUnsafeDiagnostic = page.diagnostics.some((diagnostic) => (
+        diagnostic.code !== "RELAY_LEGACY_PUBLICATION_TIME"
+      ));
+      if (page.sourceTruncated || hasUnsafeDiagnostic) {
+        return unavailableSection("Your open Relay summary could not establish a complete diagnostic-free corpus.");
+      }
+      count += page.items.length;
+      cursor = page.nextCursor ?? undefined;
+      pages += 1;
+      if (pages > 21 || count > 2_048) {
+        return unavailableSection("Your open Relay summary exceeded its bounded canonical corpus.");
+      }
+    } while (cursor !== undefined);
+    return { availability: "available", count };
+  } catch {
+    return unavailableSection("Your open Relay handoffs could not be read safely.");
+  }
+}
+
 function unavailableWorkstreams(): HubHttpError {
   return new HubHttpError(
     503,
@@ -3166,6 +3652,15 @@ function unavailableInbox(): HubHttpError {
     "CAPABILITY_UNAVAILABLE",
     "Capability unavailable",
     "Inbox workflows are not connected in this build.",
+  );
+}
+
+function unavailableRelays(): HubHttpError {
+  return new HubHttpError(
+    503,
+    "CAPABILITY_UNAVAILABLE",
+    "Capability unavailable",
+    "Relay workflows are not connected in this build.",
   );
 }
 

@@ -3,6 +3,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vitest/config";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { hubContractAliases } from "./scripts/contract-aliases.mjs";
 
 const packageRoot = dirname(fileURLToPath(import.meta.url));
 const fixtureModuleId = "virtual:mex-hub-fixture-api";
@@ -12,6 +13,7 @@ export default defineConfig(({ command }) => ({
   resolve: {
     alias: {
       "@": resolve(packageRoot, "src"),
+      ...hubContractAliases(packageRoot, command),
       [fixtureModuleId]: resolve(
         packageRoot,
         command === "build"

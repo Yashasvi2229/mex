@@ -201,6 +201,83 @@ describe("HubJobManager", () => {
     unsubscribe();
   });
 
+  it("does not persist or publish an identical progress snapshot", async () => {
+    const root = tempProject();
+    const store = localState(root);
+    const originalUpdate = store.updateHubJobRecord.bind(store);
+    let updateCalls = 0;
+    store.updateHubJobRecord = ((request) => {
+      updateCalls += 1;
+      return originalUpdate(request);
+    }) as TeamLocalState["updateHubJobRecord"];
+    let context: HubJobExecutorContext | undefined;
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const manager = new HubJobManager({
+      localState: store,
+      now: () => NOW,
+      generateId: () => JOB_A,
+      executors: {
+        wiki_rebuild: async (received) => {
+          context = received;
+          await pending;
+        },
+      },
+    });
+    manager.initialize();
+    const queued = manager.start({ kind: "wiki_rebuild" });
+    const events: HubJobSnapshot[] = [];
+    const unsubscribe = manager.subscribe(queued.id, (event) => {
+      if (event.type === "progress") events.push(event.job);
+    });
+
+    await waitForState(manager, queued.id, "running");
+    context!.reportProgress({ phase: "parse", completed: 0, total: 3 });
+    const parsing = manager.get(queued.id)!;
+    const callsWhileParsing = updateCalls;
+    const eventsWhileParsing = events.length;
+
+    context!.reportProgress({ phase: "publish" });
+
+    const publishing = manager.get(queued.id)!;
+    expect(updateCalls).toBe(callsWhileParsing + 1);
+    expect(publishing).toMatchObject({
+      phase: "publish",
+      progress: { completed: 0, total: 3 },
+    });
+    expect(publishing.revision).not.toBe(parsing.revision);
+    expect(events).toHaveLength(eventsWhileParsing + 1);
+
+    const dbPath = join(root, ".mex/local/team.db");
+    const durableBytes = readFileSync(dbPath);
+    const durableMtime = statSync(dbPath, { bigint: true }).mtimeNs;
+    const callsWhilePublishing = updateCalls;
+    const eventsWhilePublishing = events.length;
+
+    context!.reportProgress({ phase: "publish" });
+
+    expect(updateCalls).toBe(callsWhilePublishing);
+    expect(manager.get(queued.id)).toEqual(publishing);
+    expect(readFileSync(dbPath)).toEqual(durableBytes);
+    expect(statSync(dbPath, { bigint: true }).mtimeNs).toBe(durableMtime);
+    expect(events).toHaveLength(eventsWhilePublishing);
+
+    context!.reportProgress({ completed: 1 });
+    expect(updateCalls).toBe(callsWhilePublishing + 1);
+    expect(manager.get(queued.id)).toMatchObject({
+      phase: "publish",
+      progress: { completed: 1, total: 3 },
+    });
+    expect(manager.get(queued.id)?.revision).not.toBe(publishing.revision);
+    expect(events).toHaveLength(eventsWhilePublishing + 1);
+
+    finish();
+    await waitForState(manager, queued.id, "succeeded");
+    unsubscribe();
+  });
+
   it("enforces one active index mutation per scaffold transactionally", () => {
     const root = tempProject();
     const manager = new HubJobManager({

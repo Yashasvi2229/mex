@@ -131,10 +131,17 @@ describe("mex capabilities manifest", () => {
         .toBeLessThanOrEqual(CAPABILITIES_MAX_BYTES);
       expect(value.data.commands.read.find((entry) => entry.id === "inbox.contract"), label)
         .toMatchObject({ usage: "mex inbox contract --json", contractResolver: "inbox.contract" });
+      expect(value.data.commands.read.find((entry) => entry.id === "relay.contract"), label)
+        .toMatchObject({ usage: "mex relay contract --json", contractResolver: "relay.contract" });
       for (const descriptor of Object.values(value.data.commands).flat()) {
         if (!descriptor.id.startsWith("inbox.")) continue;
         expect(descriptor.contractResolver, `${label}:${descriptor.id}`).toBe("inbox.contract");
       }
+      expect(Object.values(value.data.commands).flat().filter((entry) => entry.id.startsWith("relay.")), label)
+        .toEqual([expect.objectContaining({ id: "relay.contract" })]);
+      const serialized = JSON.stringify(value);
+      expect(serialized, label).not.toContain("team-relay-request-v1.json");
+      expect(serialized, label).not.toContain("team-relay-preview-envelope-v1.json");
     }
   });
 
@@ -1108,6 +1115,21 @@ describe("mex capabilities manifest", () => {
 
   it("advertises only registered current-product command paths", async () => {
     const registered = registeredCommandPaths(program);
+    expect(registered.filter((path) => path === "mex relay" || path.startsWith("mex relay ")).sort())
+      .toEqual([
+        "mex relay",
+        "mex relay acknowledge",
+        "mex relay close",
+        "mex relay contract",
+        "mex relay draft",
+        "mex relay draft delete",
+        "mex relay draft list",
+        "mex relay draft save",
+        "mex relay draft show",
+        "mex relay list",
+        "mex relay publish",
+        "mex relay show",
+      ]);
     expect(CAPABILITY_COMMAND_CATALOG.map((entry) => entry.id))
       .not.toEqual(expect.arrayContaining(["wiki.build", "wiki.prepare", "wiki.propose.preview", "wiki.propose.apply"]));
     for (const descriptor of CAPABILITY_COMMAND_CATALOG) {
@@ -1132,6 +1154,7 @@ describe("mex capabilities manifest", () => {
       "team_identity",
       "team_workstreams",
       "team_inbox",
+      "team_relay",
       "spec_authoring",
       "activity_read",
       "activity_record",
@@ -1141,7 +1164,8 @@ describe("mex capabilities manifest", () => {
     ]);
     const serializedCommands = JSON.stringify(envelope.data.commands);
     expect(serializedCommands).toMatch(/inbox/u);
-    expect(serializedCommands).not.toMatch(/relay|playbook|catch[-_ ]?up/i);
+    expect(serializedCommands).toMatch(/relay\.contract/u);
+    expect(serializedCommands).not.toMatch(/relay\.(?:draft|list|show|publish|acknowledge|close)|playbook|catch[-_ ]?up/i);
     expect(serializedCommands).not.toMatch(/activity\.(?:create|update|delete)/i);
     expect(serializedCommands).not.toMatch(/wiki\.(?:build|prepare|propose)/i);
   });
@@ -1155,12 +1179,14 @@ describe("mex capabilities manifest", () => {
     expect(isTelemetryExemptCommand("list", "workstream")).toBe(true);
     expect(isTelemetryExemptCommand("save", "draft")).toBe(true);
     expect(isTelemetryExemptCommand("approve", "proposal")).toBe(true);
+    expect(isTelemetryExemptCommand("list", "relay")).toBe(true);
     expect(isTelemetryExemptCommand("list", "spec")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("capabilities")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("member")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("activity")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("workstream")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("inbox")).toBe(true);
+    expect(isFirstRunNoticeExemptCommand("relay")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("spec")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("check")).toBe(false);
   });

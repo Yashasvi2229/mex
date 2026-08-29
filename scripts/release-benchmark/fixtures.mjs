@@ -18,9 +18,9 @@ const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const MAX_PROCESS_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 export const RELEASE_FIXTURE_PROFILES = Object.freeze({
-  small: Object.freeze({ sourceFiles: 4, wikiEntities: 4, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 4 }),
-  medium: Object.freeze({ sourceFiles: 16, wikiEntities: 16, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 16 }),
-  large: Object.freeze({ sourceFiles: 48, wikiEntities: 48, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, activityEvents: 48 }),
+  small: Object.freeze({ sourceFiles: 4, wikiEntities: 4, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, members: 2, relayDrafts: 1, relays: 1, activityEvents: 4 }),
+  medium: Object.freeze({ sourceFiles: 16, wikiEntities: 16, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, members: 2, relayDrafts: 1, relays: 1, activityEvents: 16 }),
+  large: Object.freeze({ sourceFiles: 48, wikiEntities: 48, workstreams: 1, inboxDrafts: 1, inboxProposals: 1, members: 2, relayDrafts: 1, relays: 1, activityEvents: 48 }),
 });
 
 export function createReleaseFixture({
@@ -39,7 +39,9 @@ export function createReleaseFixture({
   mkdirSync(join(root, "src"), { recursive: true });
   mkdirSync(join(scaffold, "context"), { recursive: true });
   mkdirSync(join(scaffold, "inbox"), { recursive: true });
+  mkdirSync(join(scaffold, "relays"), { recursive: true });
   mkdirSync(join(scaffold, "specs"), { recursive: true });
+  mkdirSync(join(scaffold, "team", "members"), { recursive: true });
   mkdirSync(join(scaffold, "workstreams"), { recursive: true });
   mkdirSync(join(scaffold, "events", "activity", "2026-08"), { recursive: true });
 
@@ -109,6 +111,12 @@ export function createReleaseFixture({
 
   const draftId = "inbox_00000000000000000000000000000001";
   const proposalId = fixedId("proposal_", 40_000);
+  const workstreamId = fixedId("ws_", 20_000);
+  const publisherMemberId = fixedId("member_", 30_000);
+  const recipientMemberId = fixedId("member_", 30_001);
+  const relayDraftId = "relay_release_benchmark_local_draft";
+  const relayId = fixedId("relay_", 50_000);
+  const relayEventId = fixedId("event_", 10_000);
   const ownedFixtureTools = fixtureTools === undefined
     ? prepareReleaseFixtureTools({ cliPath, environment })
     : null;
@@ -127,16 +135,21 @@ export function createReleaseFixture({
       proposalId,
       specId: wikiIds[0],
       specPath: `.mex/specs/${wikiIds[0]}.md`,
+      workstreamId,
+      publisherMemberId,
+      recipientMemberId,
+      relayDraftId,
+      relayId,
+      relayEventId,
       environment,
     });
 
-    const workstreamId = fixedId("ws_", 20_000);
     writeFileSync(
       join(scaffold, "workstreams", `${workstreamId}.md`),
       workstreamDocument(workstreamId),
     );
 
-    for (let index = 0; index < profile.activityEvents; index += 1) {
+    for (let index = 1; index < profile.activityEvents; index += 1) {
       const id = fixedId("event_", 10_000 + index);
       const timestamp = new Date(Date.UTC(2026, 7, 1, 0, 0, index)).toISOString();
       writeFileSync(
@@ -158,6 +171,12 @@ export function createReleaseFixture({
       proposalId,
       specId: wikiIds[0],
       specPath: `.mex/specs/${wikiIds[0]}.md`,
+      workstreamId,
+      publisherMemberId,
+      recipientMemberId,
+      relayDraftId,
+      relayId,
+      relayEventId,
       environment,
     });
 
@@ -173,6 +192,12 @@ export function createReleaseFixture({
       firstInboxProposalId: proposalId,
       inboxDraftTitle: "Release benchmark local draft Requirement",
       inboxProposalTitle: "Release benchmark pending Spec update",
+      firstPublisherMemberId: publisherMemberId,
+      firstRecipientMemberId: recipientMemberId,
+      firstRelayDraftId: relayDraftId,
+      firstRelayId: relayId,
+      relayDraftSummary: "Release benchmark local Relay draft",
+      relaySummary: "Release benchmark published Relay handoff",
       mutableWikiPath: `.mex/specs/${wikiIds[0]}.md`,
       input,
     };
@@ -230,6 +255,12 @@ function seedInboxFixture({
   proposalId,
   specId,
   specPath,
+  workstreamId,
+  publisherMemberId,
+  recipientMemberId,
+  relayDraftId,
+  relayId,
+  relayEventId,
   environment,
 }) {
   run(process.execPath, [
@@ -241,6 +272,12 @@ function seedInboxFixture({
     proposalId,
     specId,
     specPath,
+    workstreamId,
+    publisherMemberId,
+    recipientMemberId,
+    relayDraftId,
+    relayId,
+    relayEventId,
   ], root, environment, 30_000);
 }
 

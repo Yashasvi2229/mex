@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpHubApi, HubApiError, fixturesEnabled, readBootstrapToken } from "./client";
-import type { ActivityResponse, JobSummary } from "./types";
+import type { ActivityResponse, JobSummary, RelayOperationPreviewRequest } from "./types";
 import { createFixtureApi } from "../dev/fixture-api";
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
@@ -253,6 +253,75 @@ describe("HttpHubApi shared-contract boundary", () => {
     await expect(api.getWorkstream("../../private/workstream")).rejects.toBeInstanceOf(HubApiError);
     await expect(api.getSpec("../../private/spec")).rejects.toBeInstanceOf(HubApiError);
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("uses strict Relay reads and applies the byte-identical signed envelope", async () => {
+    const fixture = createFixtureApi();
+    const drafts = await fixture.getRelayDrafts({ limit: 25 });
+    const draft = await fixture.getRelayDraft(drafts.items[0]!.id);
+    const relays = await fixture.getRelays({
+      perspective: "mine",
+      states: ["published", "acknowledged"],
+      limit: 25,
+    });
+    const relay = await fixture.getRelay(relays.items[0]!.ref.id);
+    const request: RelayOperationPreviewRequest = {
+      operationId: "hub_relay_client_exact_envelope",
+      action: { kind: "relay.draft.save", draft: draft.input },
+      expectedRevisions: [],
+    };
+    const preview = await fixture.previewRelayOperation(request);
+    const applied = await fixture.applyRelayOperation(preview);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(json(session))
+      .mockResolvedValueOnce(json(drafts))
+      .mockResolvedValueOnce(json(draft))
+      .mockResolvedValueOnce(json(relays))
+      .mockResolvedValueOnce(json(relay))
+      .mockResolvedValueOnce(json(preview))
+      .mockResolvedValueOnce(json(applied));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpHubApi();
+
+    await api.getSession();
+    await api.getRelayDrafts({ cursor: "relay-draft-page-2", limit: 25 });
+    await api.getRelayDraft(draft.id);
+    await api.getRelays({
+      perspective: "mine",
+      states: ["published", "acknowledged"],
+      workstreamId: relay.workstream.id,
+      cursor: "relay-page-2",
+      limit: 25,
+    });
+    await api.getRelay(relay.ref.id);
+    await api.previewRelayOperation(request);
+    await api.applyRelayOperation(preview);
+
+    const calls = fetchMock.mock.calls as [string, RequestInit][];
+    const draftListUrl = new URL(calls[1]![0], "http://127.0.0.1");
+    expect(draftListUrl.pathname).toBe("/api/v1/relays/drafts");
+    expect(Object.fromEntries(draftListUrl.searchParams)).toEqual({ limit: "25", cursor: "relay-draft-page-2" });
+    expect(new URL(calls[2]![0], "http://127.0.0.1").pathname).toBe(`/api/v1/relays/drafts/${draft.id}`);
+    const relayListUrl = new URL(calls[3]![0], "http://127.0.0.1");
+    expect(relayListUrl.pathname).toBe("/api/v1/relays");
+    expect(Object.fromEntries(relayListUrl.searchParams)).toEqual({
+      perspective: "mine",
+      limit: "25",
+      state: "published,acknowledged",
+      workstreamId: relay.workstream.id,
+      cursor: "relay-page-2",
+    });
+    expect(new URL(calls[4]![0], "http://127.0.0.1").pathname).toBe(`/api/v1/relays/${relay.ref.id}`);
+    expect(new URL(calls[5]![0], "http://127.0.0.1").pathname).toBe("/api/v1/relays/operations/preview");
+    expect(calls[5]![1].body).toBe(JSON.stringify(request));
+    expect(new URL(calls[6]![0], "http://127.0.0.1").pathname).toBe("/api/v1/relays/operations/apply");
+    expect(calls[6]![1].body).toBe(JSON.stringify(preview));
+    expect((calls[5]![1].headers as Headers).get("X-MEX-CSRF")).toBe(session.csrfToken);
+    expect((calls[6]![1].headers as Headers).get("X-MEX-CSRF")).toBe(session.csrfToken);
+
+    await expect(api.getRelayDraft("../../private/draft")).rejects.toBeInstanceOf(HubApiError);
+    await expect(api.getRelay("../../private/relay")).rejects.toBeInstanceOf(HubApiError);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
   });
 
   it("retains CSRF only in memory and adds it to JSON mutations", async () => {

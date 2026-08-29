@@ -49,6 +49,32 @@ expected deterministic Inbox asset failure short-circuited confirmation, so
 every pre-Checkpoint-E budget remains frozen. A clean enforcing pinned run is
 required before the checkpoint can merge.
 
+Checkpoint F's Relay route, draft/canonical list reads, and Relay heap were
+characterized by pinned CI run
+[`33249296778`](https://github.com/mex-memory/mex/actions/runs/33249296778),
+release-performance job
+[`99092066213`](https://github.com/mex-memory/mex/actions/runs/33249296778/job/99092066213).
+The retained `release-performance-1` artifact (ID `9713923132`, archive
+SHA-256 `6d9373c802bdc33f5f9b4d9abc79c13ff22684912eea08e3a78ead1fc845882f`,
+report SHA-256 `4626c75ed887f078036168080853cfb39ee39d950e45f48f5e1b2694c9369347`)
+measured PR head `9becb8635e90b324c168b0d387954307808f3e02` through GitHub's
+synthetic merge commit `2b25e73292bc1c54d68fae004eca07c7ec7832c7`. The report strictly
+validated on Ubuntu 24.04, Linux x64, Node 22.22.0 with ten timing and five
+heap samples. Every fixture had two Members, one local Relay draft, one
+published Relay, and zero outbound browser requests.
+
+Only the exact Relay asset candidates (`200128` JS, `12285` CSS, `0` font),
+draft/list API candidates (`5`/`15` ms small, `3`/`12` ms medium, and
+`4`/`13` ms large), and Relay heap candidates (`7753875`, `7754561`, and
+`7748627` bytes) were copied using the frozen formulas. The initial shell and
+maximum chunk remained below their frozen `460810`-byte ceiling; Home and
+Members heap remained below their existing limits and were not changed. The
+expected deterministic Relay asset failure short-circuited runtime
+confirmation, so all shared first-pass crossings remain unconfirmed and every
+non-Relay budget stays frozen. A separate clean enforcing run on the final
+exact head is mandatory, including confirmation of the four potentially
+material maintenance crossings from the characterization pass.
+
 ## Runner contract
 
 `npm run benchmark:release` builds the package and writes the bounded JSON
@@ -57,33 +83,36 @@ contracts are versioned by
 `scripts/release-benchmark/report.schema.json` and
 `scripts/release-benchmark/budgets.schema.json`.
 
-The benchmark generates three fixed Git repositories. Small contains four
-source files, four Wiki entities, one Workstream, one checkout-local Inbox
-draft, one pending canonical proposal, and four canonical Activity events;
-medium contains sixteen source files, Wiki entities, and Activity events plus
-the same one Workstream/draft/proposal shape; large contains forty-eight source
-files, Wiki entities, and Activity events plus that same bounded shape. The
-first four existing Wiki entity IDs form a root
+The benchmark generates three fixed Git repositories. Every profile contains
+one Workstream, one checkout-local Inbox draft, one pending canonical proposal,
+two active Members, one checkout-local Relay draft, and one published Relay.
+Small contains four source files, four Wiki entities, and four canonical
+Activity events; medium contains sixteen of each; large contains forty-eight of
+each. Relay publication reuses the first existing Activity slot, so Activity and
+the declared source, synthetic Knowledge/Wiki, and Inbox fixture counts remain
+unchanged. The first four existing Wiki entity IDs form a root
 Spec/requirement/constraint/acceptance-criterion slice under `.mex/specs/**`;
-no extra Wiki entities are added. IDs, contents, timestamps, Git identity,
-commit timestamp, and repository shape are deterministic. Graph and Wiki
-indexes are built only by explicit setup in the benchmark. Reads never
-initialize storage or maintain either index.
+no extra synthetic Knowledge or Spec-family records are added. The team-owned
+Workstream and Relay remain separately readable through the Wiki index, as in a
+real repository. IDs, contents, timestamps, Git identity, commit timestamp, and
+repository shape are deterministic. Graph and Wiki indexes are built only by
+explicit setup in the benchmark. Reads never initialize storage or maintain
+either index.
 
 Each profile records:
 
 - ten cold Hub readiness timings;
 - five idle server RSS and CPU samples over a two-second quiet window;
 - ten exact Hub API timings for Search, Code, Knowledge, Activity, Inbox draft
-  listing, and pending/stale Inbox proposal listing;
+  and proposal listing, and Relay draft and My-open Relay listing;
 - ten timings for each Graph/Wiki refresh and rebuild, with five peak-RSS
   samples for each operation;
 - Graph and Wiki SQLite-family bytes relative to their indexed input bytes.
 
 Every profile additionally records five Chromium heap samples after every
 registered Hub route: Home, Search, Knowledge browse/detail, Code search/symbol,
-Workstreams, Specs browse/detail, Inbox, the two honest unavailable capability
-routes, Members, Activity, Jobs, Health, and the wildcard not-found route.
+Workstreams, Specs browse/detail, Inbox, Relay, the honest unavailable Playbooks
+route, Members, Activity, Jobs, Health, and the wildcard not-found route.
 Every browser context begins empty. Its request audit fails if a route contacts
 any origin other than the exact loopback Hub origin.
 
@@ -92,8 +121,9 @@ initial static import closure and the incremental JavaScript, CSS, and font
 bytes for every registered route. Fonts referenced from global CSS are counted
 as initial assets even when Vite does not attach them to a manifest entry.
 The initial shell and Home must not statically close over Code, Knowledge,
-Workstreams, Specs, Inbox, the Inbox editor, Members, Activity, its nested
-recorder, or setup code, and the largest JavaScript chunk is checked explicitly.
+Workstreams, Specs, Inbox, Relay, either mutation editor, Members, Activity, its
+nested recorder, or setup code, and the largest JavaScript chunk is checked
+explicitly.
 Production assets are also scanned for exact development-fixture sentinels.
 
 ## Enforcement
@@ -186,16 +216,17 @@ identity, canonical Activity read/record, Graph, and Wiki surfaces. Checkpoint C
 adds registered structured Member and Activity commands; Checkpoint D adds
 registered Workstream reads/mutations and read-only Spec reads; Checkpoint E
 adds registered Inbox draft/proposal reads and governed Spec-authoring preview/
-apply commands. Every Team
+apply commands; Checkpoint F adds Relay draft/canonical reads and its five
+signed handoff mutations through a compact static-resolver descriptor. Every Team
 mutation advertises distinct preview and apply invocations plus a bounded
 machine-readable request schema, complete examples, the exact preview-envelope
 apply rule, and the typed process-exit table. Read, preview, and apply
 invocations remain separate fixed arrays, Graph's existing protocol-v3 commands
 remain JSONL byte-compatible, and unavailable states carry static safe reasons
 plus the next initialization action. Writable legacy Wiki synthesis commands
-remain omitted from the governed agent surface. Relays, Playbooks, Catch Up,
-and future team actions remain absent until their application services and
-structured CLI contracts exist.
+remain omitted from the governed agent surface. Playbooks, Catch Up, and future
+team actions remain absent until their application services and structured CLI
+contracts exist.
 
 Generated agent anchors direct supported tools to discover this manifest,
 prefer its structured reads, preview mutations, and wait for explicit human

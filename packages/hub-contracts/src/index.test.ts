@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import * as RelayRuntime from "./relay.js";
 import {
   ActivityRequestSchema,
   ActivityResponseSchema,
@@ -16,6 +17,18 @@ import {
   InboxOperationPreviewRequestSchema,
   InboxOperationPreviewResponseSchema,
   InboxProposalDetailSchema,
+  RelayDetailSchema,
+  RelayDraftDetailSchema,
+  RelayDraftIdSchema,
+  RelayDraftInputSchema,
+  RelayDraftListResponseSchema,
+  RelayDraftSummarySchema,
+  RelayIdSchema,
+  RelayListResponseSchema,
+  RelayOperationApplyResponseSchema,
+  RelayOperationPreviewRequestSchema,
+  RelayOperationPreviewResponseSchema,
+  RelaySummarySchema,
   SearchRequestSchema,
   SearchResponseSchema,
   SpecDetailResponseSchema,
@@ -38,6 +51,17 @@ import {
 } from "./index.js";
 
 describe("Hub API contracts", () => {
+  it("keeps the private Relay runtime entry on the canonical schema instances", () => {
+    expect(RelayRuntime.RelayDetailSchema).toBe(RelayDetailSchema);
+    expect(RelayRuntime.RelayDraftDetailSchema).toBe(RelayDraftDetailSchema);
+    expect(RelayRuntime.RelayDraftIdSchema).toBe(RelayDraftIdSchema);
+    expect(RelayRuntime.RelayDraftListResponseSchema).toBe(RelayDraftListResponseSchema);
+    expect(RelayRuntime.RelayIdSchema).toBe(RelayIdSchema);
+    expect(RelayRuntime.RelayListResponseSchema).toBe(RelayListResponseSchema);
+    expect(RelayRuntime.RelayOperationApplyResponseSchema).toBe(RelayOperationApplyResponseSchema);
+    expect(RelayRuntime.RelayOperationPreviewResponseSchema).toBe(RelayOperationPreviewResponseSchema);
+  });
+
   it("rejects unknown request fields and oversized queries", () => {
     expect(BootstrapRequestSchema.safeParse({
       token: Buffer.alloc(32).toString("base64url"),
@@ -53,6 +77,483 @@ describe("Hub API contracts", () => {
       q: "memory",
       limit: HUB_LIMITS.defaultPageSize,
     });
+  });
+
+  it("locks Relay draft IDs to the 128-byte ASCII product grammar", () => {
+    const maximumDraftId = "d".repeat(128);
+    const oversizedDraftId = "d".repeat(129);
+    const revision = "a".repeat(64);
+    const request = (draftId: string) => ({
+      operationId: "relay_contract_draft_id_boundary",
+      action: { kind: "relay.draft.delete" as const, draftId },
+      expectedRevisions: [{
+        target: { kind: "local" as const, namespace: "relay-draft" as const, id: draftId },
+        revision,
+      }],
+    });
+
+    expect(RelayDraftIdSchema.parse(maximumDraftId)).toBe(maximumDraftId);
+    expect(RelayOperationPreviewRequestSchema.parse(request(maximumDraftId)))
+      .toEqual(request(maximumDraftId));
+    expect(RelayDraftIdSchema.safeParse(oversizedDraftId).success).toBe(false);
+    expect(RelayOperationPreviewRequestSchema.safeParse(request(oversizedDraftId)).success)
+      .toBe(false);
+  });
+
+  it("locks strict Relay drafts, all evidence variants, and dual lifecycle projections", () => {
+    const revision = "a".repeat(64);
+    const member = { kind: "member" as const, memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV", displayName: "Ada" };
+    const workstream = { kind: "workstream" as const, id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV", title: "Relay" };
+    const draft = {
+      recipients: [member],
+      workstream,
+      summary: "A complete Relay handoff.",
+      completed: ["Captured the characterization."],
+      inProgress: ["Reviewing the final gate."],
+      decisions: [{ id: "decision-1", kind: "decision", title: "Keep the gate pinned" }],
+      blockers: ["Windows validation remains."],
+      unresolvedQuestions: ["Does the packed install preserve the digest?"],
+      changedFiles: ["src/relay.ts"],
+      code: [{ kind: "symbol" as const, symbolId: "relay.apply", fingerprint: "symbol-fingerprint" }],
+      evidence: [
+        { kind: "entity" as const, entity: { id: "decision-1", kind: "decision", title: "Pinned gate" } },
+        { kind: "code" as const, code: { kind: "file" as const, path: "src/relay.ts", fingerprint: "file-fingerprint" } },
+        { kind: "file" as const, path: "src/relay.ts" },
+        { kind: "commit" as const, hash: "b".repeat(40) },
+        { kind: "external" as const, uri: "https://example.test/evidence", label: "Run" },
+        { kind: "manual" as const, note: "Observed locally." },
+      ],
+      nextActions: ["Run the final gate."],
+    };
+    expect(RelayDraftInputSchema.parse(draft)).toEqual(draft);
+    expect(RelayDraftInputSchema.safeParse({
+      ...draft,
+      recipients: [{ ...member, displayName: "M".repeat(512) }],
+    }).success).toBe(true);
+    expect(RelayDraftInputSchema.safeParse({
+      ...draft,
+      recipients: [{ ...member, displayName: "M".repeat(513) }],
+    }).success).toBe(false);
+    for (const displayName of ["Relay\u0085Member", "Relay\u2028Member", "Relay\u2029Member"]) {
+      expect(RelayDraftInputSchema.safeParse({
+        ...draft,
+        recipients: [{ ...member, displayName }],
+      }).success, JSON.stringify(displayName)).toBe(false);
+    }
+    for (const malformed of [
+      { ...draft, completed: [draft.completed[0], draft.completed[0]] },
+      { ...draft, inProgress: [draft.inProgress[0], draft.inProgress[0]] },
+      { ...draft, blockers: [draft.blockers[0], draft.blockers[0]] },
+      { ...draft, unresolvedQuestions: [draft.unresolvedQuestions[0], draft.unresolvedQuestions[0]] },
+      { ...draft, nextActions: [draft.nextActions[0], draft.nextActions[0]] },
+      { ...draft, decisions: [draft.decisions[0], { ...draft.decisions[0], title: "Renamed duplicate" }] },
+      { ...draft, changedFiles: [draft.changedFiles[0], draft.changedFiles[0]] },
+      { ...draft, code: [draft.code[0], { ...draft.code[0] }] },
+    ]) {
+      expect(RelayDraftInputSchema.safeParse(malformed).success).toBe(false);
+    }
+    expect(RelayDraftInputSchema.safeParse({
+      ...draft,
+      evidence: [draft.evidence[0], draft.evidence[0]],
+    }).success).toBe(true);
+    expect(RelayDraftInputSchema.safeParse({ ...draft, recipients: [member, member] }).success).toBe(false);
+    expect(RelayDraftSummarySchema.safeParse({
+      id: "relay-draft-summary",
+      revision,
+      updatedAt: "2026-08-29T01:00:00.000Z",
+      summary: draft.summary,
+      recipients: [member, member],
+      workstream,
+    }).success).toBe(false);
+    expect(RelayDraftInputSchema.safeParse({ ...draft, summary: "not\nsingle line" }).success).toBe(false);
+
+    const save = {
+      operationId: "relay_contract_save",
+      action: { kind: "relay.draft.save" as const, draft },
+      expectedRevisions: [],
+    };
+    expect(RelayOperationPreviewRequestSchema.parse(save)).toEqual(save);
+    expect(RelayOperationPreviewRequestSchema.safeParse({
+      ...save,
+      expectedRevisions: [{
+        target: { kind: "artifact", path: ".mex/workstreams/ws_01ARZ3NDEKTSV4RRFFQ69G5FAV.md" },
+        revision,
+      }],
+    }).success).toBe(false);
+
+    const relay = {
+      schemaVersion: 2 as const,
+      ref: { id: "relay_01000000000000000000000001", kind: "relay" as const, title: draft.summary },
+      sourcePath: ".mex/relays/relay_01000000000000000000000001.md",
+      revision,
+      state: "closed" as const,
+      sender: member,
+      recipients: [member],
+      workstream,
+      summary: draft.summary,
+      completed: draft.completed,
+      inProgress: draft.inProgress,
+      decisions: draft.decisions,
+      blockers: draft.blockers,
+      unresolvedQuestions: draft.unresolvedQuestions,
+      changedFiles: draft.changedFiles,
+      code: draft.code,
+      evidence: draft.evidence,
+      nextActions: draft.nextActions,
+      diagnostics: [],
+      diagnosticsTruncated: false,
+      publishedAt: "2026-08-29T01:00:00.000Z",
+      acknowledgedBy: member,
+      acknowledgedAt: "2026-08-29T02:00:00.000Z",
+      closedBy: member,
+      closedAt: "2026-08-29T03:00:00.000Z",
+    };
+    expect(RelayDetailSchema.parse(relay)).toEqual(relay);
+    expect(RelayDetailSchema.safeParse({ ...relay, acknowledgedAt: "2026-08-29T00:00:00.000Z" }).success).toBe(false);
+    expect(RelayDetailSchema.safeParse({ ...relay, schemaVersion: 1 }).success).toBe(false);
+    expect(RelayDetailSchema.safeParse({
+      ...relay,
+      schemaVersion: 1,
+      publishedAt: null,
+      diagnostics: [{
+        code: "RELAY_LEGACY_PUBLICATION_TIME",
+        severity: "warning",
+        message: "One or more legacy schema-v1 Relays have no canonical publication timestamp.",
+      }],
+    }).success).toBe(true);
+
+    const legacyMember = { ...member, displayName: "M".repeat(201) };
+    const legacyGit = {
+      kind: "git" as const,
+      name: "G".repeat(321),
+      email: `${"e".repeat(310)}@example.test`,
+    };
+    const legacyRecipients = [
+      legacyGit,
+      ...Array.from({ length: 63 }, (_, index) => ({
+        kind: "git" as const,
+        name: `Legacy recipient ${index + 1}`,
+        email: `legacy-${index + 1}@example.test`,
+      })),
+    ];
+    const legacyPath = "src/legacy\u0085relay\u2028snapshot.ts";
+    const legacyRelay = {
+      ...relay,
+      schemaVersion: 1 as const,
+      state: "published" as const,
+      sender: legacyMember,
+      recipients: legacyRecipients,
+      workstream: { kind: "workstream" as const, id: "historical-workstream", title: "Historical Relay" },
+      changedFiles: [legacyPath],
+      code: [{ kind: "file" as const, path: legacyPath }],
+      evidence: [
+        { kind: "file" as const, path: legacyPath },
+        { kind: "code" as const, code: { kind: "file" as const, path: legacyPath } },
+      ],
+      diagnostics: [{
+        code: "RELAY_LEGACY_PUBLICATION_TIME",
+        severity: "warning" as const,
+        message: "One or more legacy schema-v1 Relays have no canonical publication timestamp.",
+      }],
+      publishedAt: null,
+      acknowledgedBy: null,
+      acknowledgedAt: null,
+      closedBy: null,
+      closedAt: null,
+    };
+    const legacySummary = {
+      schemaVersion: legacyRelay.schemaVersion,
+      ref: legacyRelay.ref,
+      sourcePath: legacyRelay.sourcePath,
+      revision: legacyRelay.revision,
+      state: legacyRelay.state,
+      sender: legacyRelay.sender,
+      recipients: legacyRelay.recipients,
+      workstream: legacyRelay.workstream,
+      summary: legacyRelay.summary,
+      publishedAt: legacyRelay.publishedAt,
+      acknowledgedBy: legacyRelay.acknowledgedBy,
+      acknowledgedAt: legacyRelay.acknowledgedAt,
+      closedBy: legacyRelay.closedBy,
+      closedAt: legacyRelay.closedAt,
+    };
+    expect(RelayDetailSchema.parse(legacyRelay)).toEqual(legacyRelay);
+    expect(RelaySummarySchema.parse(legacySummary)).toEqual(legacySummary);
+    expect(RelayDetailSchema.safeParse({ ...legacyRelay, sender: legacyGit }).success).toBe(true);
+    expect(RelaySummarySchema.safeParse({ ...legacySummary, sender: legacyGit }).success).toBe(true);
+    expect(RelayDetailSchema.safeParse({
+      ...legacyRelay,
+      recipients: [legacyGit, legacyGit],
+    }).success).toBe(false);
+    expect(RelaySummarySchema.safeParse({
+      ...legacySummary,
+      recipients: [legacyGit, legacyGit],
+    }).success).toBe(false);
+    expect(legacyRelay.recipients).toHaveLength(64);
+    expect(legacyRelay.workstream.id).toBe("historical-workstream");
+    expect(legacyRelay.changedFiles).toEqual([legacyPath]);
+    for (const sender of [
+      { ...legacyMember, displayName: "Legacy\u0085Member" },
+      { ...legacyGit, name: "Legacy\u2028Git" },
+      { ...legacyGit, email: "legacy\u2029@example.test" },
+    ]) {
+      expect(RelayDetailSchema.safeParse({ ...legacyRelay, sender }).success).toBe(false);
+      expect(RelaySummarySchema.safeParse({ ...legacySummary, sender }).success).toBe(false);
+    }
+    for (const changedFiles of [["src/control\u001f.ts"], ["src/delete\u007f.ts"]]) {
+      expect(RelayDetailSchema.safeParse({ ...legacyRelay, changedFiles }).success).toBe(false);
+    }
+    expect(RelayDetailSchema.safeParse({
+      ...legacyRelay,
+      schemaVersion: 2,
+      publishedAt: "2026-08-29T01:00:00.000Z",
+      diagnostics: [],
+    }).success).toBe(false);
+    expect(RelaySummarySchema.safeParse({
+      ...legacySummary,
+      schemaVersion: 2,
+      publishedAt: "2026-08-29T01:00:00.000Z",
+    }).success).toBe(false);
+    const relaySummary = {
+      schemaVersion: relay.schemaVersion,
+      ref: relay.ref,
+      sourcePath: relay.sourcePath,
+      revision: relay.revision,
+      state: relay.state,
+      sender: relay.sender,
+      recipients: relay.recipients,
+      workstream: relay.workstream,
+      summary: relay.summary,
+      publishedAt: relay.publishedAt,
+      acknowledgedBy: relay.acknowledgedBy,
+      acknowledgedAt: relay.acknowledgedAt,
+      closedBy: relay.closedBy,
+      closedAt: relay.closedAt,
+    };
+    for (const field of ["sender", "acknowledgedBy", "closedBy"] as const) {
+      expect(RelayDetailSchema.safeParse({ ...relay, [field]: legacyGit }).success).toBe(false);
+      expect(RelaySummarySchema.safeParse({ ...relaySummary, [field]: legacyGit }).success).toBe(false);
+    }
+    const duplicateV2Recipients = [member, { ...member, displayName: "Renamed duplicate" }];
+    expect(RelayDetailSchema.safeParse({ ...relay, recipients: duplicateV2Recipients }).success).toBe(false);
+    expect(RelaySummarySchema.safeParse({ ...relaySummary, recipients: duplicateV2Recipients }).success).toBe(false);
+    const offsetOrderedRelay = {
+      ...relay,
+      publishedAt: "2026-08-29T10:00:00.000+05:00",
+      acknowledgedAt: "2026-08-29T06:00:00.000Z",
+      closedAt: "2026-08-29T02:00:00.000-05:00",
+    };
+    expect(RelayDetailSchema.safeParse(offsetOrderedRelay).success).toBe(true);
+    expect(RelaySummarySchema.safeParse({
+      ...relaySummary,
+      publishedAt: offsetOrderedRelay.publishedAt,
+      acknowledgedAt: offsetOrderedRelay.acknowledgedAt,
+      closedAt: offsetOrderedRelay.closedAt,
+    }).success).toBe(true);
+
+    const acknowledgementBeforePublication = {
+      ...relay,
+      publishedAt: "2026-08-29T02:00:00.000-05:00",
+      acknowledgedAt: "2026-08-29T06:30:00.000Z",
+      closedAt: "2026-08-29T08:00:00.000Z",
+    };
+    expect(RelayDetailSchema.safeParse(acknowledgementBeforePublication).success).toBe(false);
+    expect(RelaySummarySchema.safeParse({
+      ...relaySummary,
+      publishedAt: acknowledgementBeforePublication.publishedAt,
+      acknowledgedAt: acknowledgementBeforePublication.acknowledgedAt,
+      closedAt: acknowledgementBeforePublication.closedAt,
+    }).success).toBe(false);
+
+    const closureBeforeAcknowledgement = {
+      ...relay,
+      publishedAt: "2026-08-29T05:00:00.000Z",
+      acknowledgedAt: "2026-08-29T02:00:00.000-05:00",
+      closedAt: "2026-08-29T06:30:00.000Z",
+    };
+    expect(RelayDetailSchema.safeParse(closureBeforeAcknowledgement).success).toBe(false);
+    expect(RelaySummarySchema.safeParse({
+      ...relaySummary,
+      publishedAt: closureBeforeAcknowledgement.publishedAt,
+      acknowledgedAt: closureBeforeAcknowledgement.acknowledgedAt,
+      closedAt: closureBeforeAcknowledgement.closedAt,
+    }).success).toBe(false);
+
+    const draftTarget = {
+      target: { kind: "local" as const, namespace: "relay-draft" as const, id: "draft-publish" },
+      revision,
+    };
+    const workstreamTarget = {
+      target: { kind: "artifact" as const, path: `.mex/workstreams/${workstream.id}.md` },
+      revision,
+    };
+    const memberTarget = {
+      target: { kind: "artifact" as const, path: `.mex/team/members/${member.memberId}.md` },
+      revision,
+    };
+    const publish = {
+      operationId: "relay_contract_publish",
+      action: { kind: "relay.publish" as const, draftId: "draft-publish" },
+      expectedRevisions: [memberTarget, draftTarget, workstreamTarget],
+    };
+    expect(RelayOperationPreviewRequestSchema.parse(publish)).toEqual(publish);
+    for (const expectedRevisions of [
+      [draftTarget, memberTarget],
+      [draftTarget, workstreamTarget],
+      [draftTarget, workstreamTarget, memberTarget, {
+        target: { kind: "artifact" as const, path: "README.md" },
+        revision,
+      }],
+    ]) {
+      expect(RelayOperationPreviewRequestSchema.safeParse({ ...publish, expectedRevisions }).success).toBe(false);
+    }
+
+    const previewEnvelope = {
+      schemaVersion: 1 as const,
+      request: save,
+      preview: {
+        valid: true,
+        scope: "local" as const,
+        changes: [],
+        localChanges: [],
+        diagnostics: [],
+      },
+      receipt: {
+        schemaVersion: 1 as const,
+        authority: {
+          actor: { kind: "git" as const, name: "Relay agent", email: "not-an-email" },
+          occurredAt: "2026-08-29T01:00:00.000Z",
+          repoState: {
+            branch: "feature/relay",
+            head: "b".repeat(40),
+            dirty: false,
+            observedAt: "2026-08-29T01:00:00.000Z",
+          },
+        },
+        purposeIds: [{ purpose: "relay-draft" as const, id: "draft-created" }],
+        requestRevision: "c".repeat(64),
+        presentationRevision: "d".repeat(64),
+        previewRevision: "e".repeat(64),
+      },
+    };
+    expect(RelayOperationPreviewResponseSchema.parse(previewEnvelope)).toEqual(previewEnvelope);
+    const maximumServiceMember = { ...member, displayName: "S".repeat(512) };
+    const maximumAuthorityEnvelope = {
+      ...previewEnvelope,
+      receipt: {
+        ...previewEnvelope.receipt,
+        authority: { ...previewEnvelope.receipt.authority, actor: maximumServiceMember },
+      },
+    };
+    expect(RelayOperationPreviewResponseSchema.parse(maximumAuthorityEnvelope))
+      .toEqual(maximumAuthorityEnvelope);
+    expect(RelayOperationPreviewResponseSchema.safeParse({
+      ...maximumAuthorityEnvelope,
+      receipt: {
+        ...maximumAuthorityEnvelope.receipt,
+        authority: {
+          ...maximumAuthorityEnvelope.receipt.authority,
+          actor: { ...maximumServiceMember, displayName: "S".repeat(513) },
+        },
+      },
+    }).success).toBe(false);
+    expect(RelayOperationPreviewResponseSchema.safeParse({
+      ...maximumAuthorityEnvelope,
+      receipt: {
+        ...maximumAuthorityEnvelope.receipt,
+        authority: {
+          ...maximumAuthorityEnvelope.receipt.authority,
+          actor: { kind: "git", name: "Relay\u0085Agent\u2028Line", email: "not-an-email" },
+        },
+      },
+    }).success).toBe(true);
+    const relayApply = {
+      operationId: save.operationId,
+      previewRevision: previewEnvelope.receipt.previewRevision,
+      applied: true as const,
+      idempotentReplay: false,
+      changes: [],
+      localChanges: [],
+      relays: [],
+      events: [{
+        schemaVersion: 1 as const,
+        id: "event_01000000000000000000000001",
+        timestamp: previewEnvelope.receipt.authority.occurredAt,
+        actor: maximumServiceMember,
+        action: "relay.published",
+        subjects: [{ kind: "entity" as const, entity: { id: relay.ref.id, kind: "relay" } }],
+        workstream,
+        repoState: previewEnvelope.receipt.authority.repoState,
+      }],
+    };
+    expect(RelayOperationApplyResponseSchema.parse(relayApply)).toEqual(relayApply);
+    expect(RelayOperationApplyResponseSchema.safeParse({
+      ...relayApply,
+      events: [{
+        ...relayApply.events[0],
+        actor: { ...maximumServiceMember, displayName: "S".repeat(513) },
+      }],
+    }).success).toBe(false);
+    expect(RelayOperationPreviewResponseSchema.safeParse({
+      ...previewEnvelope,
+      receipt: { ...previewEnvelope.receipt, purposeIds: [] },
+    }).success).toBe(false);
+    expect(RelayOperationPreviewResponseSchema.safeParse({
+      ...previewEnvelope,
+      request: publish,
+      receipt: {
+        ...previewEnvelope.receipt,
+        purposeIds: [
+          { purpose: "activity" as const, id: "event_01000000000000000000000001" },
+          { purpose: "relay" as const, id: relay.ref.id },
+        ],
+      },
+    }).success).toBe(true);
+    expect(RelayOperationPreviewResponseSchema.safeParse({
+      ...previewEnvelope,
+      request: publish,
+      receipt: {
+        ...previewEnvelope.receipt,
+        purposeIds: [{ purpose: "activity" as const, id: "event_01000000000000000000000001" }],
+      },
+    }).success).toBe(false);
+
+    const existingDraftExpectation = {
+      target: { kind: "local" as const, namespace: "relay-draft" as const, id: "draft-created" },
+      revision,
+    };
+    const relayExpectation = {
+      target: { kind: "artifact" as const, path: relay.sourcePath },
+      revision,
+    };
+    for (const [request, purposeIds] of [
+      [{
+        operationId: "relay_contract_update",
+        action: { kind: "relay.draft.save" as const, draftId: "draft-created", draft },
+        expectedRevisions: [existingDraftExpectation],
+      }, []],
+      [{
+        operationId: "relay_contract_delete",
+        action: { kind: "relay.draft.delete" as const, draftId: "draft-created" },
+        expectedRevisions: [existingDraftExpectation],
+      }, []],
+      [{
+        operationId: "relay_contract_acknowledge",
+        action: { kind: "relay.acknowledge" as const, relayId: relay.ref.id },
+        expectedRevisions: [relayExpectation],
+      }, [{ purpose: "activity" as const, id: "event_01000000000000000000000001" }]],
+      [{
+        operationId: "relay_contract_close",
+        action: { kind: "relay.close" as const, relayId: relay.ref.id },
+        expectedRevisions: [relayExpectation],
+      }, [{ purpose: "activity" as const, id: "event_01000000000000000000000001" }]],
+    ] as const) {
+      expect(RelayOperationPreviewResponseSchema.safeParse({
+        ...previewEnvelope,
+        request,
+        receipt: { ...previewEnvelope.receipt, purposeIds },
+      }).success).toBe(true);
+    }
   });
 
   it("locks the bounded body-free Inbox list and one-change mutation contract", () => {
@@ -285,6 +786,12 @@ describe("Hub API contracts", () => {
         draftMutation: unavailable,
         proposalMutation: unavailable,
         specApproval: unavailable,
+      },
+      relays: {
+        read: unavailable,
+        draftMutation: unavailable,
+        publish: unavailable,
+        lifecycleMutation: unavailable,
       },
       jobs: available,
       graph: { read: unavailable, refresh: unavailable, rebuild: unavailable },

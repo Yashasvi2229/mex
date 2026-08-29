@@ -34,6 +34,10 @@ import {
   buildInboxCommand,
   type TeamInboxSpecCliServiceFactory,
 } from "./team/inbox/cli/index.js";
+import {
+  buildRelayCommand,
+  type TeamRelayCliServiceFactory,
+} from "./team/relay/cli/index.js";
 
 /**
  * Load config for a CLI command and backfill scaffold identity on the way.
@@ -106,6 +110,8 @@ export function isTelemetryExemptCommand(
     || parentName === "workstream"
     || parentName === "inbox"
     || actionCommandHasAncestor(parentName, "inbox")
+    || parentName === "relay"
+    || actionCommandHasAncestor(parentName, "relay")
     || parentName === "spec"
     || commandName === "hub"
     || commandName === "capabilities";
@@ -119,13 +125,15 @@ export function isFirstRunNoticeExemptCommand(commandName?: string): boolean {
     || commandName === "activity"
     || commandName === "workstream"
     || commandName === "inbox"
+    || commandName === "relay"
     || commandName === "spec";
 }
 
 function actionCommandHasAncestor(parentName: string | undefined, expected: string): boolean {
-  // Commander exposes only the immediate parent here. Inbox has one extra
-  // draft/proposal level, so those names are treated as Team-only leaves.
-  return expected === "inbox" && (parentName === "draft" || parentName === "proposal");
+  // Commander exposes only the immediate parent here. Inbox and Relay have
+  // nested Team-only groups, so those leaves remain telemetry exempt.
+  return (expected === "inbox" || expected === "relay")
+    && (parentName === "draft" || parentName === "proposal");
 }
 
 async function runTuiCommand(): Promise<void> {
@@ -233,6 +241,7 @@ const teamWorkflowCliService = async () => {
 const teamIdentityActivityService: TeamIdentityActivityCliServiceFactory = teamWorkflowCliService;
 const teamWorkstreamService: TeamWorkstreamCliServiceFactory = teamWorkflowCliService;
 const teamInboxSpecService: TeamInboxSpecCliServiceFactory = teamWorkflowCliService;
+const teamRelayService: TeamRelayCliServiceFactory = teamWorkflowCliService;
 const specReadService: SpecCliServiceFactory = async () => {
   const projectRoot = locateTeamRepositoryRoot();
   // Specs are a read-only Wiki projection and do not depend on Team's tracked
@@ -267,6 +276,10 @@ program.addCommand(buildWorkstreamCommand({
 }));
 program.addCommand(buildInboxCommand({
   service: teamInboxSpecService,
+  io: processTeamCommandIo(),
+}));
+program.addCommand(buildRelayCommand({
+  service: teamRelayService,
   io: processTeamCommandIo(),
 }));
 program.addCommand(buildSpecCommand({
@@ -1024,6 +1037,10 @@ program
     console.log("  mex activity record <request.json> --json  Preview canonical Activity recording");
     console.log("  mex workstream list --json  List canonical team Workstreams");
     console.log("  mex workstream <create|update|archive> <request.json> --json  Preview a Workstream change");
+    console.log("  mex relay contract --json  Resolve the complete static Relay agent contract");
+    console.log("  mex relay draft <list|show|save|delete> ... --json  Read or preview local Relay drafts");
+    console.log("  mex relay list --json  List canonical team handoffs");
+    console.log("  mex relay <publish|acknowledge|close> <request.json> --json  Preview a Relay transition");
     console.log("  mex spec list --json  List read-only Wiki-owned Specs");
     console.log("  mex check              Drift score — are scaffold files still accurate?");
     console.log("  mex check --quiet      One-liner drift score");
@@ -1109,7 +1126,7 @@ interface TeamJsonInvocationContext {
 function inspectTeamJsonInvocation(argv: readonly string[]): TeamJsonInvocationContext | null {
   if (!argv.includes("--json") || argv.includes("--help") || argv.includes("-h")) return null;
   const family = argv[0];
-  if (family !== "member" && family !== "activity" && family !== "workstream" && family !== "inbox" && family !== "spec") return null;
+  if (family !== "member" && family !== "activity" && family !== "workstream" && family !== "inbox" && family !== "relay" && family !== "spec") return null;
   const leaf = argv[1];
   const applyRequested = argv.some((value) => value === "--apply" || value.startsWith("--apply="));
   if (family === "member") {
@@ -1176,6 +1193,33 @@ function inspectTeamJsonInvocation(argv: readonly string[]): TeamJsonInvocationC
     }
     return { command: "inbox", mode: "read" };
   }
+  if (family === "relay") {
+    const group = argv[1];
+    const nestedLeaf = argv[2];
+    if (group === "contract") return { command: "relay.contract", mode: "read" };
+    if (group === "draft") {
+      if (nestedLeaf === "list" || nestedLeaf === "show") {
+        return { command: `relay.draft.${nestedLeaf}`, mode: "read" };
+      }
+      if (nestedLeaf === "save" || nestedLeaf === "delete") {
+        return {
+          command: `relay.draft.${nestedLeaf}`,
+          mode: applyRequested ? "apply" : "preview",
+        };
+      }
+      return { command: "relay.draft", mode: "read" };
+    }
+    if (group === "list" || group === "show") {
+      return { command: `relay.${group}`, mode: "read" };
+    }
+    if (group === "publish" || group === "acknowledge" || group === "close") {
+      return {
+        command: `relay.${group}`,
+        mode: applyRequested ? "apply" : "preview",
+      };
+    }
+    return { command: "relay", mode: "read" };
+  }
   if (leaf === "list" || leaf === "show") {
     return { command: `spec.${leaf}`, mode: "read" };
   }
@@ -1218,7 +1262,7 @@ function isInvalidCapabilitiesJsonInvocation(argv: readonly string[]): boolean {
 
 function buildCompletion(shell: string): string {
   const commands = [
-    "setup", "capabilities", "member", "activity", "workstream", "inbox", "spec", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
+    "setup", "capabilities", "member", "activity", "workstream", "inbox", "relay", "spec", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
     "heartbeat", "doctor", "watch", "tui", "commands", "completion",
     "telemetry", "config", "feedback", "hub",
   ];

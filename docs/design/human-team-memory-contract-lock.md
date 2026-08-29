@@ -1,6 +1,6 @@
 # Human-Team Memory Contract Lock
 
-Status: Checkpoints E1-E4 implemented; pinned calibration applied and enforcing CI required
+Status: Checkpoints E1-E4 and F0-F4 implemented; pinned Checkpoint F release calibration applied and final enforcement remains gated
 
 This brief records the application boundary for the MEX OSS human-team memory
 program. The contract remains an internal, provisional API until a separate
@@ -287,6 +287,46 @@ The exact boundary is recorded in
 - Relay, Playbook, Catch Up, new MCP, agent, Git mutation, hosted, and direct
   Wiki/Spec editing surfaces remain outside E.
 
+## Relay handoff product boundary
+
+Checkpoint F is the final repository-native handoff surface in this program.
+Its exact contract is recorded in
+[`relay-handoff-contract.md`](relay-handoff-contract.md).
+
+- A Relay moves only from checkout-local draft to published, acknowledged, and
+  closed. Published handoff content is immutable; there is no decline,
+  withdrawal, reassignment, reopen, administrative override, notification,
+  external delivery, or agent execution.
+- Draft reads and writes remain local and authority-independent. Publication
+  binds one active sender, one eligible Workstream, and one to 32 active Member
+  recipients to their complete exact revision set. Any listed active recipient
+  may win the single acknowledgement claim; only the active recorded sender or
+  active claimant may close.
+- New Relay artifacts use schema v2 with a service-owned publication timestamp
+  equal to the signed authority and `relay.published` Activity time. Strict
+  schema-v1 artifacts remain readable and byte-preserving, retain schema v1
+  through lifecycle writes, and project one bounded missing-time warning.
+- The internal facade and registered CLI use a Relay-specific signed portable
+  receipt. Draft, Relay, and Activity IDs are purpose-bound so exact envelopes
+  apply across processes; actor, repository, dependency, containment, and
+  revision checks repeat under the workflow lease before publication and in
+  intent recovery.
+- `mex relay` exposes bounded local-draft and canonical reads plus explicit
+  preview/apply mutations. Its complete strict request and envelope schemas live
+  in the repository-independent static resolver; ordinary capabilities retain
+  the existing schema version and byte ceiling.
+- The authenticated private Hub adds only the six Relay API routes and a lazy
+  workbench. `My open` is the actionable recipient/claimant queue; `Sent` and
+  `All` remain explicit perspectives. Without active Member authority, all and
+  draft reads stay available while canonical actions fail honestly.
+- The deterministic release fixture adds two Members, one local Relay draft,
+  and one published Relay while reusing one existing Activity slot. Relay route
+  assets, two list APIs, and browser heap are the only ordinary F calibration
+  leaves; unrelated budgets remain frozen.
+
+Checkpoint F does not add Playbooks, Catch Up, package-root exports, new MCP,
+Git mutation, hosted behavior, or any delivery mechanism.
+
 ## Explicit exclusions
 
 Do not implement as part of this program:
@@ -351,8 +391,13 @@ registers the guarded CLI and bounded static contract resolver, E3 registers the
 private Hub and lazy Inbox workbench, and E4 adds the deterministic fixture plus
 release measurements. Inbox's numeric release candidates are pinned from the
 retained Ubuntu report, and a clean enforcing CI run is required without
-widening earlier thresholds. Relay, Playbook, and Catch Up remain assigned to
-later checkpoints.
+widening earlier thresholds. F1 adds the signed Relay facade, dual schema-v1/v2
+artifact lifecycle, and real repository conformance; F2 registers the guarded
+CLI and bounded static resolver; F3 registers the private Hub and lazy Relay
+workbench; F4 adds the deterministic two-Member/Relay fixture and owned release
+measurements. Relay numeric candidates require retained pinned provenance and a
+separate clean enforcing run. Playbook and Catch Up remain assigned to later
+checkpoints.
 
 ## Verification commands
 
@@ -362,6 +407,7 @@ npx vitest run test/wiki-port-real.contract.test.ts
 npx vitest run test/team-workflow-port-real.contract.test.ts
 npx vitest run test/team-identity-activity-real.contract.test.ts
 npx vitest run test/team-inbox-spec-authoring-real.contract.test.ts
+npx vitest run test/team-relay-handoff-real.contract.test.ts
 npx vitest run src/team/workflow/__tests__/repository-team-workstreams.test.ts
 npx vitest run src/team/specs
 npx vitest run src/graph/__tests__/protocol-v3-golden.test.ts
