@@ -157,6 +157,8 @@ type ReviewAction =
 type SimpleReviewAction = Exclude<ReviewAction, { kind: "inbox.repair" }>;
 type ApprovalAction = Extract<ReviewAction, { kind: "inbox.approve" }>;
 type SupportingReviewAction = Exclude<SimpleReviewAction, ApprovalAction>;
+type DraftBoundaryAction = Extract<SupportingReviewAction, { kind: "inbox.publish" | "inbox.draft.delete" }>;
+type ProposalSupportingAction = Exclude<SupportingReviewAction, DraftBoundaryAction>;
 type AppliedInboxAction = ReviewAction["kind"] | "inbox.draft.save";
 
 function afterDialogUnmount(callback: () => void): void {
@@ -382,6 +384,9 @@ function DraftEditorDialog({
   const api = useHubApi();
   const changeTypeRef = useRef<HTMLSelectElement>(null);
   const entityKindRef = useRef<HTMLSelectElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+  const summaryRef = useRef<HTMLTextAreaElement>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
   const isRepair = repair !== null;
   const sourceInput: InboxDraftInput | undefined = draft?.input ?? (repair === null
     ? undefined
@@ -507,6 +512,28 @@ function DraftEditorDialog({
       afterDialogUnmount(focusAppliedStatus);
     },
   });
+  const localSave = useMutation({
+    mutationFn: async () => {
+      const generation = previewGeneration.current + 1;
+      previewGeneration.current = generation;
+      setEnvelope(null);
+      const exactEnvelope = await api.previewInboxOperation(request());
+      if (generation !== previewGeneration.current) {
+        throw new Error("The draft changed while MEX was checking it. Review the latest wording and save again.");
+      }
+      setEnvelope(exactEnvelope);
+      if (!exactEnvelope.preview.valid) {
+        throw new Error("MEX could not produce a valid exact draft preview. No local changes were applied.");
+      }
+      return api.applyInboxOperation(exactEnvelope);
+    },
+    onSuccess: async (result) => {
+      applySucceeded.current = true;
+      await onApplied("inbox.draft.save", result);
+      onClose();
+      afterDialogUnmount(focusAppliedStatus);
+    },
+  });
 
   const invalidate = () => {
     previewGeneration.current += 1;
@@ -514,6 +541,7 @@ function DraftEditorDialog({
     setConfirmOpen(false);
     preview.reset();
     apply.reset();
+    if (!localSave.isPending) localSave.reset();
   };
   const startPreview = () => {
     const generation = previewGeneration.current + 1;
@@ -657,10 +685,13 @@ function DraftEditorDialog({
     ? "Repair proposal manually"
     : draft === null ? "Create local Spec draft" : "Edit local Spec draft";
   const previewLabel = isRepair ? "Review repaired proposal" : "Preview local draft";
+  const wordingInitialFocusRef = mode === "create" || includeTitle
+    ? titleRef
+    : includeSummary ? summaryRef : bodyRef;
 
   return (
     <Dialog open onOpenChange={(open) => {
-      if (!open && !apply.isPending) {
+      if (!open && !apply.isPending && !localSave.isPending) {
         onClose();
         afterDialogUnmount(() => finalFocus()?.focus({ preventScroll: true }));
       }
@@ -668,14 +699,16 @@ function DraftEditorDialog({
       <DialogContent
         className={styles.editorDialog}
         finalFocus={false}
-        initialFocus={draft === null && !isRepair ? changeTypeRef : entityKindRef}
+        initialFocus={draft === null && !isRepair
+          ? changeTypeRef
+          : isRepair ? entityKindRef : wordingInitialFocusRef}
       >
         <DialogHeader>
           <DialogTitle>{editorTitle}</DialogTitle>
           <DialogDescription>
             {isRepair
               ? "Update the stale proposal against current Spec content. Repair returns it to teammate review without writing the Spec."
-              : "This draft stays private to this checkout. Previewing and saving it does not publish canonical project memory."}
+              : "This draft stays private to this checkout. Saving it does not publish a proposal or change the Spec."}
           </DialogDescription>
         </DialogHeader>
         <div className={styles.dialogScroll}>
@@ -714,107 +747,6 @@ function DraftEditorDialog({
               </Field>
             </div>
             {mode === "update" ? (
-              <>
-                <Field>
-                  <FieldLabel htmlFor="draft-target-id">Canonical Spec ID</FieldLabel>
-                  <Input id="draft-target-id" onChange={(event) => change(setTargetId, event.currentTarget.value)} value={targetId} />
-                  <FieldDescription>The exact mx ID being updated.</FieldDescription>
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="draft-target-title">Current title (optional)</FieldLabel>
-                  <Input id="draft-target-title" maxLength={512} onChange={(event) => change(setTargetTitle, event.currentTarget.value)} value={targetTitle} />
-                </Field>
-                <div className={styles.formPair}>
-                  <Field>
-                    <FieldLabel htmlFor="draft-content-revision">Exact file revision</FieldLabel>
-                    <Input className={styles.monoInput} id="draft-content-revision" onChange={(event) => change(setTargetRevision, event.currentTarget.value)} value={targetRevision} />
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor="draft-semantic-revision">Semantic revision</FieldLabel>
-                    <Input id="draft-semantic-revision" min={1} onChange={(event) => change(setSemanticRevision, event.currentTarget.value)} type="number" value={semanticRevision} />
-                  </Field>
-                </div>
-              </>
-            ) : (
-              <>
-                <Field>
-                  <FieldLabel htmlFor="draft-status">Initial lifecycle</FieldLabel>
-                  <NativeSelect className={styles.select} id="draft-status" onChange={(event) => change(setStatus, event.currentTarget.value as "in_flight" | "promoted")} value={status}>
-                    <NativeSelectOption value="in_flight">In flight</NativeSelectOption>
-                    <NativeSelectOption value="promoted">Promoted</NativeSelectOption>
-                  </NativeSelect>
-                </Field>
-                <Field data-invalid={topicAttestations.error !== null || undefined}>
-                  <FieldLabel htmlFor="draft-topics">Topic endpoint attestations (optional)</FieldLabel>
-                  <Textarea
-                    className={styles.monoInput}
-                    id="draft-topics"
-                    onChange={(event) => change(setTopicsText, event.currentTarget.value)}
-                    placeholder="mx_… | 64-character file revision | semantic revision"
-                    rows={3}
-                    value={topicsText}
-                  />
-                  <FieldDescription>One typed topic per line. Every endpoint carries its exact file and semantic revision.</FieldDescription>
-                  {topicAttestations.error ? <FieldError>{topicAttestations.error}</FieldError> : null}
-                </Field>
-                <Field>
-                  <FieldLabel htmlFor="draft-relation-type">One hierarchy relation (optional)</FieldLabel>
-                  <NativeSelect
-                    className={styles.select}
-                    id="draft-relation-type"
-                    onChange={(event) => {
-                      const next = event.currentTarget.value as RelationType;
-                      setRelationType(next);
-                      if (next === "derived_from") setRelationTargetKind("spec");
-                      if (next === "verified_by") setRelationTargetKind("requirement");
-                      if (next === "constrained_by") setRelationTargetKind("constraint");
-                      if (next === "refines") setRelationTargetKind("requirement");
-                      invalidate();
-                    }}
-                    value={relationType}
-                  >
-                    <NativeSelectOption value="none">No relation</NativeSelectOption>
-                    <NativeSelectOption value="derived_from">Derived from</NativeSelectOption>
-                    <NativeSelectOption value="verified_by">Verified by</NativeSelectOption>
-                    <NativeSelectOption value="constrained_by">Constrained by</NativeSelectOption>
-                    <NativeSelectOption value="refines">Refines</NativeSelectOption>
-                  </NativeSelect>
-                </Field>
-                {relationType !== "none" ? (
-                  <div className={styles.attestationBlock}>
-                    <div className={styles.formPair}>
-                      <Field>
-                        <FieldLabel htmlFor="draft-relation-target-id">Relation endpoint ID</FieldLabel>
-                        <Input id="draft-relation-target-id" onChange={(event) => change(setRelationTargetId, event.currentTarget.value)} value={relationTargetId} />
-                      </Field>
-                      <Field>
-                        <FieldLabel htmlFor="draft-relation-target-kind">Endpoint kind</FieldLabel>
-                        <NativeSelect className={styles.select} id="draft-relation-target-kind" onChange={(event) => change(setRelationTargetKind, event.currentTarget.value as InboxSpecKind)} value={relationTargetKind}>
-                          {specKinds.map((kind) => <NativeSelectOption key={kind} value={kind}>{sentenceCase(kind)}</NativeSelectOption>)}
-                        </NativeSelect>
-                      </Field>
-                    </div>
-                    <Field>
-                      <FieldLabel htmlFor="draft-relation-target-title">Endpoint title (optional)</FieldLabel>
-                      <Input id="draft-relation-target-title" maxLength={512} onChange={(event) => change(setRelationTargetTitle, event.currentTarget.value)} value={relationTargetTitle} />
-                    </Field>
-                    <div className={styles.formPair}>
-                      <Field>
-                        <FieldLabel htmlFor="draft-relation-revision">Endpoint file revision</FieldLabel>
-                        <Input className={styles.monoInput} id="draft-relation-revision" onChange={(event) => change(setRelationRevision, event.currentTarget.value)} value={relationRevision} />
-                      </Field>
-                      <Field>
-                        <FieldLabel htmlFor="draft-relation-semantic-revision">Endpoint semantic revision</FieldLabel>
-                        <Input id="draft-relation-semantic-revision" min={1} onChange={(event) => change(setRelationSemanticRevision, event.currentTarget.value)} type="number" value={relationSemanticRevision} />
-                      </Field>
-                    </div>
-                    {!relationIsValid ? <FieldError>The hierarchy direction, endpoint kind, ID, and exact revisions must form one valid typed relation.</FieldError> : null}
-                    {createExpectationConflict ? <FieldError>A topic and relation may share an endpoint only when their exact revisions agree.</FieldError> : null}
-                  </div>
-                ) : null}
-              </>
-            )}
-            {mode === "update" ? (
               <Field>
                 <FieldLabel>Included patch fields</FieldLabel>
                 <div aria-label="Included Spec update fields" className={styles.patchToggles} role="group">
@@ -851,17 +783,17 @@ function DraftEditorDialog({
             ) : null}
             <Field>
               <FieldLabel htmlFor="draft-title">{mode === "create" ? "Title" : "Replacement title (optional)"}</FieldLabel>
-              <Input disabled={mode === "update" && !includeTitle} id="draft-title" maxLength={512} onChange={(event) => change(setTitle, event.currentTarget.value)} value={title} />
+              <Input disabled={mode === "update" && !includeTitle} id="draft-title" maxLength={512} onChange={(event) => change(setTitle, event.currentTarget.value)} ref={titleRef} value={title} />
             </Field>
             <Field>
               <FieldLabel htmlFor="draft-summary">{mode === "create" ? "Summary (optional)" : "Replacement summary"}</FieldLabel>
-              <Textarea disabled={mode === "update" && !includeSummary} id="draft-summary" maxLength={2 * 1024} onChange={(event) => change(setSummary, event.currentTarget.value)} rows={3} value={summary} />
-              {mode === "update" && includeSummary ? <FieldDescription>Leave empty to clear the canonical summary.</FieldDescription> : null}
+              <Textarea disabled={mode === "update" && !includeSummary} id="draft-summary" maxLength={2 * 1024} onChange={(event) => change(setSummary, event.currentTarget.value)} ref={summaryRef} rows={3} value={summary} />
+              {mode === "update" && includeSummary ? <FieldDescription>Leave empty to remove the current summary.</FieldDescription> : null}
             </Field>
             <Field>
               <FieldLabel htmlFor="draft-body">{mode === "create" ? "Spec body" : "Replacement body"}</FieldLabel>
-              <Textarea disabled={mode === "update" && !includeBody} id="draft-body" maxLength={16 * 1024} onChange={(event) => change(setBody, event.currentTarget.value)} rows={8} value={body} />
-              <FieldDescription>Tabs and line breaks are preserved in the exact canonical preview.</FieldDescription>
+              <Textarea disabled={mode === "update" && !includeBody} id="draft-body" maxLength={16 * 1024} onChange={(event) => change(setBody, event.currentTarget.value)} ref={bodyRef} rows={8} value={body} />
+              <FieldDescription>Tabs and line breaks are preserved.</FieldDescription>
             </Field>
             <Field>
               <FieldLabel htmlFor="draft-rationale">Rationale</FieldLabel>
@@ -880,9 +812,118 @@ function DraftEditorDialog({
               <FieldLabel htmlFor="draft-evidence">Additional manual evidence (optional)</FieldLabel>
               <Textarea id="draft-evidence" maxLength={4 * 1024} onChange={(event) => change(setEvidenceNote, event.currentTarget.value)} rows={3} value={evidenceNote} />
             </Field>
-            {!canPreview ? <FieldError>Complete the required fields and exact revision attestation before previewing.</FieldError> : null}
+            <Collapsible className={styles.advancedEditor}>
+              <CollapsibleTrigger render={<Button size="sm" type="button" variant="ghost" />}>
+                <ChevronDown data-icon="inline-start" /> Advanced
+              </CollapsibleTrigger>
+              <CollapsibleContent className={styles.advancedEditorContent}>
+                {mode === "update" ? (
+                  <>
+                    <Field>
+                      <FieldLabel htmlFor="draft-target-id">Canonical Spec ID</FieldLabel>
+                      <Input id="draft-target-id" onChange={(event) => change(setTargetId, event.currentTarget.value)} value={targetId} />
+                      <FieldDescription>The exact mx ID being updated.</FieldDescription>
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="draft-target-title">Current title (optional)</FieldLabel>
+                      <Input id="draft-target-title" maxLength={512} onChange={(event) => change(setTargetTitle, event.currentTarget.value)} value={targetTitle} />
+                    </Field>
+                    <div className={styles.formPair}>
+                      <Field>
+                        <FieldLabel htmlFor="draft-content-revision">Exact file revision</FieldLabel>
+                        <Input className={styles.monoInput} id="draft-content-revision" onChange={(event) => change(setTargetRevision, event.currentTarget.value)} value={targetRevision} />
+                      </Field>
+                      <Field>
+                        <FieldLabel htmlFor="draft-semantic-revision">Semantic revision</FieldLabel>
+                        <Input id="draft-semantic-revision" min={1} onChange={(event) => change(setSemanticRevision, event.currentTarget.value)} type="number" value={semanticRevision} />
+                      </Field>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <Field>
+                      <FieldLabel htmlFor="draft-status">Initial lifecycle</FieldLabel>
+                      <NativeSelect className={styles.select} id="draft-status" onChange={(event) => change(setStatus, event.currentTarget.value as "in_flight" | "promoted")} value={status}>
+                        <NativeSelectOption value="in_flight">In flight</NativeSelectOption>
+                        <NativeSelectOption value="promoted">Promoted</NativeSelectOption>
+                      </NativeSelect>
+                    </Field>
+                    <Field data-invalid={topicAttestations.error !== null || undefined}>
+                      <FieldLabel htmlFor="draft-topics">Topic endpoint attestations (optional)</FieldLabel>
+                      <Textarea
+                        className={styles.monoInput}
+                        id="draft-topics"
+                        onChange={(event) => change(setTopicsText, event.currentTarget.value)}
+                        placeholder="mx_… | 64-character file revision | semantic revision"
+                        rows={3}
+                        value={topicsText}
+                      />
+                      <FieldDescription>One typed topic per line. Every endpoint carries its exact file and semantic revision.</FieldDescription>
+                      {topicAttestations.error ? <FieldError>{topicAttestations.error}</FieldError> : null}
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="draft-relation-type">One hierarchy relation (optional)</FieldLabel>
+                      <NativeSelect
+                        className={styles.select}
+                        id="draft-relation-type"
+                        onChange={(event) => {
+                          const next = event.currentTarget.value as RelationType;
+                          setRelationType(next);
+                          if (next === "derived_from") setRelationTargetKind("spec");
+                          if (next === "verified_by") setRelationTargetKind("requirement");
+                          if (next === "constrained_by") setRelationTargetKind("constraint");
+                          if (next === "refines") setRelationTargetKind("requirement");
+                          invalidate();
+                        }}
+                        value={relationType}
+                      >
+                        <NativeSelectOption value="none">No relation</NativeSelectOption>
+                        <NativeSelectOption value="derived_from">Derived from</NativeSelectOption>
+                        <NativeSelectOption value="verified_by">Verified by</NativeSelectOption>
+                        <NativeSelectOption value="constrained_by">Constrained by</NativeSelectOption>
+                        <NativeSelectOption value="refines">Refines</NativeSelectOption>
+                      </NativeSelect>
+                    </Field>
+                    {relationType !== "none" ? (
+                      <div className={styles.attestationBlock}>
+                        <div className={styles.formPair}>
+                          <Field>
+                            <FieldLabel htmlFor="draft-relation-target-id">Relation endpoint ID</FieldLabel>
+                            <Input id="draft-relation-target-id" onChange={(event) => change(setRelationTargetId, event.currentTarget.value)} value={relationTargetId} />
+                          </Field>
+                          <Field>
+                            <FieldLabel htmlFor="draft-relation-target-kind">Endpoint kind</FieldLabel>
+                            <NativeSelect className={styles.select} id="draft-relation-target-kind" onChange={(event) => change(setRelationTargetKind, event.currentTarget.value as InboxSpecKind)} value={relationTargetKind}>
+                              {specKinds.map((kind) => <NativeSelectOption key={kind} value={kind}>{sentenceCase(kind)}</NativeSelectOption>)}
+                            </NativeSelect>
+                          </Field>
+                        </div>
+                        <Field>
+                          <FieldLabel htmlFor="draft-relation-target-title">Endpoint title (optional)</FieldLabel>
+                          <Input id="draft-relation-target-title" maxLength={512} onChange={(event) => change(setRelationTargetTitle, event.currentTarget.value)} value={relationTargetTitle} />
+                        </Field>
+                        <div className={styles.formPair}>
+                          <Field>
+                            <FieldLabel htmlFor="draft-relation-revision">Endpoint file revision</FieldLabel>
+                            <Input className={styles.monoInput} id="draft-relation-revision" onChange={(event) => change(setRelationRevision, event.currentTarget.value)} value={relationRevision} />
+                          </Field>
+                          <Field>
+                            <FieldLabel htmlFor="draft-relation-semantic-revision">Endpoint semantic revision</FieldLabel>
+                            <Input id="draft-relation-semantic-revision" min={1} onChange={(event) => change(setRelationSemanticRevision, event.currentTarget.value)} type="number" value={relationSemanticRevision} />
+                          </Field>
+                        </div>
+                        {!relationIsValid ? <FieldError>The hierarchy direction, endpoint kind, ID, and exact revisions must form one valid typed relation.</FieldError> : null}
+                        {createExpectationConflict ? <FieldError>A topic and relation may share an endpoint only when their exact revisions agree.</FieldError> : null}
+                      </div>
+                    ) : null}
+                  </>
+                )}
+              </CollapsibleContent>
+            </Collapsible>
+            {!canPreview ? <FieldError>Complete the required fields and any needed advanced references before saving.</FieldError> : null}
           </FieldGroup>
-          {preview.isError ? <ErrorState error={preview.error} /> : null}
+          {isRepair && preview.isError ? <ErrorState error={preview.error} /> : null}
+          {!isRepair && localSave.isError ? <ErrorState error={localSave.error} /> : null}
           {envelope && !envelope.preview.valid ? (
             <Alert variant="destructive">
               <AlertTriangle aria-hidden="true" />
@@ -894,7 +935,7 @@ function DraftEditorDialog({
         </div>
         <DialogFooter>
           <Button
-            disabled={apply.isPending}
+            disabled={apply.isPending || localSave.isPending}
             onClick={() => {
               onClose();
               afterDialogUnmount(() => finalFocus()?.focus({ preventScroll: true }));
@@ -904,7 +945,11 @@ function DraftEditorDialog({
           >
             Cancel
           </Button>
-          {envelope === null ? (
+          {!isRepair ? (
+            <Button disabled={!canPreview || localSave.isPending} onClick={() => localSave.mutate()} type="button">
+              <ShieldCheck data-icon="inline-start" /> {localSave.isPending ? "Saving…" : "Save draft"}
+            </Button>
+          ) : envelope === null ? (
             <Button disabled={!canPreview || preview.isPending} onClick={startPreview} type="button">
               <FileDiff data-icon="inline-start" /> {preview.isPending ? "Preparing…" : previewLabel}
             </Button>
@@ -919,7 +964,7 @@ function DraftEditorDialog({
           )}
         </DialogFooter>
       </DialogContent>
-      {envelope ? (
+      {isRepair && envelope ? (
         <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
           <AlertDialogContent finalFocus={() => applySucceeded.current ? false : confirmTriggerRef.current}>
             <AlertDialogHeader>
@@ -928,7 +973,7 @@ function DraftEditorDialog({
               <AlertDialogDescription>
                 {isRepair
                   ? "The refreshed content and references will replace this stale revision. No Spec is written."
-                  : "This writes checkout-local draft state only. It does not add proposal prose to Git or modify a canonical Spec."}
+                  : "This writes checkout-local draft state only. It does not add proposal prose to Git or modify a Spec."}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <ExactPreviewDetails envelope={envelope} />
@@ -1021,7 +1066,7 @@ function ReviewActionDialog({
   onClose,
   onApplied,
 }: {
-  action: SupportingReviewAction;
+  action: ProposalSupportingAction;
   finalFocus(): HTMLElement | null;
   focusAppliedStatus(): void;
   onClose(): void;
@@ -1061,16 +1106,6 @@ function ReviewActionDialog({
   const rationaleAccepted = canonicalText(rationale, 8 * 1024, rationaleRequired);
 
   const request = (): InboxOperationPreviewRequest => {
-    if (action.kind === "inbox.publish" || action.kind === "inbox.draft.delete") {
-      return {
-        operationId: operation.current,
-        action: {
-          kind: action.kind,
-          draftId: action.draft.id,
-        },
-        expectedRevisions: [draftExpectation(action.draft)],
-      };
-    }
     const expectedRevisions = [proposalExpectation(action.proposal)];
     if (action.kind === "inbox.reject" || action.kind === "inbox.mark-stale") {
       return {
@@ -1129,8 +1164,8 @@ function ReviewActionDialog({
         </DialogHeader>
         <div className={styles.dialogScroll}>
           <div className={styles.reviewSubject}>
-            <span>{"draft" in action ? "Local draft" : "Spec change"}</span>
-            <strong>{"draft" in action ? action.draft.title : action.proposal.title}</strong>
+            <span>Spec change</span>
+            <strong>{action.proposal.title}</strong>
           </div>
           {action.kind === "inbox.reject" || action.kind === "inbox.withdraw" || action.kind === "inbox.mark-stale" ? (
             <Field data-invalid={!rationaleAccepted || undefined}>
@@ -1396,6 +1431,96 @@ function ApproveChangeDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function DraftBoundaryDialog({
+  action,
+  finalFocus,
+  focusAppliedStatus,
+  onClose,
+  onApplied,
+}: {
+  action: DraftBoundaryAction;
+  finalFocus(): HTMLElement | null;
+  focusAppliedStatus(): void;
+  onClose(): void;
+  onApplied(kind: AppliedInboxAction, result: InboxOperationApplyResponse): Promise<void>;
+}) {
+  const api = useHubApi();
+  const applySucceeded = useRef(false);
+  const [envelope, setEnvelope] = useState<InboxOperationPreviewResponse | null>(null);
+  const operation = useMutation({
+    mutationFn: async () => {
+      const exactEnvelope = await api.previewInboxOperation({
+        operationId: operationId(action.kind.replaceAll(".", "_")),
+        action: { kind: action.kind, draftId: action.draft.id },
+        expectedRevisions: [draftExpectation(action.draft)],
+      });
+      setEnvelope(exactEnvelope);
+      if (!exactEnvelope.preview.valid) {
+        throw new Error("MEX could not produce a valid exact preview. No draft changes were applied.");
+      }
+      return api.applyInboxOperation(exactEnvelope);
+    },
+    onSuccess: async (result) => {
+      applySucceeded.current = true;
+      await onApplied(action.kind, result);
+      onClose();
+      afterDialogUnmount(focusAppliedStatus);
+    },
+  });
+  const publishing = action.kind === "inbox.publish";
+  const closeAndRestoreFocus = () => {
+    if (operation.isPending) return;
+    onClose();
+    afterDialogUnmount(() => finalFocus()?.focus({ preventScroll: true }));
+  };
+
+  return (
+    <AlertDialog open onOpenChange={(open) => {
+      if (!open) closeAndRestoreFocus();
+    }}>
+      <AlertDialogContent finalFocus={() => applySucceeded.current ? false : finalFocus()}>
+        <AlertDialogHeader>
+          <AlertDialogMedia>{publishing ? <Send aria-hidden="true" /> : <Trash2 aria-hidden="true" />}</AlertDialogMedia>
+          <AlertDialogTitle>{publishing ? "Publish this draft for review?" : "Discard this draft?"}</AlertDialogTitle>
+          <AlertDialogDescription>
+            {publishing
+              ? "This converts checkout-local content into a Git-tracked proposal for teammate review. It does not change the Spec or share anything automatically."
+              : "This removes the private draft from this checkout. Proposals and Specs are not changed."}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <div className={styles.boundarySubject}>
+          <Badge variant="outline">{changeLabel(action.draft.changeKind, action.draft.entityKind)}</Badge>
+          <strong>{action.draft.title}</strong>
+        </div>
+        {publishing ? (
+          <Alert>
+            <GitCommitHorizontal aria-hidden="true" />
+            <AlertTitle>Git step still required</AlertTitle>
+            <AlertDescription>
+              After publication, commit and push the proposal to make it available to teammates.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {operation.isError ? <ErrorState error={operation.error} /> : null}
+        {envelope ? <ExactPreviewDetails envelope={envelope} /> : null}
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={operation.isPending}>{publishing ? "Keep private" : "Keep draft"}</AlertDialogCancel>
+          <Button
+            disabled={operation.isPending}
+            onClick={() => operation.mutate()}
+            type="button"
+            variant={publishing ? "default" : "destructive"}
+          >
+            {operation.isPending
+              ? publishing ? "Publishing…" : "Discarding…"
+              : publishing ? "Publish for review" : "Discard draft"}
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -1699,18 +1824,25 @@ function TechnicalDetails({
 }
 
 function DraftDetail({
+  current,
+  currentError,
+  currentPending,
   draft,
-  canMutate,
-  canPublish,
+  draftMutation,
+  proposalMutation,
   onEdit,
   onAction,
 }: {
+  current?: WikiEntityDetailResponse;
+  currentError?: string;
+  currentPending?: boolean;
   draft: InboxDraftDetail;
-  canMutate: boolean;
-  canPublish: boolean;
-  onEdit(event: MouseEvent<HTMLButtonElement>): void;
-  onAction(action: ReviewAction, event: MouseEvent<HTMLButtonElement>): void;
+  draftMutation: CapabilityStatus;
+  proposalMutation: CapabilityStatus;
+  onEdit(trigger: HTMLButtonElement): void;
+  onAction(action: ReviewAction, trigger: HTMLButtonElement): void;
 }) {
+  const overflowTrigger = useRef<HTMLButtonElement>(null);
   return (
     <>
       <CardHeader className={styles.detailHeader}>
@@ -1725,18 +1857,68 @@ function DraftDetail({
         <CardAction><Badge variant="outline">Local only</Badge></CardAction>
       </CardHeader>
       <CardContent className={styles.detailContent}>
-        <div className={styles.detailActions}>
-          <Button disabled={!canPublish} onClick={(event) => onAction({ kind: "inbox.publish", draft }, event)} size="sm" type="button">
-            <Send data-icon="inline-start" /> Publish draft
+        <div className={styles.proposalActionBar} aria-label="Draft actions" role="group">
+          <Button
+            aria-describedby={proposalMutation.availability === "unavailable" ? "inbox-publish-unavailable" : undefined}
+            disabled={proposalMutation.availability === "unavailable"}
+            onClick={(event) => onAction({ kind: "inbox.publish", draft }, event.currentTarget)}
+            size="sm"
+            type="button"
+          >
+            <Send data-icon="inline-start" /> Publish for review
           </Button>
-          <Button disabled={!canMutate} onClick={onEdit} size="sm" type="button" variant="outline">
-            <Pencil data-icon="inline-start" /> Edit local draft
+          <Button
+            aria-describedby={draftMutation.availability === "unavailable" ? "inbox-draft-edit-unavailable" : undefined}
+            disabled={draftMutation.availability === "unavailable"}
+            onClick={(event) => onEdit(event.currentTarget)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <Pencil data-icon="inline-start" /> Edit wording
           </Button>
-          <Button disabled={!canMutate} onClick={(event) => onAction({ kind: "inbox.draft.delete", draft }, event)} size="sm" type="button" variant="destructive">
-            <Trash2 data-icon="inline-start" /> Delete draft
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              aria-label="More draft actions"
+              ref={overflowTrigger}
+              render={<Button size="sm" type="button" variant="outline" />}
+            >
+              <MoreHorizontal data-icon="inline-start" /> More
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className={styles.proposalMenu}>
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Draft actions</DropdownMenuLabel>
+                <ProposalMenuItem
+                  capability={draftMutation}
+                  onSelect={() => {
+                    if (overflowTrigger.current) {
+                      onAction({ kind: "inbox.draft.delete", draft }, overflowTrigger.current);
+                    }
+                  }}
+                  variant="destructive"
+                >
+                  Discard draft…
+                </ProposalMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          {proposalMutation.availability === "unavailable" ? (
+            <p className={styles.actionUnavailable} id="inbox-publish-unavailable" role="status">
+              Publication is unavailable: {proposalMutation.reason}
+            </p>
+          ) : null}
+          {draftMutation.availability === "unavailable" ? (
+            <p className={styles.actionUnavailable} id="inbox-draft-edit-unavailable" role="status">
+              Editing and discarding are unavailable: {draftMutation.reason}
+            </p>
+          ) : null}
         </div>
-        <ChangeDetail input={draft.input} />
+        <ChangeDetail
+          current={current}
+          currentError={currentError}
+          currentPending={currentPending}
+          input={draft.input}
+        />
         <TechnicalDetails draft={draft} input={draft.input} />
       </CardContent>
     </>
@@ -2211,7 +2393,7 @@ function ProposalQueue({
 }
 
 function DraftQueue({
-  canCreate,
+  draftMutation,
   error,
   hasNextPage,
   isFetchingNextPage,
@@ -2223,7 +2405,7 @@ function DraftQueue({
   selectedId,
   sourceBounded,
 }: {
-  canCreate: boolean;
+  draftMutation: CapabilityStatus;
   error: unknown;
   hasNextPage: boolean;
   isFetchingNextPage: boolean;
@@ -2242,15 +2424,25 @@ function DraftQueue({
           <CardTitle><h2 id="draft-queue-heading">On this device</h2></CardTitle>
           <CardDescription>Private drafts in this checkout.</CardDescription>
         </div>
-        {canCreate ? (
-          <CardAction>
-            <Button onClick={onCreate} size="sm" type="button" variant="ghost">
-              <Plus data-icon="inline-start" /> Create manually
-            </Button>
-          </CardAction>
-        ) : null}
+        <CardAction>
+          <Button
+            aria-describedby={draftMutation.availability === "unavailable" ? "inbox-create-unavailable" : undefined}
+            disabled={draftMutation.availability === "unavailable"}
+            onClick={onCreate}
+            size="sm"
+            type="button"
+            variant="ghost"
+          >
+            <Plus data-icon="inline-start" /> Create manually
+          </Button>
+        </CardAction>
       </CardHeader>
       <CardContent className={styles.queuePaneContent}>
+        {draftMutation.availability === "unavailable" ? (
+          <p className={styles.queueCapabilityReason} id="inbox-create-unavailable" role="status">
+            Manual draft actions are unavailable: {draftMutation.reason}
+          </p>
+        ) : null}
         {isPending ? (
           <QueueSkeleton rows={3} />
         ) : error && rows.length === 0 ? (
@@ -2262,13 +2454,17 @@ function DraftQueue({
               <EmptyTitle>No drafts on this device</EmptyTitle>
               <EmptyDescription>Coding agents can prepare private MEX drafts for you to review here.</EmptyDescription>
             </EmptyHeader>
-            {canCreate ? (
-              <EmptyContent>
-                <Button onClick={onCreate} size="sm" type="button" variant="ghost">
-                  <Plus data-icon="inline-start" /> Create manually
-                </Button>
-              </EmptyContent>
-            ) : null}
+            <EmptyContent>
+              <Button
+                disabled={draftMutation.availability === "unavailable"}
+                onClick={onCreate}
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                <Plus data-icon="inline-start" /> Create manually
+              </Button>
+            </EmptyContent>
           </Empty>
         ) : (
           <>
@@ -2336,12 +2532,12 @@ export function InboxPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [selectionNotice, setSelectionNotice] = useState("");
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const [reconcilingRemoval, setReconcilingRemoval] = useState(false);
   const operationTrigger = useRef<HTMLButtonElement | null>(null);
   const statusRef = useRef<HTMLDivElement | null>(null);
   const gitNoticeRef = useRef<HTMLDivElement | null>(null);
+  const refreshActionRef = useRef<HTMLButtonElement | null>(null);
   const readAvailable = capabilities?.inbox.read.availability === "available";
-  const canEditDrafts = capabilities?.inbox.draftMutation.availability === "available";
-  const canApproveSpecs = capabilities?.inbox.specApproval.availability === "available";
   const currentActor = useQuery({
     queryKey: ["actor", "current"],
     queryFn: () => api.getCurrentActor(),
@@ -2409,6 +2605,7 @@ export function InboxPage() {
     if (
       view !== "review"
       || proposalParam !== null
+      || reconcilingRemoval
       || proposals.isPending
       || currentActor.isPending
       || orderedProposalRows.length === 0
@@ -2423,6 +2620,7 @@ export function InboxPage() {
     orderedProposalRows,
     proposalParam,
     proposals.isPending,
+    reconcilingRemoval,
     searchKey,
     setSearchParams,
     view,
@@ -2432,6 +2630,7 @@ export function InboxPage() {
     if (
       view !== "drafts"
       || draftParam !== null
+      || reconcilingRemoval
       || drafts.isPending
       || draftRows.length === 0
     ) return;
@@ -2440,7 +2639,7 @@ export function InboxPage() {
     next.set("draft", draftRows[0]!.id);
     next.delete("proposal");
     setSearchParams(next, { replace: true });
-  }, [draftParam, draftRows, drafts.isPending, searchKey, setSearchParams, view]);
+  }, [draftParam, draftRows, drafts.isPending, reconcilingRemoval, searchKey, setSearchParams, view]);
 
   const draftDetail = useQuery({
     queryKey: ["inbox", "draft", selectedDraftId],
@@ -2454,9 +2653,8 @@ export function InboxPage() {
     enabled: Boolean(readAvailable && view === "review" && selectedProposalId),
     retry: false,
   });
-  const selectedUpdateTargetId = proposalDetail.data?.change.kind === "spec.update"
-    ? proposalDetail.data.change.target.id
-    : null;
+  const selectedChange = view === "review" ? proposalDetail.data?.change : draftDetail.data?.input.change;
+  const selectedUpdateTargetId = selectedChange?.kind === "spec.update" ? selectedChange.target.id : null;
   const wikiReadAvailable = capabilities?.wiki.read.availability === "available";
   const currentWikiEntity = useQuery({
     queryKey: ["wiki-entity", selectedUpdateTargetId],
@@ -2551,11 +2749,8 @@ export function InboxPage() {
     }
   };
 
-  const rememberTrigger = (event: MouseEvent<HTMLButtonElement>) => {
-    operationTrigger.current = event.currentTarget;
-  };
-  const openEditor = (draft: InboxDraftDetail | null, event: MouseEvent<HTMLButtonElement>) => {
-    rememberTrigger(event);
+  const openEditor = (draft: InboxDraftDetail | null, trigger: HTMLButtonElement) => {
+    operationTrigger.current = trigger;
     setEditor({ draft });
   };
   const openReview = (action: ReviewAction, trigger: HTMLButtonElement) => {
@@ -2563,7 +2758,12 @@ export function InboxPage() {
     setReviewAction(action);
   };
   const onApplied = async (kind: AppliedInboxAction, result: InboxOperationApplyResponse) => {
-    clearModeSelection();
+    const removesSelection = kind === "inbox.publish"
+      || kind === "inbox.draft.delete"
+      || kind === "inbox.approve"
+      || kind === "inbox.reject"
+      || kind === "inbox.withdraw";
+    if (removesSelection) setReconcilingRemoval(true);
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["inbox"] }),
       queryClient.invalidateQueries({ queryKey: ["home"] }),
@@ -2573,17 +2773,20 @@ export function InboxPage() {
       queryClient.invalidateQueries({ queryKey: ["wiki-entity"] }),
       queryClient.invalidateQueries({ queryKey: ["wiki-entities"] }),
     ]);
+    if (removesSelection) clearModeSelection();
     const consequence = kind === "inbox.approve"
       ? "Spec change and review record were written to your working tree. Commit and push them to share the result with your team."
-      : result.changes.length > 0 && result.localChanges.length > 0
+      : kind === "inbox.publish"
         ? "Proposal created in your working tree. Commit and push it to make it available to teammates."
         : result.changes.length > 0
           ? "Inbox review update was written to your working tree."
           : "Draft state updated on this device from the exact preview.";
+    const hasGitNotice = kind === "inbox.approve" || kind === "inbox.publish";
     flushSync(() => {
-      setStatus(consequence);
+      setStatus(hasGitNotice ? "" : consequence);
       if (kind === "inbox.approve") setGitNotice("approval");
       else if (kind === "inbox.publish") setGitNotice("publication");
+      if (removesSelection) setReconcilingRemoval(false);
     });
   };
 
@@ -2641,11 +2844,14 @@ export function InboxPage() {
     </div>
   ) : (
     <DraftDetail
-      canMutate={Boolean(canEditDrafts)}
-      canPublish={Boolean(canApproveSpecs)}
+      current={currentWikiEntity.data}
+      currentError={currentWikiError}
+      currentPending={Boolean(selectedUpdateTargetId && wikiReadAvailable && currentWikiEntity.isPending)}
       draft={draftDetail.data}
-      onAction={(action, event) => openReview(action, event.currentTarget)}
-      onEdit={(event) => openEditor(draftDetail.data, event)}
+      draftMutation={capabilities!.inbox.draftMutation}
+      onAction={openReview}
+      onEdit={(trigger) => openEditor(draftDetail.data, trigger)}
+      proposalMutation={capabilities!.inbox.proposalMutation}
     />
   );
 
@@ -2663,6 +2869,7 @@ export function InboxPage() {
             className={styles.refreshAction}
             disabled={!readAvailable || refreshing}
             onClick={() => void refreshInbox()}
+            ref={refreshActionRef}
             size="sm"
             type="button"
             variant="outline"
@@ -2689,7 +2896,16 @@ export function InboxPage() {
               : "Proposal created in your working tree. Commit and push it to make it available to teammates."}
           </AlertDescription>
           <AlertAction>
-            <Button aria-label="Dismiss Git notice" onClick={() => setGitNotice(null)} size="icon-sm" type="button" variant="ghost">
+            <Button
+              aria-label="Dismiss Git notice"
+              onClick={() => {
+                setGitNotice(null);
+                afterDialogUnmount(() => refreshActionRef.current?.focus({ preventScroll: true }));
+              }}
+              size="icon-sm"
+              type="button"
+              variant="ghost"
+            >
               <X aria-hidden="true" />
             </Button>
           </AlertAction>
@@ -2741,12 +2957,12 @@ export function InboxPage() {
           <TabsContent className={styles.modePanel} value="drafts">
             <div className={styles.workbench}>
               <DraftQueue
-                canCreate={Boolean(canEditDrafts)}
+                draftMutation={capabilities.inbox.draftMutation}
                 error={drafts.isError ? drafts.error : null}
                 hasNextPage={Boolean(drafts.hasNextPage)}
                 isFetchingNextPage={drafts.isFetchingNextPage}
                 isPending={drafts.isPending}
-                onCreate={(event) => openEditor(null, event)}
+                onCreate={(event) => openEditor(null, event.currentTarget)}
                 onLoadMore={() => void drafts.fetchNextPage()}
                 onSelect={selectDraft}
                 rows={draftRows}
@@ -2786,6 +3002,14 @@ export function InboxPage() {
         />
       ) : reviewAction?.kind === "inbox.approve" ? (
         <ApproveChangeDialog
+          action={reviewAction}
+          finalFocus={resolveOperationFinalFocus}
+          focusAppliedStatus={focusAppliedStatus}
+          onApplied={onApplied}
+          onClose={() => setReviewAction(null)}
+        />
+      ) : reviewAction?.kind === "inbox.publish" || reviewAction?.kind === "inbox.draft.delete" ? (
+        <DraftBoundaryDialog
           action={reviewAction}
           finalFocus={resolveOperationFinalFocus}
           focusAppliedStatus={focusAppliedStatus}

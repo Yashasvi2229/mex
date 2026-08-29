@@ -98,6 +98,16 @@
   margin: 12px 14px 0;
 }
 
+.queueCapabilityReason {
+  margin: 12px 14px 0;
+  padding: 9px 10px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 1.5;
+  background: var(--surface-subtle);
+  border-left: 2px solid var(--border-strong);
+}
+
 .queueGroup {
   min-width: 0;
 }
@@ -958,6 +968,24 @@
   max-width: 560px;
 }
 
+.boundarySubject {
+  display: grid;
+  gap: 8px;
+  padding: 13px 14px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.boundarySubject > [data-slot="badge"] {
+  width: fit-content;
+}
+
+.boundarySubject strong {
+  font-size: 13px;
+  font-weight: 610;
+}
+
 .gitTruthAlert {
   margin: -4px 0 14px;
 }
@@ -1316,6 +1344,11 @@
   color: var(--muted-foreground);
 }
 
+.editorDialog [data-slot="textarea"]:not(.monoInput),
+.reviewDialog [data-slot="textarea"]:not(.monoInput) {
+  font-family: inherit;
+}
+
 .editorDialog [data-slot="native-select-wrapper"],
 .reviewDialog [data-slot="native-select-wrapper"] {
   position: relative;
@@ -1400,6 +1433,32 @@
 
 .patchToggles button[aria-pressed="true"] {
   box-shadow: inset 0 -2px var(--primary);
+}
+
+.advancedEditor {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.advancedEditor > [data-slot="collapsible-trigger"] {
+  width: 100%;
+  justify-content: flex-start;
+  border-radius: 0;
+}
+
+.advancedEditor > [data-slot="collapsible-trigger"][aria-expanded="true"] {
+  border-bottom: 1px solid var(--border);
+}
+
+.advancedEditorContent {
+  display: grid;
+  gap: 18px;
+  padding: 14px;
+  background: var(--card);
 }
 
 .previewDocket {
@@ -1642,6 +1701,17 @@
   .queues,
   .formPair {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .queuePaneHeader {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 9px;
+    align-content: start;
+  }
+
+  .queuePaneHeader [data-slot="card-action"] {
+    grid-column: 1;
+    justify-self: start;
   }
 
   .proposalMeta,
