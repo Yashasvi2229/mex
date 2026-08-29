@@ -58,10 +58,9 @@ export const capabilityPages: Record<string, CapabilityPageDefinition> = {
     unavailableCopy: "Inbox is unavailable.",
   },
   relays: {
-    title: "Relays", capability: "inbox", icon: Send,
+    title: "Relays", capability: "relays", icon: Send,
     connectedCopy: "Relays are unavailable.",
     unavailableCopy: "Relays are unavailable.",
-    structuralUnavailable: true,
   },
 };
 
@@ -75,6 +74,7 @@ function capabilityStatus(capabilities: CapabilitiesResponse | undefined, name: 
   if (name === "workstreams") return capabilities.workstreams.read;
   if (name === "specs") return capabilities.specs.read;
   if (name === "inbox") return capabilities.inbox.read;
+  if (name === "relays") return capabilities.relays.read;
   return undefined;
 }
 

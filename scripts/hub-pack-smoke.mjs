@@ -199,8 +199,32 @@ try {
     || capabilitiesBody.wiki?.read?.availability !== "available"
     || capabilitiesBody.wiki?.refresh?.availability !== "available"
     || capabilitiesBody.wiki?.rebuild?.availability !== "available"
+    || capabilitiesBody.relays?.read?.availability !== "available"
+    || capabilitiesBody.relays?.draftMutation?.availability !== "available"
+    || capabilitiesBody.relays?.publish?.availability !== "available"
+    || capabilitiesBody.relays?.lifecycleMutation?.availability !== "available"
   ) {
     throw new Error("The packaged Hub capabilities API did not load.");
+  }
+  const relayDrafts = await fetch(`${url.origin}/api/v1/relays/drafts?limit=25`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const relayDraftsBody = await relayDrafts.json();
+  const relays = await fetch(`${url.origin}/api/v1/relays?perspective=all&limit=25`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const relaysBody = await relays.json();
+  if (
+    !relayDrafts.ok
+    || relayDraftsBody.items?.length !== 0
+    || relayDraftsBody.nextCursor !== null
+    || !relays.ok
+    || relaysBody.items?.length !== 0
+    || relaysBody.nextCursor !== null
+  ) {
+    throw new Error("The packaged Hub did not expose empty repository-independent Relay reads.");
   }
   const home = await fetch(`${url.origin}/api/v1/home`, {
     headers: { cookie },

@@ -30,7 +30,7 @@ async function normalizeEstablishedVisualGolden(
   await page.getByRole("link", { name: "Members", exact: true }).evaluate((element) => element.remove());
   const unavailableMarker = await page.getByRole("link", { name: /Playbooks/ }).locator('[aria-label="Unavailable"]')
     .evaluate((element) => element.outerHTML);
-  for (const label of ["Workstreams", "Specs", "Inbox"] as const) {
+  for (const label of ["Workstreams", "Specs", "Inbox", "Relays"] as const) {
     await page.getByRole("link", { name: label, exact: true }).evaluate((element, marker) => {
       element.insertAdjacentHTML("beforeend", marker);
     }, unavailableMarker);
@@ -50,16 +50,13 @@ async function normalizeEstablishedVisualGolden(
     });
     await page.getByRole("region", { name: "Project sections" }).evaluate((element) => {
       const rows = [...element.querySelectorAll<HTMLElement>('[role="listitem"]')];
-      const workstreams = rows.find((row) => row.textContent?.includes("Workstreams"));
-      const inbox = rows.find((row) => row.textContent?.includes("Inbox"));
-      const relays = rows.find((row) => row.textContent?.includes("Relays"));
-      const workstreamReplacement = relays?.lastElementChild?.cloneNode(true);
-      const inboxReplacement = relays?.lastElementChild?.cloneNode(true);
-      if (!workstreams?.lastElementChild || !inbox?.lastElementChild || !workstreamReplacement || !inboxReplacement) {
-        throw new Error("The Team workbench visual golden status template is unavailable.");
+      for (const label of ["Workstreams", "Relays", "Inbox"]) {
+        const row = rows.find((candidate) => candidate.textContent?.includes(label));
+        const status = row?.querySelector<HTMLElement>('[data-tone]');
+        if (!status) throw new Error(`The ${label} visual golden status is unavailable.`);
+        status.dataset.tone = "warning";
+        status.textContent = "Unavailable";
       }
-      workstreams.lastElementChild.replaceWith(workstreamReplacement);
-      inbox.lastElementChild.replaceWith(inboxReplacement);
     });
     await page.locator('a[aria-label^="Open member identity for"]').evaluate((element) => {
       const template = document.querySelector<HTMLElement>('[data-slot="badge"][data-variant="outline"]');
@@ -732,6 +729,120 @@ test.describe("populated development fixture", () => {
     await expect(approve).toBeFocused();
   });
 
+  for (const width of [390, 768, 1024, 1440] as const) {
+    test(`keeps Relay guarded or overflow-free and accessible at ${width}px`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/relays?fixture=populated");
+
+      if (width < 1024) {
+        await expect(page.getByRole("heading", { name: "A wider workbench is required" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "Primary" })).toBeHidden();
+      } else {
+        await expect(page.getByRole("heading", { level: 1, name: "Relays" })).toBeVisible();
+        await expect(page.locator('[data-relay-workbench="ready"]')).toBeVisible();
+        await expect(page.locator('[data-relay-draft-id="relay-draft-01"]')).toContainText(
+          "Carry the release evidence through the final cross-platform gate.",
+        );
+        await expect(page.locator('[data-relay-id="relay_01000000000000000000000001"]')).toContainText(
+          "Release evidence is ready for the final cross-platform gate.",
+        );
+        const drafts = await page.getByRole("region", { name: "Draft rail" }).boundingBox();
+        const desk = await page.getByRole("region", { name: "Relay desk" }).boundingBox();
+        expect(drafts).not.toBeNull();
+        expect(desk).not.toBeNull();
+        expect(drafts!.x).toBeLessThan(desk!.x);
+      }
+
+      const geometry = await page.evaluate(() => ({
+        viewportWidth: window.innerWidth,
+        documentClientWidth: document.documentElement.clientWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+      }));
+      expect(geometry).toEqual({
+        viewportWidth: width,
+        documentClientWidth: width,
+        documentScrollWidth: width,
+        bodyScrollWidth: width,
+      });
+      await expectAccessible(page);
+    });
+  }
+
+  test("keeps Relay keyboard selection, composer, and signed review focus complete", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/relays?fixture=populated");
+    await expect(page.locator('[data-relay-workbench="ready"]')).toBeVisible();
+
+    const draft = page.locator('[data-relay-draft-id="relay-draft-01"]');
+    await draft.focus();
+    await page.keyboard.press("Enter");
+    await expect(draft).toHaveAttribute("aria-current", "true");
+    await expect(page.getByRole("region", { name: "Selected Relay detail" })
+      .getByRole("heading", { name: "Carry the release evidence through the final cross-platform gate." })).toBeVisible();
+
+    const relay = page.locator('[data-relay-id="relay_01000000000000000000000001"]');
+    await relay.focus();
+    await page.keyboard.press("Enter");
+    await expect(relay).toHaveAttribute("aria-current", "true");
+    await expect(page.getByRole("region", { name: "Selected Relay detail" })
+      .getByRole("heading", { name: "Release evidence is ready for the final cross-platform gate." })).toBeVisible();
+
+    const compose = page.getByRole("button", { name: "New local draft", exact: true });
+    await compose.click();
+    const composer = page.getByRole("dialog", { name: "Compose a local Relay draft" });
+    await expect(composer).toBeVisible();
+    await expect.poll(() => composer.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press("Shift+Tab");
+    await expect.poll(() => composer.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await expectAccessible(page);
+    await page.keyboard.press("Escape");
+    await expect(composer).toBeHidden();
+    await expect(compose).toBeFocused();
+
+    const claim = page.getByRole("button", { name: "Claim handoff", exact: true });
+    await claim.click();
+    const review = page.getByRole("alertdialog", { name: "Review the exact Relay operation" });
+    await expect(review.getByRole("heading", { name: "Exact handoff docket" })).toBeVisible();
+    await expect.poll(() => review.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press("Shift+Tab");
+    await expect.poll(() => review.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await expectAccessible(page);
+    await page.keyboard.press("Escape");
+    await expect(review).toBeHidden();
+    await expect(claim).toBeFocused();
+  });
+
+  test("loads Relay lazily with one local chunk and stays external-free and idle", async ({ page }) => {
+    const requests: string[] = [];
+    const external: string[] = [];
+    const apiWrites: string[] = [];
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      requests.push(`${request.method()} ${url.pathname}${url.search}`);
+      if (url.hostname !== "127.0.0.1") external.push(request.url());
+      if (url.pathname.startsWith("/api/") && !["GET", "HEAD", "OPTIONS"].includes(request.method())) {
+        apiWrites.push(`${request.method()} ${url.pathname}`);
+      }
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/?fixture=populated");
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    expect(requests.some((request) => request.includes("/src/pages/RelayPage.tsx"))).toBe(false);
+
+    await page.getByRole("link", { name: "Relays", exact: true }).click();
+    await expect(page.locator('[data-relay-workbench="ready"]')).toBeVisible();
+    await page.waitForLoadState("networkidle");
+    expect(requests.filter((request) => request === "GET /src/pages/RelayPage.tsx")).toHaveLength(1);
+    const idleRequestCount = requests.length;
+    await page.waitForTimeout(5_500);
+    expect(requests).toHaveLength(idleRequestCount);
+    expect(apiWrites).toEqual([]);
+    expect(external).toEqual([]);
+  });
+
   test("supports keyboard routing, focus restoration, every shell, and 404", async ({ page }) => {
     await page.goto("/?fixture=populated");
     await page.keyboard.press("Tab");
@@ -948,6 +1059,28 @@ test.describe("built production Hub", () => {
     expect(await proposalsResponse.json()).toMatchObject({ items: [], nextCursor: null });
     await expect(page.getByRole("heading", { level: 1, name: "Inbox" })).toBeVisible();
     await expect(page.locator('[data-inbox-workbench="ready"]')).toBeVisible();
+
+    const [relayDraftsResponse] = await Promise.all([
+      page.waitForResponse((candidate) => new URL(candidate.url()).pathname === "/api/v1/relays/drafts"),
+      page.goto(`${productionOrigin}/relays?fixture=populated`),
+    ]);
+    expect(relayDraftsResponse.status()).toBe(200);
+    expect(Object.fromEntries(new URL(relayDraftsResponse.url()).searchParams)).toEqual({ limit: "25" });
+    expect(await relayDraftsResponse.json()).toMatchObject({ items: [], nextCursor: null });
+    await expect(page.getByRole("heading", { level: 1, name: "Relays" })).toBeVisible();
+    await expect(page.locator('[data-relay-workbench="ready"]')).toBeVisible();
+    const relayListResponsePromise = page.waitForResponse(
+      (candidate) => new URL(candidate.url()).pathname === "/api/v1/relays",
+    );
+    await page.getByRole("tab", { name: "All open" }).click();
+    const relayListResponse = await relayListResponsePromise;
+    expect(relayListResponse.status()).toBe(200);
+    expect(Object.fromEntries(new URL(relayListResponse.url()).searchParams)).toEqual({
+      perspective: "all",
+      state: "published,acknowledged",
+      limit: "25",
+    });
+    expect(await relayListResponse.json()).toMatchObject({ items: [], nextCursor: null });
     await page.waitForLoadState("networkidle");
     if (!projectRoot) throw new Error("The production Hub fixture root is unavailable.");
     const beforeIdle = snapshotReleaseProtectedState(projectRoot);

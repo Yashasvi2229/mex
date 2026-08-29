@@ -19,15 +19,9 @@ function capabilityAvailable(
   name: CapabilityName | undefined,
 ): boolean | undefined {
   if (!name || !capabilities) return undefined;
-  if (name === "graph") return capabilities.graph.read.availability === "available";
-  if (name === "wiki") return capabilities.wiki.read.availability === "available";
-  if (name === "jobs") return capabilities.jobs.availability === "available";
-  if (name === "activity") return capabilities.activity.availability === "available";
-  if (name === "members") return capabilities.members.read.availability === "available";
-  if (name === "workstreams") return capabilities.workstreams.read.availability === "available";
-  if (name === "specs") return capabilities.specs.read.availability === "available";
-  if (name === "inbox") return capabilities.inbox.read.availability === "available";
-  return false;
+  const capability = capabilities[name];
+  const status = "read" in capability ? capability.read : capability;
+  return status.availability === "available";
 }
 
 function Sidebar({ capabilities }: { capabilities?: CapabilitiesResponse }) {

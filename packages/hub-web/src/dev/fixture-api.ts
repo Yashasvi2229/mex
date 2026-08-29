@@ -22,6 +22,16 @@ import type {
   InboxProposalDetail,
   InboxProposalListRequest,
   InboxProposalListResponse,
+  RelayDetail,
+  RelayDraftDetail,
+  RelayDraftListRequest,
+  RelayDraftListResponse,
+  RelayListRequest,
+  RelayListResponse,
+  RelayOperationApplyRequest,
+  RelayOperationApplyResponse,
+  RelayOperationPreviewRequest,
+  RelayOperationPreviewResponse,
   JobsResponse,
   JobSummary,
   SearchRequest,
@@ -414,6 +424,12 @@ const capabilities: CapabilitiesResponse = {
     proposalMutation: available,
     specApproval: available,
   },
+  relays: {
+    read: available,
+    draftMutation: available,
+    publish: available,
+    lifecycleMutation: available,
+  },
   jobs: available,
   graph: { read: available, refresh: available, rebuild: available },
   wiki: {
@@ -440,7 +456,7 @@ const home: HomeResponse = {
   actor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
   sections: {
     workstreams: { availability: "available", count: fixtureWorkstreams.length },
-    relays: { availability: "unavailable", count: null, reason: "Relay workflows are not part of this read-only slice." },
+    relays: { availability: "available", count: 1 },
     inbox: { availability: "unavailable", count: null, reason: "Inbox workflows are not part of this read-only slice." },
     activity: { availability: "available", count: 4 },
   },
@@ -1000,6 +1016,87 @@ const fixtureInboxProposals: InboxProposalDetail[] = [{
   }],
 }];
 
+const fixtureRelayDraftId = "relay-draft-01";
+const fixtureRelayId = "relay_01000000000000000000000001";
+const fixtureRelayDrafts: RelayDraftDetail[] = [{
+  id: fixtureRelayDraftId,
+  revision: revision("7"),
+  updatedAt: timestamp(11),
+  summary: "Carry the release evidence through the final cross-platform gate.",
+  recipients: [{
+    kind: "member",
+    memberId: fixtureMemberIds[1],
+    displayName: fixtureMembers[1].displayName,
+  }],
+  workstream: {
+    kind: "workstream",
+    id: fixtureWorkstreamIds[0],
+    title: fixtureWorkstreams[0].title,
+  },
+  input: {
+    recipients: [{
+      kind: "member",
+      memberId: fixtureMemberIds[1],
+      displayName: fixtureMembers[1].displayName,
+    }],
+    workstream: {
+      kind: "workstream",
+      id: fixtureWorkstreamIds[0],
+      title: fixtureWorkstreams[0].title,
+    },
+    summary: "Carry the release evidence through the final cross-platform gate.",
+    completed: ["The deterministic benchmark fixture is stable."],
+    inProgress: ["Collect the final pinned runner evidence."],
+    decisions: [],
+    blockers: [],
+    unresolvedQuestions: ["Does the Windows packed-install run retain the same digest?"],
+    changedFiles: ["scripts/release-benchmark/run.mjs"],
+    code: [{ kind: "file", path: "scripts/release-benchmark/run.mjs" }],
+    evidence: [{ kind: "manual", note: "Prepared in the Relay fixture workbench." }],
+    nextActions: ["Run the cross-platform storage matrix."],
+  },
+}];
+
+const fixtureRelays: RelayDetail[] = [{
+  schemaVersion: 2,
+  ref: { kind: "relay", id: fixtureRelayId, title: "Release evidence handoff" },
+  sourcePath: `.mex/relays/${fixtureRelayId}.md`,
+  revision: revision("8"),
+  state: "published",
+  sender: {
+    kind: "member",
+    memberId: fixtureMemberIds[1],
+    displayName: fixtureMembers[1].displayName,
+  },
+  recipients: [{
+    kind: "member",
+    memberId: fixtureMemberIds[0],
+    displayName: fixtureMembers[0].displayName,
+  }],
+  workstream: {
+    kind: "workstream",
+    id: fixtureWorkstreamIds[0],
+    title: fixtureWorkstreams[0].title,
+  },
+  summary: "Release evidence is ready for the final cross-platform gate.",
+  completed: ["Linux Node 22 characterization is captured."],
+  inProgress: ["Cross-platform storage portability is awaiting claim."],
+  decisions: [],
+  blockers: [],
+  unresolvedQuestions: [],
+  changedFiles: ["scripts/release-benchmark/run.mjs"],
+  code: [{ kind: "file", path: "scripts/release-benchmark/run.mjs" }],
+  evidence: [{ kind: "manual", note: "Exact fixture evidence for Relay UI validation." }],
+  nextActions: ["Claim the handoff and run the remaining matrix."],
+  diagnostics: [],
+  diagnosticsTruncated: false,
+  publishedAt: timestamp(7),
+  acknowledgedBy: null,
+  acknowledgedAt: null,
+  closedBy: null,
+  closedAt: null,
+}];
+
 function fixtureCurrentActor(
   members: readonly TeamMember[],
   selection: TeamCurrentActorResponse["selection"],
@@ -1088,6 +1185,8 @@ class FixtureHubApi implements HubApi {
   readonly #workstreams = structuredClone(fixtureWorkstreams);
   readonly #inboxDrafts = structuredClone(fixtureInboxDrafts);
   readonly #inboxProposals = structuredClone(fixtureInboxProposals);
+  readonly #relayDrafts = structuredClone(fixtureRelayDrafts);
+  readonly #relays = structuredClone(fixtureRelays);
   readonly #activityItems = structuredClone(activityItems);
   #selection: TeamCurrentActorResponse["selection"] = {
     memberId: fixtureMemberIds[0],
@@ -1112,6 +1211,15 @@ class FixtureHubApi implements HubApi {
           availability: "available" as const,
           count: this.#workstreams.filter((item) => item.state !== "archived").length,
         },
+        relays: actor.kind !== "member"
+          ? { availability: "unavailable" as const, count: null, reason: "Select an active Member to see your open Relay handoffs." }
+          : {
+              availability: "available" as const,
+              count: this.#relays.filter((relay) => (
+                (relay.state === "published" && relay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === actor.memberId))
+                || (relay.state === "acknowledged" && relay.acknowledgedBy?.kind === "member" && relay.acknowledgedBy.memberId === actor.memberId)
+              )).length,
+            },
         inbox: {
           availability: "available" as const,
           count: this.#inboxProposals.filter((item) => (
@@ -1176,6 +1284,266 @@ class FixtureHubApi implements HubApi {
     return workstream === undefined
       ? Promise.reject(new Error("Fixture Workstream not found."))
       : Promise.resolve(structuredClone(workstream));
+  }
+  getRelayDrafts(request: RelayDraftListRequest): Promise<RelayDraftListResponse> {
+    const parsedOffset = request.cursor?.match(/^fixture_relay_drafts_(\d+)$/)?.[1];
+    const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
+    const details = this.#relayDrafts.slice(offset, offset + request.limit);
+    const items = details.map(({ input: _input, ...summary }) => summary);
+    const nextOffset = offset + items.length;
+    const nextCursor = nextOffset < this.#relayDrafts.length ? `fixture_relay_drafts_${nextOffset}` : null;
+    return Promise.resolve({
+      items: structuredClone(items),
+      nextCursor,
+      truncated: nextCursor !== null,
+      sourceTruncated: false,
+      deterministicRevision: revision("a"),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    });
+  }
+  getRelayDraft(id: string): Promise<RelayDraftDetail> {
+    const draft = this.#relayDrafts.find((candidate) => candidate.id === id);
+    return draft === undefined
+      ? Promise.reject(new Error("Fixture Relay draft not found."))
+      : Promise.resolve(structuredClone(draft));
+  }
+  getRelays(request: RelayListRequest): Promise<RelayListResponse> {
+    const current = fixtureCurrentActor(this.#members, this.#selection).actor;
+    if ((request.perspective === "mine" || request.perspective === "sent") && current.kind !== "member") {
+      return Promise.reject(new Error("Select an active Member to use this Relay perspective."));
+    }
+    const filtered = this.#relays.filter((relay) => {
+      if (request.states !== undefined && !request.states.includes(relay.state)) return false;
+      if (request.workstreamId !== undefined && relay.workstream.id !== request.workstreamId) return false;
+      if (request.perspective === "all") return true;
+      if (current.kind !== "member") return false;
+      if (request.perspective === "sent") {
+        return relay.sender.kind === "member" && relay.sender.memberId === current.memberId;
+      }
+      return relay.state === "published"
+        ? relay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === current.memberId)
+        : relay.acknowledgedBy?.kind === "member" && relay.acknowledgedBy.memberId === current.memberId;
+    });
+    const parsedOffset = request.cursor?.match(/^fixture_relays_(\d+)$/)?.[1];
+    const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
+    const details = filtered.slice(offset, offset + request.limit);
+    const items = details.map(({
+      completed: _completed,
+      inProgress: _inProgress,
+      decisions: _decisions,
+      blockers: _blockers,
+      unresolvedQuestions: _unresolvedQuestions,
+      changedFiles: _changedFiles,
+      code: _code,
+      evidence: _evidence,
+      nextActions: _nextActions,
+      diagnostics: _diagnostics,
+      diagnosticsTruncated: _diagnosticsTruncated,
+      ...summary
+    }) => summary);
+    const nextOffset = offset + items.length;
+    const nextCursor = nextOffset < filtered.length ? `fixture_relays_${nextOffset}` : null;
+    return Promise.resolve({
+      items: structuredClone(items),
+      nextCursor,
+      truncated: nextCursor !== null,
+      sourceTruncated: false,
+      deterministicRevision: revision("b"),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    });
+  }
+  getRelay(id: string): Promise<RelayDetail> {
+    const relay = this.#relays.find((candidate) => candidate.ref.id === id);
+    return relay === undefined
+      ? Promise.reject(new Error("Fixture Relay not found."))
+      : Promise.resolve(structuredClone(relay));
+  }
+  previewRelayOperation(
+    request: RelayOperationPreviewRequest,
+  ): Promise<RelayOperationPreviewResponse> {
+    const action = request.action;
+    const sequence = this.#previewSequence++;
+    const eventId = fixtureOperationId("event", sequence);
+    const draft = "draftId" in action && action.draftId !== undefined
+      ? this.#relayDrafts.find((candidate) => candidate.id === action.draftId)
+      : undefined;
+    const relay = "relayId" in action
+      ? this.#relays.find((candidate) => candidate.ref.id === action.relayId)
+      : undefined;
+    const createdDraftId = action.kind === "relay.draft.save"
+      ? action.draftId ?? "relay-draft-02"
+      : null;
+    const publishedRelayId = "relay_02000000000000000000000001";
+    const localChanges: RelayOperationPreviewResponse["preview"]["localChanges"] = action.kind === "relay.draft.save"
+      ? [{
+          namespace: "relay-draft",
+          id: createdDraftId!,
+          beforeRevision: draft?.revision ?? null,
+          afterRevision: revision("c"),
+          summary: draft === undefined ? "Create checkout-local Relay draft." : "Update checkout-local Relay draft.",
+        }]
+      : action.kind === "relay.draft.delete" || action.kind === "relay.publish"
+        ? [{
+            namespace: "relay-draft",
+            id: action.draftId,
+            beforeRevision: draft?.revision ?? revision("7"),
+            afterRevision: null,
+            summary: action.kind === "relay.publish" ? "Remove local draft after publication." : "Delete checkout-local Relay draft.",
+          }]
+        : [];
+    const activityAction = action.kind === "relay.publish" ? "relay.published"
+      : action.kind === "relay.acknowledge" ? "relay.acknowledged"
+        : action.kind === "relay.close" ? "relay.closed"
+          : null;
+    const primaryChange: RelayOperationPreviewResponse["preview"]["changes"][number] | null = action.kind === "relay.publish"
+      ? {
+          kind: "create",
+          path: `.mex/relays/${publishedRelayId}.md`,
+          diff: `--- /dev/null\n+++ b/.mex/relays/${publishedRelayId}.md\n+state: published\n+summary: ${draft?.summary ?? "Relay handoff"}\n`,
+          beforeRevision: null,
+          afterRevision: revision("d"),
+        }
+      : action.kind === "relay.acknowledge" || action.kind === "relay.close"
+        ? {
+            kind: "update",
+            path: relay?.sourcePath ?? `.mex/relays/${action.relayId}.md`,
+            diff: `--- relay\n+++ relay\n-state: ${relay?.state ?? "published"}\n+state: ${action.kind === "relay.acknowledge" ? "acknowledged" : "closed"}\n`,
+            beforeRevision: relay?.revision ?? revision("8"),
+            afterRevision: revision("e"),
+          }
+        : null;
+    const activityChange: RelayOperationPreviewResponse["preview"]["changes"][number] | null = activityAction === null ? null : {
+      kind: "create",
+      path: `.mex/events/activity/${timestamp(0).slice(0, 7)}/${eventId}.md`,
+      diff: `--- /dev/null\n+++ b/.mex/events/activity/${timestamp(0).slice(0, 7)}/${eventId}.md\n+action: ${activityAction}\n`,
+      beforeRevision: null,
+      afterRevision: revision("f"),
+    };
+    const changes = [primaryChange, activityChange].filter((change): change is NonNullable<typeof change> => change !== null);
+    const purposeIds: RelayOperationPreviewResponse["receipt"]["purposeIds"] = action.kind === "relay.draft.save"
+      ? draft === undefined ? [{ purpose: "relay-draft", id: createdDraftId! }] : []
+      : action.kind === "relay.draft.delete" ? []
+        : action.kind === "relay.publish"
+          ? [{ purpose: "activity", id: eventId }, { purpose: "relay", id: publishedRelayId }]
+          : [{ purpose: "activity", id: eventId }];
+    return Promise.resolve({
+      schemaVersion: 1,
+      request: structuredClone(request),
+      preview: {
+        valid: true,
+        scope: action.kind === "relay.draft.save" || action.kind === "relay.draft.delete" ? "local" : action.kind === "relay.publish" ? "mixed" : "canonical",
+        changes,
+        localChanges,
+        diagnostics: [],
+      },
+      receipt: {
+        schemaVersion: 1,
+        authority: {
+          actor: fixtureCurrentActor(this.#members, this.#selection).actor,
+          occurredAt: timestamp(0),
+          repoState: { branch: home.repository.branch, head: home.repository.head, dirty: home.repository.dirty, observedAt: timestamp(0) },
+        },
+        purposeIds,
+        requestRevision: revision("1"),
+        presentationRevision: revision("2"),
+        previewRevision: revision("3"),
+      },
+    });
+  }
+  applyRelayOperation(
+    envelope: RelayOperationApplyRequest,
+  ): Promise<RelayOperationApplyResponse> {
+    const action = envelope.request.action;
+    let relays: RelayDetail[] = [];
+    if (action.kind === "relay.draft.save") {
+      const id = action.draftId ?? envelope.receipt.purposeIds.find((item) => item.purpose === "relay-draft")?.id;
+      if (id !== undefined) {
+        const next: RelayDraftDetail = {
+          id,
+          revision: envelope.preview.localChanges[0]?.afterRevision ?? revision("c"),
+          updatedAt: envelope.receipt.authority.occurredAt,
+          summary: action.draft.summary,
+          recipients: structuredClone(action.draft.recipients),
+          workstream: structuredClone(action.draft.workstream),
+          input: structuredClone(action.draft),
+        };
+        const index = this.#relayDrafts.findIndex((candidate) => candidate.id === id);
+        if (index === -1) this.#relayDrafts.unshift(next);
+        else this.#relayDrafts[index] = next;
+      }
+    } else if (action.kind === "relay.draft.delete") {
+      const index = this.#relayDrafts.findIndex((candidate) => candidate.id === action.draftId);
+      if (index !== -1) this.#relayDrafts.splice(index, 1);
+    } else if (action.kind === "relay.publish") {
+      const draft = this.#relayDrafts.find((candidate) => candidate.id === action.draftId);
+      const id = envelope.receipt.purposeIds.find((item) => item.purpose === "relay")?.id;
+      if (draft !== undefined && id !== undefined) {
+        const next: RelayDetail = {
+          schemaVersion: 2,
+          ref: { kind: "relay", id },
+          sourcePath: `.mex/relays/${id}.md`,
+          revision: envelope.preview.changes[0]?.afterRevision ?? revision("d"),
+          state: "published",
+          sender: structuredClone(envelope.receipt.authority.actor),
+          ...structuredClone(draft.input),
+          publishedAt: envelope.receipt.authority.occurredAt,
+          acknowledgedBy: null,
+          acknowledgedAt: null,
+          closedBy: null,
+          closedAt: null,
+          diagnostics: [],
+          diagnosticsTruncated: false,
+        };
+        this.#relays.unshift(next);
+        this.#relayDrafts.splice(this.#relayDrafts.indexOf(draft), 1);
+        relays = [next];
+      }
+    } else {
+      const index = this.#relays.findIndex((candidate) => candidate.ref.id === action.relayId);
+      const current = this.#relays[index];
+      if (current !== undefined) {
+        const next: RelayDetail = action.kind === "relay.acknowledge"
+          ? {
+              ...current,
+              state: "acknowledged",
+              revision: envelope.preview.changes[0]?.afterRevision ?? revision("e"),
+              acknowledgedBy: structuredClone(envelope.receipt.authority.actor),
+              acknowledgedAt: envelope.receipt.authority.occurredAt,
+            }
+          : {
+              ...current,
+              state: "closed",
+              revision: envelope.preview.changes[0]?.afterRevision ?? revision("e"),
+              closedBy: structuredClone(envelope.receipt.authority.actor),
+              closedAt: envelope.receipt.authority.occurredAt,
+            };
+        this.#relays[index] = next;
+        relays = [next];
+      }
+    }
+    const eventId = envelope.receipt.purposeIds.find((item) => item.purpose === "activity")?.id;
+    const events: TeamActivityEvent[] = eventId === undefined ? [] : [{
+      schemaVersion: 1,
+      id: eventId,
+      timestamp: envelope.receipt.authority.occurredAt,
+      actor: structuredClone(envelope.receipt.authority.actor),
+      action: action.kind === "relay.publish" ? "relay.published" : action.kind === "relay.acknowledge" ? "relay.acknowledged" : "relay.closed",
+      subjects: relays[0] ? [{ kind: "entity", entity: { ...relays[0].ref } }] : [],
+      workstream: relays[0]?.workstream ?? null,
+      repoState: structuredClone(envelope.receipt.authority.repoState),
+    }];
+    return Promise.resolve({
+      operationId: envelope.request.operationId,
+      previewRevision: envelope.receipt.previewRevision,
+      applied: true,
+      idempotentReplay: false,
+      changes: structuredClone(envelope.preview.changes),
+      localChanges: structuredClone(envelope.preview.localChanges),
+      relays: structuredClone(relays),
+      events,
+    });
   }
   getInboxDrafts(request: InboxDraftListRequest): Promise<InboxDraftListResponse> {
     const parsedOffset = request.cursor?.match(/^fixture_inbox_drafts_(\d+)$/)?.[1];

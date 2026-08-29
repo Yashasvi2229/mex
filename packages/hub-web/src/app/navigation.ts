@@ -52,7 +52,7 @@ export const navigation: NavigationGroup[] = [
     items: [
       { label: "Members", path: "/members", icon: UsersRound, capability: "members" },
       { label: "Inbox", path: "/inbox", icon: Inbox, capability: "inbox" },
-      { label: "Relays", path: "/relays", icon: Send, structuralUnavailable: true },
+      { label: "Relays", path: "/relays", icon: Send, capability: "relays" },
       { label: "Activity", path: "/activity", icon: Activity, capability: "activity" },
     ],
   },
