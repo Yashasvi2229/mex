@@ -1,6 +1,6 @@
 # Relay Handoff Contract
 
-Status: Checkpoint F0 locked; implementation and registration remain gated by F1-F4
+Status: Checkpoints F0-F2 implemented and registered; F3-F4 integration remains gated
 
 This brief freezes the smallest repository-native Relay product: a local draft
 becomes one canonical handoff, one eligible recipient claims it, and the
@@ -80,6 +80,26 @@ retains generic workflow journaling, lease, containment, recovery, replay, and
 privacy guarantees. A signer lost before intent requires a new preview; once
 intent exists, bounded journal effects authenticate exact recovery.
 
+## CLI and agent discovery
+
+The registered machine tree is `mex relay contract --json`, `mex relay draft
+list|show|save|delete`, `mex relay list|show`, `mex relay publish`, `mex relay
+acknowledge`, and `mex relay close`. Mutations preview a caller-authored JSON
+request and apply only the complete successful wrapper through
+`--apply <preview-envelope>`; request fragments, altered wrappers, reconstructed
+receipts, and mismatched action commands are rejected before a repository
+service is opened.
+
+The static resolver publishes the strict roots
+`https://mex.dev/contracts/team-relay-request-v1.json` and
+`https://mex.dev/contracts/team-relay-preview-envelope-v1.json`, the full
+command inventory, examples, runtime-only invariants, and Team exit codes. It
+works without Git, Home state, or `.mex`, is capped at 64 KiB, and is included
+in packed installs. Ordinary `mex capabilities --json` advertises only the
+`team_relay` availability record and compact `relay.contract` resolver
+descriptor so every lifecycle manifest remains within 32 KiB. Existing Team,
+Inbox, Wiki, Code Graph, and Graph repair descriptors remain unchanged.
+
 ## Reads and perspectives
 
 Canonical reads accept `mine | sent | all`, lifecycle states, Workstream,
@@ -100,6 +120,8 @@ Relay retains the workflow foundation's 64 KiB artifact, 2,048 record,
 32 MiB corpus, 4,096 directory-entry, 100-result, 100-diagnostic, 4 KiB cursor,
 512 local-draft, 8 KiB summary, 4 KiB item, and 64-entry structured collection
 bounds. The product recipient bound is 32.
+Local draft identifiers use the checkout-local ASCII identifier grammar and
+are limited to 128 bytes.
 
 Malformed lifecycle or dependency sets use `VALIDATION_FAILED`; absent targets
 use `NOT_FOUND`; changed authority or revision uses `REVISION_CONFLICT`; absent

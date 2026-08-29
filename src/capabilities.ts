@@ -13,6 +13,10 @@ import {
   TEAM_IDENTITY_ACTIVITY_LIMITS,
   TEAM_INBOX_SPEC_LIMITS,
 } from "./team/contracts/workflow.js";
+import {
+  RELAY_CONTRACT_COMMAND,
+  RELAY_CONTRACT_DESCRIPTOR_ID,
+} from "./team/relay/cli/contract-catalog.js";
 import type { ContractWikiIndexState } from "./wiki/query/contract-session.js";
 import { VERSION } from "./version.js";
 
@@ -51,6 +55,7 @@ export interface InstalledCapability {
     | "team_identity"
     | "team_workstreams"
     | "team_inbox"
+    | "team_relay"
     | "spec_authoring"
     | "activity_read"
     | "activity_record"
@@ -72,7 +77,7 @@ export interface CapabilityCommandDescriptor {
   /** Machine-readable contract ID for caller-supplied input, when required. */
   inputContract?: string;
   /** Descriptor ID of the bounded command that resolves an out-of-line contract. */
-  contractResolver?: "inbox.contract";
+  contractResolver?: "inbox.contract" | "relay.contract";
 }
 
 export interface TeamCliContract {
@@ -1859,6 +1864,14 @@ const COMMANDS = {
     "mex inbox contract",
     "mex inbox contract --json",
   ),
+  relayContract: command(
+    RELAY_CONTRACT_DESCRIPTOR_ID,
+    "mex relay contract",
+    RELAY_CONTRACT_COMMAND,
+    "json",
+    undefined,
+    RELAY_CONTRACT_DESCRIPTOR_ID,
+  ),
   inboxDraftList: inboxCommand(
     "inbox.draft.list",
     "mex inbox draft list",
@@ -2044,6 +2057,7 @@ export async function inspectCapabilities(
       installedTeamCapability("team_identity", initializationState, teamUnavailableReason),
       installedTeamCapability("team_workstreams", initializationState, teamUnavailableReason),
       installedTeamCapability("team_inbox", initializationState, teamUnavailableReason),
+      installedTeamCapability("team_relay", initializationState, teamUnavailableReason),
       installedSpecAuthoringCapability(initializationState, wikiIndexState, teamUnavailableReason),
       installedTeamCapability("activity_read", initializationState, teamUnavailableReason),
       installedTeamCapability("activity_record", initializationState, teamUnavailableReason),
@@ -2137,7 +2151,11 @@ function availableCommands(
   graphMaintenance: MaintenanceAvailability,
   teamUnavailableReason: CapabilityUnavailableReason | null,
 ): Record<CapabilityCommandKind, CapabilityCommandDescriptor[]> {
-  const read: CapabilityCommandDescriptor[] = [COMMANDS.capabilities, COMMANDS.inboxContract];
+  const read: CapabilityCommandDescriptor[] = [
+    COMMANDS.capabilities,
+    COMMANDS.inboxContract,
+    COMMANDS.relayContract,
+  ];
   const preview: CapabilityCommandDescriptor[] = [];
   const apply: CapabilityCommandDescriptor[] = [];
 
@@ -2241,7 +2259,7 @@ function installedTeamCapability(
   id: Extract<
     InstalledCapability["id"],
     "project_hub" | "team_identity" | "activity_read" | "activity_record"
-    | "team_workstreams" | "team_inbox"
+    | "team_workstreams" | "team_inbox" | "team_relay"
   >,
   initializationState: RepositoryInitializationState,
   teamUnavailableReason: CapabilityUnavailableReason | null,

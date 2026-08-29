@@ -18,7 +18,8 @@ import { runLog, runTimeline } from "../src/events.js";
 import { createRepositoryGraphPort } from "../src/graph/application-adapter.js";
 import type { MexConfig } from "../src/types.js";
 
-vi.mock("../src/events.js", () => ({
+vi.mock("../src/events.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/events.js")>()),
   runLog: vi.fn(),
   runTimeline: vi.fn(),
 }));
@@ -224,8 +225,13 @@ describe("built CLI main-module guard", () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const cliPath = join(repoRoot, "dist", "cli.js");
   const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")) as { version: string };
+  const yieldToVitestRpc = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    // Vitest 3's fork worker RPC has a fixed 60-second response deadline. Give
+    // its task update one turn before this synchronous production build blocks
+    // the worker event loop.
+    await yieldToVitestRpc();
     // Vitest sets NODE_ENV=test. The build must still select React's production
     // condition and must not leave a development Hub bundle in dist/.
     execSync("npm run build", {
@@ -236,6 +242,13 @@ describe("built CLI main-module guard", () => {
       timeout: 60_000,
     });
   }, 65_000);
+
+  beforeEach(async () => {
+    // The cases below intentionally use synchronous child processes to exercise
+    // the real CLI boundary. Let Vitest acknowledge the pending task update
+    // before each case starts blocking this worker again.
+    await yieldToVitestRpc();
+  });
 
   it("parses argv when invoked through a symlinked bin (npm/npx layout)", () => {
     const binDir = mkdtempSync(join(tmpdir(), "mex-bin-"));
@@ -387,6 +400,321 @@ describe("built CLI main-module guard", () => {
       rmSync(userHome, { recursive: true, force: true });
     }
   });
+
+  it("resolves the complete Relay contract before repository readiness", () => {
+    const project = mkdtempSync(join(tmpdir(), "mex-relay-contract-cli-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-relay-contract-home-"));
+    try {
+      const beforeProject = snapshotProcessTree(project);
+      const beforeHome = snapshotProcessTree(userHome);
+      const environment = {
+        ...process.env,
+        HOME: userHome,
+        MEX_TELEMETRY: "0",
+        DO_NOT_TRACK: "1",
+        NO_COLOR: "1",
+      };
+      const resolved = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "contract", "--json"],
+        { cwd: project, encoding: "utf8", env: environment },
+      );
+      expect(resolved.status, resolved.stderr).toBe(0);
+      expect(Buffer.byteLength(resolved.stdout, "utf8")).toBeLessThanOrEqual(65_536);
+      expect(JSON.parse(resolved.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "relay.contract",
+        mode: "read",
+        ok: true,
+        data: {
+          contractId: "team.relay.contract-catalog.v1",
+          requestFile: {
+            schemaRef: "https://mex.dev/contracts/team-relay-request-v1.json",
+            maxRecipients: 32,
+          },
+          applyFile: {
+            schemaRef: "https://mex.dev/contracts/team-relay-preview-envelope-v1.json",
+          },
+        },
+      });
+      expect(snapshotProcessTree(project)).toEqual(beforeProject);
+      expect(snapshotProcessTree(userHome)).toEqual(beforeHome);
+
+      const malformed = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "contract", "--json", "unexpected"],
+        { cwd: project, encoding: "utf8", env: environment },
+      );
+      expect(malformed.status).toBe(2);
+      expect(malformed.stderr).toBe("");
+      expect(JSON.parse(malformed.stdout)).toMatchObject({
+        command: "relay.contract",
+        mode: "read",
+        ok: false,
+        problem: { code: "INVALID_REQUEST" },
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the Relay draft ID process boundary aligned with local storage", () => {
+    const project = mkdtempSync(join(tmpdir(), "mex-relay-id-cli-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-relay-id-home-"));
+    try {
+      const environment = {
+        ...process.env,
+        HOME: userHome,
+        MEX_TELEMETRY: "0",
+        DO_NOT_TRACK: "1",
+        NO_COLOR: "1",
+      };
+      const acceptedId = `d${"a".repeat(127)}`;
+      const accepted = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "draft", "show", acceptedId, "--json"],
+        { cwd: project, encoding: "utf8", env: environment },
+      );
+      expect(accepted.status, accepted.stderr).toBe(3);
+      expect(accepted.stderr).toBe("");
+      expect(JSON.parse(accepted.stdout)).toMatchObject({
+        command: "relay.draft.show",
+        mode: "read",
+        ok: false,
+        problem: { code: "NOT_FOUND" },
+      });
+
+      const rejected = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "draft", "show", `${acceptedId}a`, "--json"],
+        { cwd: project, encoding: "utf8", env: environment },
+      );
+      expect(rejected.status, rejected.stderr).toBe(2);
+      expect(rejected.stderr).toBe("");
+      expect(JSON.parse(rejected.stdout)).toMatchObject({
+        command: "relay.draft.show",
+        mode: "read",
+        ok: false,
+        problem: { code: "INVALID_REQUEST" },
+      });
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips local Relay previews with bounded Git identity and WHATWG evidence", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-relay-local-cli-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-relay-local-home-"));
+    const requestRoot = mkdtempSync(join(tmpdir(), "mex-relay-local-request-"));
+    try {
+      const mexPath = join(fixture, ".mex");
+      mkdirSync(mexPath, { recursive: true });
+      writeFileSync(join(fixture, ".gitignore"), ".mex/local/\n");
+      writeFileSync(join(mexPath, "ROUTER.md"), "# Router\n");
+      writeFileSync(join(mexPath, "config.json"), JSON.stringify({
+        scaffold_id: "scaffold-relay-local-process-001",
+      }));
+      execFileSync("git", ["init", "--quiet"], { cwd: fixture });
+      execFileSync("git", ["config", "user.email", "not-an-email"], { cwd: fixture });
+      const gitActorName = "Relay\u0085Agent";
+      execFileSync("git", ["config", "user.name", gitActorName], { cwd: fixture });
+      execFileSync("git", ["add", ".gitignore", ".mex/ROUTER.md", ".mex/config.json"], { cwd: fixture });
+      execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: fixture });
+      const environment = {
+        ...process.env,
+        HOME: userHome,
+        MEX_TELEMETRY: "0",
+        DO_NOT_TRACK: "1",
+        NO_COLOR: "1",
+      };
+      const requestPath = join(requestRoot, "save.json");
+      const externalUris = [
+        "HTTPS://example.test/path",
+        "http:example.test",
+        "https://example.test/a b",
+      ];
+      writeFileSync(requestPath, JSON.stringify({
+        operationId: "relay-local-process-001",
+        action: {
+          kind: "relay.draft.save",
+          draft: {
+            recipients: [{
+              kind: "member",
+              memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }],
+            workstream: {
+              id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+              kind: "workstream",
+            },
+            summary: "Preserve the local Relay authority contract.",
+            completed: [],
+            inProgress: [],
+            decisions: [],
+            blockers: [],
+            unresolvedQuestions: [],
+            changedFiles: [],
+            code: [],
+            evidence: externalUris.map((uri) => ({ kind: "external", uri })),
+            nextActions: [],
+          },
+        },
+        expectedRevisions: [],
+      }));
+      const preview = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "draft", "save", requestPath, "--json"],
+        { cwd: fixture, encoding: "utf8", env: environment },
+      );
+      expect(preview.status, preview.stderr).toBe(0);
+      const envelope = JSON.parse(preview.stdout) as any;
+      expect(envelope).toMatchObject({
+        command: "relay.draft.save",
+        mode: "preview",
+        ok: true,
+        data: {
+          request: {
+            action: {
+              draft: {
+                evidence: externalUris.map((uri) => ({ kind: "external", uri })),
+              },
+            },
+          },
+          receipt: {
+            authority: {
+              actor: {
+                kind: "git",
+                name: gitActorName,
+                email: "not-an-email",
+              },
+            },
+          },
+        },
+      });
+
+      const previewPath = join(requestRoot, "preview.json");
+      writeFileSync(previewPath, preview.stdout);
+      const applied = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "draft", "save", `--apply=${previewPath}`, "--json"],
+        { cwd: fixture, encoding: "utf8", env: environment },
+      );
+      expect(applied.status, applied.stderr).toBe(0);
+      expect(JSON.parse(applied.stdout)).toMatchObject({
+        command: "relay.draft.save",
+        mode: "apply",
+        ok: true,
+        data: { applied: true },
+      });
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+      rmSync(requestRoot, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  it("fails closed when a real signed Relay preview cannot fit the saved CLI wrapper", async () => {
+    const fixture = mkdtempSync(join(tmpdir(), "mex-relay-wrapper-cli-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-relay-wrapper-home-"));
+    try {
+      const mexPath = join(fixture, ".mex");
+      mkdirSync(mexPath, { recursive: true });
+      writeFileSync(join(fixture, ".gitignore"), ".mex/local/\n");
+      writeFileSync(join(mexPath, "ROUTER.md"), "# Router\n");
+      writeFileSync(join(mexPath, "config.json"), JSON.stringify({
+        scaffold_id: "scaffold-relay-wrapper-process-001",
+      }));
+      execFileSync("git", ["init", "--quiet"], { cwd: fixture });
+      execFileSync("git", ["config", "user.email", "wrapper@example.test"], { cwd: fixture });
+      execFileSync("git", ["config", "user.name", "Relay Wrapper"], { cwd: fixture });
+      execFileSync("git", ["add", ".gitignore", ".mex/ROUTER.md", ".mex/config.json"], { cwd: fixture });
+      execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: fixture });
+
+      const request = {
+        operationId: "relay-wrapper-boundary-001",
+        action: {
+          kind: "relay.draft.save" as const,
+          draft: {
+            recipients: [{
+              kind: "member" as const,
+              memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }],
+            workstream: {
+              id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+              kind: "workstream" as const,
+            },
+            summary: "s".repeat(8_192),
+            completed: Array.from({ length: 12 }, (_, index) =>
+              `${String(index).padStart(2, "0")}:${"c".repeat(4_093)}`),
+            inProgress: [`p${"x".repeat(4_095)}`],
+            decisions: [],
+            blockers: [`b${"y".repeat(2_559)}`],
+            unresolvedQuestions: [],
+            changedFiles: [],
+            code: [],
+            evidence: [],
+            nextActions: [],
+          },
+        },
+        expectedRevisions: [],
+      };
+      const requestPath = join(fixture, "relay-wrapper-request.json");
+      const requestJson = JSON.stringify(request);
+      expect(Buffer.byteLength(requestJson, "utf8")).toBeLessThanOrEqual(65_536);
+      writeFileSync(requestPath, requestJson);
+
+      const { createRepositoryTeamWorkflowPort } = await import(
+        "../src/team/workflow/repository-team-workflow-port.js"
+      );
+      const { boundedRelayJson } = await import("../src/team/relay/handoff.js");
+      const { renderTeamEnvelope, teamEnvelope } = await import("../src/team/cli/envelope.js");
+      const service = await createRepositoryTeamWorkflowPort(fixture);
+      const inner = await service.previewRelay(request);
+      expect(Buffer.byteLength(boundedRelayJson(inner), "utf8")).toBeLessThanOrEqual(65_536);
+      const outer = teamEnvelope({
+        command: "relay.draft.save",
+        mode: "preview",
+        data: inner,
+        diagnostics: inner.preview.diagnostics,
+        valid: inner.preview.valid,
+      });
+      expect(Buffer.byteLength(renderTeamEnvelope(outer), "utf8") + 1).toBeGreaterThan(65_536);
+
+      const result = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "draft", "save", requestPath, "--json"],
+        {
+          cwd: fixture,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HOME: userHome,
+            MEX_TELEMETRY: "0",
+            DO_NOT_TRACK: "1",
+            NO_COLOR: "1",
+          },
+        },
+      );
+      expect(result.status, result.stderr).toBe(1);
+      expect(result.stderr).toBe("");
+      expect(result.stdout.endsWith("\n")).toBe(true);
+      expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThanOrEqual(65_536);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        command: "relay.draft.save",
+        mode: "preview",
+        ok: false,
+        data: null,
+        problem: {
+          code: "VALIDATION_FAILED",
+          title: "Relay preview exceeds CLI envelope limit",
+        },
+      });
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  }, 40_000);
 
   it("does not auto-parse when dist/cli.js is imported as a module", () => {
     const result = spawnSync(
@@ -953,6 +1281,16 @@ Canonical read-only release requirements.
         {
           args: ["member", "add", "--apply=preview.json", "--unknown", "--json"],
           command: "member.add",
+          mode: "apply",
+        },
+        {
+          args: ["relay", "show", "--json"],
+          command: "relay.show",
+          mode: "read",
+        },
+        {
+          args: ["relay", "close", "--apply", "--json"],
+          command: "relay.close",
           mode: "apply",
         },
       ] as const;

@@ -86,14 +86,33 @@ try {
   if (!existsSync(manifest)) throw new Error("The packed package omitted dist/hub assets.");
   const declaration = readFileSync(join(installed, "dist", "index.d.ts"), "utf8");
   if (
-    /Hub(?:Job|Api|Session|Capabilities|Activity|Wiki)|Activity(?:Request|Response|Item|Diagnostic)|CodeWorkspace|CodeKnowledge(?:Request|Response)|GraphHealthDetails|WikiHealthDetails|WikiEntity(?:List|Detail)(?:Request|Response)|Wiki(?:Relations|Backlinks)(?:Request|Response)|WikiSearchResult|RepositoryGraphPort|RepositoryWiki|createRepositoryWikiPort|runHubCommand/.test(
+    /Hub(?:Job|Api|Session|Capabilities|Activity|Wiki)|Activity(?:Request|Response|Item|Diagnostic)|CodeWorkspace|CodeKnowledge(?:Request|Response)|GraphHealthDetails|WikiHealthDetails|WikiEntity(?:List|Detail)(?:Request|Response)|Wiki(?:Relations|Backlinks)(?:Request|Response)|WikiSearchResult|RepositoryGraphPort|RepositoryWiki|createRepositoryWikiPort|runHubCommand|TeamRelay|RelayHandoff/.test(
       declaration,
     )
   ) {
-    throw new Error("Private Hub declarations leaked through the package root.");
+    throw new Error("Private Hub or Relay declarations leaked through the package root.");
   }
 
   const cli = join(installed, "dist", "cli.js");
+  const relayContractOutput = run(
+    process.execPath,
+    [cli, "relay", "contract", "--json"],
+    work,
+  );
+  if (Buffer.byteLength(relayContractOutput, "utf8") > 65_536) {
+    throw new Error("The packed Relay resolver exceeded its 64 KiB output ceiling.");
+  }
+  const relayContract = JSON.parse(relayContractOutput);
+  if (
+    relayContract?.command !== "relay.contract"
+    || relayContract?.ok !== true
+    || relayContract?.data?.requestFile?.schemaRef
+      !== "https://mex.dev/contracts/team-relay-request-v1.json"
+    || relayContract?.data?.applyFile?.schemaRef
+      !== "https://mex.dev/contracts/team-relay-preview-envelope-v1.json"
+  ) {
+    throw new Error("The packed install omitted the static Relay command contract.");
+  }
   run(process.execPath, [cli, "graph", "rebuild", "--root", project, "--json"], project);
   const graphScope = run(process.execPath, [
     cli,
