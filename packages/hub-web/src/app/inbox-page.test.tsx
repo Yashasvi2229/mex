@@ -43,6 +43,26 @@ async function openDrafts(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole("tab", { name: "Drafts on this device" }));
 }
 
+async function selectMoreAction(
+  user: ReturnType<typeof userEvent.setup>,
+  name: string | RegExp,
+) {
+  await user.click(screen.getByRole("button", { name: "More proposal actions" }));
+  const item = await screen.findByRole("menuitem", { name });
+  await user.click(item);
+}
+
+async function openExactTechnicalDetails(
+  user: ReturnType<typeof userEvent.setup>,
+  scope: HTMLElement,
+) {
+  const trigger = await within(scope).findByRole("button", { name: "Exact technical details" });
+  expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await user.click(trigger);
+  expect(trigger).toHaveAttribute("aria-expanded", "true");
+  return within(scope).findByRole("heading", { name: "Exact preview" });
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((next) => {
@@ -259,29 +279,187 @@ describe("Inbox Spec-authoring workbench", () => {
     const preview = vi.spyOn(api, "previewInboxOperation");
     renderRoute(api);
     await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" });
-    await user.click(screen.getByRole("button", { name: "Review & approve" }));
-    const dialog = await screen.findByRole("dialog", { name: "Review proposal for approval" });
-    const proposalSnapshot = within(dialog).getByRole("region", { name: "Immutable proposal snapshot" });
-    expect(within(proposalSnapshot).getByText("Require exact evidence review before release approval.")).toBeVisible();
-    expect(within(proposalSnapshot).getByText("Clarify the exact evidence boundary for the release gate.")).toBeVisible();
-    expect(within(proposalSnapshot).getByText("scripts/release-benchmark/run.mjs")).toBeVisible();
-    await user.click(within(dialog).getByRole("button", { name: "Preview Spec approval" }));
-    expect(await within(dialog).findByRole("heading", { name: "Evidence docket" })).toBeVisible();
-    expect(within(dialog).getByText(".mex/specs/mx_01000000000000000000000001.md")).toBeVisible();
-    expect(within(dialog).getByText(".mex/events/operations.jsonl")).toBeVisible();
-    expect(within(dialog).getByText(`.mex/inbox/${PROPOSAL_ID}.md`)).toBeVisible();
-    expect(within(dialog).getByText(/^\.mex\/events\/activity\/2026-08\/event_/u)).toBeVisible();
-    expect(within(dialog).getByText("feat/project-hub-foundation", { exact: true })).toBeVisible();
-    expect(within(dialog).getByText("6484dd00022ac5d704404585d981b4da5f2c1cbf", { exact: true })).toBeVisible();
-    expect(within(dialog).getByText("Dirty · local changes", { exact: true })).toBeVisible();
-    expect(within(dialog).getAllByText("23 Aug, 08:45 UTC", { exact: true })).toHaveLength(2);
+    await user.click(screen.getByRole("button", { name: "Approve change" }));
+    const confirmation = await screen.findByRole("alertdialog", { name: "Approve this Spec change?" });
+    expect(within(confirmation).getByText("Clarify release evidence review")).toBeVisible();
+    expect(within(confirmation).getByText("Spec entity affected")).toBeVisible();
+    expect(within(confirmation).getByText("Human-team memory release")).toBeVisible();
+    expect(within(confirmation).getByText("Approving as Ada Lovelace")).toBeVisible();
+    expect(within(confirmation).getByText("Write the reviewed Spec change")).toBeVisible();
+    expect(within(confirmation).queryByText(".mex/specs/mx_01000000000000000000000001.md")).not.toBeInTheDocument();
+
+    expect(await openExactTechnicalDetails(user, confirmation)).toBeVisible();
+    expect(within(confirmation).getByText(".mex/specs/mx_01000000000000000000000001.md")).toBeVisible();
+    expect(within(confirmation).getByText(".mex/events/operations.jsonl")).toBeVisible();
+    expect(within(confirmation).getByText(`.mex/inbox/${PROPOSAL_ID}.md`)).toBeVisible();
+    expect(within(confirmation).getByText(/^\.mex\/events\/activity\/2026-08\/event_/u)).toBeVisible();
+    expect(within(confirmation).getByText("feat/project-hub-foundation", { exact: true })).toBeVisible();
+    expect(within(confirmation).getByText("6484dd00022ac5d704404585d981b4da5f2c1cbf", { exact: true })).toBeVisible();
+    expect(within(confirmation).getByText("Dirty · local changes", { exact: true })).toBeVisible();
+    expect(within(confirmation).getAllByText("23 Aug, 08:45 UTC", { exact: true })).toHaveLength(2);
     expect(preview.mock.calls[0]![0].action).toEqual({
       kind: "inbox.approve",
       proposalId: PROPOSAL_ID,
     });
   });
 
-  it("authors a fresh stale repair, hides withdrawal, then approves the repaired proposal", async () => {
+  it("keeps teammate approval primary and exposes terminal decline through a keyboard-safe overflow menu", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    const preview = vi.spyOn(api, "previewInboxOperation");
+    renderRoute(api, `/inbox?view=review&proposal=${PROPOSAL_ID}`);
+
+    await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" });
+    expect(screen.getByRole("button", { name: "Approve change" })).toBeVisible();
+    const more = screen.getByRole("button", { name: "More proposal actions" });
+    more.focus();
+    await user.keyboard("{Enter}");
+    const decline = await screen.findByRole("menuitem", { name: "Decline proposal…" });
+    expect(decline).toHaveFocus();
+    expect(screen.queryByRole("menuitem", { name: "Withdraw proposal…" })).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Decline proposal…" })).not.toBeInTheDocument());
+    expect(more).toHaveFocus();
+    await selectMoreAction(user, "Decline proposal…");
+    expect(await screen.findByRole("dialog", { name: "Decline proposal" })).toBeVisible();
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  it("reserves withdrawal and self-approval for the exact current author", async () => {
+    const user = userEvent.setup();
+    renderRoute(createFixtureApi(), `/inbox?view=review&proposal=${OWN_PROPOSAL_ID}`);
+
+    await screen.findByRole("heading", { level: 2, name: "Keep approval consequences explicit" });
+    expect(screen.getByText("Waiting for teammate review")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Approve change" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "More proposal actions" }));
+    expect(await screen.findByRole("menuitem", { name: "Approve without teammate review…" })).toBeVisible();
+    expect(screen.getByRole("menuitem", { name: "Withdraw proposal…" })).toBeVisible();
+    expect(screen.queryByRole("menuitem", { name: "Decline proposal…" })).not.toBeInTheDocument();
+  });
+
+  it("warns before self-approval, applies the exact returned envelope, and focuses a truthful Git notice", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    const realPreview = api.previewInboxOperation.bind(api);
+    let exactEnvelope: InboxOperationPreviewResponse | undefined;
+    const preview = vi.spyOn(api, "previewInboxOperation").mockImplementation(async (request) => {
+      exactEnvelope = await realPreview(request);
+      return exactEnvelope;
+    });
+    const apply = vi.spyOn(api, "applyInboxOperation");
+    renderRoute(api, `/inbox?view=review&proposal=${OWN_PROPOSAL_ID}`);
+
+    await screen.findByRole("heading", { level: 2, name: "Keep approval consequences explicit" });
+    await selectMoreAction(user, "Approve without teammate review…");
+    const warning = await screen.findByRole("alertdialog", { name: "Teammate review is recommended" });
+    expect(within(warning).getByText(/Independent review is the safer default/)).toBeVisible();
+    expect(preview).not.toHaveBeenCalled();
+
+    await user.click(within(warning).getByRole("button", { name: "Continue without teammate review" }));
+    const confirmation = await screen.findByRole("alertdialog", { name: "Approve this Spec change?" });
+    expect(preview).toHaveBeenCalledOnce();
+    expect(preview.mock.calls[0]![0].action).toEqual({
+      kind: "inbox.approve",
+      proposalId: OWN_PROPOSAL_ID,
+    });
+    expect(within(confirmation).getByText("Approving as Ada Lovelace")).toBeVisible();
+    await user.click(within(confirmation).getByRole("button", { name: "Approve change" }));
+
+    await waitFor(() => expect(apply).toHaveBeenCalledOnce());
+    expect(exactEnvelope).toBeDefined();
+    expect(apply.mock.calls[0]![0]).toBe(exactEnvelope);
+    const noticeTitle = await screen.findByText("Working tree updated");
+    const gitNotice = noticeTitle.closest<HTMLElement>("[role='alert']");
+    if (gitNotice === null) throw new Error("Expected the focused Git truth alert.");
+    expect(within(gitNotice).getByText(
+      "Spec change and review record were written to your working tree. Commit and push them to share the result with your team.",
+    )).toBeVisible();
+    await waitFor(() => expect(gitNotice).toHaveFocus());
+    await user.click(within(gitNotice).getByRole("button", { name: "Dismiss Git notice" }));
+    await waitFor(() => expect(screen.queryByText("Working tree updated")).not.toBeInTheDocument());
+  });
+
+  it("does not let a non-author approve or repair a stale proposal", async () => {
+    renderRoute(createFixtureApi(), "/inbox?view=review&proposal=proposal_01000000000000000000001722");
+
+    await screen.findByRole("heading", { level: 2, name: "Refresh the stale review boundary" });
+    expect(screen.getAllByText("Needs refresh").length).toBeGreaterThan(0);
+    expect(screen.getByText("The referenced Spec content changed after this proposal was published.")).toBeVisible();
+    expect(screen.getByText("Its author or their agent should refresh this proposal against current Spec content.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Approve change" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "More proposal actions" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Repair manually…")).not.toBeInTheDocument();
+  });
+
+  it("never applies an invalid approval preview and permits an explicit retry", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    const proposal = await api.getInboxProposal(PROPOSAL_ID);
+    const valid = await api.previewInboxOperation({
+      operationId: "ui_invalid_approval_fixture",
+      action: { kind: "inbox.approve", proposalId: PROPOSAL_ID },
+      expectedRevisions: [{
+        target: { kind: "artifact", path: proposal.sourcePath },
+        revision: proposal.revision,
+      }],
+    });
+    const invalid: InboxOperationPreviewResponse = {
+      ...valid,
+      preview: {
+        ...valid.preview,
+        valid: false,
+        diagnostics: [{
+          code: "INBOX_TARGET_REVISION_CHANGED",
+          severity: "error",
+          message: "The exact Spec dependency changed after publication.",
+        }],
+      },
+    };
+    const preview = vi.spyOn(api, "previewInboxOperation").mockResolvedValue(invalid);
+    const apply = vi.spyOn(api, "applyInboxOperation");
+    renderRoute(api, `/inbox?view=review&proposal=${PROPOSAL_ID}`);
+
+    await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" });
+    await user.click(screen.getByRole("button", { name: "Approve change" }));
+    const invalidDialog = await screen.findByRole("dialog", { name: "This change is not ready to approve" });
+    expect(within(invalidDialog).getByText("Approval preview is invalid")).toBeVisible();
+    expect(apply).not.toHaveBeenCalled();
+    expect(within(invalidDialog).queryByText("The exact Spec dependency changed after publication.")).not.toBeInTheDocument();
+    await openExactTechnicalDetails(user, invalidDialog);
+    expect(within(invalidDialog).getByText("The exact Spec dependency changed after publication.")).toBeVisible();
+
+    await user.click(within(invalidDialog).getByRole("button", { name: "Try preview again" }));
+    await waitFor(() => expect(preview).toHaveBeenCalledTimes(2));
+    expect(apply).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "This change is not ready to approve" })).toBeVisible();
+  });
+
+  it("keeps proposal mutations usable when Spec approval is independently unavailable", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    const capabilities = await api.getCapabilities();
+    vi.spyOn(api, "getCapabilities").mockResolvedValue({
+      ...capabilities,
+      inbox: {
+        ...capabilities.inbox,
+        specApproval: { availability: "unavailable", reason: "Spec approval is offline for maintenance." },
+      },
+    });
+    renderRoute(api, `/inbox?view=review&proposal=${PROPOSAL_ID}`);
+
+    await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" });
+    expect(screen.getByRole("button", { name: "Approve change" })).toBeDisabled();
+    expect(screen.getByText("Approval is unavailable: Spec approval is offline for maintenance.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "More proposal actions" }));
+    expect(await screen.findByRole("menuitem", { name: "Decline proposal…" })).toBeEnabled();
+    expect(screen.getByRole("menuitem", { name: /Mark as needs refresh…/ })).toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("menuitem", { name: "Decline proposal…" }));
+    expect(await screen.findByRole("dialog", { name: "Decline proposal" })).toBeVisible();
+  });
+
+  it("authors a fresh stale repair without exposing withdrawal or writing a Spec", async () => {
     const user = userEvent.setup();
     const api = createFixtureApi();
     const pending = await api.getInboxProposal(PROPOSAL_ID);
@@ -298,14 +476,19 @@ describe("Inbox Spec-authoring workbench", () => {
       }],
     });
     await api.applyInboxOperation(stalePreview);
+    const currentIdentity = await api.getCurrentActor();
+    vi.spyOn(api, "getCurrentActor").mockResolvedValue({
+      ...currentIdentity,
+      actor: pending.author,
+    });
     const preview = vi.spyOn(api, "previewInboxOperation");
     const apply = vi.spyOn(api, "applyInboxOperation");
     renderRoute(api, `/inbox?view=review&proposal=${PROPOSAL_ID}`);
 
     await screen.findByRole("heading", { level: 2, name: pending.title });
     expect(screen.queryByRole("button", { name: "Withdraw proposal" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Repair proposal" }));
-    const repairDialog = await screen.findByRole("dialog", { name: "Repair stale proposal" });
+    await selectMoreAction(user, "Repair manually…");
+    const repairDialog = await screen.findByRole("dialog", { name: "Repair proposal manually" });
     const exactRevision = within(repairDialog).getByRole("textbox", { name: "Exact file revision" });
     const semanticRevision = within(repairDialog).getByRole("spinbutton", { name: "Semantic revision" });
     const rationale = within(repairDialog).getByRole("textbox", { name: "Rationale" });
@@ -315,12 +498,12 @@ describe("Inbox Spec-authoring workbench", () => {
     fireEvent.change(rationale, { target: { value: "Fresh target revision reviewed.\n\tRepair is exact." } });
     fireEvent.change(evidence, { target: { value: "Fresh repair evidence.\n\tObserved locally." } });
 
-    await user.click(within(repairDialog).getByRole("button", { name: "Preview proposal repair" }));
-    await within(repairDialog).findByRole("heading", { name: "Evidence docket" });
+    await user.click(within(repairDialog).getByRole("button", { name: "Review repaired proposal" }));
+    await openExactTechnicalDetails(user, repairDialog);
     fireEvent.change(exactRevision, { target: { value: "b".repeat(64) } });
-    expect(within(repairDialog).queryByRole("heading", { name: "Evidence docket" })).not.toBeInTheDocument();
-    await user.click(within(repairDialog).getByRole("button", { name: "Preview proposal repair" }));
-    await within(repairDialog).findByRole("heading", { name: "Evidence docket" });
+    expect(within(repairDialog).queryByRole("heading", { name: "Exact preview" })).not.toBeInTheDocument();
+    await user.click(within(repairDialog).getByRole("button", { name: "Review repaired proposal" }));
+    await openExactTechnicalDetails(user, repairDialog);
     expect(preview).toHaveBeenCalledTimes(2);
     expect(preview.mock.calls[0]![0].operationId).not.toBe(preview.mock.calls[1]![0].operationId);
     const repairRequest = preview.mock.calls[1]![0];
@@ -339,21 +522,11 @@ describe("Inbox Spec-authoring workbench", () => {
     });
 
     await user.click(within(repairDialog).getByRole("button", { name: "Review repaired proposal" }));
-    const repairConfirmation = await screen.findByRole("alertdialog", { name: "Repair this stale proposal?" });
-    await user.click(within(repairConfirmation).getByRole("button", { name: "Repair proposal" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Repair stale proposal" })).not.toBeInTheDocument());
-
-    const approveTrigger = await screen.findByRole("button", { name: "Review & approve" });
-    await user.click(approveTrigger);
-    const approvalDialog = await screen.findByRole("dialog", { name: "Review proposal for approval" });
-    await user.click(within(approvalDialog).getByRole("button", { name: "Preview Spec approval" }));
-    await within(approvalDialog).findByRole("heading", { name: "Evidence docket" });
-    await user.click(within(approvalDialog).getByRole("button", { name: "Review exact preview" }));
-    const approvalConfirmation = await screen.findByRole("alertdialog", { name: "Approve this exact Spec change?" });
-    await user.click(within(approvalConfirmation).getByRole("button", { name: "Approve proposal and write Spec" }));
-    await waitFor(() => expect(apply).toHaveBeenCalledTimes(2));
-    expect(apply.mock.calls.map(([envelope]) => envelope.request.action.kind))
-      .toEqual(["inbox.repair", "inbox.approve"]);
+    const repairConfirmation = await screen.findByRole("alertdialog", { name: "Return this proposal to review?" });
+    await user.click(within(repairConfirmation).getByRole("button", { name: "Repair and return to review" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Repair proposal manually" })).not.toBeInTheDocument());
+    await waitFor(() => expect(apply).toHaveBeenCalledOnce());
+    expect(apply.mock.calls[0]![0].request.action.kind).toBe("inbox.repair");
   });
 
   it("accepts canonical multiline tabs, rejects NFD and lone surrogates, invalidates previews, and focuses live success", async () => {
@@ -386,11 +559,11 @@ describe("Inbox Spec-authoring workbench", () => {
     fireEvent.change(body, { target: { value: "First line\n\tTabbed second line" } });
 
     await user.click(previewButton);
-    expect(await within(dialog).findByRole("heading", { name: "Evidence docket" })).toBeVisible();
+    expect(await openExactTechnicalDetails(user, dialog)).toBeVisible();
     fireEvent.change(title, { target: { value: "Café requirement" } });
-    expect(within(dialog).queryByRole("heading", { name: "Evidence docket" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("heading", { name: "Exact preview" })).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Preview local draft" }));
-    expect(await within(dialog).findByRole("heading", { name: "Evidence docket" })).toBeVisible();
+    expect(await openExactTechnicalDetails(user, dialog)).toBeVisible();
     expect(preview).toHaveBeenCalledTimes(2);
     expect(preview.mock.calls[0]![0].operationId).not.toBe(preview.mock.calls[1]![0].operationId);
     expect(preview.mock.calls[1]![0]).toMatchObject({
@@ -406,7 +579,7 @@ describe("Inbox Spec-authoring workbench", () => {
     await user.click(within(dialog).getByRole("button", { name: "Review draft save" }));
     const confirmation = await screen.findByRole("alertdialog", { name: "Save this private draft?" });
     await user.click(within(confirmation).getByRole("button", { name: "Save local draft" }));
-    const success = await screen.findByText("Checkout-local draft state updated from the exact preview.");
+    const success = await screen.findByText("Draft state updated on this device from the exact preview.");
     expect(apply).toHaveBeenCalledOnce();
     await waitFor(() => expect(success).toHaveFocus());
   });
@@ -452,7 +625,7 @@ describe("Inbox Spec-authoring workbench", () => {
       await delayed.promise;
     });
 
-    expect(within(dialog).queryByRole("heading", { name: "Evidence docket" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Exact technical details" })).not.toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Preview local draft" })).toBeEnabled();
   });
 
@@ -469,11 +642,11 @@ describe("Inbox Spec-authoring workbench", () => {
     renderRoute(api);
 
     await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" });
-    await user.click(screen.getByRole("button", { name: "Reject proposal" }));
-    const dialog = await screen.findByRole("dialog", { name: "Reject proposal" });
+    await selectMoreAction(user, "Decline proposal…");
+    const dialog = await screen.findByRole("dialog", { name: "Decline proposal" });
     const rationale = within(dialog).getByRole("textbox", { name: "Review rationale" });
     fireEvent.change(rationale, { target: { value: "Original rejection rationale." } });
-    await user.click(within(dialog).getByRole("button", { name: "Preview rejection" }));
+    await user.click(within(dialog).getByRole("button", { name: "Review decline" }));
     await waitFor(() => expect(staleRequest).toBeDefined());
 
     fireEvent.change(rationale, { target: { value: "Edited rejection rationale." } });
@@ -483,8 +656,8 @@ describe("Inbox Spec-authoring workbench", () => {
       await delayed.promise;
     });
 
-    expect(within(dialog).queryByRole("heading", { name: "Evidence docket" })).not.toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "Preview rejection" })).toBeEnabled();
+    expect(within(dialog).queryByRole("button", { name: "Exact technical details" })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Review decline" })).toBeEnabled();
   });
 
   it.each([
@@ -537,7 +710,7 @@ describe("Inbox Spec-authoring workbench", () => {
     expect(within(dialog).getByRole("button", { name: "Body" })).toHaveAttribute("aria-pressed", "false");
     expect(within(dialog).getByRole("textbox", { name: "Replacement body" })).toBeDisabled();
     await user.click(within(dialog).getByRole("button", { name: "Preview local draft" }));
-    await within(dialog).findByRole("heading", { name: "Evidence docket" });
+    await within(dialog).findByRole("button", { name: "Exact technical details" });
     const request = preview.mock.calls[0]![0];
     if (request.action.kind !== "inbox.draft.save" || request.action.draft.change.kind !== "spec.update") {
       throw new Error("Expected a typed Spec update draft.");
@@ -600,7 +773,7 @@ describe("Inbox Spec-authoring workbench", () => {
     );
     expect(within(dialog).getByRole("combobox", { name: /One hierarchy relation/ })).toHaveValue("derived_from");
     await user.click(within(dialog).getByRole("button", { name: "Preview local draft" }));
-    await within(dialog).findByRole("heading", { name: "Evidence docket" });
+    await within(dialog).findByRole("button", { name: "Exact technical details" });
     const request = preview.mock.calls[0]![0];
     expect(request.action.kind).toBe("inbox.draft.save");
     if (request.action.kind !== "inbox.draft.save") throw new Error("Expected draft save request.");
@@ -614,23 +787,23 @@ describe("Inbox Spec-authoring workbench", () => {
     vi.spyOn(api, "applyInboxOperation").mockRejectedValue(new Error("/private/repository must not leak"));
     renderRoute(api);
     await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" });
-    await user.click(screen.getByRole("button", { name: "Reject proposal" }));
-    const dialog = await screen.findByRole("dialog", { name: "Reject proposal" });
+    await selectMoreAction(user, "Decline proposal…");
+    const dialog = await screen.findByRole("dialog", { name: "Decline proposal" });
     const rationale = within(dialog).getByRole("textbox", { name: "Review rationale" });
     await user.type(rationale, "The evidence is incomplete.");
-    await user.click(within(dialog).getByRole("button", { name: "Preview rejection" }));
-    await within(dialog).findByRole("heading", { name: "Evidence docket" });
+    await user.click(within(dialog).getByRole("button", { name: "Review decline" }));
+    await within(dialog).findByRole("button", { name: "Exact technical details" });
     await user.type(rationale, " Rework it.");
-    await user.click(within(dialog).getByRole("button", { name: "Preview rejection" }));
-    await within(dialog).findByRole("heading", { name: "Evidence docket" });
+    await user.click(within(dialog).getByRole("button", { name: "Review decline" }));
+    await within(dialog).findByRole("button", { name: "Exact technical details" });
     expect(preview.mock.calls[0]![0].operationId).not.toBe(preview.mock.calls[1]![0].operationId);
     await user.click(within(dialog).getByRole("button", { name: "Review exact preview" }));
-    const confirmation = await screen.findByRole("alertdialog", { name: "Reject this proposal?" });
-    await user.click(within(confirmation).getByRole("button", { name: "Reject proposal" }));
+    const confirmation = await screen.findByRole("alertdialog", { name: "Decline this proposal?" });
+    await user.click(within(confirmation).getByRole("button", { name: "Decline proposal" }));
     expect(await within(confirmation).findByRole("heading", { name: "This view could not be loaded" })).toBeVisible();
     expect(confirmation).not.toHaveTextContent("/private/repository");
     await user.click(within(confirmation).getByRole("button", { name: "Keep reviewing" }));
-    expect(screen.getByRole("dialog", { name: "Reject proposal" })).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "Decline proposal" })).toBeVisible();
   });
 
   it("keeps unavailable and list-error states explicit without issuing hidden reads", async () => {

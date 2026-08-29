@@ -528,6 +528,90 @@
   border-bottom: 1px solid var(--border);
 }
 
+.proposalActionBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  align-items: center;
+  padding: 13px 18px;
+  background: var(--background);
+  border-bottom: 1px solid var(--border);
+}
+
+.primaryActionStack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.approvingIdentity,
+.actionUnavailable {
+  color: var(--muted-foreground);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.actionUnavailable {
+  width: 100%;
+  margin: 0;
+}
+
+.waitingForReview,
+.actionContext {
+  display: flex;
+  min-width: 0;
+  gap: 9px;
+  align-items: flex-start;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.waitingForReview {
+  margin-right: auto;
+}
+
+.waitingForReview > svg,
+.actionContext > svg {
+  width: 15px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--muted-foreground);
+}
+
+.waitingForReview > span {
+  display: grid;
+  gap: 2px;
+}
+
+.waitingForReview strong {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.waitingForReview small {
+  color: var(--muted-foreground);
+  font-size: 9.5px;
+}
+
+.proposalMenu {
+  width: min(320px, calc(100vw - 32px));
+}
+
+.menuActionCopy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  white-space: normal;
+}
+
+.menuActionCopy small {
+  color: var(--muted-foreground);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
 .identityWarning,
 .staleWarning,
 .readWarning {
@@ -782,6 +866,105 @@
 .technicalDetails {
   padding: 12px 16px 16px;
   border-top: 1px solid var(--border);
+}
+
+.exactPreviewDetails {
+  display: grid;
+  gap: 6px;
+}
+
+.exactPreviewDetails > [data-slot="collapsible-trigger"] {
+  width: fit-content;
+}
+
+.exactPreviewDetails > [data-slot="collapsible-trigger"] svg {
+  width: 13px;
+}
+
+.approvalConfirmation {
+  width: min(calc(100vw - 40px), 680px);
+  max-width: 680px;
+}
+
+.approvalSummary {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.approvalSummary > div:first-child {
+  display: grid;
+  gap: 8px;
+}
+
+.approvalSummary > div:first-child > [data-slot="badge"] {
+  width: fit-content;
+}
+
+.approvalSummary > div:first-child strong {
+  font-size: 14px;
+  font-weight: 610;
+}
+
+.approvalSummary dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.approvalSummary dl > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.55fr) minmax(0, 1fr);
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.approvalSummary dt,
+.approvalConsequences > span {
+  color: var(--muted-foreground);
+  font-size: 9px;
+  font-weight: 620;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.approvalSummary dd {
+  margin: 0;
+  font-size: 11px;
+}
+
+.approvalConsequences {
+  display: grid;
+  gap: 7px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.approvalConsequences ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.previewStatusDialog {
+  width: min(calc(100vw - 40px), 560px);
+  max-width: 560px;
+}
+
+.gitTruthAlert {
+  margin: -4px 0 14px;
+}
+
+.gitTruthAlert:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .technicalDetails [data-slot="collapsible-trigger"] svg {

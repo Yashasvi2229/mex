@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clock3,
   Code2,
   ExternalLink,
   FileDiff,
@@ -12,18 +13,17 @@ import {
   FilePenLine,
   GitCommitHorizontal,
   GitPullRequestArrow,
-  Inbox,
   MapPin,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
   Send,
   ShieldCheck,
   Trash2,
-  Wrench,
-  XCircle,
+  X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { Link, useOutletContext, useSearchParams } from "react-router-dom";
 import {
@@ -35,6 +35,7 @@ import {
 import { useHubApi } from "../api/context";
 import type {
   CapabilitiesResponse,
+  CapabilityStatus,
   InboxDraftDetail,
   InboxDraftInput,
   InboxDraftSummary,
@@ -49,10 +50,9 @@ import type {
   HomeResponse,
   TeamActorRef,
   TeamCurrentActorResponse,
-  Tone,
   WikiEntityDetailResponse,
 } from "../api/types";
-import { Alert, AlertDescription, AlertTitle } from "../components/primitives/alert";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/primitives/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -95,6 +95,14 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "../components/primitives/collapsible";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "../components/primitives/dropdown-menu";
 import {
   Empty,
   EmptyContent,
@@ -141,12 +149,15 @@ interface TopicAttestation {
 type ReviewAction =
   | { kind: "inbox.publish"; draft: InboxDraftDetail }
   | { kind: "inbox.draft.delete"; draft: InboxDraftDetail }
-  | { kind: "inbox.approve"; proposal: InboxProposalDetail }
+  | { kind: "inbox.approve"; proposal: InboxProposalDetail; selfApproval?: boolean }
   | { kind: "inbox.reject"; proposal: InboxProposalDetail }
   | { kind: "inbox.withdraw"; proposal: InboxProposalDetail }
   | { kind: "inbox.mark-stale"; proposal: InboxProposalDetail }
   | { kind: "inbox.repair"; proposal: InboxProposalDetail };
 type SimpleReviewAction = Exclude<ReviewAction, { kind: "inbox.repair" }>;
+type ApprovalAction = Extract<ReviewAction, { kind: "inbox.approve" }>;
+type SupportingReviewAction = Exclude<SimpleReviewAction, ApprovalAction>;
+type AppliedInboxAction = ReviewAction["kind"] | "inbox.draft.save";
 
 function afterDialogUnmount(callback: () => void): void {
   queueMicrotask(() => queueMicrotask(callback));
@@ -169,14 +180,6 @@ export function inboxActorMatches(current: TeamActorRef, author: TeamActorRef): 
     && author.kind === "git"
     && current.name === author.name
     && current.email === author.email;
-}
-
-function proposalTone(state: InboxProposalState): Tone {
-  if (state === "pending") return "info";
-  if (state === "stale") return "warning";
-  if (state === "approved") return "success";
-  if (state === "rejected") return "danger";
-  return "neutral";
 }
 
 function hasLoneSurrogate(value: string): boolean {
@@ -289,11 +292,11 @@ function buildCreateRelation(
 
 function PreviewDocket({ envelope }: { envelope: InboxOperationPreviewResponse }) {
   return (
-    <section className={styles.previewDocket} aria-labelledby="inbox-preview-heading">
+    <section className={styles.previewDocket}>
       <header className={styles.previewHeader}>
         <div>
           <p>Exact review envelope</p>
-          <h3 id="inbox-preview-heading">Evidence docket</h3>
+          <h3>Exact preview</h3>
         </div>
         <StatusPill tone={envelope.preview.valid ? "success" : "danger"}>
           {envelope.preview.valid ? "Ready for review" : "Invalid"}
@@ -348,6 +351,19 @@ function PreviewDocket({ envelope }: { envelope: InboxOperationPreviewResponse }
   );
 }
 
+function ExactPreviewDetails({ envelope }: { envelope: InboxOperationPreviewResponse }) {
+  return (
+    <Collapsible className={styles.exactPreviewDetails}>
+      <CollapsibleTrigger render={<Button size="sm" type="button" variant="ghost" />}>
+        <ChevronDown data-icon="inline-start" /> Exact technical details
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <PreviewDocket envelope={envelope} />
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 function DraftEditorDialog({
   draft,
   repair,
@@ -361,7 +377,7 @@ function DraftEditorDialog({
   finalFocus(): HTMLElement | null;
   focusAppliedStatus(): void;
   onClose(): void;
-  onApplied(result: InboxOperationApplyResponse): Promise<void>;
+  onApplied(kind: AppliedInboxAction, result: InboxOperationApplyResponse): Promise<void>;
 }) {
   const api = useHubApi();
   const changeTypeRef = useRef<HTMLSelectElement>(null);
@@ -486,7 +502,7 @@ function DraftEditorDialog({
     onSuccess: async (result) => {
       applySucceeded.current = true;
       setConfirmOpen(false);
-      await onApplied(result);
+      await onApplied(isRepair ? "inbox.repair" : "inbox.draft.save", result);
       onClose();
       afterDialogUnmount(focusAppliedStatus);
     },
@@ -638,9 +654,9 @@ function DraftEditorDialog({
       };
 
   const editorTitle = isRepair
-    ? "Repair stale proposal"
+    ? "Repair proposal manually"
     : draft === null ? "Create local Spec draft" : "Edit local Spec draft";
-  const previewLabel = isRepair ? "Preview proposal repair" : "Preview local draft";
+  const previewLabel = isRepair ? "Review repaired proposal" : "Preview local draft";
 
   return (
     <Dialog open onOpenChange={(open) => {
@@ -658,7 +674,7 @@ function DraftEditorDialog({
           <DialogTitle>{editorTitle}</DialogTitle>
           <DialogDescription>
             {isRepair
-              ? "Replace the stale request with freshly attested target, topic, and relation revisions. Repair returns it to pending without writing a Spec."
+              ? "Update the stale proposal against current Spec content. Repair returns it to teammate review without writing the Spec."
               : "This draft stays private to this checkout. Previewing and saving it does not publish canonical project memory."}
           </DialogDescription>
         </DialogHeader>
@@ -867,7 +883,14 @@ function DraftEditorDialog({
             {!canPreview ? <FieldError>Complete the required fields and exact revision attestation before previewing.</FieldError> : null}
           </FieldGroup>
           {preview.isError ? <ErrorState error={preview.error} /> : null}
-          {envelope ? <PreviewDocket envelope={envelope} /> : null}
+          {envelope && !envelope.preview.valid ? (
+            <Alert variant="destructive">
+              <AlertTriangle aria-hidden="true" />
+              <AlertTitle>This operation is not ready to apply</AlertTitle>
+              <AlertDescription>No changes were applied. Review the exact diagnostics below, then try again.</AlertDescription>
+            </Alert>
+          ) : null}
+          {envelope ? <ExactPreviewDetails envelope={envelope} /> : null}
         </div>
         <DialogFooter>
           <Button
@@ -885,6 +908,10 @@ function DraftEditorDialog({
             <Button disabled={!canPreview || preview.isPending} onClick={startPreview} type="button">
               <FileDiff data-icon="inline-start" /> {preview.isPending ? "Preparing…" : previewLabel}
             </Button>
+          ) : !envelope.preview.valid ? (
+            <Button disabled={!canPreview || preview.isPending} onClick={startPreview} type="button" variant="outline">
+              <RefreshCw data-icon="inline-start" /> Try preview again
+            </Button>
           ) : (
             <Button ref={confirmTriggerRef} disabled={!envelope.preview.valid} onClick={() => setConfirmOpen(true)} type="button">
               <ShieldCheck data-icon="inline-start" /> {isRepair ? "Review repaired proposal" : "Review draft save"}
@@ -897,18 +924,19 @@ function DraftEditorDialog({
           <AlertDialogContent finalFocus={() => applySucceeded.current ? false : confirmTriggerRef.current}>
             <AlertDialogHeader>
               <AlertDialogMedia><MapPin aria-hidden="true" /></AlertDialogMedia>
-              <AlertDialogTitle>{isRepair ? "Repair this stale proposal?" : "Save this private draft?"}</AlertDialogTitle>
+              <AlertDialogTitle>{isRepair ? "Return this proposal to review?" : "Save this private draft?"}</AlertDialogTitle>
               <AlertDialogDescription>
                 {isRepair
-                  ? "The exact replacement request and fresh dependency attestations will become the proposal's pending revision. No Spec is written."
+                  ? "The refreshed content and references will replace this stale revision. No Spec is written."
                   : "This writes checkout-local draft state only. It does not add proposal prose to Git or modify a canonical Spec."}
               </AlertDialogDescription>
             </AlertDialogHeader>
+            <ExactPreviewDetails envelope={envelope} />
             {apply.isError ? <ErrorState error={apply.error} /> : null}
             <AlertDialogFooter>
               <AlertDialogCancel disabled={apply.isPending}>Keep reviewing</AlertDialogCancel>
               <AlertDialogAction disabled={apply.isPending} onClick={() => apply.mutate()}>
-                {apply.isPending ? "Saving…" : isRepair ? "Repair proposal" : "Save local draft"}
+                {apply.isPending ? "Saving…" : isRepair ? "Repair and return to review" : "Save local draft"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
@@ -949,39 +977,39 @@ function reviewCopy(action: ReviewAction) {
       };
     case "inbox.reject":
       return {
-        title: "Reject proposal",
-        description: "Rejection records a canonical review decision without writing a Spec.",
-        preview: "Preview rejection",
-        confirmTitle: "Reject this proposal?",
-        confirm: "The proposal becomes immutable rejected history with the reviewed rationale.",
-        apply: "Reject proposal",
+        title: "Decline proposal",
+        description: "Declining closes this proposal without changing the Spec. A rationale is required.",
+        preview: "Review decline",
+        confirmTitle: "Decline this proposal?",
+        confirm: "The proposal will close with your rationale and the Spec will remain unchanged.",
+        apply: "Decline proposal",
       };
     case "inbox.withdraw":
       return {
         title: "Withdraw proposal",
-        description: "Withdrawal closes the proposal without writing a Spec. An optional rationale remains in canonical review history.",
+        description: "Withdrawal closes your proposal without changing the Spec. An optional rationale stays with the review decision.",
         preview: "Preview withdrawal",
         confirmTitle: "Withdraw this proposal?",
-        confirm: "The proposal becomes immutable withdrawn history; the target Spec remains unchanged.",
+        confirm: "The proposal will close and can no longer be reviewed; the target Spec remains unchanged.",
         apply: "Withdraw proposal",
       };
     case "inbox.mark-stale":
       return {
-        title: "Mark proposal stale",
-        description: "Stale is accepted only when fresh Wiki attestation proves target drift. This does not write a Spec.",
-        preview: "Preview stale transition",
-        confirmTitle: "Mark this proposal stale?",
-        confirm: "The proposal will require repair against fresh exact revisions before approval.",
-        apply: "Mark proposal stale",
+        title: "Mark as needs refresh",
+        description: "Use this advanced action when the referenced Spec content changed after publication.",
+        preview: "Review refresh state",
+        confirmTitle: "Mark this proposal as needing refresh?",
+        confirm: "The proposal cannot be approved until its author or agent refreshes it against current Spec content.",
+        apply: "Mark as needs refresh",
       };
     case "inbox.repair":
       return {
-        title: "Repair stale proposal",
-        description: "Repair keeps the proposal pending while replacing its typed request and exact dependency attestations. It does not write a Spec.",
-        preview: "Preview proposal repair",
-        confirmTitle: "Repair this stale proposal?",
-        confirm: "The reviewed replacement request will become the proposal's new pending revision.",
-        apply: "Repair proposal",
+        title: "Repair proposal manually",
+        description: "Update this proposal against current Spec content. Repair returns it to teammate review and does not write the Spec.",
+        preview: "Review repaired proposal",
+        confirmTitle: "Return this proposal to review?",
+        confirm: "The refreshed proposal content will replace this stale revision and return to review.",
+        apply: "Repair and return to review",
       };
   }
 }
@@ -993,11 +1021,11 @@ function ReviewActionDialog({
   onClose,
   onApplied,
 }: {
-  action: SimpleReviewAction;
+  action: SupportingReviewAction;
   finalFocus(): HTMLElement | null;
   focusAppliedStatus(): void;
   onClose(): void;
-  onApplied(result: InboxOperationApplyResponse): Promise<void>;
+  onApplied(kind: AppliedInboxAction, result: InboxOperationApplyResponse): Promise<void>;
 }) {
   const api = useHubApi();
   const copy = reviewCopy(action);
@@ -1024,7 +1052,7 @@ function ReviewActionDialog({
     onSuccess: async (result) => {
       applySucceeded.current = true;
       setConfirmOpen(false);
-      await onApplied(result);
+      await onApplied(action.kind, result);
       onClose();
       afterDialogUnmount(focusAppliedStatus);
     },
@@ -1044,13 +1072,6 @@ function ReviewActionDialog({
       };
     }
     const expectedRevisions = [proposalExpectation(action.proposal)];
-    if (action.kind === "inbox.approve") {
-      return {
-        operationId: operation.current,
-        action: { kind: "inbox.approve", proposalId: action.proposal.ref.id },
-        expectedRevisions,
-      };
-    }
     if (action.kind === "inbox.reject" || action.kind === "inbox.mark-stale") {
       return {
         operationId: operation.current,
@@ -1108,21 +1129,9 @@ function ReviewActionDialog({
         </DialogHeader>
         <div className={styles.dialogScroll}>
           <div className={styles.reviewSubject}>
-            <span>{"draft" in action ? "Local draft" : "Canonical proposal"}</span>
+            <span>{"draft" in action ? "Local draft" : "Spec change"}</span>
             <strong>{"draft" in action ? action.draft.title : action.proposal.title}</strong>
-            <code>{"draft" in action ? action.draft.id : action.proposal.ref.id}</code>
           </div>
-          {action.kind === "inbox.approve" ? (
-            <section aria-labelledby="approval-proposal-snapshot" className={styles.proposalSnapshot}>
-              <h3 id="approval-proposal-snapshot">Immutable proposal snapshot</h3>
-              <ChangeDetail input={{
-                change: action.proposal.change,
-                rationale: action.proposal.rationale,
-                evidence: action.proposal.evidence,
-                targetRevisions: action.proposal.targetRevisions,
-              }} />
-            </section>
-          ) : null}
           {action.kind === "inbox.reject" || action.kind === "inbox.withdraw" || action.kind === "inbox.mark-stale" ? (
             <Field data-invalid={!rationaleAccepted || undefined}>
               <FieldLabel htmlFor="proposal-review-rationale">Review rationale</FieldLabel>
@@ -1141,7 +1150,14 @@ function ReviewActionDialog({
             </Field>
           ) : null}
           {preview.isError ? <ErrorState error={preview.error} /> : null}
-          {envelope ? <PreviewDocket envelope={envelope} /> : null}
+          {envelope && !envelope.preview.valid ? (
+            <Alert variant="destructive">
+              <AlertTriangle aria-hidden="true" />
+              <AlertTitle>This operation is not ready to apply</AlertTitle>
+              <AlertDescription>Refresh the Inbox or correct the rationale, then request a new exact preview.</AlertDescription>
+            </Alert>
+          ) : null}
+          {envelope ? <ExactPreviewDetails envelope={envelope} /> : null}
         </div>
         <DialogFooter>
           <Button
@@ -1159,6 +1175,10 @@ function ReviewActionDialog({
             <Button disabled={!rationaleAccepted || preview.isPending} onClick={startPreview} type="button">
               <FileDiff data-icon="inline-start" /> {preview.isPending ? "Preparing…" : copy.preview}
             </Button>
+          ) : !envelope.preview.valid ? (
+            <Button disabled={preview.isPending} onClick={startPreview} type="button" variant="outline">
+              <RefreshCw data-icon="inline-start" /> Try preview again
+            </Button>
           ) : (
             <Button ref={confirmTriggerRef} disabled={!envelope.preview.valid} onClick={() => setConfirmOpen(true)} type="button">
               <ShieldCheck data-icon="inline-start" /> Review exact preview
@@ -1173,9 +1193,10 @@ function ReviewActionDialog({
               <AlertDialogMedia><CheckCircle2 aria-hidden="true" /></AlertDialogMedia>
               <AlertDialogTitle>{copy.confirmTitle}</AlertDialogTitle>
               <AlertDialogDescription>
-                {copy.confirm} Exact preview <code>{envelope.receipt.previewRevision.slice(0, 12)}</code> will be revalidated.
+                {copy.confirm} MEX will revalidate the exact signed preview before writing anything.
               </AlertDialogDescription>
             </AlertDialogHeader>
+            <ExactPreviewDetails envelope={envelope} />
             {apply.isError ? <ErrorState error={apply.error} /> : null}
             <AlertDialogFooter>
               <AlertDialogCancel disabled={apply.isPending}>Keep reviewing</AlertDialogCancel>
@@ -1186,6 +1207,194 @@ function ReviewActionDialog({
           </AlertDialogContent>
         </AlertDialog>
       ) : null}
+    </Dialog>
+  );
+}
+
+function approvalEntityLabel(proposal: InboxProposalDetail): string {
+  if (proposal.change.kind === "spec.create") {
+    return `${sentenceCase(proposal.change.entityKind)} · ${proposal.change.title}`;
+  }
+  return proposal.change.target.title ?? sentenceCase(proposal.change.target.kind);
+}
+
+function ApproveChangeDialog({
+  action,
+  finalFocus,
+  focusAppliedStatus,
+  onClose,
+  onApplied,
+}: {
+  action: ApprovalAction;
+  finalFocus(): HTMLElement | null;
+  focusAppliedStatus(): void;
+  onClose(): void;
+  onApplied(kind: AppliedInboxAction, result: InboxOperationApplyResponse): Promise<void>;
+}) {
+  const api = useHubApi();
+  const operation = useRef(operationId("inbox_approve"));
+  const previewRequested = useRef(false);
+  const applySucceeded = useRef(false);
+  const [selfApprovalAcknowledged, setSelfApprovalAcknowledged] = useState(!action.selfApproval);
+  const [envelope, setEnvelope] = useState<InboxOperationPreviewResponse | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const preview = useMutation({
+    mutationFn: (request: InboxOperationPreviewRequest) => api.previewInboxOperation(request),
+    onSuccess: (nextEnvelope) => {
+      setEnvelope(nextEnvelope);
+      setConfirmOpen(nextEnvelope.preview.valid);
+    },
+  });
+  const apply = useMutation({
+    mutationFn: () => {
+      if (envelope === null || !envelope.preview.valid) throw new Error("A valid exact preview is required.");
+      return api.applyInboxOperation(envelope);
+    },
+    onSuccess: async (result) => {
+      applySucceeded.current = true;
+      setConfirmOpen(false);
+      await onApplied("inbox.approve", result);
+      onClose();
+      afterDialogUnmount(focusAppliedStatus);
+    },
+  });
+
+  const requestPreview = () => {
+    if (preview.isPending) return;
+    previewRequested.current = true;
+    operation.current = operationId("inbox_approve");
+    setEnvelope(null);
+    setConfirmOpen(false);
+    preview.reset();
+    apply.reset();
+    preview.mutate({
+      operationId: operation.current,
+      action: { kind: "inbox.approve", proposalId: action.proposal.ref.id },
+      expectedRevisions: [proposalExpectation(action.proposal)],
+    });
+  };
+
+  useEffect(() => {
+    if (!action.selfApproval && !previewRequested.current) requestPreview();
+  });
+
+  const closeAndRestoreFocus = () => {
+    if (apply.isPending) return;
+    onClose();
+    afterDialogUnmount(() => finalFocus()?.focus({ preventScroll: true }));
+  };
+
+  if (action.selfApproval && !selfApprovalAcknowledged) {
+    return (
+      <AlertDialog open onOpenChange={(open) => {
+        if (!open) closeAndRestoreFocus();
+      }}>
+        <AlertDialogContent finalFocus={false}>
+          <AlertDialogHeader>
+            <AlertDialogMedia><AlertTriangle aria-hidden="true" /></AlertDialogMedia>
+            <AlertDialogTitle>Teammate review is recommended</AlertDialogTitle>
+            <AlertDialogDescription>
+              You published this proposal. Independent review is the safer default before a Spec change becomes durable team memory.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Wait for a teammate</AlertDialogCancel>
+            <Button
+              onClick={() => {
+                setSelfApprovalAcknowledged(true);
+                requestPreview();
+              }}
+              type="button"
+              variant="destructive"
+            >
+              Continue without teammate review
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    );
+  }
+
+  if (envelope?.preview.valid && confirmOpen) {
+    return (
+      <AlertDialog open onOpenChange={(open) => {
+        if (!open && !apply.isPending) closeAndRestoreFocus();
+      }}>
+        <AlertDialogContent className={styles.approvalConfirmation} finalFocus={() => applySucceeded.current ? false : finalFocus()}>
+          <AlertDialogHeader>
+            <AlertDialogMedia><CheckCircle2 aria-hidden="true" /></AlertDialogMedia>
+            <AlertDialogTitle>Approve this Spec change?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Review the human consequences below. The complete signed preview remains available under Exact technical details.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className={styles.approvalSummary}>
+            <div>
+              <Badge variant="outline">{changeLabel(action.proposal.changeKind, action.proposal.entityKind)}</Badge>
+              <strong>{action.proposal.title}</strong>
+            </div>
+            <dl>
+              <div><dt>Spec entity affected</dt><dd>{approvalEntityLabel(action.proposal)}</dd></div>
+              <div><dt>Identity</dt><dd>Approving as {actorLabel(envelope.receipt.authority.actor)}</dd></div>
+            </dl>
+            <div className={styles.approvalConsequences}>
+              <span>Approval will</span>
+              <ul>
+                <li>Write the reviewed Spec change</li>
+                <li>Update the proposal as approved</li>
+                <li>Record the decision in Activity</li>
+              </ul>
+            </div>
+          </div>
+          <ExactPreviewDetails envelope={envelope} />
+          {apply.isError ? <ErrorState error={apply.error} /> : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={apply.isPending}>Keep reviewing</AlertDialogCancel>
+            <AlertDialogAction disabled={apply.isPending} onClick={() => apply.mutate()}>
+              {apply.isPending ? "Approving…" : "Approve change"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    );
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => {
+      if (!open) closeAndRestoreFocus();
+    }}>
+      <DialogContent className={styles.previewStatusDialog} finalFocus={false}>
+        <DialogHeader>
+          <DialogTitle>{envelope && !envelope.preview.valid ? "This change is not ready to approve" : "Preparing exact approval"}</DialogTitle>
+          <DialogDescription>
+            {envelope && !envelope.preview.valid
+              ? "The Spec change remains visible in Inbox. Refresh it or resolve the reported issue before trying again."
+              : "MEX is checking the selected proposal against current Spec content and capturing the exact signed preview."}
+          </DialogDescription>
+        </DialogHeader>
+        {preview.isPending || (!preview.isError && envelope === null) ? (
+          <StatePanel compact state="loading" title="Checking the change" detail="No project memory is written during preview." />
+        ) : null}
+        {preview.isError ? <ErrorState error={preview.error} /> : null}
+        {envelope && !envelope.preview.valid ? (
+          <>
+            <Alert variant="destructive">
+              <AlertTriangle aria-hidden="true" />
+              <AlertTitle>Approval preview is invalid</AlertTitle>
+              <AlertDescription>No changes were applied. Exact diagnostics are available below.</AlertDescription>
+            </Alert>
+            <ExactPreviewDetails envelope={envelope} />
+          </>
+        ) : null}
+        <DialogFooter>
+          <Button onClick={closeAndRestoreFocus} type="button" variant="outline">Cancel</Button>
+          {preview.isError || (envelope !== null && !envelope.preview.valid) ? (
+            <Button disabled={preview.isPending} onClick={requestPreview} type="button">
+              <RefreshCw data-icon="inline-start" /> Try preview again
+            </Button>
+          ) : null}
+        </DialogFooter>
+      </DialogContent>
     </Dialog>
   );
 }
@@ -1534,9 +1743,194 @@ function DraftDetail({
   );
 }
 
+function ProposalMenuItem({
+  capability,
+  children,
+  onSelect,
+  variant,
+}: {
+  capability: CapabilityStatus;
+  children: ReactNode;
+  onSelect(): void;
+  variant?: "default" | "destructive";
+}) {
+  const unavailable = capability.availability === "unavailable";
+  return (
+    <DropdownMenuItem disabled={unavailable} onClick={onSelect} variant={variant}>
+      <span className={styles.menuActionCopy}>
+        <span>{children}</span>
+        {unavailable ? <small>{capability.reason}</small> : null}
+      </span>
+    </DropdownMenuItem>
+  );
+}
+
+function ProposalActions({
+  identity,
+  identityError,
+  onAction,
+  proposal,
+  proposalMutation,
+  specApproval,
+}: {
+  identity?: TeamCurrentActorResponse;
+  identityError?: boolean;
+  onAction(action: ReviewAction, trigger: HTMLButtonElement): void;
+  proposal: InboxProposalDetail;
+  proposalMutation: CapabilityStatus;
+  specApproval: CapabilityStatus;
+}) {
+  const overflowTrigger = useRef<HTMLButtonElement>(null);
+  const identityLoading = identity === undefined && !identityError;
+  const identityUnknown = Boolean(identityError || identity?.actor.kind === "unknown");
+  const ownProposal = Boolean(
+    !identityLoading
+      && !identityUnknown
+      && identity
+      && inboxActorMatches(identity.actor, proposal.author),
+  );
+  const openOverflowAction = (action: ReviewAction) => {
+    if (overflowTrigger.current) onAction(action, overflowTrigger.current);
+  };
+
+  if (identityLoading) {
+    return (
+      <div className={styles.actionContext} role="status">
+        <Clock3 aria-hidden="true" /> Checking who can review this proposal…
+      </div>
+    );
+  }
+
+  if (proposal.state === "stale") {
+    return (
+      <div className={styles.proposalActionBar} aria-label="Proposal review actions">
+        <div className={styles.actionContext}>
+          <AlertTriangle aria-hidden="true" />
+          {ownProposal
+            ? "This proposal needs fresh Spec references before it can return to review."
+            : "Its author or their agent should refresh this proposal against current Spec content."}
+        </div>
+        {ownProposal ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              aria-label="More proposal actions"
+              ref={overflowTrigger}
+              render={<Button size="sm" type="button" variant="outline" />}
+            >
+              <MoreHorizontal data-icon="inline-start" /> More
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className={styles.proposalMenu}>
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Advanced action</DropdownMenuLabel>
+                <ProposalMenuItem
+                  capability={specApproval}
+                  onSelect={() => openOverflowAction({ kind: "inbox.repair", proposal })}
+                >
+                  Repair manually…
+                </ProposalMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (proposal.state !== "pending") return null;
+
+  if (ownProposal) {
+    return (
+      <div className={styles.proposalActionBar} aria-label="Proposal review actions">
+        <div className={styles.waitingForReview}>
+          <Clock3 aria-hidden="true" />
+          <span><strong>Waiting for teammate review</strong><small>Independent review is the recommended path.</small></span>
+        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            aria-label="More proposal actions"
+            ref={overflowTrigger}
+            render={<Button size="sm" type="button" variant="outline" />}
+          >
+            <MoreHorizontal data-icon="inline-start" /> More
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className={styles.proposalMenu}>
+            <DropdownMenuGroup>
+              <DropdownMenuLabel>Advanced actions</DropdownMenuLabel>
+              <ProposalMenuItem
+                capability={specApproval}
+                onSelect={() => openOverflowAction({ kind: "inbox.approve", proposal, selfApproval: true })}
+              >
+                Approve without teammate review…
+              </ProposalMenuItem>
+              <ProposalMenuItem
+                capability={proposalMutation}
+                onSelect={() => openOverflowAction({ kind: "inbox.withdraw", proposal })}
+                variant="destructive"
+              >
+                Withdraw proposal…
+              </ProposalMenuItem>
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.proposalActionBar} aria-label="Proposal review actions">
+      <div className={styles.primaryActionStack}>
+        <Button
+          aria-describedby={specApproval.availability === "unavailable" ? "inbox-approve-unavailable" : undefined}
+          disabled={specApproval.availability === "unavailable"}
+          onClick={(event) => onAction({ kind: "inbox.approve", proposal }, event.currentTarget)}
+          size="sm"
+          type="button"
+        >
+          <CheckCircle2 data-icon="inline-start" /> Approve change
+        </Button>
+        {identity?.actor.kind === "git" ? (
+          <span className={styles.approvingIdentity}>Approving as {actorLabel(identity.actor)}</span>
+        ) : null}
+      </div>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          aria-label="More proposal actions"
+          ref={overflowTrigger}
+          render={<Button size="sm" type="button" variant="outline" />}
+        >
+          <MoreHorizontal data-icon="inline-start" /> More
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className={styles.proposalMenu}>
+          <DropdownMenuGroup>
+            <DropdownMenuLabel>More actions</DropdownMenuLabel>
+            <ProposalMenuItem
+              capability={proposalMutation}
+              onSelect={() => openOverflowAction({ kind: "inbox.reject", proposal })}
+              variant="destructive"
+            >
+              Decline proposal…
+            </ProposalMenuItem>
+            <ProposalMenuItem
+              capability={specApproval}
+              onSelect={() => openOverflowAction({ kind: "inbox.mark-stale", proposal })}
+            >
+              Mark as needs refresh…
+            </ProposalMenuItem>
+          </DropdownMenuGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {specApproval.availability === "unavailable" ? (
+        <p className={styles.actionUnavailable} id="inbox-approve-unavailable" role="status">
+          Approval is unavailable: {specApproval.reason}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function ProposalDetail({
-  canReview,
-  canSpecMutate,
+  proposalMutation,
+  specApproval,
   current,
   currentError,
   currentPending,
@@ -1545,14 +1939,14 @@ function ProposalDetail({
   onAction,
   proposal,
 }: {
-  canReview: boolean;
-  canSpecMutate: boolean;
+  proposalMutation: CapabilityStatus;
+  specApproval: CapabilityStatus;
   current?: WikiEntityDetailResponse;
   currentError?: string;
   currentPending?: boolean;
   identity?: TeamCurrentActorResponse;
   identityError?: boolean;
-  onAction(action: ReviewAction, event: MouseEvent<HTMLButtonElement>): void;
+  onAction(action: ReviewAction, trigger: HTMLButtonElement): void;
   proposal: InboxProposalDetail;
 }) {
   const terminal = proposal.state === "approved" || proposal.state === "rejected" || proposal.state === "withdrawn";
@@ -1592,30 +1986,14 @@ function ProposalDetail({
           </Alert>
         ) : null}
         {!terminal ? (
-          <div className={styles.detailActions} aria-label="Proposal review actions">
-            {proposal.state === "pending" ? (
-              <>
-                <Button disabled={!canSpecMutate} onClick={(event) => onAction({ kind: "inbox.approve", proposal }, event)} size="sm" type="button">
-                  <CheckCircle2 data-icon="inline-start" /> Review &amp; approve
-                </Button>
-                <Button disabled={!canReview} onClick={(event) => onAction({ kind: "inbox.reject", proposal }, event)} size="sm" type="button" variant="destructive">
-                  <XCircle data-icon="inline-start" /> Reject proposal
-                </Button>
-                <Button disabled={!canSpecMutate} onClick={(event) => onAction({ kind: "inbox.mark-stale", proposal }, event)} size="sm" type="button" variant="outline">
-                  <AlertTriangle data-icon="inline-start" /> Mark stale
-                </Button>
-              </>
-            ) : (
-              <Button disabled={!canSpecMutate} onClick={(event) => onAction({ kind: "inbox.repair", proposal }, event)} size="sm" type="button">
-                <Wrench data-icon="inline-start" /> Repair proposal
-              </Button>
-            )}
-            {proposal.state === "pending" ? (
-              <Button disabled={!canReview} onClick={(event) => onAction({ kind: "inbox.withdraw", proposal }, event)} size="sm" type="button" variant="outline">
-                Withdraw proposal
-              </Button>
-            ) : null}
-          </div>
+          <ProposalActions
+            identity={identity}
+            identityError={identityError}
+            onAction={onAction}
+            proposal={proposal}
+            proposalMutation={proposalMutation}
+            specApproval={specApproval}
+          />
         ) : (
           <div className={styles.terminalNote}>
             <ShieldCheck aria-hidden="true" />
@@ -1954,14 +2332,15 @@ export function InboxPage() {
   const [editor, setEditor] = useState<{ draft: InboxDraftDetail | null } | null>(null);
   const [reviewAction, setReviewAction] = useState<ReviewAction | null>(null);
   const [status, setStatus] = useState("");
+  const [gitNotice, setGitNotice] = useState<"approval" | "publication" | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [selectionNotice, setSelectionNotice] = useState("");
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const operationTrigger = useRef<HTMLButtonElement | null>(null);
   const statusRef = useRef<HTMLDivElement | null>(null);
+  const gitNoticeRef = useRef<HTMLDivElement | null>(null);
   const readAvailable = capabilities?.inbox.read.availability === "available";
   const canEditDrafts = capabilities?.inbox.draftMutation.availability === "available";
-  const canReviewProposals = capabilities?.inbox.proposalMutation.availability === "available";
   const canApproveSpecs = capabilities?.inbox.specApproval.availability === "available";
   const currentActor = useQuery({
     queryKey: ["actor", "current"],
@@ -1975,7 +2354,8 @@ export function InboxPage() {
   const searchKey = searchParams.toString();
   const resolveOperationFinalFocus = () => operationTrigger.current;
   const focusAppliedStatus = () => {
-    statusRef.current?.focus({ preventScroll: true });
+    if (gitNoticeRef.current) gitNoticeRef.current.focus({ preventScroll: true });
+    else statusRef.current?.focus({ preventScroll: true });
     operationTrigger.current = null;
   };
 
@@ -2178,24 +2558,33 @@ export function InboxPage() {
     rememberTrigger(event);
     setEditor({ draft });
   };
-  const openReview = (action: ReviewAction, event: MouseEvent<HTMLButtonElement>) => {
-    rememberTrigger(event);
+  const openReview = (action: ReviewAction, trigger: HTMLButtonElement) => {
+    operationTrigger.current = trigger;
     setReviewAction(action);
   };
-  const onApplied = async (result: InboxOperationApplyResponse) => {
+  const onApplied = async (kind: AppliedInboxAction, result: InboxOperationApplyResponse) => {
     clearModeSelection();
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["inbox"] }),
       queryClient.invalidateQueries({ queryKey: ["home"] }),
       queryClient.invalidateQueries({ queryKey: ["activity"] }),
       queryClient.invalidateQueries({ queryKey: ["specs"] }),
+      queryClient.invalidateQueries({ queryKey: ["spec"] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-entity"] }),
+      queryClient.invalidateQueries({ queryKey: ["wiki-entities"] }),
     ]);
-    const consequence = result.changes.length > 0 && result.localChanges.length > 0
-      ? "Canonical proposal bytes published and the private draft was removed."
-      : result.changes.length > 0
-        ? "Canonical Inbox review applied from the exact preview."
-        : "Checkout-local draft state updated from the exact preview.";
-    flushSync(() => setStatus(consequence));
+    const consequence = kind === "inbox.approve"
+      ? "Spec change and review record were written to your working tree. Commit and push them to share the result with your team."
+      : result.changes.length > 0 && result.localChanges.length > 0
+        ? "Proposal created in your working tree. Commit and push it to make it available to teammates."
+        : result.changes.length > 0
+          ? "Inbox review update was written to your working tree."
+          : "Draft state updated on this device from the exact preview.";
+    flushSync(() => {
+      setStatus(consequence);
+      if (kind === "inbox.approve") setGitNotice("approval");
+      else if (kind === "inbox.publish") setGitNotice("publication");
+    });
   };
 
   const proposalDetailState = invalidProposalSelection ? (
@@ -2219,8 +2608,6 @@ export function InboxPage() {
     </div>
   ) : (
     <ProposalDetail
-      canSpecMutate={Boolean(canApproveSpecs)}
-      canReview={Boolean(canReviewProposals)}
       current={currentWikiEntity.data}
       currentError={currentWikiError}
       currentPending={Boolean(selectedUpdateTargetId && wikiReadAvailable && currentWikiEntity.isPending)}
@@ -2228,6 +2615,8 @@ export function InboxPage() {
       identityError={currentActor.isError}
       onAction={openReview}
       proposal={proposalDetail.data}
+      proposalMutation={capabilities!.inbox.proposalMutation}
+      specApproval={capabilities!.inbox.specApproval}
     />
   );
 
@@ -2255,7 +2644,7 @@ export function InboxPage() {
       canMutate={Boolean(canEditDrafts)}
       canPublish={Boolean(canApproveSpecs)}
       draft={draftDetail.data}
-      onAction={openReview}
+      onAction={(action, event) => openReview(action, event.currentTarget)}
       onEdit={(event) => openEditor(draftDetail.data, event)}
     />
   );
@@ -2290,6 +2679,22 @@ export function InboxPage() {
           <CheckCircle2 aria-hidden="true" /> {status}
         </div>
       )}
+      {gitNotice ? (
+        <Alert className={styles.gitTruthAlert} ref={gitNoticeRef} tabIndex={-1}>
+          <GitCommitHorizontal aria-hidden="true" />
+          <AlertTitle>{gitNotice === "approval" ? "Working tree updated" : "Proposal created"}</AlertTitle>
+          <AlertDescription>
+            {gitNotice === "approval"
+              ? "Spec change and review record were written to your working tree. Commit and push them to share the result with your team."
+              : "Proposal created in your working tree. Commit and push it to make it available to teammates."}
+          </AlertDescription>
+          <AlertAction>
+            <Button aria-label="Dismiss Git notice" onClick={() => setGitNotice(null)} size="icon-sm" type="button" variant="ghost">
+              <X aria-hidden="true" />
+            </Button>
+          </AlertAction>
+        </Alert>
+      ) : null}
       {selectionNotice ? (
         <div className={styles.selectionNotice} role="status">{selectionNotice}</div>
       ) : null}
@@ -2374,6 +2779,14 @@ export function InboxPage() {
         <DraftEditorDialog
           draft={null}
           repair={reviewAction.proposal}
+          finalFocus={resolveOperationFinalFocus}
+          focusAppliedStatus={focusAppliedStatus}
+          onApplied={onApplied}
+          onClose={() => setReviewAction(null)}
+        />
+      ) : reviewAction?.kind === "inbox.approve" ? (
+        <ApproveChangeDialog
+          action={reviewAction}
           finalFocus={resolveOperationFinalFocus}
           focusAppliedStatus={focusAppliedStatus}
           onApplied={onApplied}
