@@ -957,6 +957,8 @@ export interface TeamRelayDetail extends TeamRelaySummary {
   code: readonly CodeRef[];
   evidence: readonly TeamEvidenceRef[];
   nextActions: readonly string[];
+  /** One bounded warning for a strict legacy schema-v1 Relay, otherwise empty. */
+  diagnostics: readonly Diagnostic[];
 }
 
 export interface TeamRelayPage<T> {

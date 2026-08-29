@@ -19,6 +19,7 @@ import {
   workstreamArtifactPath,
 } from "../workflow-codecs.js";
 import { generateArtifactId } from "../ulid.js";
+import { normalizeRelayProductDraftInput } from "../../relay/handoff.js";
 
 const NOW = "2026-08-27T10:00:00.000Z";
 const MEMBER = generateArtifactId("member", { now: 1, random: new Uint8Array(10).fill(1) });
@@ -59,6 +60,100 @@ describe("workflow artifact codecs", () => {
       workstream: { id: WORKSTREAM, kind: "workstream" }, steps: [{ stepId: "verify" }], startedBy: ACTOR, startedAt: NOW,
     });
     expect(parsePlaybookRunArtifact(run, playbookRunArtifactPath(RUN))).toMatchObject({ entityRevision: 1, state: "active" });
+  });
+
+  it("strictly dual-reads Relay v1/v2 while preserving schema and timestamp order", () => {
+    const base = {
+      id: RELAY,
+      entityRevision: 1,
+      state: "published" as const,
+      sender: ACTOR,
+      recipients: [ACTOR],
+      workstream: { id: WORKSTREAM, kind: "workstream" as const },
+      summary: "Handoff",
+      completed: [],
+      inProgress: ["Tests"],
+      decisions: [],
+      blockers: [],
+      unresolvedQuestions: [],
+      changedFiles: ["src/team/index.ts" as RepoRelativePath],
+      code: [],
+      evidence: [],
+      nextActions: ["Review"],
+    };
+    const legacyBytes = serializeRelayArtifact(base);
+    const legacy = parseRelayArtifact(legacyBytes, relayArtifactPath(RELAY));
+    expect(legacy).toMatchObject({ schemaVersion: 1, state: "published" });
+    expect(legacy).not.toHaveProperty("publishedAt");
+    const {
+      schemaVersion: _schemaVersion,
+      ref: _ref,
+      kind: _kind,
+      sourcePath: _sourcePath,
+      revision: _revision,
+      ...legacyInput
+    } = legacy;
+    expect(serializeRelayArtifact({ id: RELAY, ...legacyInput })).toBe(legacyBytes);
+    const legacyAcknowledgedBytes = serializeRelayArtifact({
+      ...base,
+      state: "acknowledged",
+      acknowledgedBy: ACTOR,
+      acknowledgedAt: NOW,
+    });
+    expect(legacyAcknowledgedBytes).toContain("schema_version: 1\n");
+    expect(parseRelayArtifact(
+      legacyAcknowledgedBytes,
+      relayArtifactPath(RELAY),
+    )).toMatchObject({ schemaVersion: 1, state: "acknowledged" });
+    const legacyClosedBytes = serializeRelayArtifact({
+      ...base,
+      state: "closed",
+      acknowledgedBy: ACTOR,
+      acknowledgedAt: NOW,
+      closedBy: ACTOR,
+      closedAt: NOW,
+    });
+    expect(legacyClosedBytes).toContain("schema_version: 1\n");
+    expect(parseRelayArtifact(
+      legacyClosedBytes,
+      relayArtifactPath(RELAY),
+    )).toMatchObject({ schemaVersion: 1, state: "closed" });
+
+    const v2Bytes = serializeRelayArtifact({ ...base, publishedAt: NOW });
+    expect(v2Bytes).toContain("schema_version: 2\n");
+    expect(v2Bytes).toContain(`published_at: ${JSON.stringify(NOW)}\n`);
+    expect(parseRelayArtifact(v2Bytes, relayArtifactPath(RELAY))).toMatchObject({
+      schemaVersion: 2,
+      publishedAt: NOW,
+    });
+    expect(() => serializeRelayArtifact({
+      ...base,
+      state: "acknowledged",
+      publishedAt: NOW,
+      acknowledgedBy: ACTOR,
+      acknowledgedAt: "2026-08-27T09:59:59.999Z",
+    })).toThrow(/publication cannot follow acknowledgement/);
+    expect(() => parseRelayArtifact(
+      v2Bytes.replace("schema_version: 2", "schema_version: 1"),
+      relayArtifactPath(RELAY),
+    )).toThrow();
+  });
+
+  it("rejects lone-surrogate paths during Relay product normalization", () => {
+    expect(() => normalizeRelayProductDraftInput({
+      recipients: [ACTOR],
+      workstream: { id: WORKSTREAM, kind: "workstream" },
+      summary: "Handoff",
+      completed: [],
+      inProgress: [],
+      decisions: [],
+      blockers: [],
+      unresolvedQuestions: [],
+      changedFiles: ["src/\ud800.ts"],
+      code: [],
+      evidence: [],
+      nextActions: ["Review"],
+    })).toThrow();
   });
 
   it("persists a bounded declarative Wiki request without actor, time, handles, or plans", () => {

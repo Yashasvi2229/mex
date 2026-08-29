@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -96,7 +97,25 @@ describe("canonical workflow repositories", () => {
     const acknowledged = await relayRepository.previewUpdate(RELAY, {
       ...relayReplacement(relay), state: "acknowledged", acknowledgedBy: ACTOR, acknowledgedAt: LATER,
     }, relay.revision);
-    expect((await relayRepository.apply(acknowledged, acknowledged.previewRevision)).artifact.entityRevision).toBe(2);
+    const acknowledgedRelay = (await relayRepository.apply(
+      acknowledged,
+      acknowledged.previewRevision,
+    )).artifact;
+    expect(acknowledgedRelay).toMatchObject({ entityRevision: 2, schemaVersion: 1 });
+    expect(readFileSync(join(root, acknowledgedRelay.sourcePath), "utf8"))
+      .toContain("schema_version: 1\n");
+    const closed = await relayRepository.previewUpdate(RELAY, {
+      ...relayReplacement(acknowledgedRelay),
+      state: "closed",
+      acknowledgedBy: acknowledgedRelay.acknowledgedBy,
+      acknowledgedAt: acknowledgedRelay.acknowledgedAt,
+      closedBy: ACTOR,
+      closedAt: LATER,
+    }, acknowledgedRelay.revision);
+    const closedRelay = (await relayRepository.apply(closed, closed.previewRevision)).artifact;
+    expect(closedRelay).toMatchObject({ entityRevision: 3, schemaVersion: 1, state: "closed" });
+    expect(readFileSync(join(root, closedRelay.sourcePath), "utf8"))
+      .toContain("schema_version: 1\n");
 
     const playbookRepository = new PlaybookRepository(root);
     const playbookPlan = await playbookRepository.previewCreate({
@@ -349,6 +368,7 @@ function relayReplacement(relay: Awaited<ReturnType<RelayRepository["get"]>> & {
     sender: relay.sender, recipients: relay.recipients, workstream: relay.workstream, summary: relay.summary, completed: relay.completed,
     inProgress: relay.inProgress, decisions: relay.decisions, blockers: relay.blockers, unresolvedQuestions: relay.unresolvedQuestions,
     changedFiles: relay.changedFiles, code: relay.code, evidence: relay.evidence, nextActions: relay.nextActions,
+    ...(relay.publishedAt === undefined ? {} : { publishedAt: relay.publishedAt }),
   };
 }
 

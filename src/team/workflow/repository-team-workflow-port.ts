@@ -61,9 +61,22 @@ import type {
   TeamInboxSpecProposalDetail,
   TeamInboxSpecProposalSummary,
   TeamInboxSpecPurposeId,
+  TeamRelayApplyResult,
+  TeamRelayCommand,
+  TeamRelayDetail,
+  TeamRelayDraftDetail,
+  TeamRelayDraftListRequest,
+  TeamRelayDraftSummary,
+  TeamRelayHandoffPort,
+  TeamRelayListRequest,
+  TeamRelayPage,
+  TeamRelayPreviewEnvelope,
+  TeamRelayPurposeId,
+  TeamRelaySummary,
   TeamMember,
   TeamMemberListRequest,
   TeamWorkflowApplyRequest,
+  TeamWorkflowAction,
   TeamWorkflowCommand,
   TeamWorkflowPort,
   TeamWorkflowPreview,
@@ -78,6 +91,7 @@ import {
   TEAM_INBOX_SPEC_LIMITS,
   TEAM_IDENTITY_ACTIVITY_LIMITS,
   TEAM_READ_LIMITS,
+  TEAM_RELAY_LIMITS,
 } from "../contracts/workflow.js";
 import type {
   WikiOperationActor,
@@ -175,6 +189,23 @@ import {
   type ExactSpecEntityAttestation,
   utf8Excerpt,
 } from "../inbox/spec-authoring.js";
+import {
+  aggregateRelayDiagnostics,
+  boundedRelayJson,
+  boundedRelayReceiptJson,
+  decodeRelayCursor,
+  encodeRelayCursor,
+  hashRelayValue,
+  isRelayLocalId,
+  normalizeRelayListFilter,
+  normalizeRelayProductDraftInput,
+  normalizeTeamRelayCommand,
+  relayDraftProjection,
+  relayDraftSummary,
+  relayProjection,
+  relaySigningPayload,
+  relaySummary,
+} from "../relay/handoff.js";
 import { generateEntityId, isEntityId } from "../../wiki/model/ids.js";
 import { RepositoryRootGuard } from "./repository-root.js";
 
@@ -262,7 +293,8 @@ interface PrimaryResult<TWikiPayload extends JsonValue> {
 type PortableWorkflowPurposeId =
   | TeamIdentityActivityPurposeId
   | TeamWorkstreamPurposeId
-  | TeamInboxSpecPurposeId;
+  | TeamInboxSpecPurposeId
+  | TeamRelayPurposeId;
 
 interface RecoverableWikiPort<TWikiPayload extends JsonValue, TWikiPlan>
   extends WikiPort<unknown, TWikiPayload, TWikiPlan, unknown> {
@@ -302,7 +334,7 @@ interface MemberCursor {
 export class RepositoryTeamWorkflowPort<
   TWikiPayload extends JsonValue,
   TWikiPlan = unknown,
-> implements TeamWorkflowPort<TWikiPayload>, TeamInboxSpecAuthoringPort {
+> implements TeamWorkflowPort<TWikiPayload>, TeamInboxSpecAuthoringPort, TeamRelayHandoffPort {
   readonly #root: RepositoryRootGuard;
   readonly #git: GitPort;
   readonly #wiki: WikiPort<unknown, TWikiPayload, TWikiPlan, unknown>;
@@ -1063,6 +1095,293 @@ export class RepositoryTeamWorkflowPort<
     };
   }
 
+  async getRelayDraft(id: string): Promise<TeamRelayDraftDetail | null> {
+    this.#root.assertCurrent();
+    const draft = await this.getLocalDraft(id);
+    if (draft === null || draft.kind !== "relay") return null;
+    return relayDraftProjection(draft);
+  }
+
+  async listRelayDrafts(
+    request: TeamRelayDraftListRequest = {},
+  ): Promise<TeamRelayPage<TeamRelayDraftSummary>> {
+    this.#root.assertCurrent();
+    if (!isPlainObject(request)) throw invalidRelayList();
+    exactObjectKeys(request, [], ["cursor", "limit"]);
+    const cursor = request.cursor;
+    const limit = request.limit;
+    if (cursor !== undefined && typeof cursor !== "string") throw invalidRelayList();
+    if (limit !== undefined && typeof limit !== "number") throw invalidRelayList();
+    const page = await this.listLocalDrafts({
+      kind: "relay",
+      ...(cursor === undefined ? {} : { cursor }),
+      ...(limit === undefined ? {} : { limit }),
+    });
+    const details = page.items.map((draft) => {
+      if (draft.kind !== "relay") throw invalidRelayList();
+      return relayDraftProjection(draft);
+    });
+    return {
+      ...page,
+      items: details.map(relayDraftSummary),
+      deterministicRevision: hashRelayValue(details.map((draft) => ({
+        id: draft.id,
+        revision: draft.revision,
+      }))),
+    };
+  }
+
+  async getRelay(id: string): Promise<TeamRelayDetail | null> {
+    this.#root.assertCurrent();
+    const relay = await this.#relays.get(id);
+    return relay === null ? null : relayProjection(relay);
+  }
+
+  async listRelays(
+    request: TeamRelayListRequest = {},
+  ): Promise<TeamRelayPage<TeamRelaySummary>> {
+    this.#root.assertCurrent();
+    const filter = normalizeRelayListFilter(request);
+    const currentMemberId = await this.#activeRelayMemberOrNull();
+    if (filter.perspective !== "all" && currentMemberId === null) {
+      throw relayUnauthorized(
+        "Select an active Member, or configure one unique active Git alias, to view personal Relays.",
+      );
+    }
+    const memberId = currentMemberId;
+    const filterRevision = hashRelayValue({
+      perspective: filter.perspective,
+      states: filter.states,
+      workstreamId: filter.workstreamId,
+      memberId,
+    });
+    const cursor = decodeRelayCursor(filter.cursor);
+    if (cursor !== null && cursor.filterRevision !== filterRevision) {
+      throw relayPageConflict();
+    }
+    const all: TeamRelayDetail[] = [];
+    const diagnostics: Diagnostic[] = [];
+    let sourceTruncated = false;
+    let innerCursor: string | undefined;
+    let corpusRevision: Revision | null = null;
+    for (;;) {
+      const page = await this.#relays.list({
+        limit: TEAM_RELAY_LIMITS.maxPageSize,
+        includeArchived: true,
+        ...(innerCursor === undefined ? {} : { cursor: innerCursor }),
+      });
+      if (corpusRevision === null) corpusRevision = page.deterministicRevision;
+      if (corpusRevision !== page.deterministicRevision) throw relayPageConflict();
+      sourceTruncated ||= page.sourceTruncated;
+      const availableDiagnostics = Math.max(0, 100 - diagnostics.length);
+      if (page.diagnostics.length > availableDiagnostics) sourceTruncated = true;
+      diagnostics.push(...page.diagnostics.slice(0, availableDiagnostics));
+      for (const stored of page.items) {
+        if (
+          filter.states !== null
+          && !filter.states.includes(stored.state)
+        ) continue;
+        if (
+          filter.workstreamId !== null
+          && stored.workstream.id !== filter.workstreamId
+        ) continue;
+        if (filter.perspective === "sent") {
+          if (stored.sender.kind !== "member" || stored.sender.memberId !== memberId) continue;
+        } else if (filter.perspective === "mine") {
+          const mine = stored.state === "published"
+            ? stored.recipients.some(
+                (recipient) => recipient.kind === "member" && recipient.memberId === memberId,
+              )
+            : stored.acknowledgedBy?.kind === "member"
+              && stored.acknowledgedBy.memberId === memberId;
+          if (!mine) continue;
+        }
+        all.push(relayProjection(stored));
+      }
+      if (page.nextCursor === null) break;
+      innerCursor = page.nextCursor;
+    }
+    corpusRevision ??= hashRelayValue([]);
+    if (cursor !== null && cursor.corpusRevision !== corpusRevision) {
+      throw relayPageConflict();
+    }
+    all.sort(compareRelayProjection);
+    const offset = cursor?.offset ?? 0;
+    if (offset > all.length) throw relayPageConflict();
+    const details = all.slice(offset, offset + filter.limit);
+    const nextOffset = offset + details.length;
+    const hasMore = nextOffset < all.length;
+    const hasLegacy = all.some((relay) => relay.publishedAt === null);
+    const aggregatedDiagnostics = aggregateRelayDiagnostics(
+      diagnostics,
+      hasLegacy,
+      sourceTruncated,
+    );
+    return {
+      items: details.map(relaySummary),
+      nextCursor: hasMore
+        ? encodeRelayCursor({
+            v: 1,
+            offset: nextOffset,
+            corpusRevision,
+            filterRevision,
+          })
+        : null,
+      truncated: hasMore,
+      sourceTruncated: aggregatedDiagnostics.sourceTruncated,
+      deterministicRevision: hashRelayValue({ corpusRevision, filterRevision }),
+      diagnostics: aggregatedDiagnostics.diagnostics,
+    };
+  }
+
+  async previewRelay(
+    commandValue: TeamRelayCommand,
+  ): Promise<TeamRelayPreviewEnvelope> {
+    this.#root.assertCurrent();
+    const command = normalizeTeamRelayCommand(commandValue);
+    const workflowCommand = command as TeamWorkflowCommand<TWikiPayload>;
+    let internal = await this.#previewWorkflow(workflowCommand, true);
+    if (!this.#portablePreviewIsFresh(internal.command.authority.occurredAt)) {
+      this.#evictIssuedCommand(internal);
+      internal = await this.#previewWorkflow(workflowCommand, true);
+    }
+    const prepared = this.#issued.get(internal.previewRevision);
+    if (prepared === undefined) throw previewConflict();
+    const publicPreview = relayPublicPreviewFrom(internal);
+    const purposeIds = relayPurposeIdsFromPrepared(command, prepared);
+    const requestRevision = hashText(boundedRelayJson(command));
+    let presentationRevision: Revision;
+    try {
+      presentationRevision = hashText(boundedRelayJson(publicPreview));
+    } catch (error) {
+      if (error instanceof MexPortError && error.problem.code === "INVALID_REQUEST") {
+        throw relayEnvelopeTooLarge();
+      }
+      throw error;
+    }
+    const receiptBase = {
+      schemaVersion: 1 as const,
+      authority: internal.command.authority,
+      purposeIds,
+      requestRevision,
+      presentationRevision,
+    };
+    const unsigned = {
+      schemaVersion: 1 as const,
+      request: command,
+      preview: publicPreview,
+      receipt: { ...receiptBase, previewRevision: "0".repeat(64) },
+    };
+    assertRelayEnvelopeFits(unsigned);
+    parseRelayEnvelope(unsigned);
+    this.#receiptSigner.initialize();
+    const previewRevision = this.#receiptSigner.sign(
+      relaySigningPayload(receiptBase),
+    );
+    const envelope = deepFreeze({
+      schemaVersion: 1 as const,
+      request: command,
+      preview: publicPreview,
+      receipt: { ...receiptBase, previewRevision },
+    });
+    assertRelayEnvelopeFits(envelope);
+    parseRelayEnvelope(envelope);
+    const portable = withPortableEnvelopeAttestation(
+      prepared,
+      previewRevision,
+      relayEnvelopeRevision(envelope),
+    );
+    this.#rememberIssued(previewRevision, portable, false);
+    return envelope;
+  }
+
+  async applyRelay(
+    envelopeValue: TeamRelayPreviewEnvelope,
+  ): Promise<TeamRelayApplyResult> {
+    this.#root.assertCurrent();
+    let envelope: TeamRelayPreviewEnvelope;
+    try {
+      envelope = parseRelayEnvelope(envelopeValue);
+    } catch (error) {
+      if (error instanceof MexPortError && error.problem.code === "INVALID_REQUEST") {
+        throw invalidSignedRelayEnvelope();
+      }
+      throw error;
+    }
+    assertRelayPreviewContainment(this.#root.path, envelope.preview);
+    const command = deepFreeze({
+      ...envelope.request,
+      authority: envelope.receipt.authority,
+    }) as PreparedTeamWorkflowCommand<TWikiPayload>;
+    let existing: TeamWorkflowJournalEntry | null = null;
+    try {
+      existing = this.#local.getWorkflowOperation(command.operationId);
+    } catch (error) {
+      if (!(error instanceof MexPortError)) throw error;
+      if (error.problem.code === "MIGRATION_REQUIRED") {
+        existing = null;
+      } else if (error.problem.code === "OPERATION_INTERRUPTED") {
+        this.#local.initializeForMutation();
+        existing = this.#local.getWorkflowOperation(command.operationId);
+      } else {
+        throw error;
+      }
+    }
+    const completedInterruptedOperation = existing !== null
+      && existing.phase !== "complete";
+    let result: TeamWorkflowResult<TWikiPayload>;
+    if (existing !== null) {
+      assertJournalEnvelopeAttestation(existing.effects, envelope);
+      result = await this.apply({
+        command,
+        expectedPreviewRevision: envelope.receipt.previewRevision,
+      });
+    } else {
+      this.#receiptSigner.verify(
+        relaySigningPayload(envelope.receipt),
+        envelope.receipt.previewRevision,
+      );
+      this.#assertPortablePreviewFresh(envelope.receipt.authority.occurredAt);
+      await this.#assertPreWriteFreshnessAndDependencies(command);
+      const replanned = await this.#plan(
+        command,
+        envelope.receipt.requestRevision,
+        envelope.receipt.purposeIds,
+      );
+      if (
+        boundedRelayJson(relayPublicPreviewFrom(replanned.preview))
+          !== boundedRelayJson(envelope.preview)
+        || boundedRelayJson(relayPurposeIdsFromPrepared(envelope.request, replanned))
+          !== boundedRelayJson(envelope.receipt.purposeIds)
+      ) throw previewConflict();
+      const portable = withPortableEnvelopeAttestation(
+        replanned,
+        envelope.receipt.previewRevision,
+        relayEnvelopeRevision(envelope),
+      );
+      this.#rememberIssued(envelope.receipt.previewRevision, portable, false);
+      result = await this.apply({
+        command,
+        expectedPreviewRevision: envelope.receipt.previewRevision,
+      });
+    }
+    return {
+      operationId: result.operationId,
+      previewRevision: result.previewRevision,
+      applied: true,
+      idempotentReplay: completedInterruptedOperation
+        ? false
+        : result.idempotentReplay,
+      changes: result.changes,
+      localChanges: result.localChanges.filter(
+        (change) => change.namespace === "relay-draft",
+      ) as TeamRelayApplyResult["localChanges"],
+      relays: result.artifacts.flatMap((artifact) =>
+        artifact.kind === "relay" ? [relayProjection(artifact)] : []),
+      events: result.events as TeamRelayApplyResult["events"],
+    };
+  }
+
   async getArtifact(ref: EntityRef): Promise<TeamArtifact<TWikiPayload> | null> {
     this.#root.assertCurrent();
     switch (ref.kind) {
@@ -1160,13 +1479,10 @@ export class RepositoryTeamWorkflowPort<
       ? undefined
       : this.#issued.get(cachedRevision);
     if (cached !== undefined) {
-      await this.#assertAuthorityCurrent(
-        cached.preview.command.authority,
-        cached.preview.command.action.kind === "member.clear",
-      );
+      await this.#assertCommandAuthorityCurrent(cached.preview.command);
       return cached.preview;
     }
-    const actor = callerCommand.action.kind === "member.clear"
+    const actor = actionAllowsStaleSelectionFallback(callerCommand.action.kind)
       ? (await this.#resolveCurrentActorDetailed()).actor
       : await this.resolveActor();
     const occurredAt = this.#nowIso();
@@ -1313,18 +1629,14 @@ export class RepositoryTeamWorkflowPort<
     try {
       await this.#runPhaseHook("before-canonical-publication");
       this.#root.assertCurrent();
-      await this.#assertAuthorityCurrent(
-        prepared.preview.command.authority,
-        prepared.preview.command.action.kind === "member.clear",
-      );
-      await this.#assertExpectationsCurrent(
-        prepared.preview.command.expectedRevisions,
+      await this.#assertPreWriteFreshnessAndDependencies(
+        prepared.preview.command,
       );
       await this.#assertInboxActionDependencies(prepared.preview.command);
       const primary = await prepared.applyPrimary();
       await this.#runPhaseHook("after-canonical-publication");
       if (isAuditOnlyEffects(prepared.effects)) {
-        await this.#assertAuthorityCurrent(prepared.preview.command.authority);
+        await this.#assertCommandAuthorityCurrent(prepared.preview.command);
       } else {
         await this.#assertPostPrimaryRepository(prepared.preview.command.authority.repoState);
       }
@@ -1743,12 +2055,18 @@ export class RepositoryTeamWorkflowPort<
           : normalizeRelayDraftInput(action.draft);
         const draftId = action.draftId
           ?? recoveryLocalId(recoveryEffects, `${kind}-draft`)
-          ?? (kind === "inbox" ? purposeId(purposeIds, "inbox-draft") : undefined)
+          ?? purposeId(
+            purposeIds,
+            kind === "inbox" ? "inbox-draft" : "relay-draft",
+          )
           ?? this.#localDraftId(kind);
         const current = action.draftId === undefined
           ? null
           : this.#local.getLocalDraft(draftId);
         if (action.draftId !== undefined) {
+          if (kind === "relay") {
+            requiredDraft<TWikiPayload>(current, "relay");
+          }
           requireLocalExpectation(expectedRevisions, `${kind}-draft`, draftId, current?.revision ?? null);
         }
         const stored = this.#local.previewSaveLocalDraft({
@@ -1784,6 +2102,12 @@ export class RepositoryTeamWorkflowPort<
       case "inbox.draft.delete":
       case "relay.draft.delete": {
         const kind = action.kind === "inbox.draft.delete" ? "inbox" as const : "relay" as const;
+        if (kind === "relay") {
+          requiredDraft<TWikiPayload>(
+            this.#local.getLocalDraft(action.draftId),
+            "relay",
+          );
+        }
         const current = this.#local.previewDeleteLocalDraft({
           id: action.draftId,
           kind,
@@ -1824,24 +2148,43 @@ export class RepositoryTeamWorkflowPort<
         }, this.#proposals), "inbox", action.draftId, draft.revision);
       }
       case "relay.publish": {
+        await this.#assertRelayActionDependencies(command);
         const draft = requiredDraft<TWikiPayload>(this.#local.getLocalDraft(action.draftId), "relay");
         requireLocalExpectation(expectedRevisions, "relay-draft", action.draftId, draft.revision);
-        const payload = draft.payload as RelayDraftInput;
-        await this.#requireWorkstreamDependency(payload.workstream, expectedRevisions);
-        const recoveryId = recoveryCanonicalId(recoveryEffects, "relay");
+        const payload = normalizeRelayProductDraftInput(draft.payload);
+        const workstream = await this.#requireWorkstreamDependency(
+          payload.workstream,
+          expectedRevisions,
+        );
+        const recipients = await Promise.all(payload.recipients.map(async (recipient) => {
+          if (recipient.kind !== "member") throw relayUnauthorized("Relay recipients must be Members.");
+          const member = await required(this.#members.get(recipient.memberId), "Member");
+          return {
+            kind: "member" as const,
+            memberId: member.ref.id,
+            displayName: member.displayName,
+          };
+        }));
+        const recoveryId = recoveryCanonicalId(recoveryEffects, "relay")
+          ?? purposeId(purposeIds, "relay")
+          ?? null;
         const plan = await this.#relays.previewCreate({
           ...(recoveryId === null ? {} : { id: recoveryId }),
           ...payload,
+          recipients,
+          workstream: workstream.ref,
           sender: authority.actor,
+          publishedAt: authority.occurredAt,
         });
         return withCleanup(canonicalWorkflowPlan<TWikiPayload, typeof plan.artifact>(plan, "relay", plan.artifact.ref.id, {
           action: "relay.published",
           subjects: [entitySubject(plan.artifact.ref)],
-          workstream: payload.workstream,
+          workstream: workstream.ref,
         }, this.#relays), "relay", action.draftId, draft.revision);
       }
       case "relay.acknowledge":
       case "relay.close": {
+        await this.#assertRelayActionDependencies(command);
         const current = await required(this.#relays.get(action.relayId), "Relay");
         requireArtifactExpectation(expectedRevisions, current.sourcePath, current.revision);
         const plan = await this.#relays.previewUpdate(action.relayId, {
@@ -2373,6 +2716,174 @@ export class RepositoryTeamWorkflowPort<
     return playbook;
   }
 
+  async #requireActiveRelayMember(action: string): Promise<string> {
+    const memberId = await this.#activeRelayMemberOrNull();
+    if (memberId === null) {
+      throw relayUnauthorized(
+        `Select an active Member, or configure one unique active Git alias, to ${action}.`,
+      );
+    }
+    return memberId;
+  }
+
+  async #activeRelayMemberOrNull(): Promise<string | null> {
+    const resolution = await this.#resolveCurrentActorDetailed();
+    if (resolution.actor.kind !== "member") return null;
+    const member = await this.#members.get(resolution.actor.memberId);
+    return member?.active === true ? member.ref.id : null;
+  }
+
+  async #assertRelayActionDependencies(
+    command: PreparedTeamWorkflowCommand<TWikiPayload>,
+  ): Promise<void> {
+    const action = command.action;
+    if (
+      action.kind !== "relay.draft.save"
+      && action.kind !== "relay.draft.delete"
+      && action.kind !== "relay.publish"
+      && action.kind !== "relay.acknowledge"
+      && action.kind !== "relay.close"
+    ) return;
+    if (
+      action.kind === "relay.draft.save"
+      || action.kind === "relay.draft.delete"
+    ) return;
+    if (command.authority.actor.kind !== "member") {
+      throw relayUnauthorized("Canonical Relay actions require an active Member.");
+    }
+    const actor = await this.#members.get(command.authority.actor.memberId);
+    if (actor?.active !== true) {
+      throw relayUnauthorized("The current Relay actor is missing or inactive.");
+    }
+    if (action.kind === "relay.publish") {
+      const draft = requiredDraft<TWikiPayload>(
+        this.#local.getLocalDraft(action.draftId),
+        "relay",
+      );
+      const payload = normalizeRelayProductDraftInput(draft.payload);
+      const workstream = await required(
+        this.#workstreams.get(payload.workstream.id),
+        "Workstream",
+      );
+      if (
+        payload.workstream.kind !== "workstream"
+        || (workstream.state !== "planned"
+          && workstream.state !== "active"
+          && workstream.state !== "blocked")
+      ) {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Relay Workstream is not publishable",
+          "Relay publication requires a planned, active, or blocked Workstream.",
+          workstream.sourcePath,
+        );
+      }
+      const recipients = await Promise.all(payload.recipients.map(async (recipient) => {
+        if (recipient.kind !== "member") {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Invalid Relay recipient",
+            "Relay recipients must be canonical Members.",
+          );
+        }
+        const member = await required(this.#members.get(recipient.memberId), "Member");
+        if (!member.active) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Inactive Relay recipient",
+            `Relay recipient ${recipient.memberId} is inactive.`,
+            member.sourcePath,
+          );
+        }
+        return member;
+      }));
+      const targets = [
+        `local:relay-draft:${action.draftId}`,
+        `artifact:${workstream.sourcePath}`,
+        ...recipients.map((member) => `artifact:${member.sourcePath}`),
+      ];
+      assertExactRelayExpectationTargets(command.expectedRevisions, targets);
+      requireLocalExpectation(
+        command.expectedRevisions,
+        "relay-draft",
+        action.draftId,
+        draft.revision,
+      );
+      requireArtifactExpectation(
+        command.expectedRevisions,
+        workstream.sourcePath,
+        workstream.revision,
+      );
+      for (const member of recipients) {
+        requireArtifactExpectation(
+          command.expectedRevisions,
+          member.sourcePath,
+          member.revision,
+        );
+      }
+      return;
+    }
+    if (action.kind !== "relay.acknowledge" && action.kind !== "relay.close") {
+      return;
+    }
+    const relay = await required(this.#relays.get(action.relayId), "Relay");
+    assertExactRelayExpectationTargets(command.expectedRevisions, [
+      `artifact:${relay.sourcePath}`,
+    ]);
+    requireArtifactExpectation(
+      command.expectedRevisions,
+      relay.sourcePath,
+      relay.revision,
+    );
+    const actorId = command.authority.actor.memberId;
+    if (action.kind === "relay.acknowledge") {
+      if (relay.state !== "published") {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Relay cannot be acknowledged",
+          "Only a published Relay can be acknowledged.",
+          relay.sourcePath,
+        );
+      }
+      if (!relay.recipients.some(
+        (recipient) => recipient.kind === "member" && recipient.memberId === actorId,
+      )) {
+        throw relayUnauthorized("Only a listed Relay recipient may acknowledge it.");
+      }
+      return;
+    }
+    if (relay.state !== "acknowledged") {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Relay cannot be closed",
+        "Only an acknowledged Relay can be closed.",
+        relay.sourcePath,
+      );
+    }
+    if (relay.sender.kind !== "member" || relay.acknowledgedBy?.kind !== "member") {
+      throw relayUnauthorized(
+        "A Relay with non-Member legacy principals cannot be closed.",
+      );
+    }
+    const principalIds = [...new Set([
+      relay.sender.memberId,
+      relay.acknowledgedBy.memberId,
+    ])];
+    const principals = await Promise.all(
+      principalIds.map((memberId) => this.#members.get(memberId)),
+    );
+    if (principals.some((member) => member?.active !== true)) {
+      throw relayUnauthorized(
+        "The recorded Relay sender and claimant must both remain active Members.",
+      );
+    }
+    if (!principalIds.includes(actorId)) {
+      throw relayUnauthorized(
+        "Only the recorded Relay sender or claimant may close it.",
+      );
+    }
+  }
+
   async #assertAuthorityCurrent(
     authority: { actor: ActorRef; repoState: RepoState },
     allowStaleSelectionFallback = false,
@@ -2385,6 +2896,60 @@ export class RepositoryTeamWorkflowPort<
     }
     const current = await this.#git.getRepoState();
     if (!sameRepoCheckpoint(current, authority.repoState)) throw repositoryChanged();
+  }
+
+  async #assertCommandAuthorityCurrent(
+    command: PreparedTeamWorkflowCommand<TWikiPayload>,
+  ): Promise<void> {
+    if (
+      command.action.kind !== "relay.publish"
+      && command.action.kind !== "relay.acknowledge"
+      && command.action.kind !== "relay.close"
+    ) {
+      await this.#assertAuthorityCurrent(
+        command.authority,
+        actionAllowsStaleSelectionFallback(command.action.kind),
+      );
+      return;
+    }
+    const expected = command.authority.actor;
+    const currentActor = (await this.#resolveCurrentActorDetailed()).actor;
+    if (
+      expected.kind !== "member"
+      || currentActor.kind !== "member"
+      || expected.memberId !== currentActor.memberId
+    ) {
+      throw artifactError(
+        "REVISION_CONFLICT",
+        "Workflow actor changed",
+        "The resolved Member changed after preview. Preview the workflow again.",
+      );
+    }
+    const currentRepo = await this.#git.getRepoState();
+    if (!sameRepoCheckpoint(currentRepo, command.authority.repoState)) {
+      throw repositoryChanged();
+    }
+  }
+
+  /**
+   * Relay eligibility is derived from mutable Member, Workstream, Relay, and
+   * checkout-local draft state. Once a Relay preview has been reviewed, stale
+   * authority or exact target revisions must win over a newly invalid semantic
+   * state so callers receive the stable REVISION_CONFLICT re-preview signal.
+   * Keep the historical dependency-first order for every non-Relay workflow.
+   */
+  async #assertPreWriteFreshnessAndDependencies(
+    command: PreparedTeamWorkflowCommand<TWikiPayload>,
+  ): Promise<void> {
+    if (command.action.kind.startsWith("relay.")) {
+      await this.#assertCommandAuthorityCurrent(command);
+      await this.#assertExpectationsCurrent(command.expectedRevisions);
+      await this.#assertRelayActionDependencies(command);
+      return;
+    }
+    await this.#assertRelayActionDependencies(command);
+    await this.#assertCommandAuthorityCurrent(command);
+    await this.#assertExpectationsCurrent(command.expectedRevisions);
   }
 
   async #resolveCurrentActorDetailed(
@@ -2499,12 +3064,8 @@ export class RepositoryTeamWorkflowPort<
     prepared: PreparedOperation<TWikiPayload, TWikiPlan>,
     prepareActivity: boolean,
   ): Promise<PreparedActivityPublication | null> {
-    await this.#assertAuthorityCurrent(
-      prepared.preview.command.authority,
-      prepared.preview.command.action.kind === "member.clear",
-    );
-    await this.#assertExpectationsCurrent(
-      prepared.preview.command.expectedRevisions,
+    await this.#assertPreWriteFreshnessAndDependencies(
+      prepared.preview.command,
     );
     if (prepared.preview.command.action.kind === "member.deactivate") {
       this.#assertMemberIsNotSelected(
@@ -2616,6 +3177,17 @@ export class RepositoryTeamWorkflowPort<
     // it is external alteration of a recovery target and must terminate as a
     // conflict before lease takeover or any cleanup advances the journal.
     this.#assertNoDivergentPrimaryEffects(entry.effects);
+    if (
+      entry.phase === "intent"
+      && command.action.kind.startsWith("relay.")
+      && (
+        this.#primaryEffectState(entry.effects) === "none"
+        || this.#isAuditOnlyPending(entry.effects)
+      )
+    ) {
+      this.#assertPortablePreviewFresh(command.authority.occurredAt);
+      await this.#assertPreWriteFreshnessAndDependencies(command);
+    }
     const leaseToken = this.#acquireLease();
     let current = this.#local.getWorkflowOperation(entry.operationId) ?? entry;
     if (current.phase === "intent") {
@@ -2812,11 +3384,7 @@ export class RepositoryTeamWorkflowPort<
     // Once an exact effect exists, the journaled recovery path below may finish
     // without depending on mutable current identity.
     this.#assertPortablePreviewFresh(command.authority.occurredAt);
-    await this.#assertAuthorityCurrent(
-      command.authority,
-      command.action.kind === "member.clear",
-    );
-    await this.#assertExpectationsCurrent(command.expectedRevisions);
+    await this.#assertPreWriteFreshnessAndDependencies(command);
     const activity = effects.find(
       (effect): effect is ActivityWorkflowEffect => effect.kind === "activity",
     );
@@ -2848,16 +3416,12 @@ export class RepositoryTeamWorkflowPort<
     await this.#runPhaseHook("before-canonical-publication");
     this.#root.assertCurrent();
     this.#assertPortablePreviewFresh(command.authority.occurredAt);
-    await this.#assertAuthorityCurrent(
-      command.authority,
-      command.action.kind === "member.clear",
-    );
-    await this.#assertExpectationsCurrent(command.expectedRevisions);
+    await this.#assertPreWriteFreshnessAndDependencies(command);
     await this.#assertInboxActionDependencies(command);
     await planned.applyPrimary();
     await this.#runPhaseHook("after-canonical-publication");
     if (isAuditOnlyEffects(effects)) {
-      await this.#assertAuthorityCurrent(command.authority);
+      await this.#assertCommandAuthorityCurrent(command);
     } else {
       await this.#assertPostPrimaryRepository(command.authority.repoState);
     }
@@ -3528,6 +4092,21 @@ function inboxPublicPreviewFrom<TWikiPayload extends JsonValue>(
   });
 }
 
+function relayPublicPreviewFrom<TWikiPayload extends JsonValue>(
+  preview: TeamWorkflowPreview<TWikiPayload>,
+): TeamRelayPreviewEnvelope["preview"] {
+  if (preview.localChanges.some((change) => change.namespace !== "relay-draft")) {
+    throw previewConflict();
+  }
+  return deepFreeze({
+    valid: preview.valid,
+    scope: preview.scope,
+    changes: preview.changes,
+    localChanges: preview.localChanges as TeamRelayPreviewEnvelope["preview"]["localChanges"],
+    diagnostics: preview.diagnostics,
+  });
+}
+
 function workflowCommandFromInbox<TWikiPayload extends JsonValue>(
   command: TeamInboxSpecCommand,
 ): TeamWorkflowCommand<TWikiPayload> {
@@ -3632,6 +4211,57 @@ function inboxPurposeIdsFromPrepared<
   return deepFreeze(purposes);
 }
 
+function relayPurposeIdsFromPrepared<
+  TWikiPayload extends JsonValue,
+  TWikiPlan,
+>(
+  command: TeamRelayCommand,
+  prepared: PreparedOperation<TWikiPayload, TWikiPlan>,
+): readonly TeamRelayPurposeId[] {
+  const purposes: TeamRelayPurposeId[] = [];
+  if (
+    command.action.kind === "relay.draft.save"
+    && command.action.draftId === undefined
+  ) {
+    const drafts = prepared.effects.filter(
+      (effect): effect is LocalWorkflowEffect =>
+        effect.kind === "local" && effect.namespace === "relay-draft",
+    );
+    if (drafts.length !== 1 || drafts[0]!.beforeRevision !== null) {
+      throw previewConflict();
+    }
+    purposes.push({ purpose: "relay-draft", id: drafts[0]!.id });
+  }
+  if (command.action.kind === "relay.publish") {
+    const relays = prepared.effects.filter(
+      (effect): effect is CanonicalWorkflowEffect =>
+        effect.kind === "canonical" && effect.namespace === "relay",
+    );
+    if (relays.length !== 1 || relays[0]!.beforeRevision !== null) {
+      throw previewConflict();
+    }
+    purposes.push({ purpose: "relay", id: relays[0]!.id });
+  }
+  if (
+    command.action.kind === "relay.publish"
+    || command.action.kind === "relay.acknowledge"
+    || command.action.kind === "relay.close"
+  ) {
+    const activities = prepared.effects.filter(
+      (effect): effect is ActivityWorkflowEffect => effect.kind === "activity",
+    );
+    if (activities.length !== 1) throw previewConflict();
+    purposes.push({ purpose: "activity", id: activities[0]!.id });
+  }
+  purposes.sort((left, right) => compareCodePoints(left.purpose, right.purpose));
+  if (
+    purposes.length > TEAM_RELAY_LIMITS.maxPurposeIds
+    || new Set(purposes.map((item) => item.purpose)).size !== purposes.length
+    || new Set(purposes.map((item) => item.id)).size !== purposes.length
+  ) throw previewConflict();
+  return deepFreeze(purposes);
+}
+
 function commandFromPrepared<TWikiPayload extends JsonValue>(
   command: PreparedTeamWorkflowCommand<TWikiPayload>,
 ): TeamWorkflowCommand<TWikiPayload> {
@@ -3681,11 +4311,18 @@ function inboxEnvelopeRevision(
   return hashText(boundedInboxJson(envelope));
 }
 
+function relayEnvelopeRevision(
+  envelope: TeamRelayPreviewEnvelope,
+): Revision {
+  return hashText(boundedRelayJson(envelope));
+}
+
 function assertJournalEnvelopeAttestation(
   effects: readonly TeamWorkflowJournalEffect[],
   envelope: TeamIdentityActivityPreviewEnvelope
     | TeamWorkstreamPreviewEnvelope
-    | TeamInboxSpecPreviewEnvelope,
+    | TeamInboxSpecPreviewEnvelope
+    | TeamRelayPreviewEnvelope,
 ): void {
   const receipts = effects.filter(
     (effect): effect is IdentityActivityReceiptWorkflowEffect =>
@@ -3702,13 +4339,17 @@ function assertJournalEnvelopeAttestation(
 function portableEnvelopeRevision(
   envelope: TeamIdentityActivityPreviewEnvelope
     | TeamWorkstreamPreviewEnvelope
-    | TeamInboxSpecPreviewEnvelope,
+    | TeamInboxSpecPreviewEnvelope
+    | TeamRelayPreviewEnvelope,
 ): Revision {
   if (envelope.request.action.kind.startsWith("workstream.")) {
     return workstreamEnvelopeRevision(envelope as TeamWorkstreamPreviewEnvelope);
   }
   if (envelope.request.action.kind.startsWith("inbox.")) {
     return inboxEnvelopeRevision(envelope as TeamInboxSpecPreviewEnvelope);
+  }
+  if (envelope.request.action.kind.startsWith("relay.")) {
+    return relayEnvelopeRevision(envelope as TeamRelayPreviewEnvelope);
   }
   return identityActivityEnvelopeRevision(
     envelope as TeamIdentityActivityPreviewEnvelope,
@@ -3927,6 +4568,173 @@ function parseInboxEnvelope(value: unknown): TeamInboxSpecPreviewEnvelope {
   const preview = parseInboxPublicPreview(parsed.preview);
   const receipt = parseInboxReceipt(parsed.receipt, request, preview);
   return deepFreeze({ schemaVersion: 1, request, preview, receipt });
+}
+
+function parseRelayEnvelope(value: unknown): TeamRelayPreviewEnvelope {
+  const serialized = boundedRelayJson(value);
+  const parsed = JSON.parse(serialized) as unknown;
+  if (!isPlainObject(parsed)) throw invalidRelayEnvelope();
+  exactEnvelopeKeys(
+    parsed,
+    ["schemaVersion", "request", "preview", "receipt"],
+    [],
+    invalidRelayEnvelope,
+  );
+  if (parsed.schemaVersion !== 1) throw invalidRelayEnvelope();
+  const request = normalizeTeamRelayCommand(parsed.request);
+  const preview = parseRelayPublicPreview(parsed.preview);
+  const receipt = parseRelayReceipt(parsed.receipt, request, preview);
+  return deepFreeze({ schemaVersion: 1, request, preview, receipt });
+}
+
+function parseRelayPublicPreview(
+  value: unknown,
+): TeamRelayPreviewEnvelope["preview"] {
+  if (!isPlainObject(value)) throw invalidRelayEnvelope();
+  exactEnvelopeKeys(
+    value,
+    ["valid", "scope", "changes", "localChanges", "diagnostics"],
+    [],
+    invalidRelayEnvelope,
+  );
+  if (
+    typeof value.valid !== "boolean"
+    || (value.scope !== "canonical" && value.scope !== "local" && value.scope !== "mixed")
+    || !Array.isArray(value.changes)
+    || !Array.isArray(value.localChanges)
+    || !Array.isArray(value.diagnostics)
+  ) throw invalidRelayEnvelope();
+  for (const change of value.changes) {
+    if (
+      !isPlainObject(change)
+      || typeof change.path !== "string"
+      || !isRepoRelativePath(change.path)
+      || typeof change.diff !== "string"
+      || (change.kind !== "create"
+        && change.kind !== "update"
+        && change.kind !== "delete"
+        && change.kind !== "move")
+      || (change.beforeRevision !== null
+        && (typeof change.beforeRevision !== "string" || !isRevision(change.beforeRevision)))
+      || (change.afterRevision !== null
+        && (typeof change.afterRevision !== "string" || !isRevision(change.afterRevision)))
+      || (change.kind === "create" && change.beforeRevision !== null)
+      || (change.kind === "delete" && change.afterRevision !== null)
+      || (change.kind !== "move" && Object.hasOwn(change, "previousPath"))
+      || (change.kind === "move"
+        && (typeof change.previousPath !== "string"
+          || !isRepoRelativePath(change.previousPath)))
+    ) throw invalidRelayEnvelope();
+    exactEnvelopeKeys(
+      change,
+      change.kind === "move"
+        ? ["kind", "path", "previousPath", "diff", "beforeRevision", "afterRevision"]
+        : ["kind", "path", "diff", "beforeRevision", "afterRevision"],
+      [],
+      invalidRelayEnvelope,
+    );
+  }
+  for (const change of value.localChanges) {
+    if (!isPlainObject(change)) throw invalidRelayEnvelope();
+    exactEnvelopeKeys(
+      change,
+      ["namespace", "id", "beforeRevision", "afterRevision", "summary"],
+      [],
+      invalidRelayEnvelope,
+    );
+    if (
+      change.namespace !== "relay-draft"
+      || typeof change.id !== "string"
+      || (change.beforeRevision !== null
+        && (typeof change.beforeRevision !== "string" || !isRevision(change.beforeRevision)))
+      || (change.afterRevision !== null
+        && (typeof change.afterRevision !== "string" || !isRevision(change.afterRevision)))
+      || typeof change.summary !== "string"
+    ) throw invalidRelayEnvelope();
+  }
+  return deepFreeze(value as unknown as TeamRelayPreviewEnvelope["preview"]);
+}
+
+function parseRelayReceipt(
+  value: unknown,
+  request: TeamRelayCommand,
+  preview: TeamRelayPreviewEnvelope["preview"],
+): TeamRelayPreviewEnvelope["receipt"] {
+  boundedRelayReceiptJson(value);
+  if (!isPlainObject(value)) throw invalidRelayEnvelope();
+  exactEnvelopeKeys(value, [
+    "schemaVersion",
+    "authority",
+    "purposeIds",
+    "requestRevision",
+    "presentationRevision",
+    "previewRevision",
+  ], [], invalidRelayEnvelope);
+  if (
+    value.schemaVersion !== 1
+    || typeof value.requestRevision !== "string"
+    || !isRevision(value.requestRevision)
+    || typeof value.presentationRevision !== "string"
+    || !isRevision(value.presentationRevision)
+    || typeof value.previewRevision !== "string"
+    || !isRevision(value.previewRevision)
+  ) throw invalidRelayEnvelope();
+  assertReceiptAuthority(value.authority, invalidRelayEnvelope);
+  const purposeIds = normalizeRelayPurposeIds(value.purposeIds, request);
+  if (
+    value.requestRevision !== hashText(boundedRelayJson(request))
+    || value.presentationRevision !== hashText(boundedRelayJson(preview))
+  ) throw previewConflict();
+  return deepFreeze({
+    schemaVersion: 1,
+    authority: value.authority,
+    purposeIds,
+    requestRevision: value.requestRevision,
+    presentationRevision: value.presentationRevision,
+    previewRevision: value.previewRevision,
+  } as TeamRelayPreviewEnvelope["receipt"]);
+}
+
+function normalizeRelayPurposeIds(
+  value: unknown,
+  request: TeamRelayCommand,
+): readonly TeamRelayPurposeId[] {
+  if (!Array.isArray(value) || value.length > TEAM_RELAY_LIMITS.maxPurposeIds) {
+    throw invalidRelayEnvelope();
+  }
+  const purposes = value.map((item): TeamRelayPurposeId => {
+    if (!isPlainObject(item)) throw invalidRelayEnvelope();
+    exactEnvelopeKeys(item, ["purpose", "id"], [], invalidRelayEnvelope);
+    if (
+      item.purpose !== "relay-draft"
+      && item.purpose !== "relay"
+      && item.purpose !== "activity"
+    ) throw invalidRelayEnvelope();
+    if (typeof item.id !== "string") throw invalidRelayEnvelope();
+    const valid = item.purpose === "activity"
+      ? isArtifactId(item.id, "event")
+      : item.purpose === "relay"
+        ? isArtifactId(item.id, "relay")
+        : isRelayLocalId(item.id);
+    if (!valid) throw invalidRelayEnvelope();
+    return { purpose: item.purpose, id: item.id };
+  });
+  const actual = purposes.map((item) => item.purpose);
+  const expected: readonly TeamRelayPurposeId["purpose"][] =
+    request.action.kind === "relay.draft.save" && request.action.draftId === undefined
+      ? ["relay-draft"]
+      : request.action.kind === "relay.publish"
+        ? ["activity", "relay"]
+        : request.action.kind === "relay.acknowledge"
+          || request.action.kind === "relay.close"
+          ? ["activity"]
+          : [];
+  if (
+    stableJson(actual) !== stableJson(expected)
+    || new Set(purposes.map((item) => item.purpose)).size !== purposes.length
+    || new Set(purposes.map((item) => item.id)).size !== purposes.length
+  ) throw invalidRelayEnvelope();
+  return deepFreeze(purposes);
 }
 
 function parseInboxPublicPreview(
@@ -4570,6 +5378,44 @@ function invalidSignedInboxEnvelope(): MexPortError {
   );
 }
 
+function invalidRelayEnvelope(): MexPortError {
+  return artifactError(
+    "INVALID_REQUEST",
+    "Invalid Relay preview",
+    "The portable Relay preview envelope is malformed or exceeds its bounded contract.",
+  );
+}
+
+function invalidSignedRelayEnvelope(): MexPortError {
+  return artifactError(
+    "VALIDATION_FAILED",
+    "Invalid signed Relay preview",
+    "The supplied Relay envelope is malformed, out of bounds, or has an invalid purpose binding.",
+  );
+}
+
+function relayEnvelopeTooLarge(): MexPortError {
+  const detail = `The complete Relay preview envelope exceeds ${TEAM_RELAY_LIMITS.maxEnvelopeBytes} UTF-8 bytes.`;
+  return new MexPortError({
+    title: "Relay preview envelope is too large",
+    status: 422,
+    code: "VALIDATION_FAILED",
+    detail,
+    diagnostics: [{
+      code: "ENVELOPE_TOO_LARGE",
+      severity: "error",
+      message: detail,
+    }],
+  });
+}
+
+function assertRelayEnvelopeFits(value: unknown): void {
+  if (
+    Buffer.byteLength(stableJson(value), "utf8")
+      > TEAM_RELAY_LIMITS.maxEnvelopeBytes
+  ) throw relayEnvelopeTooLarge();
+}
+
 function inboxEnvelopeTooLarge(): MexPortError {
   const detail = `The complete Inbox/Spec preview envelope exceeds ${TEAM_INBOX_SPEC_LIMITS.maxEnvelopeBytes} UTF-8 bytes.`;
   return new MexPortError({
@@ -4595,6 +5441,30 @@ function assertInboxEnvelopeFits(value: unknown): void {
 function assertInboxPreviewContainment(
   projectRoot: string,
   preview: TeamInboxSpecPublicPreview,
+): void {
+  if (preview.localChanges.length > 0) {
+    assertContainedArtifactDirectory(
+      projectRoot,
+      ".mex/local" as RepoRelativePath,
+    );
+  }
+  for (const change of preview.changes) {
+    assertContainedArtifactDirectory(
+      projectRoot,
+      dirname(change.path) as RepoRelativePath,
+    );
+    if (change.kind === "move") {
+      assertContainedArtifactDirectory(
+        projectRoot,
+        dirname(change.previousPath) as RepoRelativePath,
+      );
+    }
+  }
+}
+
+function assertRelayPreviewContainment(
+  projectRoot: string,
+  preview: TeamRelayPreviewEnvelope["preview"],
 ): void {
   if (preview.localChanges.length > 0) {
     assertContainedArtifactDirectory(
@@ -5291,6 +6161,101 @@ function invalidLocalDraftList() {
     "Invalid local draft list request",
     "Local draft kind, page size, or cursor is invalid.",
   );
+}
+
+function invalidRelayList() {
+  return artifactError(
+    "INVALID_REQUEST",
+    "Invalid Relay list request",
+    "Relay perspective, state, Workstream, page size, or cursor is invalid.",
+  );
+}
+
+function relayPageConflict() {
+  return artifactError(
+    "REVISION_CONFLICT",
+    "Relay page changed",
+    "The Relay corpus, personal identity, or filter changed. Restart pagination.",
+  );
+}
+
+function relayUnauthorized(detail: string) {
+  return artifactError("UNAUTHORIZED", "Relay action is not authorized", detail);
+}
+
+function actionAllowsStaleSelectionFallback(
+  kind: TeamWorkflowAction<JsonValue>["kind"],
+): boolean {
+  return kind === "member.clear"
+    || kind === "relay.draft.save"
+    || kind === "relay.draft.delete";
+}
+
+function assertExactRelayExpectationTargets(
+  expectations: readonly RevisionExpectation[],
+  expectedTargets: readonly string[],
+): void {
+  const actual = expectations.map((expectation) => {
+    if (expectation.semanticRevision !== undefined) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Invalid Relay expectation set",
+        "Relay artifact and local dependencies never accept semantic revisions.",
+      );
+    }
+    if (expectation.target.kind === "artifact") {
+      if (expectation.revision === null) {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Invalid Relay expectation set",
+          "Every existing Relay artifact dependency requires a non-null exact revision.",
+        );
+      }
+      return `artifact:${expectation.target.path}`;
+    }
+    if (
+      expectation.target.kind === "local"
+      && expectation.target.namespace === "relay-draft"
+    ) {
+      if (expectation.revision === null) {
+        throw artifactError(
+          "VALIDATION_FAILED",
+          "Invalid Relay expectation set",
+          "An existing Relay draft requires a non-null exact revision.",
+        );
+      }
+      return `local:relay-draft:${expectation.target.id}`;
+    }
+    throw artifactError(
+      "VALIDATION_FAILED",
+      "Invalid Relay expectation set",
+      "Relay operations reject unrelated, semantic, and unsupported revision targets.",
+    );
+  });
+  const orderedActual = [...actual].sort(compareCodePoints);
+  const orderedExpected = [...expectedTargets].sort(compareCodePoints);
+  if (
+    new Set(actual).size !== actual.length
+    || stableJson(orderedActual) !== stableJson(orderedExpected)
+  ) {
+    throw artifactError(
+      "VALIDATION_FAILED",
+      "Incomplete Relay expectation set",
+      "Relay publication requires exactly its draft, Workstream, and recipient Members; lifecycle actions require only the Relay.",
+    );
+  }
+}
+
+function compareRelayProjection(
+  left: TeamRelayDetail,
+  right: TeamRelayDetail,
+): number {
+  if (left.publishedAt === null && right.publishedAt !== null) return 1;
+  if (left.publishedAt !== null && right.publishedAt === null) return -1;
+  if (left.publishedAt !== right.publishedAt) {
+    return left.publishedAt! > right.publishedAt! ? -1 : 1;
+  }
+  return left.ref.id > right.ref.id ? -1 : left.ref.id < right.ref.id ? 1 : 0;
 }
 
 function incompleteRecovery() {
