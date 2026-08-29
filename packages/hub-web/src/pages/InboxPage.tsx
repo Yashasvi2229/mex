@@ -1,30 +1,44 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  BookOpen,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
+  Code2,
+  ExternalLink,
   FileDiff,
+  FileText,
   FilePenLine,
+  GitCommitHorizontal,
   GitPullRequestArrow,
   Inbox,
   MapPin,
   Pencil,
   Plus,
+  RefreshCw,
   Send,
   ShieldCheck,
   Trash2,
   Wrench,
   XCircle,
 } from "lucide-react";
-import { useMemo, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { flushSync } from "react-dom";
-import { useOutletContext } from "react-router-dom";
+import { Link, useOutletContext, useSearchParams } from "react-router-dom";
+import {
+  GraphSymbolIdSchema,
+  InboxDraftIdSchema,
+  InboxProposalIdSchema,
+  WikiEntityIdSchema,
+} from "@mex/hub-contracts";
 import { useHubApi } from "../api/context";
 import type {
   CapabilitiesResponse,
   InboxDraftDetail,
   InboxDraftInput,
   InboxDraftSummary,
+  InboxEvidenceRef,
   InboxOperationApplyResponse,
   InboxOperationPreviewRequest,
   InboxOperationPreviewResponse,
@@ -32,9 +46,13 @@ import type {
   InboxProposalState,
   InboxProposalSummary,
   InboxSpecKind,
+  HomeResponse,
   TeamActorRef,
+  TeamCurrentActorResponse,
   Tone,
+  WikiEntityDetailResponse,
 } from "../api/types";
+import { Alert, AlertDescription, AlertTitle } from "../components/primitives/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -47,6 +65,7 @@ import {
   AlertDialogTitle,
 } from "../components/primitives/alert-dialog";
 import { Button } from "../components/primitives/button";
+import { Badge } from "../components/primitives/badge";
 import {
   Card,
   CardAction,
@@ -71,7 +90,31 @@ import {
   FieldLabel,
 } from "../components/primitives/field";
 import { Input } from "../components/primitives/input";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "../components/primitives/collapsible";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../components/primitives/empty";
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemMedia,
+  ItemTitle,
+} from "../components/primitives/item";
 import { NativeSelect, NativeSelectOption } from "../components/primitives/native-select";
+import { Skeleton } from "../components/primitives/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/primitives/tabs";
 import { Textarea } from "../components/primitives/textarea";
 import { ErrorState, PageHeader, StatePanel, StatusPill, formatDate, sentenceCase } from "../components/ui";
 import { boundedNextCursor, MAX_WORKBENCH_PAGES } from "../lib/bounds";
@@ -110,9 +153,22 @@ function afterDialogUnmount(callback: () => void): void {
 }
 
 function actorLabel(actor: TeamActorRef): string {
-  if (actor.kind === "member") return actor.displayName ?? actor.memberId;
+  if (actor.kind === "member") return actor.displayName ?? "Team member";
   if (actor.kind === "git") return actor.name ?? actor.email ?? "Git identity";
-  return "Unknown actor";
+  return "Unknown identity";
+}
+
+export function inboxActorMatches(current: TeamActorRef, author: TeamActorRef): boolean {
+  if (current.kind === "unknown" || author.kind === "unknown" || current.kind !== author.kind) {
+    return false;
+  }
+  if (current.kind === "member" && author.kind === "member") {
+    return current.memberId === author.memberId;
+  }
+  return current.kind === "git"
+    && author.kind === "git"
+    && current.name === author.name
+    && current.email === author.email;
 }
 
 function proposalTone(state: InboxProposalState): Tone {
@@ -1134,77 +1190,302 @@ function ReviewActionDialog({
   );
 }
 
+function safeExternalEvidenceUri(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:")
+      && parsed.username === ""
+      && parsed.password === ""
+      ? parsed.href
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function EvidenceValue({ item }: { item: InboxEvidenceRef }) {
+  if (item.kind === "entity") {
+    const validId = WikiEntityIdSchema.safeParse(item.entity.id);
+    const label = item.entity.title ?? `Referenced ${sentenceCase(item.entity.kind)}`;
+    return validId.success
+      ? <Link to={`/knowledge/${encodeURIComponent(validId.data)}`}>{label}</Link>
+      : <span>{label}</span>;
+  }
+  if (item.kind === "code") {
+    if (item.code.kind === "file") return <code>{item.code.path}</code>;
+    const validId = GraphSymbolIdSchema.safeParse(item.code.symbolId);
+    return validId.success
+      ? <Link to={`/code/symbols/${encodeURIComponent(validId.data)}`}><code>{item.code.symbolId}</code></Link>
+      : <code>{item.code.symbolId}</code>;
+  }
+  if (item.kind === "external") {
+    const href = safeExternalEvidenceUri(item.uri);
+    return href === null
+      ? <span>{item.label ?? "External evidence"}</span>
+      : (
+          <a href={href} rel="noopener noreferrer" target="_blank">
+            {item.label ?? item.uri}
+            <ExternalLink aria-hidden="true" />
+          </a>
+        );
+  }
+  if (item.kind === "commit") return <code>{item.hash}</code>;
+  if (item.kind === "file") return <code>{item.path}</code>;
+  return <p>{item.note}</p>;
+}
+
+function EvidenceIcon({ item }: { item: InboxEvidenceRef }) {
+  if (item.kind === "entity") return <BookOpen aria-hidden="true" />;
+  if (item.kind === "code") return <Code2 aria-hidden="true" />;
+  if (item.kind === "commit") return <GitCommitHorizontal aria-hidden="true" />;
+  if (item.kind === "file") return <FileText aria-hidden="true" />;
+  if (item.kind === "external") return <ExternalLink aria-hidden="true" />;
+  return <FilePenLine aria-hidden="true" />;
+}
+
+function evidenceLabel(item: InboxEvidenceRef): string {
+  if (item.kind === "entity") return "Knowledge";
+  if (item.kind === "code") return item.code.kind === "symbol" ? "Code symbol" : "Code file";
+  if (item.kind === "commit") return "Commit";
+  if (item.kind === "file") return "File";
+  if (item.kind === "external") return "External source";
+  return "Review note";
+}
+
 function EvidenceList({ evidence }: { evidence: InboxDraftInput["evidence"] }) {
-  if (evidence.length === 0) return <p className={styles.mutedCopy}>No evidence references recorded.</p>;
+  if (evidence.length === 0) {
+    return <p className={styles.mutedCopy}>No supporting evidence was included.</p>;
+  }
   return (
-    <ul className={styles.evidenceList}>
+    <ul className={styles.semanticEvidenceList}>
       {evidence.map((item, index) => (
         <li key={`${item.kind}:${index}`}>
-          <span>{sentenceCase(item.kind)}</span>
-          <code>
-            {item.kind === "entity" ? item.entity.title ?? item.entity.id
-              : item.kind === "code" ? (item.code.kind === "file" ? item.code.path : item.code.symbolId)
-                : item.kind === "commit" ? item.hash
-                  : item.kind === "file" ? item.path
-                    : item.kind === "external" ? item.label ?? item.uri
-                      : item.note}
-          </code>
+          <span className={styles.evidenceIcon}><EvidenceIcon item={item} /></span>
+          <div>
+            <small>{evidenceLabel(item)}</small>
+            <EvidenceValue item={item} />
+          </div>
         </li>
       ))}
     </ul>
   );
 }
 
-function ChangeDetail({ input }: { input: InboxDraftInput }) {
+function relationPhrase(relation: CreateRelation): string {
+  if (relation.type === "derived_from") return "Derived from";
+  if (relation.type === "constrained_by") return "Constrained by";
+  if (relation.type === "verified_by") return "Verified by";
+  return "Refines";
+}
+
+function RelatedKnowledge({ change }: { change: InboxDraftInput["change"] }) {
+  if (change.kind !== "spec.create") return null;
+  const relation = change.relation;
+  if (relation === undefined) return null;
+  return (
+    <section>
+      <h3>Related knowledge</h3>
+      <ul className={styles.relationshipList}>
+        <li>
+          <span>{relationPhrase(relation)}</span>
+          <Link to={`/knowledge/${encodeURIComponent(relation.target.id)}`}>
+            {relation.target.title ?? `Related ${sentenceCase(relation.target.kind)}`}
+          </Link>
+        </li>
+      </ul>
+    </section>
+  );
+}
+
+function ComparisonValue({
+  children,
+  empty = "Not set",
+}: {
+  children: string | null | undefined;
+  empty?: string;
+}) {
+  return <p>{children === null || children === undefined || children === "" ? empty : children}</p>;
+}
+
+function UpdateComparison({
+  change,
+  current,
+  currentError,
+  currentPending,
+}: {
+  change: Extract<InboxDraftInput["change"], { kind: "spec.update" }>;
+  current?: WikiEntityDetailResponse;
+  currentError?: string;
+  currentPending?: boolean;
+}) {
+  const fields = [
+    ...Object.hasOwn(change.patch, "title")
+      ? [{ name: "Title", current: current?.entity.title, proposed: change.patch.title }]
+      : [],
+    ...Object.hasOwn(change.patch, "summary")
+      ? [{ name: "Summary", current: current?.entity.summary, proposed: change.patch.summary, empty: "No summary" }]
+      : [],
+    ...Object.hasOwn(change.patch, "body")
+      ? [{ name: "Body", current: current?.body.content, proposed: change.patch.body }]
+      : [],
+  ];
+  return (
+    <div className={styles.updatePresentation}>
+      <p className={styles.targetCopy}>
+        Updates <strong>{change.target.title ?? current?.entity.title ?? sentenceCase(change.target.kind)}</strong>
+      </p>
+      {currentPending ? (
+        <div className={styles.comparisonLoading}>
+          <Skeleton /><Skeleton /><Skeleton />
+        </div>
+      ) : null}
+      {currentError ? (
+        <Alert className={styles.readWarning}>
+          <AlertTriangle aria-hidden="true" />
+          <AlertTitle>Current Spec content could not be read</AlertTitle>
+          <AlertDescription>
+            Proposed values remain available below. The approval preview is still the final freshness authority. {currentError}
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      <div className={styles.comparisonStack}>
+        {fields.map((field) => (
+          <section key={field.name} aria-label={`${field.name} comparison`}>
+            <h4>{field.name}</h4>
+            <div>
+              <article>
+                <span>Current</span>
+                {current ? <ComparisonValue empty={field.empty} children={field.current} /> : <p className={styles.unavailableValue}>Unavailable</p>}
+              </article>
+              <article>
+                <span>Proposed</span>
+                <ComparisonValue empty={field.empty} children={field.proposed} />
+              </article>
+            </div>
+          </section>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ChangeDetail({
+  current,
+  currentError,
+  currentPending,
+  input,
+}: {
+  current?: WikiEntityDetailResponse;
+  currentError?: string;
+  currentPending?: boolean;
+  input: InboxDraftInput;
+}) {
   const change = input.change;
   return (
-    <div className={styles.detailSections}>
+    <div className={styles.semanticSections}>
       <section>
-        <p className={styles.sectionEyebrow}>Typed change</p>
-        <dl className={styles.factGrid}>
-          <div><dt>Operation</dt><dd>{sentenceCase(change.kind)}</dd></div>
-          <div><dt>Entity kind</dt><dd>{sentenceCase(change.kind === "spec.create" ? change.entityKind : change.target.kind)}</dd></div>
-          {change.kind === "spec.update" ? <div><dt>Target</dt><dd><code>{change.target.id}</code></dd></div> : null}
-          {change.kind === "spec.create" ? <div><dt>Lifecycle</dt><dd>{sentenceCase(change.status)}</dd></div> : null}
-        </dl>
+        <h3>What will change</h3>
         {change.kind === "spec.create" ? (
-          <>
-            {change.summary !== undefined ? <p className={styles.summaryCopy}>{change.summary}</p> : null}
-            <pre aria-label="Draft Spec body"><code>{change.body}</code></pre>
-          </>
-        ) : (
-          <div className={styles.patchStack}>
-            {change.patch.title !== undefined ? <div><span>Title</span><p>{change.patch.title}</p></div> : null}
-            {change.patch.summary !== undefined ? <div><span>Summary</span><p>{change.patch.summary}</p></div> : null}
-            {change.patch.body !== undefined ? <div><span>Body</span><pre aria-label="Proposed replacement Spec body"><code>{change.patch.body}</code></pre></div> : null}
+          <div className={styles.createPresentation}>
+            <dl className={styles.humanFacts}>
+              <div><dt>Entity type</dt><dd>{sentenceCase(change.entityKind)}</dd></div>
+              <div><dt>Lifecycle</dt><dd>{sentenceCase(change.status)}</dd></div>
+            </dl>
+            <h4>{change.title}</h4>
+            {change.summary !== undefined && change.summary !== "" ? <p className={styles.summaryCopy}>{change.summary}</p> : null}
+            <div className={styles.bodyProse}>{change.body}</div>
           </div>
+        ) : (
+          <UpdateComparison
+            change={change}
+            current={current}
+            currentError={currentError}
+            currentPending={currentPending}
+          />
         )}
       </section>
       <section>
-        <p className={styles.sectionEyebrow}>Review rationale</p>
+        <h3>Why this change</h3>
         <p className={styles.prose}>{input.rationale}</p>
       </section>
       <section>
-        <p className={styles.sectionEyebrow}>Evidence</p>
+        <h3>Evidence</h3>
         <EvidenceList evidence={input.evidence} />
       </section>
-      <section>
-        <p className={styles.sectionEyebrow}>Exact dependency attestations</p>
-        {input.targetRevisions.length === 0 ? (
-          <p className={styles.mutedCopy}>No existing Spec dependencies.</p>
-        ) : (
-          <ul className={styles.revisionList}>
-            {input.targetRevisions.map((item) => (
-              <li key={item.target.id}>
-                <code>{item.target.id}</code>
-                <span>semantic r{item.semanticRevision}</span>
-                <code>{item.revision}</code>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <RelatedKnowledge change={change} />
     </div>
+  );
+}
+
+function TechnicalDetails({
+  draft,
+  input,
+  proposal,
+}: {
+  draft?: InboxDraftDetail;
+  input: InboxDraftInput;
+  proposal?: InboxProposalDetail;
+}) {
+  const rawEvidence = input.evidence.filter(
+    (item): item is Extract<InboxEvidenceRef, { kind: "entity" | "code" }> => (
+      item.kind === "entity" || item.kind === "code"
+    ),
+  );
+  return (
+    <Collapsible className={styles.technicalDetails}>
+      <CollapsibleTrigger render={<Button size="sm" type="button" variant="ghost" />}>
+        <ChevronDown data-icon="inline-start" /> Technical details
+      </CollapsibleTrigger>
+      <CollapsibleContent className={styles.technicalContent}>
+        <dl>
+          {proposal ? <div><dt>Proposal ID</dt><dd><code>{proposal.ref.id}</code></dd></div> : null}
+          {proposal ? <div><dt>Source path</dt><dd><code>{proposal.sourcePath}</code></dd></div> : null}
+          {proposal ? <div><dt>Proposal revision</dt><dd><code>{proposal.revision}</code></dd></div> : null}
+          {draft ? <div><dt>Draft ID</dt><dd><code>{draft.id}</code></dd></div> : null}
+          {draft ? <div><dt>Draft revision</dt><dd><code>{draft.revision}</code></dd></div> : null}
+        </dl>
+        {input.targetRevisions.length > 0 ? (
+          <section>
+            <h4>Exact dependency revisions</h4>
+            <ul className={styles.revisionList}>
+              {input.targetRevisions.map((item) => (
+                <li key={item.target.id}>
+                  <code>{item.target.id}</code>
+                  <span>Semantic revision {item.semanticRevision}</span>
+                  <code>{item.revision}</code>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+        {input.change.kind === "spec.create" && (input.change.topics?.length || input.change.relation) ? (
+          <section>
+            <h4>Stored relationships</h4>
+            <ul className={styles.technicalList}>
+              {(input.change.topics ?? []).map((id) => <li key={id}>Topic <code>{id}</code></li>)}
+              {input.change.relation ? (
+                <li>{input.change.relation.type} <code>{input.change.relation.target.id}</code></li>
+              ) : null}
+            </ul>
+          </section>
+        ) : null}
+        {rawEvidence.length > 0 ? (
+          <section>
+            <h4>Raw evidence identifiers</h4>
+            <ul className={styles.technicalList}>
+              {rawEvidence.map((item, index) => (
+                <li key={index}>
+                  {item.kind === "entity" ? <code>{item.entity.id}</code>
+                    : item.code.kind === "symbol" ? <code>{item.code.symbolId}</code>
+                      : <code>{item.code.path}</code>}
+                  {item.kind === "code" && item.code.fingerprint ? <code>{item.code.fingerprint}</code> : null}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -1225,62 +1506,91 @@ function DraftDetail({
     <>
       <CardHeader className={styles.detailHeader}>
         <div>
-          <CardDescription>Private checkout draft</CardDescription>
+          <div className={styles.detailBadges}>
+            <Badge variant="outline">Private draft</Badge>
+            <Badge variant="secondary">{changeLabel(draft.changeKind, draft.entityKind)}</Badge>
+          </div>
           <CardTitle><h2>{draft.title}</h2></CardTitle>
-          <code>{draft.id}</code>
+          <CardDescription>Only available in this checkout.</CardDescription>
         </div>
-        <CardAction><StatusPill tone="neutral">Local only</StatusPill></CardAction>
+        <CardAction><Badge variant="outline">Local only</Badge></CardAction>
       </CardHeader>
       <CardContent className={styles.detailContent}>
         <div className={styles.detailActions}>
-          <Button disabled={!canMutate} onClick={onEdit} size="sm" type="button" variant="outline">
-            <Pencil data-icon="inline-start" /> Edit local draft
-          </Button>
           <Button disabled={!canPublish} onClick={(event) => onAction({ kind: "inbox.publish", draft }, event)} size="sm" type="button">
             <Send data-icon="inline-start" /> Publish draft
+          </Button>
+          <Button disabled={!canMutate} onClick={onEdit} size="sm" type="button" variant="outline">
+            <Pencil data-icon="inline-start" /> Edit local draft
           </Button>
           <Button disabled={!canMutate} onClick={(event) => onAction({ kind: "inbox.draft.delete", draft }, event)} size="sm" type="button" variant="destructive">
             <Trash2 data-icon="inline-start" /> Delete draft
           </Button>
         </div>
-        <div className={styles.privacyBoundary}>
-          <ShieldCheck aria-hidden="true" />
-          <p><strong>Privacy boundary intact.</strong> This prose remains outside Git and canonical team memory until you review and publish an exact proposal diff.</p>
-        </div>
         <ChangeDetail input={draft.input} />
+        <TechnicalDetails draft={draft} input={draft.input} />
       </CardContent>
     </>
   );
 }
 
 function ProposalDetail({
-  proposal,
   canReview,
   canSpecMutate,
+  current,
+  currentError,
+  currentPending,
+  identity,
+  identityError,
   onAction,
+  proposal,
 }: {
-  proposal: InboxProposalDetail;
   canReview: boolean;
   canSpecMutate: boolean;
+  current?: WikiEntityDetailResponse;
+  currentError?: string;
+  currentPending?: boolean;
+  identity?: TeamCurrentActorResponse;
+  identityError?: boolean;
   onAction(action: ReviewAction, event: MouseEvent<HTMLButtonElement>): void;
+  proposal: InboxProposalDetail;
 }) {
   const terminal = proposal.state === "approved" || proposal.state === "rejected" || proposal.state === "withdrawn";
+  const identityUnknown = identityError || identity?.actor.kind === "unknown";
   return (
     <>
       <CardHeader className={styles.detailHeader}>
         <div>
-          <CardDescription>Canonical review proposal</CardDescription>
+          <div className={styles.detailBadges}>
+            <Badge variant="outline">Spec change</Badge>
+            <Badge variant="secondary">{changeLabel(proposal.changeKind, proposal.entityKind)}</Badge>
+          </div>
           <CardTitle><h2>{proposal.title}</h2></CardTitle>
-          <code>{proposal.ref.id}</code>
+          <CardDescription>Published by {actorLabel(proposal.author)}</CardDescription>
         </div>
-        <CardAction><StatusPill tone={proposalTone(proposal.state)}>{sentenceCase(proposal.state)}</StatusPill></CardAction>
+        <CardAction>
+          <Badge variant={proposal.state === "stale" ? "outline" : "secondary"}>
+            {proposalStateLabel(proposal.state)}
+          </Badge>
+        </CardAction>
       </CardHeader>
       <CardContent className={styles.detailContent}>
-        <dl className={styles.proposalMeta}>
-          <div><dt>Author</dt><dd>{actorLabel(proposal.author)}</dd></div>
-          <div><dt>Revision</dt><dd><code>{proposal.revision.slice(0, 12)}</code></dd></div>
-          <div><dt>Source</dt><dd><code>{proposal.sourcePath}</code></dd></div>
-        </dl>
+        {identityUnknown ? (
+          <Alert className={styles.identityWarning}>
+            <AlertTriangle aria-hidden="true" />
+            <AlertTitle>Team identity is not set</AlertTitle>
+            <AlertDescription>
+              MEX cannot reliably tell which proposals are yours. You can still review this change, or <Link to="/members">set your identity in Team</Link>.
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {proposal.state === "stale" ? (
+          <Alert className={styles.staleWarning}>
+            <AlertTriangle aria-hidden="true" />
+            <AlertTitle>Needs refresh</AlertTitle>
+            <AlertDescription>The referenced Spec content changed after this proposal was published.</AlertDescription>
+          </Alert>
+        ) : null}
         {!terminal ? (
           <div className={styles.detailActions} aria-label="Proposal review actions">
             {proposal.state === "pending" ? (
@@ -1319,31 +1629,350 @@ function ProposalDetail({
             <small>{proposal.reviewer ? actorLabel(proposal.reviewer) : "Reviewer unavailable"} · {formatDate(proposal.reviewedAt)}</small>
           </section>
         ) : null}
-        <ChangeDetail input={{
-          change: proposal.change,
-          rationale: proposal.rationale,
-          evidence: proposal.evidence,
-          targetRevisions: proposal.targetRevisions,
-        }} />
+        <ChangeDetail
+          current={current}
+          currentError={currentError}
+          currentPending={currentPending}
+          input={{
+            change: proposal.change,
+            rationale: proposal.rationale,
+            evidence: proposal.evidence,
+            targetRevisions: proposal.targetRevisions,
+          }}
+        />
+        <TechnicalDetails
+          input={{
+            change: proposal.change,
+            rationale: proposal.rationale,
+            evidence: proposal.evidence,
+            targetRevisions: proposal.targetRevisions,
+          }}
+          proposal={proposal}
+        />
       </CardContent>
     </>
+  );
+}
+type InboxView = "review" | "drafts";
+
+function inboxView(value: string | null): InboxView {
+  return value === "drafts" ? "drafts" : "review";
+}
+
+function changeLabel(
+  changeKind: InboxDraftSummary["changeKind"],
+  entityKind: InboxSpecKind,
+): string {
+  return `${changeKind === "spec.create" ? "New" : "Update"} ${sentenceCase(entityKind)}`;
+}
+
+function proposalStateLabel(state: InboxProposalState): string {
+  return state === "pending" ? "Needs review"
+    : state === "stale" ? "Needs refresh"
+      : sentenceCase(state);
+}
+
+interface ProposalGroup {
+  key: "needs-review" | "waiting" | "needs-refresh";
+  title: string;
+  rows: InboxProposalSummary[];
+}
+
+export function groupInboxProposals(
+  rows: InboxProposalSummary[],
+  current: TeamActorRef | undefined,
+): ProposalGroup[] {
+  const identityResolved = current !== undefined && current.kind !== "unknown";
+  const groups: ProposalGroup[] = identityResolved ? [
+    {
+      key: "needs-review",
+      title: "Needs your review",
+      rows: rows.filter((row) => row.state === "pending" && !inboxActorMatches(current, row.author)),
+    },
+    {
+      key: "waiting",
+      title: "Waiting for teammate",
+      rows: rows.filter((row) => row.state === "pending" && inboxActorMatches(current, row.author)),
+    },
+    {
+      key: "needs-refresh",
+      title: "Needs refresh",
+      rows: rows.filter((row) => row.state === "stale"),
+    },
+  ] : [
+    {
+      key: "needs-review",
+      title: "Needs review",
+      rows: rows.filter((row) => row.state === "pending"),
+    },
+    {
+      key: "needs-refresh",
+      title: "Needs refresh",
+      rows: rows.filter((row) => row.state === "stale"),
+    },
+  ];
+  return groups.filter((group) => group.rows.length > 0);
+}
+
+function QueueSkeleton({ rows = 4 }: { rows?: number }) {
+  return (
+    <div className={styles.queueSkeleton} aria-label="Loading Inbox queue">
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index}>
+          <Skeleton className={styles.skeletonIcon} />
+          <span>
+            <Skeleton className={styles.skeletonLabel} />
+            <Skeleton className={styles.skeletonTitle} />
+            <Skeleton className={styles.skeletonMeta} />
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProposalQueue({
+  error,
+  groups,
+  hasNextPage,
+  isFetchingNextPage,
+  isPending,
+  onLoadMore,
+  onSelect,
+  selectedId,
+  sourceBounded,
+}: {
+  error: unknown;
+  groups: ProposalGroup[];
+  hasNextPage: boolean;
+  isFetchingNextPage: boolean;
+  isPending: boolean;
+  onLoadMore(): void;
+  onSelect(id: string): void;
+  selectedId: string | null;
+  sourceBounded: boolean;
+}) {
+  const rowCount = groups.reduce((count, group) => count + group.rows.length, 0);
+  return (
+    <Card className={styles.queuePane} role="region" aria-labelledby="proposal-queue-heading">
+      <CardHeader className={styles.queuePaneHeader}>
+        <div>
+          <CardTitle><h2 id="proposal-queue-heading">Spec changes</h2></CardTitle>
+          <CardDescription>Select a change to review its meaningful content.</CardDescription>
+        </div>
+      </CardHeader>
+      <CardContent className={styles.queuePaneContent}>
+        {isPending ? (
+          <QueueSkeleton />
+        ) : error && rowCount === 0 ? (
+          <ErrorState error={error} />
+        ) : rowCount === 0 ? (
+          <Empty className={styles.emptyQueue}>
+            <EmptyHeader>
+              <EmptyMedia variant="icon"><CheckCircle2 aria-hidden="true" /></EmptyMedia>
+              <EmptyTitle>You’re all caught up</EmptyTitle>
+              <EmptyDescription>No Spec changes currently need review.</EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button render={<Link to="/activity" />} size="sm" variant="outline">Open Activity</Button>
+            </EmptyContent>
+          </Empty>
+        ) : (
+          <>
+            {groups.map((group) => (
+              <section className={styles.queueGroup} aria-labelledby={`proposal-group-${group.key}`} key={group.key}>
+                <h3 id={`proposal-group-${group.key}`}>{group.title}</h3>
+                <ItemGroup className={styles.queueItems}>
+                  {group.rows.map((proposal) => (
+                    <Item
+                      aria-current={selectedId === proposal.ref.id ? "true" : undefined}
+                      className={styles.queueItem}
+                      data-inbox-proposal-id={proposal.ref.id}
+                      data-selected={selectedId === proposal.ref.id ? "true" : undefined}
+                      key={proposal.ref.id}
+                      onClick={() => onSelect(proposal.ref.id)}
+                      render={<button type="button" />}
+                      size="sm"
+                      variant="default"
+                    >
+                      <ItemMedia className={styles.queueItemIcon} variant="icon">
+                        <GitPullRequestArrow aria-hidden="true" />
+                      </ItemMedia>
+                      <ItemContent>
+                        <span className={styles.changeLabel}>{changeLabel(proposal.changeKind, proposal.entityKind)}</span>
+                        <ItemTitle>{proposal.title}</ItemTitle>
+                        <ItemDescription>
+                          Published by {actorLabel(proposal.author)}
+                          <span className={styles.narrowQueueState}> · {proposalStateLabel(proposal.state)}</span>
+                        </ItemDescription>
+                      </ItemContent>
+                      <ItemActions>
+                        <Badge className={styles.queueStateBadge} variant={proposal.state === "stale" ? "outline" : "secondary"}>
+                          {proposalStateLabel(proposal.state)}
+                        </Badge>
+                        <ChevronRight aria-hidden="true" />
+                      </ItemActions>
+                    </Item>
+                  ))}
+                </ItemGroup>
+              </section>
+            ))}
+            {error ? <div className={styles.paginationError}><ErrorState error={error} /></div> : null}
+            {hasNextPage ? (
+              <Button disabled={isFetchingNextPage} onClick={onLoadMore} size="sm" type="button" variant="outline">
+                {isFetchingNextPage ? "Loading…" : "Load more"}
+              </Button>
+            ) : sourceBounded ? (
+              <p className={styles.boundNote}>The bounded review queue limit was reached.</p>
+            ) : null}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DraftQueue({
+  canCreate,
+  error,
+  hasNextPage,
+  isFetchingNextPage,
+  isPending,
+  onCreate,
+  onLoadMore,
+  onSelect,
+  rows,
+  selectedId,
+  sourceBounded,
+}: {
+  canCreate: boolean;
+  error: unknown;
+  hasNextPage: boolean;
+  isFetchingNextPage: boolean;
+  isPending: boolean;
+  onCreate(event: MouseEvent<HTMLButtonElement>): void;
+  onLoadMore(): void;
+  onSelect(id: string): void;
+  rows: InboxDraftSummary[];
+  selectedId: string | null;
+  sourceBounded: boolean;
+}) {
+  return (
+    <Card className={styles.queuePane} role="region" aria-labelledby="draft-queue-heading">
+      <CardHeader className={styles.queuePaneHeader}>
+        <div>
+          <CardTitle><h2 id="draft-queue-heading">On this device</h2></CardTitle>
+          <CardDescription>Private drafts in this checkout.</CardDescription>
+        </div>
+        {canCreate ? (
+          <CardAction>
+            <Button onClick={onCreate} size="sm" type="button" variant="ghost">
+              <Plus data-icon="inline-start" /> Create manually
+            </Button>
+          </CardAction>
+        ) : null}
+      </CardHeader>
+      <CardContent className={styles.queuePaneContent}>
+        {isPending ? (
+          <QueueSkeleton rows={3} />
+        ) : error && rows.length === 0 ? (
+          <ErrorState error={error} />
+        ) : rows.length === 0 ? (
+          <Empty className={styles.emptyQueue}>
+            <EmptyHeader>
+              <EmptyMedia variant="icon"><FilePenLine aria-hidden="true" /></EmptyMedia>
+              <EmptyTitle>No drafts on this device</EmptyTitle>
+              <EmptyDescription>Coding agents can prepare private MEX drafts for you to review here.</EmptyDescription>
+            </EmptyHeader>
+            {canCreate ? (
+              <EmptyContent>
+                <Button onClick={onCreate} size="sm" type="button" variant="ghost">
+                  <Plus data-icon="inline-start" /> Create manually
+                </Button>
+              </EmptyContent>
+            ) : null}
+          </Empty>
+        ) : (
+          <>
+            <ItemGroup className={styles.queueItems}>
+              {rows.map((draft) => (
+                <Item
+                  aria-current={selectedId === draft.id ? "true" : undefined}
+                  className={styles.queueItem}
+                  data-inbox-draft-id={draft.id}
+                  data-selected={selectedId === draft.id ? "true" : undefined}
+                  key={draft.id}
+                  onClick={() => onSelect(draft.id)}
+                  render={<button type="button" />}
+                  size="sm"
+                  variant="default"
+                >
+                  <ItemMedia className={styles.queueItemIcon} variant="icon">
+                    <FilePenLine aria-hidden="true" />
+                  </ItemMedia>
+                  <ItemContent>
+                    <span className={styles.changeLabel}>{changeLabel(draft.changeKind, draft.entityKind)}</span>
+                    <ItemTitle>{draft.title}</ItemTitle>
+                    <ItemDescription>Private draft · {formatDate(draft.updatedAt)}</ItemDescription>
+                  </ItemContent>
+                  <ItemActions><ChevronRight aria-hidden="true" /></ItemActions>
+                </Item>
+              ))}
+            </ItemGroup>
+            {error ? <div className={styles.paginationError}><ErrorState error={error} /></div> : null}
+            {hasNextPage ? (
+              <Button disabled={isFetchingNextPage} onClick={onLoadMore} size="sm" type="button" variant="outline">
+                {isFetchingNextPage ? "Loading…" : "Load more"}
+              </Button>
+            ) : sourceBounded ? (
+              <p className={styles.boundNote}>The bounded draft list limit was reached.</p>
+            ) : null}
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
 export function InboxPage() {
   const api = useHubApi();
   const queryClient = useQueryClient();
-  const { capabilities } = useOutletContext<{ capabilities?: CapabilitiesResponse }>();
-  const [selection, setSelection] = useState<Selection | null>(null);
+  const { capabilities, home } = useOutletContext<{
+    capabilities?: CapabilitiesResponse;
+    home?: HomeResponse;
+  }>();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = inboxView(searchParams.get("view"));
+  const proposalParam = view === "review" ? searchParams.get("proposal") : null;
+  const draftParam = view === "drafts" ? searchParams.get("draft") : null;
+  const parsedProposal = proposalParam === null ? null : InboxProposalIdSchema.safeParse(proposalParam);
+  const parsedDraft = draftParam === null ? null : InboxDraftIdSchema.safeParse(draftParam);
+  const selectedProposalId = parsedProposal?.success ? parsedProposal.data : null;
+  const selectedDraftId = parsedDraft?.success ? parsedDraft.data : null;
+  const invalidProposalSelection = proposalParam !== null && parsedProposal?.success === false;
+  const invalidDraftSelection = draftParam !== null && parsedDraft?.success === false;
   const [editor, setEditor] = useState<{ draft: InboxDraftDetail | null } | null>(null);
   const [reviewAction, setReviewAction] = useState<ReviewAction | null>(null);
   const [status, setStatus] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [selectionNotice, setSelectionNotice] = useState("");
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
   const operationTrigger = useRef<HTMLButtonElement | null>(null);
   const statusRef = useRef<HTMLDivElement | null>(null);
   const readAvailable = capabilities?.inbox.read.availability === "available";
   const canEditDrafts = capabilities?.inbox.draftMutation.availability === "available";
   const canReviewProposals = capabilities?.inbox.proposalMutation.availability === "available";
   const canApproveSpecs = capabilities?.inbox.specApproval.availability === "available";
+  const currentActor = useQuery({
+    queryKey: ["actor", "current"],
+    queryFn: () => api.getCurrentActor(),
+    enabled: readAvailable,
+    retry: false,
+  });
+  const exactReviewCount = home?.sections.inbox.availability === "available"
+    ? home.sections.inbox.count
+    : null;
+  const searchKey = searchParams.toString();
   const resolveOperationFinalFocus = () => operationTrigger.current;
   const focusAppliedStatus = () => {
     statusRef.current?.focus({ preventScroll: true });
@@ -1358,7 +1987,7 @@ export function InboxPage() {
     }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage, pages) => boundedNextCursor(lastPage.nextCursor, pages.length),
-    enabled: readAvailable,
+    enabled: Boolean(readAvailable && view === "drafts"),
     retry: false,
   });
   const proposals = useInfiniteQuery({
@@ -1370,7 +1999,7 @@ export function InboxPage() {
     }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage, pages) => boundedNextCursor(lastPage.nextCursor, pages.length),
-    enabled: readAvailable,
+    enabled: Boolean(readAvailable && view === "review"),
     retry: false,
   });
   const draftRows = useMemo(() => {
@@ -1387,24 +2016,160 @@ export function InboxPage() {
     }
     return [...unique.values()];
   }, [proposals.data?.pages]);
-  const activeSelection = selection
-    ?? (proposalRows[0] ? { kind: "proposal" as const, id: proposalRows[0].ref.id }
-      : draftRows[0] ? { kind: "draft" as const, id: draftRows[0].id }
-        : null);
-  const selectedDraftId = activeSelection?.kind === "draft" ? activeSelection.id : null;
-  const selectedProposalId = activeSelection?.kind === "proposal" ? activeSelection.id : null;
+  const proposalGroups = useMemo(
+    () => groupInboxProposals(proposalRows, currentActor.data?.actor),
+    [currentActor.data?.actor, proposalRows],
+  );
+  const orderedProposalRows = useMemo(
+    () => proposalGroups.flatMap((group) => group.rows),
+    [proposalGroups],
+  );
+
+  useEffect(() => {
+    if (
+      view !== "review"
+      || proposalParam !== null
+      || proposals.isPending
+      || currentActor.isPending
+      || orderedProposalRows.length === 0
+    ) return;
+    const next = new URLSearchParams(searchKey);
+    next.set("view", "review");
+    next.set("proposal", orderedProposalRows[0]!.ref.id);
+    next.delete("draft");
+    setSearchParams(next, { replace: true });
+  }, [
+    currentActor.isPending,
+    orderedProposalRows,
+    proposalParam,
+    proposals.isPending,
+    searchKey,
+    setSearchParams,
+    view,
+  ]);
+
+  useEffect(() => {
+    if (
+      view !== "drafts"
+      || draftParam !== null
+      || drafts.isPending
+      || draftRows.length === 0
+    ) return;
+    const next = new URLSearchParams(searchKey);
+    next.set("view", "drafts");
+    next.set("draft", draftRows[0]!.id);
+    next.delete("proposal");
+    setSearchParams(next, { replace: true });
+  }, [draftParam, draftRows, drafts.isPending, searchKey, setSearchParams, view]);
+
   const draftDetail = useQuery({
     queryKey: ["inbox", "draft", selectedDraftId],
     queryFn: () => api.getInboxDraft(selectedDraftId!),
-    enabled: Boolean(readAvailable && selectedDraftId),
+    enabled: Boolean(readAvailable && view === "drafts" && selectedDraftId),
     retry: false,
   });
   const proposalDetail = useQuery({
     queryKey: ["inbox", "proposal", selectedProposalId],
     queryFn: () => api.getInboxProposal(selectedProposalId!),
-    enabled: Boolean(readAvailable && selectedProposalId),
+    enabled: Boolean(readAvailable && view === "review" && selectedProposalId),
     retry: false,
   });
+  const selectedUpdateTargetId = proposalDetail.data?.change.kind === "spec.update"
+    ? proposalDetail.data.change.target.id
+    : null;
+  const wikiReadAvailable = capabilities?.wiki.read.availability === "available";
+  const currentWikiEntity = useQuery({
+    queryKey: ["wiki-entity", selectedUpdateTargetId],
+    queryFn: () => api.getWikiEntity(selectedUpdateTargetId!),
+    enabled: Boolean(selectedUpdateTargetId && wikiReadAvailable),
+    retry: false,
+  });
+  const currentWikiError = selectedUpdateTargetId === null
+    ? undefined
+    : capabilities?.wiki.read.availability === "unavailable"
+      ? capabilities.wiki.read.reason
+      : currentWikiEntity.isError
+        ? "Current content is temporarily unavailable."
+        : undefined;
+
+  const clearModeSelection = (replace = true) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("view", view);
+    next.delete(view === "review" ? "proposal" : "draft");
+    setSearchParams(next, { replace });
+  };
+
+  useEffect(() => {
+    if (refreshGeneration === 0) return;
+    const selectedError = view === "review"
+      ? selectedProposalId !== null && proposalDetail.isError
+      : selectedDraftId !== null && draftDetail.isError;
+    const noLongerActionable = view === "review"
+      && proposalDetail.data !== undefined
+      && !actionableProposalStates.includes(proposalDetail.data.state);
+    if (!selectedError && !noLongerActionable) return;
+    const next = new URLSearchParams(searchKey);
+    next.set("view", view);
+    next.delete(view === "review" ? "proposal" : "draft");
+    setSearchParams(next, { replace: true });
+    setSelectionNotice(view === "review"
+      ? "That proposal is no longer in the review queue. Choose another Spec change."
+      : "That draft is no longer on this device. Choose another draft.");
+  }, [
+    draftDetail.isError,
+    proposalDetail.data,
+    proposalDetail.isError,
+    refreshGeneration,
+    searchKey,
+    selectedDraftId,
+    selectedProposalId,
+    setSearchParams,
+    view,
+  ]);
+
+  const selectView = (nextValue: string) => {
+    const nextView = inboxView(nextValue);
+    const next = new URLSearchParams(searchParams);
+    next.set("view", nextView);
+    next.delete(nextView === "review" ? "draft" : "proposal");
+    setSelectionNotice("");
+    setSearchParams(next);
+  };
+  const selectProposal = (id: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("view", "review");
+    next.set("proposal", id);
+    next.delete("draft");
+    setSelectionNotice("");
+    setSearchParams(next);
+  };
+  const selectDraft = (id: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("view", "drafts");
+    next.set("draft", id);
+    next.delete("proposal");
+    setSelectionNotice("");
+    setSearchParams(next);
+  };
+  const returnToQueue = () => {
+    setSelectionNotice("");
+    clearModeSelection();
+  };
+  const refreshInbox = async () => {
+    setRefreshing(true);
+    setSelectionNotice("");
+    try {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["inbox"] }),
+        queryClient.invalidateQueries({ queryKey: ["actor", "current"] }),
+        queryClient.invalidateQueries({ queryKey: ["home"] }),
+      ]);
+      setRefreshGeneration((generation) => generation + 1);
+      setStatus("Inbox refreshed.");
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const rememberTrigger = (event: MouseEvent<HTMLButtonElement>) => {
     operationTrigger.current = event.currentTarget;
@@ -1418,7 +2183,7 @@ export function InboxPage() {
     setReviewAction(action);
   };
   const onApplied = async (result: InboxOperationApplyResponse) => {
-    setSelection(null);
+    clearModeSelection();
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["inbox"] }),
       queryClient.invalidateQueries({ queryKey: ["home"] }),
@@ -1433,17 +2198,90 @@ export function InboxPage() {
     flushSync(() => setStatus(consequence));
   };
 
+  const proposalDetailState = invalidProposalSelection ? (
+    <div className={styles.recoverableState}>
+      <StatePanel
+        compact
+        state="empty"
+        title="This proposal link is invalid"
+        detail="Return to the queue and choose an available Spec change."
+      />
+      <Button onClick={returnToQueue} size="sm" type="button" variant="outline">Return to queue</Button>
+    </div>
+  ) : selectedProposalId === null ? (
+    <StatePanel compact state="empty" title="Choose a Spec change" detail="Select an item from the queue to start reviewing." />
+  ) : proposalDetail.isPending ? (
+    <StatePanel compact state="loading" title="Opening Spec change" detail="Loading its meaningful content only after selection." />
+  ) : proposalDetail.isError ? (
+    <div className={styles.recoverableState}>
+      <ErrorState error={proposalDetail.error} retry={() => void proposalDetail.refetch()} />
+      <Button onClick={returnToQueue} size="sm" type="button" variant="outline">Return to queue</Button>
+    </div>
+  ) : (
+    <ProposalDetail
+      canSpecMutate={Boolean(canApproveSpecs)}
+      canReview={Boolean(canReviewProposals)}
+      current={currentWikiEntity.data}
+      currentError={currentWikiError}
+      currentPending={Boolean(selectedUpdateTargetId && wikiReadAvailable && currentWikiEntity.isPending)}
+      identity={currentActor.data}
+      identityError={currentActor.isError}
+      onAction={openReview}
+      proposal={proposalDetail.data}
+    />
+  );
+
+  const draftDetailState = invalidDraftSelection ? (
+    <div className={styles.recoverableState}>
+      <StatePanel
+        compact
+        state="empty"
+        title="This draft link is invalid"
+        detail="Return to the list and choose a draft on this device."
+      />
+      <Button onClick={returnToQueue} size="sm" type="button" variant="outline">Return to drafts</Button>
+    </div>
+  ) : selectedDraftId === null ? (
+    <StatePanel compact state="empty" title="Choose a draft" detail="Select a private draft to review it." />
+  ) : draftDetail.isPending ? (
+    <StatePanel compact state="loading" title="Opening private draft" detail="Loading its content only after selection." />
+  ) : draftDetail.isError ? (
+    <div className={styles.recoverableState}>
+      <ErrorState error={draftDetail.error} retry={() => void draftDetail.refetch()} />
+      <Button onClick={returnToQueue} size="sm" type="button" variant="outline">Return to drafts</Button>
+    </div>
+  ) : (
+    <DraftDetail
+      canMutate={Boolean(canEditDrafts)}
+      canPublish={Boolean(canApproveSpecs)}
+      draft={draftDetail.data}
+      onAction={openReview}
+      onEdit={(event) => openEditor(draftDetail.data, event)}
+    />
+  );
+
   return (
-    <div className={styles.page} data-inbox-workbench={readAvailable ? "ready" : "unavailable"}>
+    <div
+      className={styles.page}
+      data-inbox-actor={currentActor.data?.actor.kind ?? (currentActor.isError ? "unavailable" : "loading")}
+      data-inbox-workbench={readAvailable ? "ready" : "unavailable"}
+    >
       <PageHeader
-        eyebrow="Spec authoring"
         title="Inbox"
-        description="Shape private drafts, publish deliberate proposals, and approve only the exact canonical Spec diff."
-        actions={canEditDrafts ? (
-          <Button onClick={(event) => openEditor(null, event)} type="button">
-            <Plus data-icon="inline-start" /> New local draft
+        description="Review proposed changes before they become shared project memory."
+        actions={(
+          <Button
+            className={styles.refreshAction}
+            disabled={!readAvailable || refreshing}
+            onClick={() => void refreshInbox()}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <RefreshCw className={refreshing ? styles.refreshingIcon : undefined} data-icon="inline-start" />
+            {refreshing ? "Refreshing…" : "Refresh"}
           </Button>
-        ) : undefined}
+        )}
       />
       {status === "" ? (
         <div className={styles.liveStatus} aria-live="polite" role="status" />
@@ -1452,9 +2290,12 @@ export function InboxPage() {
           <CheckCircle2 aria-hidden="true" /> {status}
         </div>
       )}
+      {selectionNotice ? (
+        <div className={styles.selectionNotice} role="status">{selectionNotice}</div>
+      ) : null}
 
       {capabilities === undefined ? (
-        <StatePanel state="loading" title="Checking Inbox capability" detail="Confirming the private Spec-authoring service connection." />
+        <StatePanel state="loading" title="Checking Inbox capability" detail="Confirming which Inbox reads and actions are available." />
       ) : !readAvailable ? (
         <StatePanel
           state="unavailable"
@@ -1462,135 +2303,62 @@ export function InboxPage() {
           detail={capabilities.inbox.read.reason ?? "Inbox reads are not connected in this Hub process."}
         />
       ) : (
-        <div className={styles.workbench}>
-          <div className={styles.queues}>
-            <Card className={styles.queueCard} role="region" aria-labelledby="draft-rail-heading">
-              <CardHeader className={styles.queueHeader}>
-                <div>
-                  <CardDescription>Checkout-local</CardDescription>
-                  <CardTitle><h2 id="draft-rail-heading">Private draft rail</h2></CardTitle>
-                </div>
-                <CardAction><StatusPill>{draftRows.length} loaded</StatusPill></CardAction>
-              </CardHeader>
-              <CardContent className={styles.queueContent}>
-                {drafts.isPending ? (
-                  <StatePanel compact state="loading" title="Reading local drafts" detail="Loading the first bounded page." />
-                ) : drafts.isError ? (
-                  <ErrorState error={drafts.error} retry={() => void drafts.refetch()} />
-                ) : draftRows.length === 0 ? (
-                  <StatePanel compact state="empty" title="No private drafts" detail="Create a typed Spec draft when an idea is ready for deliberate review." />
-                ) : (
-                  <ul className={styles.queueList}>
-                    {draftRows.map((draft) => (
-                      <li key={draft.id}>
-                        <button
-                          aria-current={selectedDraftId === draft.id ? "true" : undefined}
-                          data-inbox-draft-id={draft.id}
-                          data-selected={selectedDraftId === draft.id ? "true" : undefined}
-                          onClick={() => setSelection({ kind: "draft", id: draft.id })}
-                          type="button"
-                        >
-                          <span className={styles.queueGlyph}><FilePenLine aria-hidden="true" /></span>
-                          <span><strong>{draft.title}</strong><small>{sentenceCase(draft.entityKind)} · {formatDate(draft.updatedAt)}</small></span>
-                          <ChevronRight aria-hidden="true" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+        <Tabs className={styles.modeTabs} onValueChange={selectView} value={view}>
+          <TabsList aria-label="Inbox views" className={styles.modeTabList} variant="line">
+            <TabsTrigger value="review">
+              For review
+              {exactReviewCount !== null ? <Badge className={styles.tabCount} variant="secondary">{exactReviewCount}</Badge> : null}
+            </TabsTrigger>
+            <TabsTrigger value="drafts">Drafts on this device</TabsTrigger>
+          </TabsList>
+          <TabsContent className={styles.modePanel} value="review">
+            <div className={styles.workbench}>
+              <ProposalQueue
+                error={proposals.isError ? proposals.error : null}
+                groups={proposalGroups}
+                hasNextPage={Boolean(proposals.hasNextPage)}
+                isFetchingNextPage={proposals.isFetchingNextPage}
+                isPending={proposals.isPending}
+                onLoadMore={() => void proposals.fetchNextPage()}
+                onSelect={selectProposal}
+                selectedId={selectedProposalId}
+                sourceBounded={Boolean(
+                  proposals.data
+                  && (proposals.data.pages.length >= MAX_WORKBENCH_PAGES
+                    || proposals.data.pages.some((page) => page.sourceTruncated)),
                 )}
-                {drafts.hasNextPage ? (
-                  <Button disabled={drafts.isFetchingNextPage} onClick={() => void drafts.fetchNextPage()} size="sm" type="button" variant="outline">
-                    {drafts.isFetchingNextPage ? "Loading…" : "Load more drafts"}
-                  </Button>
-                ) : drafts.data && drafts.data.pages.length >= MAX_WORKBENCH_PAGES ? (
-                  <p className={styles.boundNote}>Draft page limit reached.</p>
-                ) : null}
-              </CardContent>
-            </Card>
-
-            <Card className={styles.queueCard} role="region" aria-labelledby="proposal-queue-heading">
-              <CardHeader className={styles.queueHeader}>
-                <div>
-                  <CardDescription>Canonical · pending &amp; stale</CardDescription>
-                  <CardTitle><h2 id="proposal-queue-heading">Proposal review queue</h2></CardTitle>
-                </div>
-                <CardAction><StatusPill tone={proposalRows.length > 0 ? "warning" : "neutral"}>{proposalRows.length} actionable</StatusPill></CardAction>
-              </CardHeader>
-              <CardContent className={styles.queueContent}>
-                {proposals.isPending ? (
-                  <StatePanel compact state="loading" title="Reading proposal queue" detail="Loading the first bounded page." />
-                ) : proposals.isError ? (
-                  <ErrorState error={proposals.error} retry={() => void proposals.refetch()} />
-                ) : proposalRows.length === 0 ? (
-                  <StatePanel compact state="empty" title="Review queue is clear" detail="No pending or stale canonical proposals need attention." />
-                ) : (
-                  <ul className={styles.queueList}>
-                    {proposalRows.map((proposal) => (
-                      <li key={proposal.ref.id}>
-                        <button
-                          aria-current={selectedProposalId === proposal.ref.id ? "true" : undefined}
-                          data-inbox-proposal-id={proposal.ref.id}
-                          data-selected={selectedProposalId === proposal.ref.id ? "true" : undefined}
-                          onClick={() => setSelection({ kind: "proposal", id: proposal.ref.id })}
-                          type="button"
-                        >
-                          <span className={styles.queueGlyph} data-state={proposal.state}><GitPullRequestArrow aria-hidden="true" /></span>
-                          <span><strong>{proposal.title}</strong><small>{actorLabel(proposal.author)} · {sentenceCase(proposal.entityKind)}</small></span>
-                          <StatusPill tone={proposalTone(proposal.state)}>{sentenceCase(proposal.state)}</StatusPill>
-                          <ChevronRight aria-hidden="true" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {proposals.hasNextPage ? (
-                  <Button disabled={proposals.isFetchingNextPage} onClick={() => void proposals.fetchNextPage()} size="sm" type="button" variant="outline">
-                    {proposals.isFetchingNextPage ? "Loading…" : "Load more proposals"}
-                  </Button>
-                ) : proposals.data && proposals.data.pages.length >= MAX_WORKBENCH_PAGES ? (
-                  <p className={styles.boundNote}>Proposal page limit reached.</p>
-                ) : null}
-              </CardContent>
-            </Card>
-          </div>
-
-          <Card className={styles.detailCard} role="region" aria-label="Selected Inbox review detail">
-            {activeSelection === null ? (
-              <StatePanel compact state="empty" title="No Inbox item selected" detail="Choose a private draft or actionable proposal from the review desk." />
-            ) : activeSelection.kind === "draft" ? (
-              draftDetail.isPending ? (
-                <StatePanel compact state="loading" title="Reading private draft" detail="Loading the checkout-local body only after selection." />
-              ) : draftDetail.isError ? (
-                <ErrorState error={draftDetail.error} retry={() => void draftDetail.refetch()} />
-              ) : (
-                <DraftDetail
-                  canMutate={Boolean(canEditDrafts)}
-                  canPublish={Boolean(canApproveSpecs)}
-                  draft={draftDetail.data}
-                  onAction={openReview}
-                  onEdit={(event) => openEditor(draftDetail.data, event)}
-                />
-              )
-            ) : proposalDetail.isPending ? (
-              <StatePanel compact state="loading" title="Reading proposal evidence" detail="Loading the canonical body only after selection." />
-            ) : proposalDetail.isError ? (
-              <ErrorState error={proposalDetail.error} retry={() => void proposalDetail.refetch()} />
-            ) : (
-              <ProposalDetail
-                canSpecMutate={Boolean(canApproveSpecs)}
-                canReview={Boolean(canReviewProposals)}
-                onAction={openReview}
-                proposal={proposalDetail.data}
               />
-            )}
-          </Card>
-        </div>
+              <Card className={styles.detailCard} role="region" aria-label="Selected Inbox review detail">
+                {proposalDetailState}
+              </Card>
+            </div>
+          </TabsContent>
+          <TabsContent className={styles.modePanel} value="drafts">
+            <div className={styles.workbench}>
+              <DraftQueue
+                canCreate={Boolean(canEditDrafts)}
+                error={drafts.isError ? drafts.error : null}
+                hasNextPage={Boolean(drafts.hasNextPage)}
+                isFetchingNextPage={drafts.isFetchingNextPage}
+                isPending={drafts.isPending}
+                onCreate={(event) => openEditor(null, event)}
+                onLoadMore={() => void drafts.fetchNextPage()}
+                onSelect={selectDraft}
+                rows={draftRows}
+                selectedId={selectedDraftId}
+                sourceBounded={Boolean(
+                  drafts.data
+                  && (drafts.data.pages.length >= MAX_WORKBENCH_PAGES
+                    || drafts.data.pages.some((page) => page.sourceTruncated)),
+                )}
+              />
+              <Card className={styles.detailCard} role="region" aria-label="Selected Inbox draft detail">
+                {draftDetailState}
+              </Card>
+            </div>
+          </TabsContent>
+        </Tabs>
       )}
-
-      <aside className={styles.boundaryNote}>
-        <Inbox aria-hidden="true" />
-        <p><strong>Review desk, not a background worker.</strong> Lists begin at 25 summaries, details load on selection, and nothing polls or writes without an explicit preview and confirmation.</p>
-      </aside>
 
       {editor ? (
         <DraftEditorDialog

@@ -1,12 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, useNavigate } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate, useOutletContext } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import type { HubApi } from "../api/client";
 import { HubApiProvider } from "../api/context";
 import { createFixtureApi } from "../dev/fixture-api";
 import { AppRoutes } from "./App";
+import { HubLayout, type HubOutletContext } from "./HubLayout";
 
 function renderRoute(route: string, api: HubApi = createFixtureApi()) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -322,6 +323,38 @@ describe("Project Hub routes", () => {
     expect(screen.queryByLabelText("1 open Relays for you.")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("1 active system operations.")).not.toBeInTheDocument();
     expect(getHome).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares the trusted shell Home projection with route outlets without another request", async () => {
+    const api = createFixtureApi();
+    const session = await api.getSession();
+    const capabilities = await api.getCapabilities();
+    const getHome = vi.spyOn(api, "getHome");
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+
+    function HomeOutletProbe() {
+      const { home } = useOutletContext<HubOutletContext>();
+      return <output aria-label="Outlet Home repository">{home?.repository.name ?? "Home unavailable"}</output>;
+    }
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <HubApiProvider api={api}>
+          <MemoryRouter>
+            <Routes>
+              <Route element={<HubLayout capabilities={capabilities} session={session} />}>
+                <Route index element={<HomeOutletProbe />} />
+              </Route>
+            </Routes>
+          </MemoryRouter>
+        </HubApiProvider>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Outlet Home repository")).toHaveTextContent("mex"));
+    expect(getHome).toHaveBeenCalledTimes(1);
   });
 
   it("keeps routes behind a safe, retryable capabilities error", async () => {

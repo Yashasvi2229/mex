@@ -64,7 +64,7 @@ describe("development-only populated fixture", () => {
     expect(HomeResponseSchema.safeParse(home).success).toBe(true);
     expect(ActivityResponseSchema.safeParse(activity).success).toBe(true);
     expect(home.sections.activity).toEqual({ availability: "available", count: 4 });
-    expect(home.sections.inbox).toEqual({ availability: "available", count: 1 });
+    expect(home.sections.inbox).toEqual({ availability: "available", count: 3 });
     expect(home.sections.relays).toEqual({ availability: "available", count: 1 });
     expect(activity.items.some((item) => item.source === "activity")).toBe(true);
     expect(activity.items.some((item) => item.source === "legacy")).toBe(true);
@@ -150,6 +150,100 @@ describe("development-only populated fixture", () => {
     expect(TeamOperationApplyResponseSchema.safeParse(workstreamApplied).success).toBe(true);
     expect(workstreamApplied.workstreams).toHaveLength(1);
     expect(workstreamApplied.events).toHaveLength(1);
+  });
+
+  it("models the complete Inbox review desk in stable server order", async () => {
+    const api = createFixtureApi();
+    const firstPage = await api.getInboxProposals({ states: ["pending", "stale"], limit: 2 });
+    const secondPage = await api.getInboxProposals({
+      states: ["pending", "stale"],
+      limit: 2,
+      cursor: firstPage.nextCursor ?? undefined,
+    });
+    const proposals = [...firstPage.items, ...secondPage.items];
+
+    expect(proposals.map((proposal) => proposal.ref.id)).toEqual([
+      "proposal_01000000000000000000001720",
+      "proposal_01000000000000000000001721",
+      "proposal_01000000000000000000001722",
+    ]);
+    expect(proposals.map((proposal) => proposal.state)).toEqual(["pending", "pending", "stale"]);
+    expect(proposals.map((proposal) => proposal.author)).toEqual([
+      {
+        kind: "member",
+        memberId: "member_01K36R3X4A5BC6DE7FGHJKMNPQ",
+        displayName: "Grace Hopper",
+      },
+      {
+        kind: "member",
+        memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX",
+        displayName: "Ada Lovelace",
+      },
+      {
+        kind: "member",
+        memberId: "member_01K36R3X4A5BC6DE7FGHJKMNPQ",
+        displayName: "Grace Hopper",
+      },
+    ]);
+    expect(firstPage.nextCursor).toBe("fixture_inbox_proposals_2");
+    expect(firstPage.truncated).toBe(true);
+    expect(secondPage.nextCursor).toBeNull();
+    expect(secondPage.truncated).toBe(false);
+
+    const details = await Promise.all(proposals.map((proposal) => api.getInboxProposal(proposal.ref.id)));
+    expect(details.every((proposal) => InboxProposalDetailSchema.safeParse(proposal).success)).toBe(true);
+
+    const teammateUpdate = details[0]!;
+    if (teammateUpdate.change.kind !== "spec.update") throw new Error("Expected the teammate fixture to update a Spec.");
+    const target = await api.getWikiEntity(teammateUpdate.change.target.id);
+    expect(target.entity).toMatchObject({
+      id: teammateUpdate.change.target.id,
+      kind: teammateUpdate.change.target.kind,
+      title: teammateUpdate.change.target.title,
+      version: {
+        semanticRevision: teammateUpdate.targetRevisions[0]!.semanticRevision,
+        contentHash: teammateUpdate.targetRevisions[0]!.revision,
+      },
+    });
+    expect(target.body.content).toContain("The release gate records bounded evidence");
+    await expect(api.getWikiEntity("mx_07000000000000000000000000"))
+      .rejects.toThrow("Fixture Wiki entity not found.");
+  });
+
+  it("provides one rich checkout-local draft without leaking detail through its summary", async () => {
+    const api = createFixtureApi();
+    const page = await api.getInboxDrafts({ limit: 25 });
+    expect(page.items).toHaveLength(1);
+    expect(Object.hasOwn(page.items[0]!, "input")).toBe(false);
+
+    const draft = await api.getInboxDraft(page.items[0]!.id);
+    expect(InboxDraftDetailSchema.safeParse(draft).success).toBe(true);
+    expect(draft.input.change).toMatchObject({
+      kind: "spec.create",
+      entityKind: "requirement",
+      topics: ["mx_01000000000000000000000001"],
+      relation: {
+        type: "derived_from",
+        target: {
+          id: "mx_01000000000000000000000001",
+          kind: "spec",
+          title: "Human-team memory release",
+        },
+      },
+    });
+    expect(draft.input.evidence.map((evidence) => evidence.kind)).toEqual([
+      "entity",
+      "code",
+      "file",
+      "commit",
+      "external",
+      "manual",
+    ]);
+    expect(draft.input.targetRevisions).toEqual([{
+      target: { kind: "entity", id: "mx_01000000000000000000000001" },
+      revision: "3".repeat(64),
+      semanticRevision: 4,
+    }]);
   });
 
   it("mirrors canonical purpose IDs, exact approval files, and Activity results", async () => {

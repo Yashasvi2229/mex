@@ -5,16 +5,23 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import type { HubApi } from "../api/client";
 import { HubApiProvider } from "../api/context";
-import type { InboxDraftDetail, InboxOperationPreviewRequest, InboxOperationPreviewResponse } from "../api/types";
+import type {
+  InboxDraftDetail,
+  InboxOperationPreviewRequest,
+  InboxOperationPreviewResponse,
+  InboxProposalSummary,
+} from "../api/types";
 import { createFixtureApi } from "../dev/fixture-api";
+import { groupInboxProposals, inboxActorMatches } from "../pages/InboxPage";
 import { AppRoutes } from "./App";
 
 const DRAFT_ID = "inbox_00000000000000000000000000000001";
 const PROPOSAL_ID = "proposal_01000000000000000000001720";
+const OWN_PROPOSAL_ID = "proposal_01000000000000000000001721";
 const TOPIC_ID = "mx_02000000000000000000000001";
 const RELATION_ID = "mx_03000000000000000000000001";
 
-function renderRoute(api: HubApi = createFixtureApi()) {
+function renderRoute(api: HubApi = createFixtureApi(), initialEntry = "/inbox") {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -22,7 +29,7 @@ function renderRoute(api: HubApi = createFixtureApi()) {
     ...render(
       <QueryClientProvider client={queryClient}>
         <HubApiProvider api={api}>
-          <MemoryRouter initialEntries={["/inbox"]}>
+          <MemoryRouter initialEntries={[initialEntry]}>
             <AppRoutes />
           </MemoryRouter>
         </HubApiProvider>
@@ -30,6 +37,10 @@ function renderRoute(api: HubApi = createFixtureApi()) {
     ),
     queryClient,
   };
+}
+
+async function openDrafts(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("tab", { name: "Drafts on this device" }));
 }
 
 function deferred<T>() {
@@ -41,6 +52,42 @@ function deferred<T>() {
 }
 
 describe("Inbox Spec-authoring workbench", () => {
+  it("opens For review by default, keeps drafts secondary, and has no page-level creation CTA", async () => {
+    const api = createFixtureApi();
+    const draftList = vi.spyOn(api, "getInboxDrafts");
+    renderRoute(api);
+
+    const reviewTab = await screen.findByRole("tab", { name: "For review 3" });
+    expect(reviewTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Drafts on this device" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /New local draft/i })).not.toBeInTheDocument();
+    expect(draftList).not.toHaveBeenCalled();
+  });
+
+  it("loads a schema-valid URL proposal directly without previewing it", async () => {
+    const api = createFixtureApi();
+    const detail = vi.spyOn(api, "getInboxProposal");
+    const preview = vi.spyOn(api, "previewInboxOperation");
+    renderRoute(api, `/inbox?view=review&proposal=${OWN_PROPOSAL_ID}`);
+
+    expect(await screen.findByRole("heading", { level: 2, name: "Keep approval consequences explicit" })).toBeVisible();
+    expect(detail).toHaveBeenCalledWith(OWN_PROPOSAL_ID);
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid URL selection before the client read and recovers to the queue", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    const detail = vi.spyOn(api, "getInboxProposal");
+    renderRoute(api, "/inbox?view=review&proposal=not-a-proposal");
+
+    expect(await screen.findByRole("heading", { name: "This proposal link is invalid" })).toBeVisible();
+    expect(detail).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Return to queue" }));
+    expect(await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" })).toBeVisible();
+  });
+
   it("loads at most 25 body-free summaries and fetches detail only after selection", async () => {
     const api = createFixtureApi();
     const drafts = vi.spyOn(api, "getInboxDrafts");
@@ -49,21 +96,161 @@ describe("Inbox Spec-authoring workbench", () => {
     renderRoute(api);
 
     expect(await screen.findByRole("heading", { level: 1, name: "Inbox" })).toBeVisible();
-    const draftRow = (await screen.findByText("Release benchmark local draft Requirement")).closest("button");
-    const proposalRow = (await screen.findByText("Release benchmark pending Spec update")).closest("button");
-    expect(draftRow).toHaveAttribute("data-inbox-draft-id", DRAFT_ID);
+    const proposalRow = (await screen.findByText("Clarify release evidence review")).closest("button");
     expect(proposalRow).toHaveAttribute("data-inbox-proposal-id", PROPOSAL_ID);
-    expect(proposalRow).toHaveAttribute("aria-current", "true");
+    await waitFor(() => expect(proposalRow).toHaveAttribute("aria-current", "true"));
     expect(proposalRow).toHaveAttribute("data-selected", "true");
-    expect(drafts).toHaveBeenCalledWith({ limit: 25 });
+    expect(drafts).not.toHaveBeenCalled();
     expect(proposals).toHaveBeenCalledWith({ states: ["pending", "stale"], limit: 25 });
     expect(draftDetail).not.toHaveBeenCalled();
-    expect(screen.queryByText(/The release benchmark must retain exact local evidence/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Inbox must help a reviewer understand/)).not.toBeInTheDocument();
 
-    await userEvent.setup().click(draftRow!);
-    expect(await screen.findByText(/The release benchmark must retain exact local evidence/)).toBeVisible();
+    const user = userEvent.setup();
+    await openDrafts(user);
+    const draftRow = (await screen.findByText("Keep Inbox review focused on meaningful changes")).closest("button");
+    expect(draftRow).toHaveAttribute("data-inbox-draft-id", DRAFT_ID);
+    expect(drafts).toHaveBeenCalledWith({ limit: 25 });
+    await user.click(draftRow!);
+    expect(await screen.findByText(/Inbox must help a reviewer understand/)).toBeVisible();
     expect(draftDetail).toHaveBeenCalledWith(DRAFT_ID);
     expect(draftRow).toHaveAttribute("aria-current", "true");
+  });
+
+  it("groups member, exact Git, and unknown actors without guessing authorship", async () => {
+    const api = createFixtureApi();
+    const rows = (await api.getInboxProposals({ states: ["pending", "stale"], limit: 25 })).items;
+
+    const memberGroups = groupInboxProposals(rows, {
+      kind: "member",
+      memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX",
+      displayName: "Ada Lovelace",
+    });
+    expect(memberGroups.map((group) => [group.title, group.rows.map((row) => row.ref.id)])).toEqual([
+      ["Needs your review", [PROPOSAL_ID]],
+      ["Waiting for teammate", [OWN_PROPOSAL_ID]],
+      ["Needs refresh", ["proposal_01000000000000000000001722"]],
+    ]);
+
+    const gitRows: InboxProposalSummary[] = rows.map((row, index) => ({
+      ...row,
+      author: index === 1
+        ? { kind: "git", name: "Ada", email: "ada@example.test" }
+        : { kind: "git", name: "Grace", email: "grace@example.test" },
+    }));
+    const gitGroups = groupInboxProposals(gitRows, {
+      kind: "git",
+      name: "Ada",
+      email: "ada@example.test",
+    });
+    expect(gitGroups.map((group) => [group.title, group.rows.map((row) => row.ref.id)])).toEqual([
+      ["Needs your review", [PROPOSAL_ID]],
+      ["Waiting for teammate", [OWN_PROPOSAL_ID]],
+      ["Needs refresh", ["proposal_01000000000000000000001722"]],
+    ]);
+    expect(inboxActorMatches(
+      { kind: "git", name: "Ada", email: "ada@example.test" },
+      { kind: "git", name: "Ada", email: "other@example.test" },
+    )).toBe(false);
+
+    for (const current of [{ kind: "unknown" as const }, undefined]) {
+      const neutralGroups = groupInboxProposals(rows, current);
+      expect(neutralGroups.map((group) => [group.title, group.rows.map((row) => row.ref.id)])).toEqual([
+        ["Needs review", [PROPOSAL_ID, OWN_PROPOSAL_ID]],
+        ["Needs refresh", ["proposal_01000000000000000000001722"]],
+      ]);
+    }
+  });
+
+  it("presents a create as readable Spec content with technical metadata collapsed", async () => {
+    const user = userEvent.setup();
+    renderRoute(createFixtureApi(), `/inbox?view=review&proposal=${OWN_PROPOSAL_ID}`);
+
+    const detail = await screen.findByRole("region", { name: "Selected Inbox review detail" });
+    expect(await within(detail).findByText("Spec change")).toBeVisible();
+    expect(within(detail).getByText("New Constraint")).toBeVisible();
+    expect(within(detail).getByText("Published by Ada Lovelace")).toBeVisible();
+    expect(within(detail).getByRole("heading", { name: "What will change" })).toBeVisible();
+    expect(within(detail).getByText("Every approval confirmation must explain the durable Spec change, proposal transition, and Activity record before apply.")).toBeVisible();
+    expect(within(detail).getByRole("heading", { name: "Why this change" })).toBeVisible();
+    expect(within(detail).getByText("Reviewers should know which working-tree artifacts an approval writes.")).toBeVisible();
+
+    const technical = within(detail).getByRole("button", { name: "Technical details" });
+    expect(technical).toHaveAttribute("aria-expanded", "false");
+    expect(within(detail).queryByText(OWN_PROPOSAL_ID)).not.toBeInTheDocument();
+    expect(within(detail).queryByText(`.mex/inbox/${OWN_PROPOSAL_ID}.md`)).not.toBeInTheDocument();
+
+    await user.click(technical);
+    expect(technical).toHaveAttribute("aria-expanded", "true");
+    expect(within(detail).getByText(OWN_PROPOSAL_ID)).toBeVisible();
+    expect(within(detail).getByText(`.mex/inbox/${OWN_PROPOSAL_ID}.md`)).toBeVisible();
+  });
+
+  it("fetches only the selected update target and renders semantic Current and Proposed comparisons", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    const getWikiEntity = vi.spyOn(api, "getWikiEntity");
+    renderRoute(api, `/inbox?view=review&proposal=${OWN_PROPOSAL_ID}`);
+
+    await screen.findByRole("heading", { level: 2, name: "Keep approval consequences explicit" });
+    expect(getWikiEntity).not.toHaveBeenCalled();
+
+    await user.click((await screen.findByText("Clarify release evidence review")).closest("button")!);
+    const detail = await screen.findByRole("region", { name: "Selected Inbox review detail" });
+    expect(await within(detail).findByText("Human-team memory release", { selector: "strong" })).toBeVisible();
+    await waitFor(() => expect(getWikiEntity).toHaveBeenCalledTimes(1));
+    expect(getWikiEntity).toHaveBeenCalledWith("mx_01000000000000000000000001");
+
+    const summary = within(detail).getByRole("region", { name: "Summary comparison" });
+    expect(within(summary).getByText("Current")).toBeVisible();
+    expect(within(summary).getByText("The reviewed Spec for Git-authoritative team memory and the Hub surfaces that explain it.")).toBeVisible();
+    expect(within(summary).getByText("Proposed")).toBeVisible();
+    expect(within(summary).getByText("Require exact evidence review before release approval.")).toBeVisible();
+
+    const body = within(detail).getByRole("region", { name: "Body comparison" });
+    expect(within(body).getByText(/The release gate records bounded evidence before a durable team-memory change/)).toBeVisible();
+    expect(within(body).getByText(/Private proposal prose remains outside durable Specs until approval/)).toBeVisible();
+  });
+
+  it("keeps proposed update content readable when the current Wiki entity cannot be read", async () => {
+    const api = createFixtureApi();
+    vi.spyOn(api, "getWikiEntity").mockRejectedValue(new Error("/private/wiki/index.sqlite"));
+    renderRoute(api, `/inbox?view=review&proposal=${PROPOSAL_ID}`);
+
+    const detail = await screen.findByRole("region", { name: "Selected Inbox review detail" });
+    expect(await within(detail).findByText("Current Spec content could not be read")).toBeVisible();
+    expect(within(detail).getByText(/Proposed values remain available below/)).toBeVisible();
+    expect(within(detail).getByText("Require exact evidence review before release approval.")).toBeVisible();
+    expect(within(detail).getByText(/Private proposal prose remains outside durable Specs until approval/)).toBeVisible();
+    expect(detail).not.toHaveTextContent("/private/wiki/index.sqlite");
+  });
+
+  it("renders safe actionable evidence links and natural relationship copy for a local draft", async () => {
+    renderRoute(createFixtureApi(), `/inbox?view=drafts&draft=${DRAFT_ID}`);
+
+    const detail = await screen.findByRole("region", { name: "Selected Inbox draft detail" });
+    const evidenceHeading = await within(detail).findByRole("heading", { name: "Evidence" });
+    const evidence = evidenceHeading.closest("section");
+    if (evidence === null) throw new Error("Expected the semantic evidence section.");
+    expect(within(evidence).getByRole("link", { name: "Human-team memory release" })).toHaveAttribute(
+      "href",
+      "/knowledge/mx_01000000000000000000000001",
+    );
+    expect(within(evidence).getByRole("link", { name: "sym.createHubServer" })).toHaveAttribute(
+      "href",
+      "/code/symbols/sym.createHubServer",
+    );
+    const external = within(evidence).getByRole("link", { name: /Accessible dialog guidance/ });
+    expect(external).toHaveAttribute("href", "https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/");
+    expect(external).toHaveAttribute("target", "_blank");
+    expect(external).toHaveAttribute("rel", "noopener noreferrer");
+
+    const related = within(detail).getByRole("heading", { name: "Related knowledge" }).closest("section");
+    if (related === null) throw new Error("Expected the related knowledge section.");
+    expect(within(related).getByText("Derived from")).toBeVisible();
+    expect(within(related).getAllByRole("link", { name: "Human-team memory release" })[0]).toHaveAttribute(
+      "href",
+      "/knowledge/mx_01000000000000000000000001",
+    );
   });
 
   it("renders every exact approval diff, including the Wiki ledger and immutable Activity", async () => {
@@ -71,14 +258,13 @@ describe("Inbox Spec-authoring workbench", () => {
     const api = createFixtureApi();
     const preview = vi.spyOn(api, "previewInboxOperation");
     renderRoute(api);
-    await screen.findByRole("heading", { name: "Release benchmark pending Spec update" });
+    await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" });
     await user.click(screen.getByRole("button", { name: "Review & approve" }));
     const dialog = await screen.findByRole("dialog", { name: "Review proposal for approval" });
     const proposalSnapshot = within(dialog).getByRole("region", { name: "Immutable proposal snapshot" });
     expect(within(proposalSnapshot).getByText("Require exact evidence review before release approval.")).toBeVisible();
     expect(within(proposalSnapshot).getByText("Clarify the exact evidence boundary for the release gate.")).toBeVisible();
     expect(within(proposalSnapshot).getByText("scripts/release-benchmark/run.mjs")).toBeVisible();
-    expect(within(proposalSnapshot).getAllByText("mx_01000000000000000000000001")).toHaveLength(2);
     await user.click(within(dialog).getByRole("button", { name: "Preview Spec approval" }));
     expect(await within(dialog).findByRole("heading", { name: "Evidence docket" })).toBeVisible();
     expect(within(dialog).getByText(".mex/specs/mx_01000000000000000000000001.md")).toBeVisible();
@@ -114,9 +300,9 @@ describe("Inbox Spec-authoring workbench", () => {
     await api.applyInboxOperation(stalePreview);
     const preview = vi.spyOn(api, "previewInboxOperation");
     const apply = vi.spyOn(api, "applyInboxOperation");
-    renderRoute(api);
+    renderRoute(api, `/inbox?view=review&proposal=${PROPOSAL_ID}`);
 
-    await screen.findByRole("heading", { name: pending.title });
+    await screen.findByRole("heading", { level: 2, name: pending.title });
     expect(screen.queryByRole("button", { name: "Withdraw proposal" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Repair proposal" }));
     const repairDialog = await screen.findByRole("dialog", { name: "Repair stale proposal" });
@@ -177,7 +363,8 @@ describe("Inbox Spec-authoring workbench", () => {
     const apply = vi.spyOn(api, "applyInboxOperation");
     renderRoute(api);
 
-    const trigger = await screen.findByRole("button", { name: "New local draft" });
+    await openDrafts(user);
+    const trigger = await screen.findByRole("button", { name: "Create manually" });
     await user.click(trigger);
     const dialog = await screen.findByRole("dialog", { name: "Create local Spec draft" });
     await waitFor(() => expect(within(dialog).getByRole("combobox", { name: "Change type" })).toHaveFocus());
@@ -227,7 +414,8 @@ describe("Inbox Spec-authoring workbench", () => {
   it("closes the draft dialog on Escape and restores its live trigger", async () => {
     const user = userEvent.setup();
     renderRoute();
-    const trigger = await screen.findByRole("button", { name: "New local draft" });
+    await openDrafts(user);
+    const trigger = await screen.findByRole("button", { name: "Create manually" });
     await user.click(trigger);
     expect(await screen.findByRole("dialog", { name: "Create local Spec draft" })).toBeVisible();
     await user.keyboard("{Escape}");
@@ -247,7 +435,8 @@ describe("Inbox Spec-authoring workbench", () => {
     });
     renderRoute(api);
 
-    await user.click(await screen.findByRole("button", { name: "New local draft" }));
+    await openDrafts(user);
+    await user.click(await screen.findByRole("button", { name: "Create manually" }));
     const dialog = await screen.findByRole("dialog", { name: "Create local Spec draft" });
     const title = within(dialog).getByRole("textbox", { name: "Title" });
     fireEvent.change(title, { target: { value: "Original reviewed title" } });
@@ -279,7 +468,7 @@ describe("Inbox Spec-authoring workbench", () => {
     });
     renderRoute(api);
 
-    await screen.findByRole("heading", { name: "Release benchmark pending Spec update" });
+    await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" });
     await user.click(screen.getByRole("button", { name: "Reject proposal" }));
     const dialog = await screen.findByRole("dialog", { name: "Reject proposal" });
     const rationale = within(dialog).getByRole("textbox", { name: "Review rationale" });
@@ -332,8 +521,9 @@ describe("Inbox Spec-authoring workbench", () => {
     vi.spyOn(api, "getInboxDraft").mockResolvedValue(update);
     const preview = vi.spyOn(api, "previewInboxOperation");
     renderRoute(api);
+    await openDrafts(user);
     await user.click((await screen.findByText(base.title)).closest("button")!);
-    await screen.findByRole("heading", { name: "Release root update" });
+    await screen.findByRole("heading", { level: 2, name: "Release root update" });
     await user.click(screen.getByRole("button", { name: "Edit local draft" }));
     const dialog = await screen.findByRole("dialog", { name: "Edit local Spec draft" });
     expect(within(dialog).getByRole("button", { name: "Title" })).toHaveAttribute(
@@ -398,6 +588,7 @@ describe("Inbox Spec-authoring workbench", () => {
     vi.spyOn(api, "getInboxDraft").mockResolvedValue(rich);
     const preview = vi.spyOn(api, "previewInboxOperation");
     renderRoute(api);
+    await openDrafts(user);
     await user.click((await screen.findByText(base.title)).closest("button")!);
     await screen.findByText("Rich body", { exact: false });
     await user.click(screen.getByRole("button", { name: "Edit local draft" }));
@@ -422,7 +613,7 @@ describe("Inbox Spec-authoring workbench", () => {
     const preview = vi.spyOn(api, "previewInboxOperation");
     vi.spyOn(api, "applyInboxOperation").mockRejectedValue(new Error("/private/repository must not leak"));
     renderRoute(api);
-    await screen.findByRole("heading", { name: "Release benchmark pending Spec update" });
+    await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" });
     await user.click(screen.getByRole("button", { name: "Reject proposal" }));
     const dialog = await screen.findByRole("dialog", { name: "Reject proposal" });
     const rationale = within(dialog).getByRole("textbox", { name: "Review rationale" });
@@ -461,7 +652,7 @@ describe("Inbox Spec-authoring workbench", () => {
 
     const errorApi = createFixtureApi();
     vi.spyOn(errorApi, "getInboxDrafts").mockRejectedValue(new Error("/private/repository/drafts"));
-    renderRoute(errorApi);
+    renderRoute(errorApi, "/inbox?view=drafts");
     const alert = await screen.findByRole("alert");
     expect(within(alert).getByRole("heading", { name: "This view could not be loaded" })).toBeVisible();
     expect(alert).not.toHaveTextContent("/private/repository/drafts");

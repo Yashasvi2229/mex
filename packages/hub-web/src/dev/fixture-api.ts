@@ -550,6 +550,7 @@ const wikiIds = {
   graph: "mx_01K36R3X4A5BC6DE7FGHJKMNPQ",
   activity: "mx_01K35Z2A3B4C5D6E7FGHJKMNPQ",
 } as const;
+const fixtureInboxSpecId = "mx_01000000000000000000000001";
 
 const wikiEntities: WikiEntitySummary[] = [
   {
@@ -603,13 +604,33 @@ const wikiEntities: WikiEntitySummary[] = [
     diagnosticsTruncated: false,
     route: `/knowledge/${wikiIds.activity}`,
   },
+  {
+    id: fixtureInboxSpecId,
+    kind: "spec",
+    title: "Human-team memory release",
+    summary: "The reviewed Spec for Git-authoritative team memory and the Hub surfaces that explain it.",
+    lifecycleState: "in_flight",
+    groundingHealth: "fresh",
+    topics: [wikiIds.hub],
+    topicsTruncated: false,
+    sourceTypes: ["manual", "file"],
+    sourceTypesTruncated: false,
+    location: { path: `.mex/specs/${fixtureInboxSpecId}.md`, startLine: 1, endLine: 72 },
+    version: { semanticRevision: 4, contentHash: revision("3") },
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    route: `/knowledge/${fixtureInboxSpecId}`,
+  },
 ];
 
 function wikiDetail(id: string): WikiEntityDetailResponse {
-  const entity = wikiEntities.find((item) => item.id === id) ?? wikiEntities[0];
+  const entity = wikiEntities.find((item) => item.id === id);
+  if (entity === undefined) throw new Error("Fixture Wiki entity not found.");
   const grounded = entity.id === wikiIds.hub;
   const body = entity.id === wikiIds.hub
     ? "# Project Hub read boundaries\n\nThe Hub is a local, read-only projection of canonical project state.\n\nEvery indexed response belongs to one stable revision. Pagination never combines revisions, and maintenance runs only after an explicit user action."
+    : entity.id === fixtureInboxSpecId
+      ? "# Human-team memory release\n\nThe release gate records bounded evidence before a durable team-memory change is accepted.\n\nReview remains explicit, and Git distribution remains a separate human action."
     : `# ${entity.title}\n\n${entity.summary ?? "No additional narrative is recorded."}`;
   return {
     indexedRevision: wikiRevision,
@@ -954,8 +975,14 @@ function fixtureOperationId(prefix: "event" | "member" | "ws", sequence: number)
 
 const fixtureInboxDraftId = "inbox_00000000000000000000000000000001";
 const fixtureInboxProposalId = "proposal_01000000000000000000001720";
-const fixtureInboxSpecId = "mx_01000000000000000000000001";
+const fixtureInboxOwnProposalId = "proposal_01000000000000000000001721";
+const fixtureInboxStaleProposalId = "proposal_01000000000000000000001722";
 const fixtureInboxCreatedSpecId = "mx_02000000000000000000000001";
+const fixtureInboxTeammateActor = {
+  kind: "member" as const,
+  memberId: fixtureMemberIds[1],
+  displayName: fixtureMembers[1].displayName,
+};
 
 const fixtureInboxDrafts: InboxDraftDetail[] = [{
   id: fixtureInboxDraftId,
@@ -963,58 +990,155 @@ const fixtureInboxDrafts: InboxDraftDetail[] = [{
   updatedAt: timestamp(16),
   changeKind: "spec.create",
   entityKind: "requirement",
-  title: "Release benchmark local draft Requirement",
-  rationaleExcerpt: "Keep the release evidence reviewable before it enters canonical history.",
+  title: "Keep Inbox review focused on meaningful changes",
+  rationaleExcerpt: "An agent prepared this private draft so a human can review the durable intent before publication.",
   input: {
     change: {
       kind: "spec.create",
       entityKind: "requirement",
-      title: "Release benchmark local draft Requirement",
-      summary: "A bounded release benchmark requirement ready for team review.",
-      body: "The release benchmark must retain exact local evidence.\n\nReviewers can inspect the proposed bytes before publishing.",
+      title: "Keep Inbox review focused on meaningful changes",
+      summary: "Reviewers see the proposed Spec meaning before implementation metadata.",
+      body: "Inbox must help a reviewer understand what will change, why it matters, and what evidence supports it before approval.\n\nExact revisions and machine identifiers remain available for audit without controlling the reading experience.",
       status: "in_flight",
+      topics: [fixtureInboxSpecId],
+      relation: {
+        type: "derived_from",
+        target: {
+          id: fixtureInboxSpecId,
+          kind: "spec",
+          title: "Human-team memory release",
+        },
+      },
     },
-    rationale: "Keep the release evidence reviewable before it enters canonical history.",
-    evidence: [{ kind: "manual", note: "Collected from the Checkpoint E release review." }],
-    targetRevisions: [],
+    rationale: "An agent prepared this private draft so a human can review the durable intent before publication.",
+    evidence: [
+      {
+        kind: "entity",
+        entity: {
+          id: fixtureInboxSpecId,
+          kind: "spec",
+          title: "Human-team memory release",
+        },
+      },
+      { kind: "code", code: { kind: "symbol", symbolId: "sym.createHubServer" } },
+      { kind: "file", path: "packages/hub-web/src/pages/InboxPage.tsx" },
+      { kind: "commit", hash: "cbc42c867dbd4ad675c8353e9921d5c653508c58" },
+      {
+        kind: "external",
+        uri: "https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/",
+        label: "Accessible dialog guidance",
+      },
+      { kind: "manual", note: "Prepared from a checkout-local review of the existing Inbox workbench." },
+    ],
+    targetRevisions: [{
+      target: { kind: "entity", id: fixtureInboxSpecId },
+      revision: revision("3"),
+      semanticRevision: 4,
+    }],
   },
 }];
 
-const fixtureInboxProposals: InboxProposalDetail[] = [{
-  schemaVersion: 1,
-  ref: {
-    id: fixtureInboxProposalId,
-    kind: "proposal",
-    title: "Release benchmark pending Spec update",
-  },
-  sourcePath: `.mex/inbox/${fixtureInboxProposalId}.md`,
-  revision: revision("2"),
-  state: "pending",
-  author: fixtureWorkstreamActor,
-  changeKind: "spec.update",
-  entityKind: "spec",
-  title: "Release benchmark pending Spec update",
-  rationaleExcerpt: "Clarify the exact evidence boundary for the release gate.",
-  change: {
-    kind: "spec.update",
-    target: {
-      id: fixtureInboxSpecId,
-      kind: "spec",
-      title: "Human-team memory release",
+const fixtureInboxProposals: InboxProposalDetail[] = [
+  {
+    schemaVersion: 1,
+    ref: {
+      id: fixtureInboxProposalId,
+      kind: "proposal",
+      title: "Clarify release evidence review",
     },
-    patch: {
-      body: "The release gate records exact, bounded evidence before approval.\n\nPrivate proposal prose remains outside canonical Specs until approval.",
-      summary: "Require exact evidence review before release approval.",
+    sourcePath: `.mex/inbox/${fixtureInboxProposalId}.md`,
+    revision: revision("2"),
+    state: "pending",
+    author: fixtureInboxTeammateActor,
+    changeKind: "spec.update",
+    entityKind: "spec",
+    title: "Clarify release evidence review",
+    rationaleExcerpt: "Clarify the exact evidence boundary for the release gate.",
+    change: {
+      kind: "spec.update",
+      target: {
+        id: fixtureInboxSpecId,
+        kind: "spec",
+        title: "Human-team memory release",
+      },
+      patch: {
+        body: "The release gate records exact, bounded evidence before approval.\n\nPrivate proposal prose remains outside durable Specs until approval.",
+        summary: "Require exact evidence review before release approval.",
+      },
     },
+    rationale: "Clarify the exact evidence boundary for the release gate.",
+    evidence: [
+      { kind: "file", path: "scripts/release-benchmark/run.mjs" },
+      { kind: "manual", note: "Grace reviewed the release evidence boundary with the team." },
+    ],
+    targetRevisions: [{
+      target: { kind: "entity", id: fixtureInboxSpecId },
+      revision: revision("3"),
+      semanticRevision: 4,
+    }],
   },
-  rationale: "Clarify the exact evidence boundary for the release gate.",
-  evidence: [{ kind: "file", path: "scripts/release-benchmark/run.mjs" }],
-  targetRevisions: [{
-    target: { kind: "entity", id: fixtureInboxSpecId },
-    revision: revision("3"),
-    semanticRevision: 4,
-  }],
-}];
+  {
+    schemaVersion: 1,
+    ref: {
+      id: fixtureInboxOwnProposalId,
+      kind: "proposal",
+      title: "Keep approval consequences explicit",
+    },
+    sourcePath: `.mex/inbox/${fixtureInboxOwnProposalId}.md`,
+    revision: revision("5"),
+    state: "pending",
+    author: fixtureWorkstreamActor,
+    changeKind: "spec.create",
+    entityKind: "constraint",
+    title: "Keep approval consequences explicit",
+    rationaleExcerpt: "Reviewers should know which working-tree artifacts an approval writes.",
+    change: {
+      kind: "spec.create",
+      entityKind: "constraint",
+      title: "Keep approval consequences explicit",
+      summary: "Approval copy names the Spec, proposal, and Activity effects.",
+      body: "Every approval confirmation must explain the durable Spec change, proposal transition, and Activity record before apply.",
+      status: "in_flight",
+    },
+    rationale: "Reviewers should know which working-tree artifacts an approval writes.",
+    evidence: [{ kind: "manual", note: "Prepared while reviewing the current actor's Hub workflow." }],
+    targetRevisions: [],
+  },
+  {
+    schemaVersion: 1,
+    ref: {
+      id: fixtureInboxStaleProposalId,
+      kind: "proposal",
+      title: "Refresh the stale review boundary",
+    },
+    sourcePath: `.mex/inbox/${fixtureInboxStaleProposalId}.md`,
+    revision: revision("6"),
+    state: "stale",
+    author: fixtureInboxTeammateActor,
+    changeKind: "spec.update",
+    entityKind: "spec",
+    title: "Refresh the stale review boundary",
+    rationaleExcerpt: "The referenced Spec content changed after this proposal was published.",
+    change: {
+      kind: "spec.update",
+      target: {
+        id: fixtureInboxSpecId,
+        kind: "spec",
+        title: "Human-team memory release",
+      },
+      patch: {
+        title: "Human-team memory review release",
+      },
+    },
+    rationale: "Make the review boundary unmistakable, once the dependency is refreshed.",
+    evidence: [{ kind: "commit", hash: "d34db33fd34db33fd34db33fd34db33fd34db33f" }],
+    targetRevisions: [{
+      target: { kind: "entity", id: fixtureInboxSpecId },
+      revision: revision("8"),
+      semanticRevision: 3,
+    }],
+  },
+];
 
 const fixtureRelayDraftId = "relay-draft-01";
 const fixtureRelayId = "relay_01000000000000000000000001";
@@ -2249,7 +2373,13 @@ class FixtureHubApi implements HubApi {
       truncated: hasMore,
     });
   }
-  getWikiEntity(id: string) { return Promise.resolve(wikiDetail(id)); }
+  getWikiEntity(id: string): Promise<WikiEntityDetailResponse> {
+    try {
+      return Promise.resolve(wikiDetail(id));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
   getWikiRelations(id: string, _request: WikiRelationsRequest) { return Promise.resolve(wikiRelations(id)); }
   getWikiBacklinks(id: string, _request: WikiBacklinksRequest) { return Promise.resolve(wikiBacklinks(id)); }
   getCodeKnowledge(id: string, _request: CodeKnowledgeRequest): Promise<CodeKnowledgeResponse> {

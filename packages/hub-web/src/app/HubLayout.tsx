@@ -12,6 +12,7 @@ import { HubSidebar } from "./HubSidebar";
 export interface HubOutletContext {
   capabilities?: CapabilitiesResponse;
   clearSearchFocusRequest: () => void;
+  home?: HomeResponse;
   searchFocusRequest: number;
 }
 
@@ -120,7 +121,7 @@ export function HubLayout({
         <RepositoryBar repository={trustedHome?.repository} session={session} />
         <main id="main-content" className={styles.main} ref={mainRef} tabIndex={-1}>
           <Suspense fallback={<StatePanel state="loading" title="Opening workbench" detail="Loading this local Hub view." />}>
-            <Outlet context={{ capabilities, clearSearchFocusRequest, searchFocusRequest } satisfies HubOutletContext} />
+            <Outlet context={{ capabilities, clearSearchFocusRequest, home: trustedHome, searchFocusRequest } satisfies HubOutletContext} />
           </Suspense>
         </main>
       </div>
