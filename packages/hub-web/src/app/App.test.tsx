@@ -311,7 +311,7 @@ describe("Project Hub routes", () => {
     expect(await screen.findByText("Ada Lovelace")).toBeVisible();
     const repositoryBar = screen.getByRole("banner", { name: "Repository context" });
     expect(within(repositoryBar).getByText(initialHome.repository.name)).toBeVisible();
-    expect(screen.getByLabelText("1 proposals awaiting team review.")).toBeVisible();
+    expect(screen.getByLabelText("3 proposals awaiting team review.")).toBeVisible();
 
     await act(async () => {
       await queryClient.invalidateQueries({ queryKey: ["home"] });
@@ -319,7 +319,7 @@ describe("Project Hub routes", () => {
 
     expect(await screen.findByText("Set team identity")).toBeVisible();
     expect(within(repositoryBar).getByText("Current project")).toBeVisible();
-    expect(screen.queryByLabelText("1 proposals awaiting team review.")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("3 proposals awaiting team review.")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("1 open Relays for you.")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("1 active system operations.")).not.toBeInTheDocument();
     expect(getHome).toHaveBeenCalledTimes(2);

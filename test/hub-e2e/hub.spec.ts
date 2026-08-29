@@ -634,24 +634,252 @@ test.describe("populated development fixture", () => {
     }
   }
 
-  for (const width of [390, 768, 1024, 1440] as const) {
-    test(`keeps Inbox accessible and overflow-free at ${width}px`, async ({ page }) => {
+  test("renders Inbox as a review-first semantic desk with honest action policy", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/inbox?fixture=populated");
+
+    await expect(page.getByRole("heading", { level: 1, name: "Inbox" })).toBeVisible();
+    await expect(page.getByText(
+      "Review proposed changes before they become shared project memory.",
+      { exact: true },
+    )).toBeVisible();
+    await expect(page.getByRole("tab", { name: "For review 3" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { name: "Drafts on this device" })).toHaveAttribute("aria-selected", "false");
+    await expect(page.getByRole("heading", { name: "Needs your review" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Waiting for teammate" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Needs refresh" })).toBeVisible();
+
+    const teammate = page.locator('[data-inbox-proposal-id="proposal_01000000000000000000001720"]');
+    await expect(teammate).toContainText("Clarify release evidence review");
+    await expect(teammate).toContainText("Published by Grace Hopper");
+    await expect(teammate).toHaveAttribute("aria-current", "true");
+    const detail = page.getByRole("region", { name: "Selected Inbox review detail" });
+    await expect(detail.getByRole("heading", { level: 2, name: "Clarify release evidence review" })).toBeVisible();
+    await expect(detail.getByText("Spec change", { exact: true })).toBeVisible();
+    await expect(detail.getByText("Published by Grace Hopper", { exact: true })).toBeVisible();
+    await expect(detail.getByRole("heading", { name: "What will change" })).toBeVisible();
+    await expect(detail.getByRole("region", { name: "Summary comparison" }).getByText("Current")).toBeVisible();
+    await expect(detail.getByRole("region", { name: "Summary comparison" }).getByText("Proposed")).toBeVisible();
+    await expect(detail.getByRole("heading", { name: "Why this change" })).toBeVisible();
+    const technical = detail.getByRole("button", { name: "Technical details" });
+    await expect(technical).toHaveAttribute("aria-expanded", "false");
+    await expect(detail.getByText("proposal_01000000000000000000001720", { exact: true })).toHaveCount(0);
+    await technical.click();
+    await expect(detail.getByText("proposal_01000000000000000000001720", { exact: true })).toBeVisible();
+    await technical.click();
+    await expect(detail.getByRole("button", { name: "Approve change" })).toBeVisible();
+    const teammateMore = detail.getByRole("button", { name: "More proposal actions" });
+    await teammateMore.click();
+    await expect(page.getByRole("menuitem", { name: "Decline proposal…" })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Mark as needs refresh…" })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Withdraw proposal…" })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(teammateMore).toBeFocused();
+
+    const own = page.locator('[data-inbox-proposal-id="proposal_01000000000000000000001721"]');
+    await own.focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(/view=review.*proposal=proposal_01000000000000000000001721/);
+    await expect(detail.getByRole("heading", { level: 2, name: "Keep approval consequences explicit" })).toBeVisible();
+    await expect(detail.getByText("Waiting for teammate review", { exact: true })).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Approve change" })).toHaveCount(0);
+    const ownMore = detail.getByRole("button", { name: "More proposal actions" });
+    await ownMore.click();
+    await expect(page.getByRole("menuitem", { name: "Approve without teammate review…" })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Withdraw proposal…" })).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    const stale = page.locator('[data-inbox-proposal-id="proposal_01000000000000000000001722"]');
+    await stale.click();
+    await expect(detail.getByRole("heading", { level: 2, name: "Refresh the stale review boundary" })).toBeVisible();
+    await expect(detail.getByText(
+      "The referenced Spec content changed after this proposal was published.",
+      { exact: true },
+    )).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Approve change" })).toHaveCount(0);
+    await expect(detail.getByRole("button", { name: "More proposal actions" })).toHaveCount(0);
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("renders the empty Inbox fixture as an honest caught-up state", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/inbox?fixture=populated&inboxFixture=empty");
+
+    await expect(page.getByRole("tab", { name: /For review/ })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByText("You’re all caught up", { exact: true })).toBeVisible();
+    await expect(page.getByText("No Spec changes currently need review.", { exact: true })).toBeVisible();
+    await expect(page.locator("[data-inbox-proposal-id]")).toHaveCount(0);
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps unknown Inbox identity neutral without blocking review", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/inbox?fixture=populated&inboxFixture=unknown");
+
+    await expect(page.getByRole("heading", { name: "Needs review" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Needs your review" })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Waiting for teammate" })).toHaveCount(0);
+    const detail = page.getByRole("region", { name: "Selected Inbox review detail" });
+    await expect(detail.getByText("Team identity is not set", { exact: true })).toBeVisible();
+    await expect(detail.getByRole("link", { name: "set your identity in Team" })).toHaveAttribute("href", "/members");
+    await expect(detail.getByRole("button", { name: "Approve change" })).toBeEnabled();
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("isolates partial Inbox capabilities without hiding readable work", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/inbox?fixture=populated&inboxFixture=partial");
+
+    const reviewDetail = page.getByRole("region", { name: "Selected Inbox review detail" });
+    await expect(reviewDetail.getByRole("heading", { level: 2, name: "Clarify release evidence review" })).toBeVisible();
+    await expect(reviewDetail.getByRole("button", { name: "Approve change" })).toBeDisabled();
+    await expect(reviewDetail.getByText(
+      "Approval is unavailable: Inbox Spec approval requires exact Wiki planning and apply.",
+      { exact: true },
+    )).toBeVisible();
+
+    await page.getByRole("tab", { name: "Drafts on this device" }).click();
+    const draftDetail = page.getByRole("region", { name: "Selected Inbox draft detail" });
+    await expect(draftDetail.getByRole("heading", { level: 2, name: "Keep Inbox review focused on meaningful changes" })).toBeVisible();
+    await expect(draftDetail.getByRole("button", { name: "Publish for review" })).toBeDisabled();
+    await expect(draftDetail.getByText(
+      "Publication is unavailable: Inbox proposal writes are not connected in this Hub process.",
+      { exact: true },
+    )).toBeVisible();
+    await expect(draftDetail.getByRole("button", { name: "Edit wording" })).toBeEnabled();
+    await expect(draftDetail.getByRole("button", { name: "More draft actions" })).toBeEnabled();
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps Inbox URL selection and explicit Refresh stable", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(
+      "/inbox?fixture=populated&view=review&proposal=proposal_01000000000000000000001721",
+    );
+
+    const own = page.locator('[data-inbox-proposal-id="proposal_01000000000000000000001721"]');
+    await expect(own).toHaveAttribute("aria-current", "true");
+    const refresh = page.getByRole("button", { name: "Refresh", exact: true });
+    await refresh.click();
+    await expect(page.getByRole("status").filter({ hasText: "Inbox refreshed." })).toBeVisible();
+    await expect(own).toHaveAttribute("aria-current", "true");
+    await expect(page).toHaveURL(/view=review.*proposal=proposal_01000000000000000000001721/);
+
+    await page.getByRole("tab", { name: "Drafts on this device" }).click();
+    await expect(page).toHaveURL(/view=drafts.*draft=inbox_00000000000000000000000000000001/);
+    await expect(page.locator('[data-inbox-draft-id="inbox_00000000000000000000000000000001"]'))
+      .toHaveAttribute("aria-current", "true");
+  });
+
+  test("keeps draft editing, overflow, publication, and discard keyboard complete", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/inbox?fixture=populated&view=drafts");
+
+    await expect(page.getByRole("tab", { name: "Drafts on this device" })).toHaveAttribute("aria-selected", "true");
+    const draft = page.locator('[data-inbox-draft-id="inbox_00000000000000000000000000000001"]');
+    await expect(draft).toContainText("Keep Inbox review focused on meaningful changes");
+    await expect(draft).toHaveAttribute("aria-current", "true");
+    const detail = page.getByRole("region", { name: "Selected Inbox draft detail" });
+    await expect(detail.getByRole("heading", { level: 2, name: "Keep Inbox review focused on meaningful changes" })).toBeVisible();
+
+    const edit = detail.getByRole("button", { name: "Edit wording" });
+    await edit.click();
+    const editor = page.getByRole("dialog", { name: "Edit local Spec draft" });
+    await expect(editor).toBeVisible();
+    await expect(editor.getByRole("textbox", { name: "Title" })).toBeFocused();
+    const advanced = editor.getByRole("button", { name: "Advanced" });
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await expect(editor.getByRole("textbox", { name: /Topic endpoint attestations/ })).toHaveCount(0);
+    await advanced.click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "true");
+    await expect(editor.getByRole("textbox", { name: /Topic endpoint attestations/ })).toBeVisible();
+    await expectAccessible(page);
+    await page.keyboard.press("Escape");
+    await expect(editor).toBeHidden();
+    await expect(edit).toBeFocused();
+
+    const more = detail.getByRole("button", { name: "More draft actions" });
+    await more.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("menuitem", { name: "Discard draft…" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menuitem", { name: "Discard draft…" })).toBeHidden();
+    await expect(more).toBeFocused();
+
+    const publish = detail.getByRole("button", { name: "Publish for review" });
+    await publish.click();
+    const publishDialog = page.getByRole("alertdialog", { name: "Publish this draft for review?" });
+    await expect(publishDialog).toBeVisible();
+    await expect.poll(() => publishDialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await expect(publishDialog.getByText("Git step still required", { exact: true })).toBeVisible();
+    await expectAccessible(page);
+    await publishDialog.getByRole("button", { name: "Keep private" }).click();
+    await expect(publishDialog).toBeHidden();
+    await expect(publish).toBeFocused();
+
+    await more.click();
+    await page.getByRole("menuitem", { name: "Discard draft…" }).click();
+    const discardDialog = page.getByRole("alertdialog", { name: "Discard this draft?" });
+    await expect(discardDialog).toBeVisible();
+    await expect.poll(() => discardDialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await expectAccessible(page);
+    await discardDialog.getByRole("button", { name: "Keep draft" }).click();
+    await expect(discardDialog).toBeHidden();
+    await expect(more).toBeFocused();
+    expect(errors).toEqual([]);
+  });
+
+  for (const viewport of [
+    { width: 390, height: 900 },
+    { width: 768, height: 900 },
+    { width: 1024, height: 768 },
+    { width: 1440, height: 900 },
+  ] as const) {
+    test(`keeps Inbox accessible and overflow-free at ${viewport.width}x${viewport.height}`, async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
-      await page.setViewportSize({ width, height: 900 });
+      await page.setViewportSize(viewport);
       await page.goto("/inbox?fixture=populated");
 
-      if (width < 1024) {
+      if (viewport.width < 1024) {
         await expect(page.getByRole("heading", { name: "A wider workbench is required" })).toBeVisible();
         await expect(page.getByRole("navigation", { name: "Primary" })).toBeHidden();
       } else {
         await expect(page.getByRole("heading", { level: 1, name: "Inbox" })).toBeVisible();
-        await expect(page.locator('[data-inbox-workbench="ready"]')).toBeVisible();
-        await expect(page.locator(
-          '[data-inbox-draft-id="inbox_00000000000000000000000000000001"]',
-        )).toContainText("Release benchmark local draft Requirement");
-        await expect(page.locator(
-          '[data-inbox-proposal-id="proposal_01000000000000000000001720"]',
-        )).toContainText("Release benchmark pending Spec update");
+        const reviewQueue = page.getByRole("region", { name: "Spec changes" });
+        const reviewDetail = page.getByRole("region", { name: "Selected Inbox review detail" });
+        await expect(reviewQueue).toBeVisible();
+        await expect(reviewDetail.getByRole("heading", { level: 2, name: "Clarify release evidence review" })).toBeVisible();
+        const reviewBoxes = await Promise.all([reviewQueue.boundingBox(), reviewDetail.boundingBox()]);
+        expect(reviewBoxes[0]).not.toBeNull();
+        expect(reviewBoxes[1]).not.toBeNull();
+        expect(reviewBoxes[0]!.x).toBeLessThan(reviewBoxes[1]!.x);
+        expect(reviewBoxes[0]!.x + reviewBoxes[0]!.width).toBeLessThanOrEqual(reviewBoxes[1]!.x + 1);
+
+        await page.getByRole("tab", { name: "Drafts on this device" }).click();
+        const draftQueue = page.getByRole("region", { name: "On this device" });
+        const draftDetail = page.getByRole("region", { name: "Selected Inbox draft detail" });
+        await expect(draftQueue).toBeVisible();
+        await expect(draftDetail.getByRole("heading", { level: 2, name: "Keep Inbox review focused on meaningful changes" })).toBeVisible();
+        const draftBoxes = await Promise.all([draftQueue.boundingBox(), draftDetail.boundingBox()]);
+        expect(draftBoxes[0]).not.toBeNull();
+        expect(draftBoxes[1]).not.toBeNull();
+        expect(draftBoxes[0]!.x).toBeLessThan(draftBoxes[1]!.x);
+        expect(draftBoxes[0]!.x + draftBoxes[0]!.width).toBeLessThanOrEqual(draftBoxes[1]!.x + 1);
       }
 
       const geometry = await page.evaluate(() => ({
@@ -661,64 +889,22 @@ test.describe("populated development fixture", () => {
         bodyScrollWidth: document.body.scrollWidth,
       }));
       expect(geometry).toEqual({
-        viewportWidth: width,
-        documentClientWidth: width,
-        documentScrollWidth: width,
-        bodyScrollWidth: width,
+        viewportWidth: viewport.width,
+        documentClientWidth: viewport.width,
+        documentScrollWidth: viewport.width,
+        bodyScrollWidth: viewport.width,
       });
       await expectAccessible(page);
     });
   }
 
-  test("keeps Inbox selection and review dialogs keyboard complete", async ({ page }) => {
+  test("renders the deterministic Inbox review visual", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/inbox?fixture=populated");
-    await expect(page.locator('[data-inbox-workbench="ready"]')).toBeVisible();
-
-    const draft = page.locator('[data-inbox-draft-id="inbox_00000000000000000000000000000001"]');
-    const proposal = page.locator('[data-inbox-proposal-id="proposal_01000000000000000000001720"]');
-    await expect(draft).toContainText("Release benchmark local draft Requirement");
-    await expect(proposal).toContainText("Release benchmark pending Spec update");
-
-    await draft.focus();
-    await page.keyboard.press("Enter");
-    await expect(draft).toHaveAttribute("aria-current", "true");
-    await expect(draft).toHaveAttribute("data-selected", "true");
     await expect(page.getByRole("region", { name: "Selected Inbox review detail" })
-      .getByRole("heading", { name: "Release benchmark local draft Requirement", exact: true })).toBeVisible();
-
-    const createDraft = page.getByRole("button", { name: "New local draft", exact: true });
-    await createDraft.click();
-    const editor = page.getByRole("dialog", { name: "Create local Spec draft" });
-    await expect(editor).toBeVisible();
-    await expect(editor.getByText(
-      "This draft stays private to this checkout. Previewing and saving it does not publish canonical project memory.",
-      { exact: true },
-    )).toBeVisible();
-    await expect(page.getByLabel("Change type", { exact: true })).toBeFocused();
-    await page.keyboard.press("Shift+Tab");
-    await expect.poll(() => editor.evaluate((element) => element.contains(document.activeElement))).toBe(true);
-    await expectAccessible(page);
-    await page.keyboard.press("Escape");
-    await expect(editor).toBeHidden();
-    await expect(createDraft).toBeFocused();
-
-    await proposal.focus();
-    await page.keyboard.press("Enter");
-    await expect(proposal).toHaveAttribute("aria-current", "true");
-    await expect(proposal).toHaveAttribute("data-selected", "true");
-    await expect(page.getByRole("region", { name: "Selected Inbox review detail" })
-      .getByRole("heading", { name: "Release benchmark pending Spec update", exact: true })).toBeVisible();
-
-    const approve = page.getByRole("button", { name: "Review & approve", exact: true });
-    await approve.click();
-    const review = page.getByRole("dialog", { name: "Review proposal for approval" });
-    await expect(review).toBeVisible();
-    await expect(review.getByRole("button", { name: "Preview Spec approval", exact: true })).toBeVisible();
-    await page.keyboard.press("Escape");
-    await expect(review).toBeHidden();
-    await expect(approve).toBeFocused();
+      .getByRole("heading", { level: 2, name: "Clarify release evidence review" })).toBeVisible();
+    await expect(page).toHaveScreenshot("hub-inbox.png", { fullPage: true });
   });
 
   for (const width of [390, 768, 1024, 1440] as const) {
@@ -1008,7 +1194,7 @@ test.describe("populated development fixture", () => {
     await page.goto("/?fixture=populated");
     await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     const sidebar = page.locator('aside[aria-label="Project Hub navigation"]');
-    await expect(sidebar.getByLabel("1 proposals awaiting team review.")).toHaveText("1");
+    await expect(sidebar.getByLabel("3 proposals awaiting team review.")).toHaveText("3");
     await expect(sidebar.getByLabel("1 open Relays for you.")).toHaveText("1");
     await expect(sidebar.getByLabel("1 active system operations.")).toHaveText("1");
     await expect(sidebar.getByRole("link", { name: "Team", exact: true })).toHaveAttribute("href", "/members");
@@ -1309,17 +1495,21 @@ test.describe("built production Hub", () => {
     await expect(page.getByRole("heading", { name: "Members", exact: true })).toBeVisible();
     await expect(page.getByText("Ada Lovelace", { exact: true })).toHaveCount(0);
     await expect(page.getByText("member_01K36WVM6H7JK8M9NPQRSTVVWX", { exact: true })).toHaveCount(0);
-    const [draftsResponse, proposalsResponse] = await Promise.all([
-      page.waitForResponse((candidate) => new URL(candidate.url()).pathname === "/api/v1/inbox/drafts"),
+    const [proposalsResponse] = await Promise.all([
       page.waitForResponse((candidate) => new URL(candidate.url()).pathname === "/api/v1/inbox/proposals"),
       page.goto(`${productionOrigin}/inbox?fixture=populated`),
     ]);
-    expect(draftsResponse.status()).toBe(200);
     expect(proposalsResponse.status()).toBe(200);
-    expect(await draftsResponse.json()).toMatchObject({ items: [], nextCursor: null });
     expect(await proposalsResponse.json()).toMatchObject({ items: [], nextCursor: null });
     await expect(page.getByRole("heading", { level: 1, name: "Inbox" })).toBeVisible();
     await expect(page.locator('[data-inbox-workbench="ready"]')).toBeVisible();
+    const draftsResponsePromise = page.waitForResponse(
+      (candidate) => new URL(candidate.url()).pathname === "/api/v1/inbox/drafts",
+    );
+    await page.getByRole("tab", { name: "Drafts on this device" }).click();
+    const draftsResponse = await draftsResponsePromise;
+    expect(draftsResponse.status()).toBe(200);
+    expect(await draftsResponse.json()).toMatchObject({ items: [], nextCursor: null });
 
     const [relayDraftsResponse] = await Promise.all([
       page.waitForResponse((candidate) => new URL(candidate.url()).pathname === "/api/v1/relays/drafts"),

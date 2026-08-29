@@ -206,6 +206,17 @@ describe("development-only populated fixture", () => {
       },
     });
     expect(target.body.content).toContain("The release gate records bounded evidence");
+
+    const knowledgeFirstPage = await api.listWikiEntities({ limit: 25 });
+    const knowledgeSecondPage = await api.listWikiEntities({
+      limit: 25,
+      cursor: knowledgeFirstPage.nextCursor ?? undefined,
+    });
+    const browsableKnowledge = [...knowledgeFirstPage.items, ...knowledgeSecondPage.items];
+    expect(browsableKnowledge).toHaveLength(3);
+    expect(browsableKnowledge.map((entity) => entity.id)).not.toContain(teammateUpdate.change.target.id);
+    expect(knowledgeSecondPage.nextCursor).toBeNull();
+
     await expect(api.getWikiEntity("mx_07000000000000000000000000"))
       .rejects.toThrow("Fixture Wiki entity not found.");
   });
@@ -391,4 +402,114 @@ describe("development-only populated fixture", () => {
     expect(approved.proposals[0]).toMatchObject({ state: "approved" });
     expect(approved.events[0]!.action).toBe("inbox.approved");
   });
+
+  it("projects an exact empty Inbox without changing its read capability", async () => {
+    const api = createFixtureApi({ inboxFixture: "empty" });
+    const [capability, homeResult, drafts, proposals, actor] = await Promise.all([
+      api.getCapabilities(),
+      api.getHome(),
+      api.getInboxDrafts({ limit: 25 }),
+      api.getInboxProposals({ states: ["pending", "stale"], limit: 25 }),
+      api.getCurrentActor(),
+    ]);
+
+    expect(HubCapabilitiesSchema.safeParse(capability).success).toBe(true);
+    expect(HomeResponseSchema.safeParse(homeResult).success).toBe(true);
+    expect(InboxDraftListResponseSchema.safeParse(drafts).success).toBe(true);
+    expect(InboxProposalListResponseSchema.safeParse(proposals).success).toBe(true);
+    expect(TeamCurrentActorResponseSchema.safeParse(actor).success).toBe(true);
+    expect(capability.inbox).toEqual({
+      read: { availability: "available" },
+      draftMutation: { availability: "available" },
+      proposalMutation: { availability: "available" },
+      specApproval: { availability: "available" },
+    });
+    expect(homeResult.sections.inbox).toEqual({ availability: "available", count: 0 });
+    expect(drafts).toMatchObject({ items: [], nextCursor: null, truncated: false });
+    expect(proposals).toMatchObject({ items: [], nextCursor: null, truncated: false });
+    expect(actor.actor).toMatchObject({ kind: "member", displayName: "Ada Lovelace" });
+    await expect(api.getInboxDraft("inbox_00000000000000000000000000000001"))
+      .rejects.toThrow("Fixture Inbox draft not found.");
+    await expect(api.getInboxProposal("proposal_01000000000000000000001720"))
+      .rejects.toThrow("Fixture Inbox proposal not found.");
+  });
+
+  it("projects an unknown current actor while retaining the populated review queue", async () => {
+    const api = createFixtureApi({ inboxFixture: "unknown" });
+    const [actor, homeResult, drafts, proposals] = await Promise.all([
+      api.getCurrentActor(),
+      api.getHome(),
+      api.getInboxDrafts({ limit: 25 }),
+      api.getInboxProposals({ states: ["pending", "stale"], limit: 25 }),
+    ]);
+
+    expect(TeamCurrentActorResponseSchema.safeParse(actor).success).toBe(true);
+    expect(HomeResponseSchema.safeParse(homeResult).success).toBe(true);
+    expect(actor).toEqual({
+      actor: { kind: "unknown" },
+      source: "unknown",
+      selection: null,
+      diagnostics: [{
+        code: "ACTOR_UNKNOWN",
+        severity: "warning",
+        message: "MEX could not resolve a current Team or Git identity.",
+      }],
+      diagnosticsTruncated: false,
+    });
+    expect(homeResult.actor).toEqual({ kind: "unknown" });
+    expect(homeResult.sections.inbox).toEqual({ availability: "available", count: 3 });
+    expect(drafts.items).toHaveLength(1);
+    expect(proposals.items).toHaveLength(3);
+  });
+
+  it("projects partial Inbox mutation capability without suppressing reads or local drafts", async () => {
+    const api = createFixtureApi({ inboxFixture: "partial" });
+    const [capability, homeResult, drafts, proposals, wiki] = await Promise.all([
+      api.getCapabilities(),
+      api.getHome(),
+      api.getInboxDrafts({ limit: 25 }),
+      api.getInboxProposals({ states: ["pending", "stale"], limit: 25 }),
+      api.listWikiEntities({ limit: 25 }),
+    ]);
+
+    expect(HubCapabilitiesSchema.safeParse(capability).success).toBe(true);
+    expect(capability.inbox).toEqual({
+      read: { availability: "available" },
+      draftMutation: { availability: "available" },
+      proposalMutation: {
+        availability: "unavailable",
+        reason: "Inbox proposal writes are not connected in this Hub process.",
+      },
+      specApproval: {
+        availability: "unavailable",
+        reason: "Inbox Spec approval requires exact Wiki planning and apply.",
+      },
+    });
+    expect(capability.wiki.read).toEqual({ availability: "available" });
+    expect(homeResult.sections.inbox).toEqual({ availability: "available", count: 3 });
+    expect(drafts.items).toHaveLength(1);
+    expect(proposals.items).toHaveLength(3);
+    expect(WikiEntityListResponseSchema.safeParse(wiki).success).toBe(true);
+  });
+
+  it.each(["empty", "unknown", "partial"] as const)(
+    "keeps unrelated fixture routes stable for the %s Inbox variant",
+    async (inboxFixture) => {
+      const baseline = createFixtureApi();
+      const variant = createFixtureApi({ inboxFixture });
+      const request = { limit: 25 } as const;
+      const [baselineActivity, variantActivity, baselineRelays, variantRelays, baselineWorkstreams, variantWorkstreams] = await Promise.all([
+        baseline.getActivity(request),
+        variant.getActivity(request),
+        baseline.getRelays({ perspective: "mine", states: ["published", "acknowledged"], limit: 25 }),
+        variant.getRelays({ perspective: "mine", states: ["published", "acknowledged"], limit: 25 }),
+        baseline.getWorkstreams(request),
+        variant.getWorkstreams(request),
+      ]);
+
+      expect(variantActivity).toEqual(baselineActivity);
+      expect(variantRelays).toEqual(baselineRelays);
+      expect(variantWorkstreams).toEqual(baselineWorkstreams);
+    },
+  );
 });

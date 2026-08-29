@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpHubApi, HubApiError, fixturesEnabled, readBootstrapToken } from "./client";
+import {
+  HttpHubApi,
+  HubApiError,
+  fixturesEnabled,
+  inboxFixtureVariant,
+  readBootstrapToken,
+} from "./client";
 import type { ActivityResponse, JobSummary, RelayOperationPreviewRequest } from "./types";
 import { createFixtureApi } from "../dev/fixture-api";
 
@@ -54,7 +60,20 @@ describe("bootstrap fragment handling", () => {
   it("cannot enable populated fixtures in a production build", () => {
     expect(fixturesEnabled(false, "?fixture=populated")).toBe(false);
     expect(fixturesEnabled(true, "?fixture=populated")).toBe(true);
+    expect(fixturesEnabled(true, "?fixture=populated&inboxFixture=empty")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=empty")).toBe(false);
+  });
+
+  it.each([
+    ["?fixture=populated&inboxFixture=empty", "empty"],
+    ["?fixture=populated&inboxFixture=unknown", "unknown"],
+    ["?fixture=populated&inboxFixture=partial", "partial"],
+    ["?fixture=populated", undefined],
+    ["?fixture=populated&inboxFixture=populated", undefined],
+    ["?fixture=populated&inboxFixture=EMPTY", undefined],
+    ["?fixture=populated&inboxFixture=../../private", undefined],
+  ])("bounds the Inbox fixture variant in %s", (search, expected) => {
+    expect(inboxFixtureVariant(search)).toBe(expected);
   });
 });
 

@@ -120,6 +120,12 @@ export interface JobSubscription {
   close(): void;
 }
 
+export type InboxFixtureVariant = "empty" | "unknown" | "partial";
+
+export interface FixtureApiOptions {
+  inboxFixture?: InboxFixtureVariant;
+}
+
 export interface HubApi {
   bootstrap(token: string): Promise<BootstrapResponse>;
   getSession(): Promise<SessionResponse>;
@@ -624,12 +630,20 @@ export function fixturesEnabled(isDevelopment: boolean, search: string): boolean
   return isDevelopment && new URLSearchParams(search).get("fixture") === "populated";
 }
 
+export function inboxFixtureVariant(search: string): InboxFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("inboxFixture");
+  return value === "empty" || value === "unknown" || value === "partial"
+    ? value
+    : undefined;
+}
+
 export async function resolveApi(): Promise<HubApi> {
   if (
     createFixtureApi !== null
     && fixturesEnabled(import.meta.env.DEV, window.location.search)
   ) {
-    return createFixtureApi();
+    const variant = inboxFixtureVariant(window.location.search);
+    return createFixtureApi(variant === undefined ? {} : { inboxFixture: variant });
   }
   return new HttpHubApi();
 }

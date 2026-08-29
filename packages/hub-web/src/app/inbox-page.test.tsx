@@ -212,13 +212,34 @@ describe("Inbox Spec-authoring workbench", () => {
     }
   });
 
+  it("drops cached authorship grouping when a current-actor refresh fails", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    const initialIdentity = await api.getCurrentActor();
+    const actor = vi.spyOn(api, "getCurrentActor")
+      .mockResolvedValueOnce(initialIdentity)
+      .mockRejectedValueOnce(new Error("Current identity is unavailable."));
+    renderRoute(api, `/inbox?view=review&proposal=${PROPOSAL_ID}`);
+
+    expect(await screen.findByRole("heading", { name: "Needs your review" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Waiting for teammate" })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(await screen.findByRole("heading", { name: "Needs review" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Needs your review" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Waiting for teammate" })).not.toBeInTheDocument();
+    expect(await screen.findByText("Team identity is not set")).toBeVisible();
+    expect(actor).toHaveBeenCalledTimes(2);
+  });
+
   it("presents a create as readable Spec content with technical metadata collapsed", async () => {
     const user = userEvent.setup();
     renderRoute(createFixtureApi(), `/inbox?view=review&proposal=${OWN_PROPOSAL_ID}`);
 
     const detail = await screen.findByRole("region", { name: "Selected Inbox review detail" });
     expect(await within(detail).findByText("Spec change")).toBeVisible();
-    expect(within(detail).getByText("New Constraint")).toBeVisible();
+    expect(within(detail).getByText("New constraint")).toBeVisible();
     expect(within(detail).getByText("Published by Ada Lovelace")).toBeVisible();
     expect(within(detail).getByRole("heading", { name: "What will change" })).toBeVisible();
     expect(within(detail).getByText("Every approval confirmation must explain the durable Spec change, proposal transition, and Activity record before apply.")).toBeVisible();
@@ -323,6 +344,7 @@ describe("Inbox Spec-authoring workbench", () => {
   });
 
   it("renders safe actionable evidence links and natural relationship copy for a local draft", async () => {
+    const user = userEvent.setup();
     renderRoute(createFixtureApi(), `/inbox?view=drafts&draft=${DRAFT_ID}`);
 
     const detail = await screen.findByRole("region", { name: "Selected Inbox draft detail" });
@@ -333,10 +355,11 @@ describe("Inbox Spec-authoring workbench", () => {
       "href",
       "/knowledge/mx_01000000000000000000000001",
     );
-    expect(within(evidence).getByRole("link", { name: "sym.createHubServer" })).toHaveAttribute(
+    expect(within(evidence).getByRole("link", { name: "Open referenced code symbol" })).toHaveAttribute(
       "href",
       "/code/symbols/sym.createHubServer",
     );
+    expect(evidence).not.toHaveTextContent("sym.createHubServer");
     const external = within(evidence).getByRole("link", { name: /Accessible dialog guidance/ });
     expect(external).toHaveAttribute("href", "https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/");
     expect(external).toHaveAttribute("target", "_blank");
@@ -344,11 +367,47 @@ describe("Inbox Spec-authoring workbench", () => {
 
     const related = within(detail).getByRole("heading", { name: "Related knowledge" }).closest("section");
     if (related === null) throw new Error("Expected the related knowledge section.");
+    expect(within(related).getByText("Topic")).toBeVisible();
     expect(within(related).getByText("Derived from")).toBeVisible();
-    expect(within(related).getAllByRole("link", { name: "Human-team memory release" })[0]).toHaveAttribute(
-      "href",
-      "/knowledge/mx_01000000000000000000000001",
-    );
+    for (const link of within(related).getAllByRole("link", { name: "Human-team memory release" })) {
+      expect(link).toHaveAttribute("href", "/knowledge/mx_01000000000000000000000001");
+    }
+    expect(related).not.toHaveTextContent("mx_01000000000000000000000001");
+
+    const technical = within(detail).getByRole("button", { name: "Technical details" });
+    await user.click(technical);
+    expect(within(detail).getByText("sym.createHubServer")).toBeVisible();
+  });
+
+  it("phrases a verified_by create relation in its stored direction", async () => {
+    const api = createFixtureApi();
+    const draft = await api.getInboxDraft(DRAFT_ID);
+    if (
+      draft.input.change.kind !== "spec.create"
+      || draft.input.change.relation === undefined
+      || draft.input.change.relation.target.kind !== "spec"
+    ) {
+      throw new Error("Expected a related create draft fixture.");
+    }
+    vi.spyOn(api, "getInboxDraft").mockResolvedValue({
+      ...draft,
+      input: {
+        ...draft.input,
+        change: {
+          ...draft.input.change,
+          entityKind: "acceptance_criterion",
+          relation: { type: "verified_by", target: draft.input.change.relation.target },
+        },
+      },
+    });
+    renderRoute(api, `/inbox?view=drafts&draft=${DRAFT_ID}`);
+
+    await screen.findByRole("heading", { level: 2, name: draft.title });
+    const detail = await screen.findByRole("region", { name: "Selected Inbox draft detail" });
+    const related = within(detail).getByRole("heading", { name: "Related knowledge" }).closest("section");
+    if (related === null) throw new Error("Expected the related knowledge section.");
+    expect(within(related).getByText("Verifies")).toBeVisible();
+    expect(within(related).queryByText("Verified by")).not.toBeInTheDocument();
   });
 
   it("uses a publish-first draft action hierarchy with keyboard-safe discard overflow and collapsed Advanced fields", async () => {
@@ -368,7 +427,7 @@ describe("Inbox Spec-authoring workbench", () => {
     expect(discard).toHaveFocus();
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Discard draft…" })).not.toBeInTheDocument());
-    expect(more).toHaveFocus();
+    expect(screen.getByRole("button", { name: "More draft actions" })).toHaveFocus();
 
     await user.click(edit);
     const dialog = await screen.findByRole("dialog", { name: "Edit local Spec draft" });
@@ -431,7 +490,7 @@ describe("Inbox Spec-authoring workbench", () => {
 
     await user.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("menuitem", { name: "Decline proposal…" })).not.toBeInTheDocument());
-    expect(more).toHaveFocus();
+    expect(screen.getByRole("button", { name: "More proposal actions" })).toHaveFocus();
     await selectMoreAction(user, "Decline proposal…");
     expect(await screen.findByRole("dialog", { name: "Decline proposal" })).toBeVisible();
     expect(preview).not.toHaveBeenCalled();
@@ -594,7 +653,12 @@ describe("Inbox Spec-authoring workbench", () => {
       actor: pending.author,
     });
     const preview = vi.spyOn(api, "previewInboxOperation");
-    const apply = vi.spyOn(api, "applyInboxOperation");
+    const applyGate = deferred<void>();
+    const realApply = api.applyInboxOperation.bind(api);
+    const apply = vi.spyOn(api, "applyInboxOperation").mockImplementation(async (envelope) => {
+      await applyGate.promise;
+      return realApply(envelope);
+    });
     renderRoute(api, `/inbox?view=review&proposal=${PROPOSAL_ID}`);
 
     await screen.findByRole("heading", { level: 2, name: pending.title });
@@ -639,8 +703,12 @@ describe("Inbox Spec-authoring workbench", () => {
     await user.click(within(repairDialog).getByRole("button", { name: "Review repaired proposal" }));
     const repairConfirmation = await screen.findByRole("alertdialog", { name: "Return this proposal to review?" });
     await user.click(within(repairConfirmation).getByRole("button", { name: "Repair and return to review" }));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Repair proposal manually" })).not.toBeInTheDocument());
     await waitFor(() => expect(apply).toHaveBeenCalledOnce());
+    await user.keyboard("{Escape}");
+    expect(repairConfirmation).toBeVisible();
+    expect(within(repairConfirmation).getByRole("button", { name: "Saving…" })).toBeDisabled();
+    applyGate.resolve();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Repair proposal manually" })).not.toBeInTheDocument());
     expect(apply.mock.calls[0]![0].request.action.kind).toBe("inbox.repair");
   });
 
@@ -693,7 +761,7 @@ describe("Inbox Spec-authoring workbench", () => {
     await waitFor(() => expect(apply).toHaveBeenCalledOnce());
     expect(exactEnvelope).toBeDefined();
     expect(apply.mock.calls[0]![0]).toBe(exactEnvelope);
-    const success = await screen.findByText("Draft state updated on this device from the exact preview.");
+    const success = await screen.findByText("Draft state updated on this device.");
     await waitFor(() => expect(success).toHaveFocus());
   });
 
@@ -970,13 +1038,42 @@ describe("Inbox Spec-authoring workbench", () => {
     await user.click(within(dialog).getByRole("button", { name: "Review decline" }));
     await within(dialog).findByRole("button", { name: "Exact technical details" });
     expect(preview.mock.calls[0]![0].operationId).not.toBe(preview.mock.calls[1]![0].operationId);
-    await user.click(within(dialog).getByRole("button", { name: "Review exact preview" }));
+    await user.click(within(dialog).getByRole("button", { name: "Review outcome" }));
     const confirmation = await screen.findByRole("alertdialog", { name: "Decline this proposal?" });
     await user.click(within(confirmation).getByRole("button", { name: "Decline proposal" }));
     expect(await within(confirmation).findByRole("heading", { name: "This view could not be loaded" })).toBeVisible();
     expect(confirmation).not.toHaveTextContent("/private/repository");
     await user.click(within(confirmation).getByRole("button", { name: "Keep reviewing" }));
     expect(screen.getByRole("dialog", { name: "Decline proposal" })).toBeVisible();
+  });
+
+  it("keeps a supporting-action confirmation modal while its apply is pending", async () => {
+    const user = userEvent.setup();
+    const api = createFixtureApi();
+    const applyGate = deferred<void>();
+    const realApply = api.applyInboxOperation.bind(api);
+    const apply = vi.spyOn(api, "applyInboxOperation").mockImplementation(async (envelope) => {
+      await applyGate.promise;
+      return realApply(envelope);
+    });
+    renderRoute(api, `/inbox?view=review&proposal=${PROPOSAL_ID}`);
+
+    await screen.findByRole("heading", { level: 2, name: "Clarify release evidence review" });
+    await selectMoreAction(user, "Decline proposal…");
+    const dialog = await screen.findByRole("dialog", { name: "Decline proposal" });
+    await user.type(within(dialog).getByRole("textbox", { name: "Review rationale" }), "The evidence is incomplete.");
+    await user.click(within(dialog).getByRole("button", { name: "Review decline" }));
+    await user.click(await within(dialog).findByRole("button", { name: "Review outcome" }));
+    const confirmation = await screen.findByRole("alertdialog", { name: "Decline this proposal?" });
+    await user.click(within(confirmation).getByRole("button", { name: "Decline proposal" }));
+    await waitFor(() => expect(apply).toHaveBeenCalledOnce());
+
+    await user.keyboard("{Escape}");
+    expect(confirmation).toBeVisible();
+    expect(within(confirmation).getByRole("button", { name: "Applying…" })).toBeDisabled();
+
+    applyGate.resolve();
+    await waitFor(() => expect(screen.queryByRole("alertdialog", { name: "Decline this proposal?" })).not.toBeInTheDocument());
   });
 
   it("keeps publication read-only until privacy confirmation, applies its exact envelope, and focuses the Git notice", async () => {
@@ -1060,7 +1157,7 @@ describe("Inbox Spec-authoring workbench", () => {
     expect(preview).toHaveBeenCalledTimes(2);
     expect(apply.mock.calls[1]![0]).toBe(envelopes[1]);
     await waitFor(() => expect(screen.queryByRole("alertdialog", { name: "Discard this draft?" })).not.toBeInTheDocument());
-    expect(await screen.findByText("Draft state updated on this device from the exact preview.")).toBeVisible();
+    expect(await screen.findByText("Draft state updated on this device.")).toBeVisible();
   });
 
   it("keeps draft edit, publication, and approval capabilities independent", async () => {
@@ -1078,7 +1175,8 @@ describe("Inbox Spec-authoring workbench", () => {
     const publishView = renderRoute(publishApi, `/inbox?view=drafts&draft=${DRAFT_ID}`);
 
     await screen.findByRole("heading", { level: 2, name: "Keep Inbox review focused on meaningful changes" });
-    expect(screen.getByRole("button", { name: "Publish for review" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Publish for review" })).toBeDisabled();
+    expect(screen.getByText("Publication is unavailable: Spec approval is offline.")).toBeVisible();
     expect(screen.getByRole("button", { name: "Edit wording" })).toBeDisabled();
     expect(screen.getByText("Editing and discarding are unavailable: Local draft writes are locked.")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "More draft actions" }));

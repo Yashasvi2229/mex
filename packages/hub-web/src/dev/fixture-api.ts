@@ -1,4 +1,4 @@
-import type { HubApi, JobSubscription } from "../api/client";
+import type { FixtureApiOptions, HubApi, JobSubscription } from "../api/client";
 import type {
   ActivityItem,
   ActivityRequest,
@@ -604,6 +604,10 @@ const wikiEntities: WikiEntitySummary[] = [
     diagnosticsTruncated: false,
     route: `/knowledge/${wikiIds.activity}`,
   },
+];
+
+const detailOnlyWikiEntities = new Map<string, WikiEntitySummary>([[
+  fixtureInboxSpecId,
   {
     id: fixtureInboxSpecId,
     kind: "spec",
@@ -621,10 +625,10 @@ const wikiEntities: WikiEntitySummary[] = [
     diagnosticsTruncated: false,
     route: `/knowledge/${fixtureInboxSpecId}`,
   },
-];
+]]);
 
 function wikiDetail(id: string): WikiEntityDetailResponse {
-  const entity = wikiEntities.find((item) => item.id === id);
+  const entity = wikiEntities.find((item) => item.id === id) ?? detailOnlyWikiEntities.get(id);
   if (entity === undefined) throw new Error("Fixture Wiki entity not found.");
   const grounded = entity.id === wikiIds.hub;
   const body = entity.id === wikiIds.hub
@@ -1307,8 +1311,9 @@ class FixtureHubApi implements HubApi {
   readonly #jobs = structuredClone(jobs);
   readonly #members = structuredClone(fixtureMembers);
   readonly #workstreams = structuredClone(fixtureWorkstreams);
-  readonly #inboxDrafts = structuredClone(fixtureInboxDrafts);
-  readonly #inboxProposals = structuredClone(fixtureInboxProposals);
+  readonly #inboxFixture: FixtureApiOptions["inboxFixture"];
+  readonly #inboxDrafts: InboxDraftDetail[];
+  readonly #inboxProposals: InboxProposalDetail[];
   readonly #relayDrafts = structuredClone(fixtureRelayDrafts);
   readonly #relays = structuredClone(fixtureRelays);
   readonly #activityItems = structuredClone(activityItems);
@@ -1319,11 +1324,50 @@ class FixtureHubApi implements HubApi {
   };
   #previewSequence = 0;
 
+  constructor(options: FixtureApiOptions = {}) {
+    this.#inboxFixture = options.inboxFixture;
+    this.#inboxDrafts = structuredClone(
+      options.inboxFixture === "empty" ? [] : fixtureInboxDrafts,
+    );
+    this.#inboxProposals = structuredClone(
+      options.inboxFixture === "empty" ? [] : fixtureInboxProposals,
+    );
+  }
+
+  #currentInboxActor(): TeamCurrentActorResponse {
+    if (this.#inboxFixture !== "unknown") {
+      return fixtureCurrentActor(this.#members, this.#selection);
+    }
+    return {
+      actor: { kind: "unknown" },
+      source: "unknown",
+      selection: null,
+      diagnostics: [{
+        code: "ACTOR_UNKNOWN",
+        severity: "warning",
+        message: "MEX could not resolve a current Team or Git identity.",
+      }],
+      diagnosticsTruncated: false,
+    };
+  }
+
   bootstrap() { return Promise.resolve({ expiresAt: session.expiresAt }); }
   getSession() { return Promise.resolve(session); }
-  getCapabilities() { return Promise.resolve(capabilities); }
+  getCapabilities() {
+    return Promise.resolve(structuredClone(this.#inboxFixture === "partial"
+      ? {
+          ...capabilities,
+          inbox: {
+            ...capabilities.inbox,
+            proposalMutation: unavailable("Inbox proposal writes are not connected in this Hub process."),
+            specApproval: unavailable("Inbox Spec approval requires exact Wiki planning and apply."),
+          },
+        }
+      : capabilities));
+  }
   getHome() {
-    const actor = fixtureCurrentActor(this.#members, this.#selection).actor;
+    const actor = this.#currentInboxActor().actor;
+    const relayActor = fixtureCurrentActor(this.#members, this.#selection).actor;
     return Promise.resolve({
       ...home,
       actor: actor.kind === "member"
@@ -1335,13 +1379,13 @@ class FixtureHubApi implements HubApi {
           availability: "available" as const,
           count: this.#workstreams.filter((item) => item.state !== "archived").length,
         },
-        relays: actor.kind !== "member"
+        relays: relayActor.kind !== "member"
           ? { availability: "unavailable" as const, count: null, reason: "Select an active Member to see your open Relay handoffs." }
           : {
               availability: "available" as const,
               count: this.#relays.filter((relay) => (
-                (relay.state === "published" && relay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === actor.memberId))
-                || (relay.state === "acknowledged" && relay.acknowledgedBy?.kind === "member" && relay.acknowledgedBy.memberId === actor.memberId)
+                (relay.state === "published" && relay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === relayActor.memberId))
+                || (relay.state === "acknowledged" && relay.acknowledgedBy?.kind === "member" && relay.acknowledgedBy.memberId === relayActor.memberId)
               )).length,
             },
         inbox: {
@@ -1381,7 +1425,7 @@ class FixtureHubApi implements HubApi {
       : Promise.resolve(structuredClone(member));
   }
   getCurrentActor(): Promise<TeamCurrentActorResponse> {
-    return Promise.resolve(fixtureCurrentActor(this.#members, this.#selection));
+    return Promise.resolve(structuredClone(this.#currentInboxActor()));
   }
   getWorkstreams(request: TeamWorkstreamListRequest): Promise<TeamWorkstreamListResponse> {
     const filtered = this.#workstreams.filter((workstream) => (
@@ -1870,7 +1914,7 @@ class FixtureHubApi implements HubApi {
       receipt: {
         schemaVersion: 1,
         authority: {
-          actor: fixtureCurrentActor(this.#members, this.#selection).actor,
+          actor: this.#currentInboxActor().actor,
           occurredAt: timestamp(0),
           repoState: {
             branch: home.repository.branch,
@@ -2418,6 +2462,6 @@ class FixtureHubApi implements HubApi {
   subscribeToJob(): JobSubscription { return { close() {} }; }
 }
 
-export function createFixtureApi(): HubApi {
-  return new FixtureHubApi();
+export function createFixtureApi(options: FixtureApiOptions = {}): HubApi {
+  return new FixtureHubApi(options);
 }
