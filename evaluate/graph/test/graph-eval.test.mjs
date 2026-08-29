@@ -187,7 +187,7 @@ test("current-schema integrity hashing includes graph rows and semantic metadata
   db.close();
 
   const first = inspectGraphDatabase(path, { nodesCreated: 1 });
-  assert.equal(first.schemaVersion, 3);
+  assert.equal(first.schemaVersion, 4);
   assert.deepEqual(first.parseStatusCounts, { partial: 1 });
   assert.equal(first.totalDiagnostics, 2);
   assert.equal(first.resolvedReferences, 1);

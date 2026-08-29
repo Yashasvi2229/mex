@@ -52,6 +52,7 @@ import {
   TYPESCRIPT_COMPILER_EXTRACTOR_VERSION,
   TYPESCRIPT_COMPILER_VERSION,
   type CompilerExtractedNode,
+  type CompilerExtractionOptions,
   type CompilerExtractionResult,
   type CompilerFileExtraction,
   type CompilerSemanticInput,
@@ -95,6 +96,8 @@ export interface GraphEngineOptions {
   readOnly?: boolean;
   /** Injectable source-file access for embedders and deterministic fault tests. */
   sourceFileAccess?: Partial<GraphSourceFileAccess>;
+  /** Compiler extraction knobs (semantic diagnostics, program-crash fault tests). */
+  compilerExtraction?: CompilerExtractionOptions;
 }
 
 interface GraphEngineInternalHooks {
@@ -265,6 +268,7 @@ class GraphEngineImpl implements GraphEngine {
   private readonly immutable: boolean;
   private readonly sourceFileAccess: GraphSourceFileAccess;
   private readonly internal: GraphEngineInternalHooks;
+  private readonly compilerExtraction?: CompilerExtractionOptions;
   private db: SqliteDatabase | null = null;
   private store: GraphStore | null = null;
 
@@ -284,6 +288,7 @@ class GraphEngineImpl implements GraphEngine {
       : NODE_SOURCE_FILE_ACCESS;
     this.internal = (options as GraphEngineOptions & GraphEngineInternalOptions)
       .__internalGraphEngineHooks ?? {};
+    this.compilerExtraction = options.compilerExtraction;
     if (database) {
       this.db = database;
       this.store = new GraphStore(database);
@@ -309,7 +314,13 @@ class GraphEngineImpl implements GraphEngine {
     const root = rootDir ? resolve(rootDir) : this.rootDir;
     const gitBeforeStaging = readGraphGitProvenance(root);
     const manifest = graphManifest(root);
-    const staged = await stageCorpus(root, manifest, this.sourceFileAccess, this.internal);
+    const staged = await stageCorpus(
+      root,
+      manifest,
+      this.sourceFileAccess,
+      this.internal,
+      this.compilerExtraction,
+    );
     try {
       this.assertNoNewParseFailures(staged);
       const result = this.publish(staged, root, gitBeforeStaging);
@@ -344,7 +355,13 @@ class GraphEngineImpl implements GraphEngine {
 
     // Re-stage the whole semantic corpus. This makes an arbitrary sync sequence
     // converge to the same graph as a clean build and re-resolves cross-file refs.
-    const staged = await stageCorpus(this.rootDir, manifest, this.sourceFileAccess, this.internal);
+    const staged = await stageCorpus(
+      this.rootDir,
+      manifest,
+      this.sourceFileAccess,
+      this.internal,
+      this.compilerExtraction,
+    );
     try {
       const stagedByPath = new Map(staged.files.map((file) => [file.record.path, file]));
       const unstagedExisting = changedSources.filter((file) => (
@@ -531,6 +548,7 @@ async function stageCorpus(
   manifest = graphManifest(root),
   sourceFileAccess: GraphSourceFileAccess = NODE_SOURCE_FILE_ACCESS,
   internal: GraphEngineInternalHooks = {},
+  compilerExtraction?: CompilerExtractionOptions,
 ): Promise<StagedCorpus> {
   const sourceSpool = new GraphSourceSpool();
   try {
@@ -570,6 +588,7 @@ async function stageCorpus(
     const semanticInputLedger = createGraphSemanticInputLedger();
     try {
       compiler = buildTypeScriptExtraction(root, compilerPaths, {
+        ...compilerExtraction,
         stagedInputs: compilerInputs,
         readProjectFile: (absolutePath) => {
           const source = readSecureCompilerInput(root, absolutePath);
@@ -604,7 +623,13 @@ async function stageCorpus(
     const compilerByPath = new Map(compiler.files.map((file) => [file.filePath, file]));
     const treeLanguages = [...new Set(discovered.map((file) => detectLanguage(file.relPath))
       .filter((language) => !COMPILER_LANGUAGES.has(language)))];
-    await loadGrammars(treeLanguages);
+    // Compiler-language files a crashing project could not stage fall back to
+    // tree-sitter, so their grammars must be present too.
+    const fallbackLanguages = [...new Set(discovered
+      .filter((file) => COMPILER_LANGUAGES.has(detectLanguage(file.relPath))
+        && !compilerByPath.has(file.relPath))
+      .map((file) => detectLanguage(file.relPath)))];
+    await loadGrammars([...treeLanguages, ...fallbackLanguages]);
 
     const files = discovered.map((file) => {
       const source = sourceSpool.read(file);
@@ -1507,15 +1532,22 @@ function validateCompilerInputs(
   root: string,
 ): void {
   const observed = new Map(compiler.semanticInputs.map((input) => [input.filePath, input.contentHash]));
+  const discoveredByPath = new Map(discovered.map((file) => [file.relPath, file]));
   const failures: GraphSourceStagingFailure[] = [];
-  for (const file of discovered) {
-    if (!COMPILER_LANGUAGES.has(detectLanguage(file.relPath))) continue;
-    const compilerHash = observed.get(file.relPath);
-    if (compilerHash === file.contentHash) continue;
+  // A compiler-language file can be deliberately absent from compiler.files
+  // when program creation crashes; the engine then extracts its immutable spool
+  // bytes with tree-sitter. Exact compiler-consumption validation therefore
+  // applies to files that actually produced compiler facts.
+  for (const extraction of compiler.files) {
+    const file = discoveredByPath.get(extraction.filePath);
+    const compilerHash = observed.get(extraction.filePath);
+    if (file && compilerHash === file.contentHash) continue;
     failures.push({
-      filePath: file.relPath,
+      filePath: extraction.filePath,
       operation: "read",
-      message: compilerHash === undefined
+      message: !file
+        ? "The TypeScript compiler produced facts for a file outside the staged corpus."
+        : compilerHash === undefined
         ? "The TypeScript compiler did not consume the securely staged source."
         : "The TypeScript compiler consumed source bytes that differ from the staged corpus.",
     });

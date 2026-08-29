@@ -30,7 +30,7 @@ mex maps your code, turns what agents learn into structured Markdown, and keeps 
 
 Every coding session starts with relevant architectural context instead of another full-repository scan.
 
-> **New in v0.7.2:** source-backed one-call graph retrieval with compiler-resolved TypeScript flows, deterministic evidence, and hard output budgets.
+> **New in v0.7.3:** graph builds hold one compiler program at a time, stores are 36-40% smaller, `mex check` no longer rebuilds the graph, and `mex graph repair` recovers an interrupted store without a rebuild.
 
 💬 **Join the mex community on Discord** — discuss ideas, get help, share feedback, and contribute to the project.
 
@@ -272,6 +272,7 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | `mex graph get <node-id...>` | Expand exact symbols from a retrieval result |
 | `mex graph query <relation> <symbol>` | Query structural code relationships |
 | `mex graph ground` | Connect an existing pre-0.7 wiki to the graph |
+| `mex graph repair` | Recover an interrupted graph store without a rebuild |
 | `mex impact <symbol\|file>` | Find code and wiki content affected by a change |
 | `mex log <message>` | Record a decision, note, risk, or todo |
 | `mex timeline` | Read recent project events |
@@ -347,7 +348,7 @@ The MCP package is not published yet. For local development, build it with:
 npm run build --workspace mex-mcp
 ```
 
-The primary v0.7.2 release remains the `mex-agent` CLI.
+The primary v0.7.3 release remains the `mex-agent` CLI.
 
 ## Agent memory mode
 

@@ -1,13 +1,15 @@
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  existsSync,
   readFileSync,
   readdirSync,
   renameSync,
   rmSync,
   symlinkSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -22,6 +24,7 @@ import {
   acquireGraphMaintenanceLease,
   GraphMaintenanceError,
   rebuildGraph,
+  repairGraph,
   refreshGraph,
 } from "../maintenance.js";
 import { inspectGraphStatus } from "../status.js";
@@ -77,6 +80,360 @@ function git(root: string, ...args: string[]): string {
 }
 
 describe("graph maintenance", () => {
+  it("repairs a stranded WAL through a validated candidate without writing the live database in place", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export const service = 1;\n");
+    const dbPath = await buildBaseline(root);
+    const phases: string[] = [];
+    const strand = spawnSync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA wal_autocheckpoint = 0");
+      db.prepare(
+        "INSERT INTO project_metadata (key, value, updated_at) VALUES (?, ?, ?) " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
+      ).run("stranded_marker", "preserved", Date.now());
+      process.kill(process.pid, "SIGKILL");
+    `, dbPath], { encoding: "utf8" });
+    expect(strand.status).not.toBe(0);
+    const walPath = `${dbPath}-wal`;
+    const walBytes = statSync(walPath).size;
+    expect(walBytes).toBeGreaterThan(0);
+
+    const result = await repairGraph(root, {
+      onProgress: (entry) => phases.push(entry.phase),
+    });
+
+    expect(result).toMatchObject({
+      state: "succeeded",
+      lineage: "v4",
+      upgraded: false,
+      recoveredWalBytes: walBytes,
+    });
+    expect(phases).toEqual(["discover", "stage", "validate", "publish"]);
+    expect(!existsSync(walPath) || statSync(walPath).size === 0).toBe(true);
+    const repaired = openSqlite(dbPath, { readOnly: true, immutable: true });
+    try {
+      expect(repaired.prepare("SELECT value FROM project_metadata WHERE key = ?")
+        .get("stranded_marker")).toEqual({ value: "preserved" });
+    } finally {
+      repaired.close();
+    }
+    expect(ownedArtifacts(root)).toEqual([]);
+  }, 30_000);
+
+  it("publishes a recognized older-schema candidate with its exact snapshot advanced to v4", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export function preservedFact(): number { return 4; }\n");
+    const dbPath = await buildBaseline(root);
+    const legacy = openSqlite(dbPath);
+    let nodeCount = 0;
+    try {
+      nodeCount = (legacy.prepare("SELECT COUNT(*) AS count FROM nodes").get() as { count: number }).count;
+      const snapshotRow = legacy.prepare(
+        "SELECT value FROM project_metadata WHERE key = ?",
+      ).get("graph_snapshot_v1") as { value: string };
+      const snapshot = JSON.parse(snapshotRow.value) as Record<string, unknown>;
+      snapshot.schemaVersion = 3;
+      legacy.prepare("UPDATE project_metadata SET value = ? WHERE key = ?")
+        .run(JSON.stringify(snapshot), "graph_snapshot_v1");
+      legacy.exec("DELETE FROM schema_versions");
+      legacy.prepare(
+        "INSERT INTO schema_versions(version, applied_at, description) VALUES(3, ?, ?)",
+      ).run(Date.now(), "recognized hybrid-v3 repair fixture");
+    } finally {
+      legacy.close();
+    }
+
+    const result = await repairGraph(root);
+
+    expect(result).toMatchObject({
+      state: "succeeded",
+      fromSchemaVersion: 3,
+      toSchemaVersion: 4,
+      lineage: "hybrid-v3",
+      upgraded: true,
+    });
+    expect(result.status.status).toBe("fresh");
+    const repaired = openSqlite(dbPath, { readOnly: true, immutable: true });
+    try {
+      expect((repaired.prepare("SELECT COUNT(*) AS count FROM nodes").get() as { count: number }).count)
+        .toBe(nodeCount);
+      const snapshotRow = repaired.prepare(
+        "SELECT value FROM project_metadata WHERE key = ?",
+      ).get("graph_snapshot_v1") as { value: string };
+      expect(JSON.parse(snapshotRow.value)).toMatchObject({ schemaVersion: 4 });
+    } finally {
+      repaired.close();
+    }
+  }, 30_000);
+
+  it("leaves the live database and stranded WAL exact when repair candidate validation fails", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export const service = 1;\n");
+    const dbPath = await buildBaseline(root);
+    const strand = spawnSync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA wal_autocheckpoint = 0");
+      db.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = ?")
+        .run(Date.now(), "manifest_hash");
+      process.kill(process.pid, "SIGKILL");
+    `, dbPath], { encoding: "utf8" });
+    expect(strand.status).not.toBe(0);
+    const walPath = `${dbPath}-wal`;
+    const databaseBefore = readFileSync(dbPath);
+    const walBefore = readFileSync(walPath);
+    const options = {
+      __internal: {
+        afterCandidateBuilt(candidatePath: string) {
+          writeFileSync(candidatePath, "invalid repaired candidate");
+        },
+      },
+    } as GraphMaintenanceOptions;
+
+    await expect(repairGraph(root, options)).rejects.toBeInstanceOf(GraphMaintenanceError);
+
+    expect(readFileSync(dbPath)).toEqual(databaseBefore);
+    expect(readFileSync(walPath)).toEqual(walBefore);
+    expect(ownedArtifacts(root)).toEqual([]);
+  }, 30_000);
+
+  it("redacts live and candidate paths from repair materialization failures", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export const service = 1;\n");
+    const dbPath = await buildBaseline(root);
+    const before = readFileSync(dbPath);
+    let candidatePath = "";
+    const options = {
+      __internal: {
+        beforeRepairCandidateMaterialize(path: string) {
+          candidatePath = path;
+          throw new Error(`cannot materialize ${dbPath} into ${path}`);
+        },
+      },
+    } as GraphMaintenanceOptions;
+
+    let failure: GraphMaintenanceError | null = null;
+    try {
+      await repairGraph(root, options);
+    } catch (error) {
+      failure = error as GraphMaintenanceError;
+    }
+
+    expect(failure).toMatchObject({ code: "GRAPH_INDEX_NOT_REPAIRABLE" });
+    expect(failure!.message).toBe(
+      "The graph recovery state could not be materialized safely. Run `mex graph rebuild`.",
+    );
+    expect(failure!.message).not.toContain(root);
+    expect(failure!.message).not.toContain(candidatePath);
+    expect(readFileSync(dbPath)).toEqual(before);
+    expect(ownedArtifacts(root)).toEqual([]);
+  });
+
+  it("never restores an old SHM snapshot over a changed recovery namespace", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export const service = 1;\n");
+    const dbPath = await buildBaseline(root);
+    const strand = spawnSync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA wal_autocheckpoint = 0");
+      db.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = ?")
+        .run(Date.now(), "manifest_hash");
+      process.kill(process.pid, "SIGKILL");
+    `, dbPath], { encoding: "utf8" });
+    expect(strand.status).not.toBe(0);
+    const walPath = `${dbPath}-wal`;
+    const shmPath = `${dbPath}-shm`;
+    const databaseBefore = readFileSync(dbPath);
+    const walBefore = readFileSync(walPath);
+    const shmBefore = readFileSync(shmPath);
+    const changedShm = Buffer.from(shmBefore);
+    changedShm[changedShm.length - 1] ^= 0xff;
+    const options = {
+      __internal: {
+        beforeRepairCandidateMaterialize() {
+          writeFileSync(shmPath, changedShm);
+          throw new Error("concurrent recovery namespace change");
+        },
+      },
+    } as GraphMaintenanceOptions;
+
+    let failure: GraphMaintenanceError | null = null;
+    try {
+      await repairGraph(root, options);
+    } catch (error) {
+      failure = error as GraphMaintenanceError;
+    }
+
+    expect(failure).toMatchObject({
+      code: "GRAPH_PUBLICATION_FAILED",
+      recoveryPath: expect.stringContaining(".mex/graph.db.recovery-"),
+    });
+    expect(failure!.message).not.toContain(root);
+    expect(readFileSync(dbPath)).toEqual(databaseBefore);
+    expect(readFileSync(walPath)).toEqual(walBefore);
+    expect(readFileSync(shmPath)).toEqual(changedShm);
+    expect(readFileSync(join(root, failure!.recoveryPath!))).toEqual(shmBefore);
+  }, 30_000);
+
+  it("restores detached recovery sidecars byte-for-byte after a post-publication failure", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export const service = 1;\n");
+    const dbPath = await buildBaseline(root);
+    const strand = spawnSync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA wal_autocheckpoint = 0");
+      db.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = ?")
+        .run(Date.now(), "manifest_hash");
+      process.kill(process.pid, "SIGKILL");
+    `, dbPath], { encoding: "utf8" });
+    expect(strand.status).not.toBe(0);
+    const walPath = `${dbPath}-wal`;
+    const databaseBefore = readFileSync(dbPath);
+    const walBefore = readFileSync(walPath);
+    const shmPath = `${dbPath}-shm`;
+    const shmBefore = existsSync(shmPath) ? readFileSync(shmPath) : null;
+    const options = {
+      __internal: {
+        afterPublish(livePath: string) {
+          writeFileSync(livePath, "invalid published repair candidate");
+        },
+      },
+    } as GraphMaintenanceOptions;
+
+    await expect(repairGraph(root, options)).rejects.toMatchObject({
+      code: "GRAPH_CANDIDATE_INVALID",
+    });
+
+    expect(readFileSync(dbPath)).toEqual(databaseBefore);
+    expect(readFileSync(walPath)).toEqual(walBefore);
+    if (shmBefore) expect(readFileSync(shmPath)).toEqual(shmBefore);
+    expect(ownedArtifacts(root)).toEqual([]);
+  }, 30_000);
+
+  it.each([
+    ["unlink-to-rename", "afterRepairShmRemoved"],
+    ["rename-to-fsync", "afterRepairShmRestored"],
+  ] as const)("retries SHM restoration safely across the %s boundary", async (_label, hook) => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export const service = 1;\n");
+    const dbPath = await buildBaseline(root);
+    const strand = spawnSync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA wal_autocheckpoint = 0");
+      db.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = ?")
+        .run(Date.now(), "manifest_hash");
+      process.kill(process.pid, "SIGKILL");
+    `, dbPath], { encoding: "utf8" });
+    expect(strand.status).not.toBe(0);
+    const walPath = `${dbPath}-wal`;
+    const shmPath = `${dbPath}-shm`;
+    const databaseBefore = readFileSync(dbPath);
+    const walBefore = readFileSync(walPath);
+    const shmBefore = readFileSync(shmPath);
+    let injected = false;
+    const options = {
+      __internal: {
+        [hook]() {
+          if (injected) return;
+          injected = true;
+          throw new Error("injected SHM restoration interruption");
+        },
+      },
+    } as GraphMaintenanceOptions;
+
+    await expect(repairGraph(root, options)).rejects.toThrow("injected SHM restoration interruption");
+
+    expect(readFileSync(dbPath)).toEqual(databaseBefore);
+    expect(readFileSync(walPath)).toEqual(walBefore);
+    expect(readFileSync(shmPath)).toEqual(shmBefore);
+    expect(ownedArtifacts(root)).toEqual([]);
+  }, 30_000);
+
+  it("does not attach prior WAL bytes to an independently replaced live graph", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export const service = 1;\n");
+    const dbPath = await buildBaseline(root);
+    const strand = spawnSync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA wal_autocheckpoint = 0");
+      db.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = ?")
+        .run(Date.now(), "manifest_hash");
+      process.kill(process.pid, "SIGKILL");
+    `, dbPath], { encoding: "utf8" });
+    expect(strand.status).not.toBe(0);
+    const walPath = `${dbPath}-wal`;
+    const priorWal = readFileSync(walPath);
+    const replacement = Buffer.from("independent live graph replacement\n");
+    const options = {
+      __internal: {
+        afterPublish(livePath: string) {
+          const replacementPath = join(root, ".mex", "independent-repair-replacement.tmp");
+          writeFileSync(replacementPath, replacement);
+          renameSync(replacementPath, livePath);
+        },
+      },
+    } as GraphMaintenanceOptions;
+
+    let failure: GraphMaintenanceError | null = null;
+    try {
+      await repairGraph(root, options);
+    } catch (error) {
+      failure = error as GraphMaintenanceError;
+    }
+
+    expect(failure).toMatchObject({
+      code: "GRAPH_PUBLICATION_FAILED",
+      recoveryPath: expect.stringContaining(".mex/graph.db.recovery-"),
+    });
+    expect(readFileSync(dbPath)).toEqual(replacement);
+    expect(existsSync(walPath)).toBe(false);
+    expect(readFileSync(join(root, failure!.recoveryPath!))).toEqual(priorWal);
+  }, 30_000);
+
+  it("reports retained recovery sidecars without failing after successful publication", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export const service = 1;\n");
+    const dbPath = await buildBaseline(root);
+    const strand = spawnSync(process.execPath, ["-e", `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA wal_autocheckpoint = 0");
+      db.prepare("UPDATE project_metadata SET updated_at = ? WHERE key = ?")
+        .run(Date.now(), "manifest_hash");
+      process.kill(process.pid, "SIGKILL");
+    `, dbPath], { encoding: "utf8" });
+    expect(strand.status).not.toBe(0);
+    const priorWal = readFileSync(`${dbPath}-wal`);
+    const result = await repairGraph(root, {
+      __internal: {
+        beforeRepairSidecarCleanup(_path: string, index: number) {
+          if (index === 0) throw new Error("injected cleanup interruption");
+        },
+      },
+    } as GraphMaintenanceOptions);
+
+    expect(result.state).toBe("succeeded");
+    const retained = result.diagnostics.find((entry) =>
+      entry.code === "GRAPH_INDEX_RECOVERY_CLEANUP_INCOMPLETE"
+    );
+    expect(retained?.path).toMatch(/^\.mex\/graph\.db\.recovery-.*-wal$/u);
+    expect(readFileSync(join(root, retained!.path!))).toEqual(priorWal);
+    expect((await inspectGraphStatus({ projectRoot: root })).status).toBe("fresh");
+  }, 30_000);
+
   it("rebuilds a missing graph through a validated candidate without leftovers", async () => {
     const root = temporaryRoot();
     source(root, "src/service.ts", "export const service = true;\n");

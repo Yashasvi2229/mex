@@ -98,11 +98,27 @@ const NORMALIZED_TABLES = [
     name: "node_fingerprints",
     columns: ["node_id", "minhash", "neighbors", "token_count"],
     order: ["node_id"],
+    // Schema v4 retains main-v3's BLOB sketch; hex() keeps the hashed projection
+    // textual and identical in meaning to the v2 JSON text, for both encodings.
+    sql: () => `SELECT "node_id", hex("minhash") AS "minhash", "neighbors", "token_count"
+      FROM "node_fingerprints" ORDER BY "node_id"`,
   },
   {
     name: "lsh_buckets",
     columns: ["band", "band_hash", "node_id"],
     order: ["band", "band_hash", "node_id"],
+    // Schema v4 retains main-v3's integer fingerprint ref rather than the
+    // node id. Join back to the owning node so the hashed content keeps meaning
+    // "which node sits in which band bucket", as it did under v2. The ref
+    // itself is deliberately NOT hashed: it is storage bookkeeping, not a
+    // semantic graph fact.
+    sql: (available) => (available.has("ref")
+      ? `SELECT buckets."band" AS "band", buckets."band_hash" AS "band_hash",
+           fingerprints."node_id" AS "node_id"
+         FROM "lsh_buckets" buckets
+         JOIN "node_fingerprints" fingerprints ON fingerprints."ref" = buckets."ref"
+         ORDER BY "band", "band_hash", "node_id"`
+      : null),
   },
 ];
 
@@ -304,6 +320,8 @@ function compareText(left, right) {
 function normalizedRows(db, spec) {
   const available = tableColumns(db, spec.name);
   if (!available.size) return null;
+  const custom = spec.sql?.(available);
+  if (custom) return rows(db, custom);
   const columns = spec.columns.filter((column) => available.has(column));
   if (!columns.length) return [];
   const order = spec.order.filter((column) => available.has(column));

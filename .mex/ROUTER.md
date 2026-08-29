@@ -26,7 +26,12 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
-- MEX v0.7.2 graph retrieval and protocol-v3 JSONL behavior.
+- MEX v0.7.3 graph extraction and protocol-v3 JSONL behavior, including
+  sequential TypeScript programs, compiler crash isolation, explicit WASM tree
+  disposal, compact fingerprints/LSH, and bounded repair.
+- Graph schema v4 combines v0.7.3's compact store with subject-generalized Wiki
+  grounding. Explicit locked maintenance recognizes both historical v3
+  lineages; ordinary reads never migrate or repair a store.
 - Internal human-team application contracts, ownership rules, and stable error
   codes are available under `src/team/contracts` as a provisional boundary.
 - A behavioral WikiPort mock, realistic fixture, reusable conformance suite,

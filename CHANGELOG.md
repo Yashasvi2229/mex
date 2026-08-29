@@ -5,11 +5,69 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- A bounded release-performance gate for local Hub startup, idle CPU/RAM,
+  browser heap, API latency, maintenance working sets, asset closure, and
+  Graph/Wiki database ratios, plus `mex capabilities --json` for agent-safe
+  discovery of installed and currently available commands.
+- An internal repository TeamWorkflowPort with strict canonical repositories,
+  checkout-local state, leases, operation recovery, and conformance coverage
+  for members, Activity, Workstreams, Inbox, Relays, Playbooks, and manual runs.
+- Bounded Member and canonical Activity CLI/private Hub workflows with signed
+  preview/apply, local actor selection, exact revisions, and immutable Activity
+  emission for accepted canonical mutations.
 - Bounded canonical Workstream CLI and private Hub surfaces with signed
   preview/apply for create, update, and one-way archive; each successful
   canonical mutation emits exactly one immutable Activity event.
 - Fresh-index, read-only Spec CLI and Hub views over explicit Wiki hierarchy,
   provenance, sources, and grounding without implicit index maintenance.
+- A governed Team Inbox and Spec-authoring workflow for local drafts, portable
+  canonical proposals, explicit approval/rejection/withdrawal/repair, and exact
+  single-Spec create or update through the real Wiki preview/apply boundary.
+
+### Changed
+- The integration graph uses schema v4: v0.7.3's compact BLOB fingerprints and
+  integer-reference LSH storage combined with subject-generalized Wiki
+  grounding. The v0.7.3 sequential compiler, crash isolation, fallback, and
+  WASM-tree cleanup run inside the existing immutable freshness and atomic
+  publication boundaries.
+- `mex graph repair` now uses the graph maintenance lease and a validated
+  same-directory candidate instead of mutating the published database in place.
+
+### Compatibility
+- Explicit graph maintenance recognizes v1, v2, released-main v3,
+  integration-grounding v3, and complete hybrid v3 stores structurally. v2 and
+  complete v3 lineages upgrade losslessly to schema v4; v1, partial, or
+  ambiguous stores require a safe rebuild. Ordinary reads never migrate.
+
+## [0.7.3] - 2026-08-27
+
+### Added
+- `mex graph repair` checkpoints a stranded write-ahead log and verifies store integrity in place, so a graph left behind by an interrupted build or check no longer requires a full rebuild to recover.
+
+### Changed
+- `mex check` now reads the last published graph read-only. It never synchronizes the graph as a side effect, and reports how many source files the graph is behind instead of silently re-staging the corpus.
+- TypeScript projects are extracted one at a time, with each compiler program released before the next is created, instead of holding every project's program and type checker in memory simultaneously.
+- Graph stores use schema v3, a compact encoding of the fingerprint and locality-sensitive-hashing tables: binary MinHash sketches, integer band hashes, integer fingerprint references, and the composite primary key as the only index.
+- The per-file semantic type-check pass is now opt-in. Parser health has always been derived from syntactic diagnostics, and reference resolution uses the type checker directly, so the full semantic pass only added diagnostic detail at a cost that scaled with the installed dependency surface.
+- Discovered TypeScript projects are configured with `skipLibCheck` and `noEmit`, because extraction needs symbol and type queries rather than a full compile.
+
+### Fixed
+- A malformed source file that triggers an internal TypeScript compiler assertion no longer aborts the entire graph build. The affected project is isolated and its files fall back to Tree-sitter extraction.
+- Two same-identity declarations in one TypeScript or JavaScript file no longer abort corpus staging with a duplicate node id; they are ordinal-disambiguated, matching the existing Python and Rust extractors.
+- Tree-sitter parse trees are released after extraction. They are allocated in the WebAssembly heap and were never reclaimed, so every parsed file leaked for the lifetime of the process.
+- Grammars are now loaded for compiler-language files that compiler extraction could not stage, so the Tree-sitter fallback can actually extract them.
+
+### Performance
+- On a 3,254-file multi-project repository, peak resident memory during a graph build fell from 5.17 GB to 2.11 GB and wall-clock time fell from 448 s to 309 s, with byte-identical graph output.
+- Graph stores are roughly 36-40% smaller: 700.1 MB to 451.1 MB on that repository, and 269.8 MB to 162.9 MB on a 494-file repository. The fingerprint and LSH tables themselves shrank by about 86% and are no longer the largest consumer in a store.
+- A drift check on a repository with edited sources no longer pays graph-staging cost at all, because `mex check` no longer stages.
+
+### Compatibility
+- Node.js 22.5 or newer remains required.
+- Schema-v2 `.mex/graph.db` files migrate to v3 losslessly the next time a writing command runs (`mex graph`, `mex sync`, `mex graph ground`). No rebuild is required and existing groundings continue to resolve. Read-only commands report the usual rebuild guidance until that migration has run.
+- Schema-v1 stores still require a one-time `mex graph` rebuild, unchanged from 0.7.2.
+- Serialized `mh:64:` grounding anchors in scaffold Markdown are unchanged; no scaffold edits are needed.
+- Graph output is unchanged by this release except for the TypeScript project isolation and duplicate-identity fixes, which add nodes and edges that previously aborted or were absent. The compiler extractor version advances, so the first `mex graph` after upgrading performs a full rebuild.
 
 ## [0.7.2] - 2026-08-20
 

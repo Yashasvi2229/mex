@@ -1,5 +1,7 @@
 import type { GraphSourceChanges, GraphStatus } from "../team/contracts/graph.js";
 import {
+  GraphMaintenanceError,
+  repairGraph,
   rebuildGraph,
   refreshGraph,
   type GraphMaintenanceResult,
@@ -103,5 +105,39 @@ function printMaintenance(verb: "refreshed" | "rebuilt", result: GraphMaintenanc
   );
   if (result.recoveryPath) {
     console.log(`Previous index retained for local recovery: ${result.recoveryPath}`);
+  }
+}
+
+/** Explicit locked candidate repair; the live graph is never opened writable. */
+export async function runGraphRepair(
+  input: GraphCommandOptions | string = {},
+): Promise<number> {
+  const options = typeof input === "string" ? { root: input } : input;
+  try {
+    const result = await repairGraph(options.root ?? process.cwd());
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      const recovered = result.recoveredWalBytes > 0
+        ? `recovered ${(result.recoveredWalBytes / 1048576).toFixed(1)} MB of WAL`
+        : "no WAL data was pending";
+      const schema = result.upgraded
+        ? `upgraded ${result.lineage} schema ${result.fromSchemaVersion} → ${result.toSchemaVersion}`
+        : `validated ${result.lineage} schema ${result.toSchemaVersion}`;
+      console.log(`Graph store repaired: ${recovered}; ${schema}; status ${result.status.status}.`);
+      for (const diagnostic of result.diagnostics) {
+        if (diagnostic.code !== "GRAPH_INDEX_RECOVERY_CLEANUP_INCOMPLETE") continue;
+        console.warn(`WARNING ${diagnostic.code}: ${diagnostic.message}`);
+      }
+    }
+    return 0;
+  } catch (error) {
+    const guidance = error instanceof GraphMaintenanceError
+      && (error.code === "GRAPH_INDEX_MISSING" || error.code === "GRAPH_INDEX_NOT_REPAIRABLE")
+      ? " Run `mex graph rebuild`."
+      : "";
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`${message}${message.includes("mex graph rebuild") ? "" : guidance}`);
+    return 1;
   }
 }

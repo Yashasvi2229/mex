@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "ok": true,
   "data": {
-    "mexVersion": "0.7.2",
+    "mexVersion": "0.7.3",
     "repository": {
       "initializationState": "ready",
       "graphIndexState": "fresh",
@@ -479,6 +479,12 @@
           "id": "graph.rebuild",
           "path": "mex graph rebuild",
           "usage": "mex graph rebuild --json",
+          "output": "json"
+        },
+        {
+          "id": "graph.repair",
+          "path": "mex graph repair",
+          "usage": "mex graph repair --json",
           "output": "json"
         },
         {

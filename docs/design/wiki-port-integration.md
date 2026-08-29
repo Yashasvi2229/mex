@@ -35,9 +35,11 @@ stores two different revisions because they answer different questions:
 their exact file hashes. A separate immutable-index digest binds cursors to the
 complete projected generation, including derived grounding state.
 
-Existing graph schema-v2 indexes are not silently migrated by readers. They are
-reported as `rebuild_required`; only explicit graph maintenance may publish the
-schema-v3 grounding baseline.
+Existing graph schema-v1/v2 indexes and either historical schema-v3 lineage are
+not silently migrated by readers. They are reported as `rebuild_required`; only
+explicit graph maintenance may publish the combined schema-v4 compact store and
+grounding baseline described in
+[`graph-v4-compatibility.md`](graph-v4-compatibility.md).
 
 ## Read handshake
 

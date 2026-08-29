@@ -27,6 +27,7 @@ import { BANDS } from "../config.js";
 import { GRAPH_CORPUS_LIMITS } from "../corpus-policy.js";
 import { createGraphEngine } from "../engine-impl.js";
 import { FingerprintStore } from "../fingerprint-store.js";
+import { decodeMinhash } from "../fingerprint.js";
 import type { Fingerprint } from "../reconcile.js";
 import {
   GRAPH_SNAPSHOT_METADATA_KEY,
@@ -359,7 +360,7 @@ describe("inspectGraphStatus", () => {
     }));
   });
 
-  it.each([1, 2, DB_SCHEMA_VERSION + 1])("classifies schema %s as rebuild_required", async (schemaVersion) => {
+  it.each([1, DB_SCHEMA_VERSION + 1])("classifies schema %s as rebuild_required", async (schemaVersion) => {
     const root = temporaryRoot();
     source(root, "src/a.ts", "export const a = 1;\n");
     const dbPath = await build(root);
@@ -378,6 +379,80 @@ describe("inspectGraphStatus", () => {
     const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_REBUILD_REQUIRED");
     expect(diagnostic).toBeDefined();
     expect(diagnostic?.remediation).toEqual([{ label: "Rebuild graph", command: "mex graph rebuild" }]);
+  });
+
+  it.each([2, 3])("offers lossless repair for structurally recognized schema %s", async (schemaVersion) => {
+    const root = temporaryRoot(`mex-graph-repair-v${schemaVersion}-`);
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.exec("DELETE FROM schema_versions");
+      db.prepare("INSERT INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)")
+        .run(schemaVersion, NOW.getTime(), "recognized repair fixture");
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("rebuild_required");
+    expect(status.schemaVersion).toBe(schemaVersion);
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_REPAIR_AVAILABLE",
+      remediation: [{ label: "Upgrade graph schema", command: "mex graph repair" }],
+    }));
+  });
+
+  it("rejects a current-version store whose compact fingerprint column type is malformed", async () => {
+    const root = temporaryRoot("mex-graph-current-shape-invalid-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      // Rebuild only the compact tables with a deliberately wrong declared
+      // type. Mutating sqlite_master through writable_schema is rejected by
+      // newer Node 24 SQLite builds, and the fixture should exercise our
+      // schema validator rather than depend on that unsafe escape hatch.
+      db.exec(`
+        PRAGMA foreign_keys = OFF;
+        BEGIN IMMEDIATE;
+        CREATE TEMP TABLE saved_lsh AS
+          SELECT band, band_hash, ref FROM lsh_buckets;
+        CREATE TABLE node_fingerprints_malformed (
+          ref INTEGER PRIMARY KEY,
+          node_id TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE,
+          minhash TEXT NOT NULL,
+          neighbors TEXT NOT NULL,
+          token_count INTEGER NOT NULL
+        );
+        INSERT INTO node_fingerprints_malformed
+          SELECT ref, node_id, CAST(minhash AS TEXT), neighbors, token_count
+          FROM node_fingerprints;
+        DROP TABLE lsh_buckets;
+        DROP TABLE node_fingerprints;
+        ALTER TABLE node_fingerprints_malformed RENAME TO node_fingerprints;
+        CREATE TABLE lsh_buckets (
+          band INTEGER NOT NULL,
+          band_hash INTEGER NOT NULL,
+          ref INTEGER NOT NULL REFERENCES node_fingerprints(ref) ON DELETE CASCADE,
+          PRIMARY KEY (band, band_hash, ref)
+        ) WITHOUT ROWID;
+        INSERT INTO lsh_buckets SELECT band, band_hash, ref FROM saved_lsh;
+        DROP TABLE saved_lsh;
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+      `);
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+    expect(status.status).toBe("corrupt");
+    expect(status.schemaVersion).toBe(DB_SCHEMA_VERSION);
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_SCHEMA_INVALID",
+      message: "The current graph schema has incompatible column, key, or generated-table structure.",
+    }));
   });
 
   it("offers isolated rebuild recovery for an empty recorded schema version", async () => {
@@ -425,6 +500,7 @@ describe("inspectGraphStatus", () => {
       expect(transient.changes.total).toBe(0);
       expect(transient.diagnostics).toContainEqual(expect.objectContaining({ code: "GRAPH_INDEX_SIDECAR_ACTIVE" }));
       expect(transient.diagnostics).not.toContainEqual(expect.objectContaining({ code: "GRAPH_INDEX_CORRUPT" }));
+      expect(executableRemediations(transient)).toContain("mex graph repair");
     } finally {
       writer.close();
     }
@@ -746,6 +822,81 @@ describe("inspectGraphStatus", () => {
     expect(diagnostic?.message).toContain("missing column files.extractor_version");
   });
 
+  it("rejects an empty current-v4 fingerprint layout with incompatible declared types", async () => {
+    const root = temporaryRoot("mex-graph-current-v4-shape-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.exec(`
+        PRAGMA foreign_keys = OFF;
+        DROP TABLE lsh_buckets;
+        DROP TABLE node_fingerprints;
+        CREATE TABLE node_fingerprints (
+          ref TEXT PRIMARY KEY,
+          node_id TEXT NOT NULL UNIQUE,
+          minhash TEXT NOT NULL,
+          neighbors TEXT NOT NULL,
+          token_count INTEGER NOT NULL
+        );
+        CREATE TABLE lsh_buckets (
+          band INTEGER NOT NULL,
+          band_hash TEXT NOT NULL,
+          ref TEXT NOT NULL,
+          PRIMARY KEY (band, band_hash, ref)
+        ) WITHOUT ROWID;
+      `);
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+
+    expect(status.status).toBe("corrupt");
+    expect(status.schemaVersion).toBe(DB_SCHEMA_VERSION);
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_SCHEMA_INVALID",
+      message: "The current graph schema has incompatible column, key, or generated-table structure.",
+    }));
+    expect(executableRemediations(status)).toContain("mex graph rebuild");
+  });
+
+  it("rejects a current-v4 grounding table with a forged scaffold projection", async () => {
+    const root = temporaryRoot("mex-graph-current-v4-grounding-");
+    source(root, "src/a.ts", "export const a = 1;\n");
+    const dbPath = await build(root);
+    const db = openSqlite(dbPath);
+    try {
+      db.exec(`
+        DROP INDEX idx_grounded_subject;
+        DROP INDEX idx_grounded_node;
+        DROP TABLE _mex_grounded_source;
+        CREATE TABLE _mex_grounded_source (
+          subject_kind TEXT NOT NULL DEFAULT 'scaffold',
+          subject_id TEXT NOT NULL,
+          node_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          body_hash TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          scaffold_file TEXT GENERATED ALWAYS AS ('wrong') VIRTUAL,
+          PRIMARY KEY (subject_kind, subject_id, node_id)
+        );
+        CREATE INDEX idx_grounded_node ON _mex_grounded_source(node_id);
+        CREATE INDEX idx_grounded_subject ON _mex_grounded_source(subject_kind, subject_id);
+      `);
+    } finally {
+      db.close();
+    }
+
+    const status = await inspect(root);
+
+    expect(status.status).toBe("corrupt");
+    expect(status.diagnostics).toContainEqual(expect.objectContaining({
+      code: "GRAPH_INDEX_SCHEMA_INVALID",
+    }));
+    expect(executableRemediations(status)).toContain("mex graph rebuild");
+  });
+
   it("requires every FTS shadow table used by retrieval and rebuild", async () => {
     const root = temporaryRoot("mex-graph-fts-schema-");
     source(root, "src/a.ts", "export const searchable = 1;\n");
@@ -810,8 +961,8 @@ describe("inspectGraphStatus", () => {
           binding_key, file_path, local_name, imported_name, module_specifier, target_id
         ) VALUES (?, ?, ?, ?, ?, ?)`,
       ).run("test-binding", "src/missing.ts", "local", "remote", "./missing", "missing-target");
-      db.prepare("INSERT INTO lsh_buckets (band, band_hash, node_id) VALUES (?, ?, ?)")
-        .run(0, "test-band", "missing-node");
+      db.prepare("INSERT INTO lsh_buckets (band, band_hash, ref) VALUES (?, ?, ?)")
+        .run(0, 0n, 9_999_999n);
     } finally {
       db.close();
     }
@@ -845,23 +996,21 @@ describe("inspectGraphStatus", () => {
          FROM node_fingerprints ORDER BY node_id LIMIT 4`,
       ).all() as Array<{
         node_id: string;
-        minhash: string;
+        minhash: Uint8Array;
         neighbors: string;
         token_count: number;
       }>;
       expect(rows).toHaveLength(4);
       const reachable = rows[0]!;
       const baseline: Fingerprint = {
-        minhash: JSON.parse(reachable.minhash) as number[],
+        minhash: decodeMinhash(reachable.minhash),
         neighbors: JSON.parse(reachable.neighbors) as string[],
         tokenCount: reachable.token_count,
       };
       db.prepare("UPDATE node_fingerprints SET minhash = ? WHERE node_id = ?")
-        .run("{", reachable.node_id);
-      const invalidNumbers = JSON.parse(rows[1]!.minhash) as number[];
-      invalidNumbers[0] = -1;
+        .run(Buffer.alloc(1), reachable.node_id);
       db.prepare("UPDATE node_fingerprints SET minhash = ? WHERE node_id = ?")
-        .run(JSON.stringify(invalidNumbers), rows[1]!.node_id);
+        .run("not-a-blob", rows[1]!.node_id);
       db.prepare("UPDATE node_fingerprints SET neighbors = ? WHERE node_id = ?")
         .run("[1]", rows[2]!.node_id);
       db.prepare("UPDATE node_fingerprints SET token_count = -1 WHERE node_id = ?")
@@ -892,23 +1041,16 @@ describe("inspectGraphStatus", () => {
     const db = openSqlite(dbPath);
     try {
       const rows = db.prepare(
-        "SELECT node_id FROM node_fingerprints ORDER BY node_id LIMIT 4",
-      ).all() as Array<{ node_id: string }>;
+        "SELECT CAST(ref AS TEXT) AS ref, node_id FROM node_fingerprints ORDER BY node_id LIMIT 4",
+      ).all() as Array<{ ref: string; node_id: string }>;
       expect(rows).toHaveLength(4);
-      const [missing, duplicate, outOfRange, wrongHash] = rows;
-      db.prepare("DELETE FROM lsh_buckets WHERE node_id = ?").run(missing!.node_id);
+      const [missing, outOfRange, wrongHash] = rows;
+      db.prepare("DELETE FROM lsh_buckets WHERE ref = ?").run(BigInt(missing!.ref));
       db.prepare(
-        `INSERT INTO lsh_buckets (band, band_hash, node_id)
-         SELECT band, band_hash, node_id FROM lsh_buckets
-         WHERE node_id = ? AND band = 0 LIMIT 1`,
-      ).run(duplicate!.node_id);
-      db.prepare(
-        `UPDATE lsh_buckets SET band = ? WHERE rowid = (
-           SELECT rowid FROM lsh_buckets WHERE node_id = ? AND band = 0 LIMIT 1
-         )`,
-      ).run(BANDS, outOfRange!.node_id);
-      db.prepare("UPDATE lsh_buckets SET band_hash = ? WHERE node_id = ?")
-        .run("0".repeat(64), wrongHash!.node_id);
+        "UPDATE lsh_buckets SET band = ? WHERE ref = ? AND band = 0",
+      ).run(BANDS, BigInt(outOfRange!.ref));
+      db.prepare("UPDATE lsh_buckets SET band_hash = ? WHERE ref = ?")
+        .run(0n, BigInt(wrongHash!.ref));
     } finally {
       db.close();
     }
@@ -917,7 +1059,6 @@ describe("inspectGraphStatus", () => {
     expect(status.status).toBe("corrupt");
     const diagnostic = status.diagnostics.find((entry) => entry.code === "GRAPH_INDEX_INVARIANT_FAILED");
     expect(diagnostic?.message).toContain("missing fingerprint LSH band(s)");
-    expect(diagnostic?.message).toContain("duplicate fingerprint LSH bucket row(s)");
     expect(diagnostic?.message).toContain("out-of-range fingerprint LSH bucket row(s)");
     expect(diagnostic?.message).toContain("fingerprint LSH bucket hash mismatch(es)");
     expect(diagnostic?.remediation).toBeUndefined();

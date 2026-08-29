@@ -18,6 +18,7 @@ import { openSqlite } from "../db/sqlite.js";
 import { FingerprintStore } from "../fingerprint-store.js";
 import { serializeFingerprint } from "../fingerprint.js";
 import { loadFreshGraphReadSession } from "../read-session.js";
+import { GraphMaintenanceError } from "../maintenance.js";
 
 const roots: string[] = [];
 
@@ -90,6 +91,30 @@ function expectPortCode(error: unknown, code: string): void {
 }
 
 describe("RepositoryGraphPort", () => {
+  it("maps a non-lossless repair state to sanitized rebuild guidance", async () => {
+    const root = temporaryRoot();
+    source(root, "src/service.ts", "export const service = true;\n");
+    const port = createRepositoryGraphPort(root, {
+      __internal: {
+        refresh: async () => {
+          throw new GraphMaintenanceError(
+            "GRAPH_INDEX_NOT_REPAIRABLE",
+            `unsafe lineage at ${root}/.mex/graph.db`,
+          );
+        },
+      },
+    });
+
+    await expect(port.refresh()).rejects.toSatisfy((error) => {
+      expectPortCode(error, "MIGRATION_REQUIRED");
+      const problem = (error as MexPortError).problem;
+      expect(problem.status).toBe(409);
+      expect(problem.detail).toContain("Rebuild");
+      expect(problem.detail).not.toContain(root);
+      return true;
+    });
+  });
+
   it("keeps missing status read-only and maps unavailable reads", async () => {
     const root = temporaryRoot();
     source(root, "src/empty.ts", "export const empty = true;\n");

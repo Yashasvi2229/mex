@@ -1,5 +1,5 @@
 import type { GroundedSource, GroundingBaseline, GroundingSubject } from "./grounding.js";
-import { bandHashes } from "./fingerprint.js";
+import { bandHashInts, decodeMinhash, encodeMinhash } from "./fingerprint.js";
 import type { Fingerprint } from "./reconcile.js";
 import type { SQLInputValue } from "node:sqlite";
 
@@ -14,7 +14,8 @@ export interface SqliteDatabase {
 
 interface FingerprintRow {
   node_id: string;
-  minhash: string;
+  /** BLOB (schema v4); a pre-migration TEXT JSON array is still decodable. */
+  minhash: Uint8Array | string;
   neighbors: string;
   token_count: number;
 }
@@ -44,39 +45,47 @@ export class FingerprintStore {
        ON CONFLICT(node_id) DO UPDATE SET minhash=excluded.minhash,
          neighbors=excluded.neighbors, token_count=excluded.token_count`,
     );
-    const bucketCount = bandHashes(ordered[0]!.fingerprint).length;
+    // ON CONFLICT DO UPDATE keeps the existing row, so `ref` is stable across
+    // re-upserts of the same node — stale LSH rows are deleted by ref below.
+    const selectRef = this.db.prepare(
+      "SELECT CAST(ref AS TEXT) AS ref FROM node_fingerprints WHERE node_id = ?",
+    );
+    const bucketCount = bandHashInts(ordered[0]!.fingerprint).length;
     const insertBuckets = this.db.prepare(
-      `INSERT INTO lsh_buckets (band, band_hash, node_id) VALUES ${
+      `INSERT INTO lsh_buckets (band, band_hash, ref) VALUES ${
         Array.from({ length: bucketCount }, () => "(?, ?, ?)").join(", ")
       }`,
     );
 
     this.db.exec("SAVEPOINT mex_fingerprint_upsert_many");
     try {
-      // Delete prior buckets before inserting any replacements. Without a
-      // node_id-oriented LSH index, deleting once per node degenerates into a
-      // full-table scan for every fingerprint as this table grows. Chunked IN
-      // deletes scan the old table only a bounded number of times and produce
-      // the identical final rows (the last entry for a duplicate node wins).
+      // Delete prior buckets before inserting any replacements. Chunked IN
+      // deletes over the ref subquery scan the table a bounded number of times
+      // and produce the identical final rows (the last duplicate entry wins).
       const deleteChunkSize = 500;
       for (let offset = 0; offset < ordered.length; offset += deleteChunkSize) {
         const nodeIds = ordered.slice(offset, offset + deleteChunkSize).map((entry) => entry.nodeId);
         this.db.prepare(
-          `DELETE FROM lsh_buckets WHERE node_id IN (${nodeIds.map(() => "?").join(",")})`,
+          `DELETE FROM lsh_buckets WHERE ref IN (
+             SELECT ref FROM node_fingerprints WHERE node_id IN (${nodeIds.map(() => "?").join(",")})
+           )`,
         ).run(...nodeIds);
       }
       for (const { nodeId, fingerprint } of ordered) {
-        const buckets = bandHashes(fingerprint);
+        const buckets = bandHashInts(fingerprint);
         if (buckets.length !== bucketCount) {
           throw new Error(`Inconsistent fingerprint band count for ${nodeId}.`);
         }
         upsertFingerprint.run(
           nodeId,
-          JSON.stringify(fingerprint.minhash),
+          encodeMinhash(fingerprint.minhash),
           JSON.stringify(fingerprint.neighbors),
           fingerprint.tokenCount,
         );
-        insertBuckets.run(...buckets.flatMap((bandHash, band) => [band, bandHash, nodeId]));
+        const row = selectRef.get(nodeId) as { ref: string } | undefined;
+        if (!row) throw new Error(`Fingerprint upsert failed for ${nodeId}.`);
+        const ref = BigInt(row.ref);
+        insertBuckets.run(...buckets.flatMap((bandHash, band) => [band, bandHash, ref]));
       }
       this.db.exec("RELEASE mex_fingerprint_upsert_many");
     } catch (error) {
@@ -103,9 +112,12 @@ export class FingerprintStore {
   lookup(fingerprint: Fingerprint): Array<{ nodeId: string; fingerprint: Fingerprint }> {
     const candidates = new Set<string>();
     const lookup = this.db.prepare(
-      "SELECT node_id FROM lsh_buckets WHERE band = ? AND band_hash = ?",
+      `SELECT fingerprints.node_id AS node_id
+       FROM lsh_buckets buckets
+       JOIN node_fingerprints fingerprints ON fingerprints.ref = buckets.ref
+       WHERE buckets.band = ? AND buckets.band_hash = ?`,
     );
-    bandHashes(fingerprint).forEach((bandHash, band) => {
+    bandHashInts(fingerprint).forEach((bandHash, band) => {
       for (const row of lookup.all(band, bandHash) as Array<{ node_id: string }>) {
         candidates.add(row.node_id);
       }
@@ -120,7 +132,7 @@ export class FingerprintStore {
    * The baseline for one (subject, node) pair, following a node alias when the
    * id it was grounded under has since been reconciled to a canonical one.
    *
-   * Subject-generalized (schema v3). `getGroundedSource` is the scaffold-kind
+   * Subject-generalized (schema v4). `getGroundedSource` is the scaffold-kind
    * projection of it, so there is one accessor and not two: a second one would
    * be a second place for the alias fallback to be forgotten.
    */
@@ -218,9 +230,15 @@ function decodeBaseline(row: BaselineRow): GroundingBaseline {
 }
 
 function decodeRow(row: FingerprintRow): Fingerprint {
-  return {
-    minhash: JSON.parse(row.minhash) as number[],
+  const fingerprint: Fingerprint = {
+    minhash: typeof row.minhash === "string"
+      ? JSON.parse(row.minhash) as number[]
+      : decodeMinhash(row.minhash),
     neighbors: JSON.parse(row.neighbors) as string[],
     tokenCount: row.token_count,
   };
+  // The compact BLOB decoder can represent every byte sequence; validate the
+  // semantic K=64 fingerprint before it reaches reconciliation.
+  bandHashInts(fingerprint);
+  return fingerprint;
 }
