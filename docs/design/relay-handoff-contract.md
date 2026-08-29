@@ -1,6 +1,6 @@
 # Relay Handoff Contract
 
-Status: Checkpoints F0-F3 implemented and registered; F4 release calibration remains gated
+Status: Checkpoints F0-F4 implemented and registered; pinned release calibration applied and final enforcement remains gated
 
 This brief freezes the smallest repository-native Relay product: a local draft
 becomes one canonical handoff, one eligible recipient claims it, and the

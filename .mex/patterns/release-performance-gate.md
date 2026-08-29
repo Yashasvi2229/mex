@@ -12,7 +12,7 @@ edges:
   - target: "patterns/safe-graph-snapshot-evolution.md"
     condition: "when changing Graph maintenance or corpus inspection"
 grounds_to: []
-last_updated: 2026-08-27
+last_updated: 2026-08-29
 ---
 
 # Release Performance Gate
@@ -46,6 +46,13 @@ calibration environment.
    `ceil(bytes * 1.05)`, then rerun the same pinned job in enforcement mode.
 6. Commit the budget file, its versioned schema/golden, and the retained runner
    identity together. Never copy wall-clock numbers from a local machine.
+7. When a new deterministic team fixture adds canonical and checkout-local
+   records, preserve every unrelated corpus total. Reuse an existing Activity
+   slot when the new artifact requires an event, and record the new topology as
+   additive optional report fields so historical reports remain valid.
+8. Calibrate only the explicitly owned metric leaves. Diff the candidate budget
+   file against its exact base and fail the review if any unrelated number,
+   schema contract, or calibration formula changes.
 
 ## Gotchas
 
@@ -62,6 +69,10 @@ calibration environment.
 - Corpus byte caps prevent runaway allocation, but maintenance should also
   release source bodies and parser state as each file or bounded compiler batch
   completes.
+- An unavailable-route placeholder can already have a frozen asset or heap
+  budget. Replacing it with a real lazy workbench should initially fail only
+  that route's owned leaves; do not reinterpret the placeholder budget as a
+  calibration result.
 
 ## Verify
 

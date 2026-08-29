@@ -120,7 +120,9 @@
         "knowledge": { "$ref": "#/$defs/nonNegativeNumber" },
         "activity": { "$ref": "#/$defs/nonNegativeNumber" },
         "inboxDrafts": { "$ref": "#/$defs/nonNegativeNumber" },
-        "inboxProposals": { "$ref": "#/$defs/nonNegativeNumber" }
+        "inboxProposals": { "$ref": "#/$defs/nonNegativeNumber" },
+        "relayDrafts": { "$ref": "#/$defs/nonNegativeNumber" },
+        "relays": { "$ref": "#/$defs/nonNegativeNumber" }
       }
     },
     "profiledReadBudgets": {

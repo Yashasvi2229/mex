@@ -135,7 +135,7 @@ export async function measureIdleProcess(server) {
   };
 }
 
-export async function measureCommonReads(server, auth, samples, inboxFixture) {
+export async function measureCommonReads(server, auth, samples, teamFixture) {
   const warmSearch = await hubJson(
     server,
     "/api/v1/search?q=releaseBenchmarkNeedle&limit=25",
@@ -156,13 +156,29 @@ export async function measureCommonReads(server, auth, samples, inboxFixture) {
   );
   assertInboxFixturePage(warmInboxDrafts, {
     kind: "draft",
-    id: inboxFixture.draftId,
-    title: inboxFixture.draftTitle,
+    id: teamFixture.inboxDraftId,
+    title: teamFixture.inboxDraftTitle,
   });
   assertInboxFixturePage(warmInboxProposals, {
     kind: "proposal",
-    id: inboxFixture.proposalId,
-    title: inboxFixture.proposalTitle,
+    id: teamFixture.inboxProposalId,
+    title: teamFixture.inboxProposalTitle,
+  });
+  const warmRelayDrafts = await hubJson(server, "/api/v1/relays/drafts?limit=25", auth);
+  const warmRelays = await hubJson(
+    server,
+    "/api/v1/relays?perspective=mine&state=published,acknowledged&limit=25",
+    auth,
+  );
+  assertRelayFixturePage(warmRelayDrafts, {
+    kind: "draft",
+    id: teamFixture.relayDraftId,
+    summary: teamFixture.relayDraftSummary,
+  });
+  assertRelayFixturePage(warmRelays, {
+    kind: "relay",
+    id: teamFixture.relayId,
+    summary: teamFixture.relaySummary,
   });
 
   const paths = releaseCommonReadPaths(symbol.id);
@@ -185,6 +201,8 @@ export function releaseCommonReadPaths(codeSymbolId) {
     activity: "/api/v1/activity?limit=25",
     inboxDrafts: "/api/v1/inbox/drafts?limit=25",
     inboxProposals: "/api/v1/inbox/proposals?state=pending,stale&limit=25",
+    relayDrafts: "/api/v1/relays/drafts?limit=25",
+    relays: "/api/v1/relays?perspective=mine&state=published,acknowledged&limit=25",
   };
 }
 
@@ -212,6 +230,33 @@ export function assertInboxFixturePage(page, expected) {
   }
   if (expected.kind === "proposal" && item?.state !== "pending") {
     throw new Error("The benchmark Inbox proposal is not pending.");
+  }
+}
+
+export function assertRelayFixturePage(page, expected) {
+  if (
+    !page
+    || !Array.isArray(page.items)
+    || page.items.length !== 1
+    || page.nextCursor !== null
+    || page.truncated !== false
+    || page.sourceTruncated !== false
+    || !REVISION_PATTERN.test(page.deterministicRevision)
+    || !Array.isArray(page.diagnostics)
+    || page.diagnostics.length !== 0
+    || page.diagnosticsTruncated !== false
+  ) {
+    throw new Error(
+      `The benchmark Relay ${expected.kind} list did not return its exact complete diagnostic-free one-item page.`,
+    );
+  }
+  const item = page.items[0];
+  const id = expected.kind === "relay" ? item?.ref?.id : item?.id;
+  if (id !== expected.id || item?.summary !== expected.summary) {
+    throw new Error(`The benchmark Relay ${expected.kind} list returned unexpected fixture content.`);
+  }
+  if (expected.kind === "relay" && item?.state !== "published") {
+    throw new Error("The benchmark Relay is not published.");
   }
 }
 

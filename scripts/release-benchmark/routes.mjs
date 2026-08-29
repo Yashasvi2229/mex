@@ -17,7 +17,7 @@ export const RELEASE_ROUTE_MANIFEST_HINTS = Object.freeze({
   specsDetail: Object.freeze(["SpecsPage"]),
   playbooks: Object.freeze(["CapabilityPage"]),
   inbox: Object.freeze(["InboxPage"]),
-  relays: Object.freeze(["CapabilityPage"]),
+  relays: Object.freeze(["RelayPage"]),
   members: Object.freeze(["MembersPage"]),
   activity: Object.freeze(["ActivityPage"]),
   jobs: Object.freeze(["JobsPage"]),

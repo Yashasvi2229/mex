@@ -1,5 +1,5 @@
 import { releaseWorkbenchPaths } from "./routes.mjs";
-import { assertInboxFixturePage } from "./hub.mjs";
+import { assertInboxFixturePage, assertRelayFixturePage } from "./hub.mjs";
 
 const PAGE_READY_TIMEOUT_MS = 30_000;
 
@@ -20,6 +20,10 @@ export async function measureWorkbenchHeap({
   inboxDraftTitle,
   inboxProposalId,
   inboxProposalTitle,
+  relayDraftId,
+  relayDraftSummary,
+  relayId,
+  relaySummary,
 }) {
   const { chromium } = await import("@playwright/test");
   const browser = await chromium.launch({ headless: true });
@@ -61,6 +65,10 @@ export async function measureWorkbenchHeap({
             inboxDraftTitle,
             inboxProposalId,
             inboxProposalTitle,
+            relayDraftId,
+            relayDraftSummary,
+            relayId,
+            relaySummary,
           });
           // Give React one task turn to commit route content after network idle.
           await page.waitForTimeout(50);
@@ -92,7 +100,7 @@ export async function measureWorkbenchHeap({
   };
 }
 
-async function assertReleaseRouteReady(page, route, inboxFixture) {
+async function assertReleaseRouteReady(page, route, teamFixture) {
   if (route === "workstreams") {
     await page.getByRole("heading", { name: "Release benchmark Workstream", exact: true })
       .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
@@ -104,15 +112,15 @@ async function assertReleaseRouteReady(page, route, inboxFixture) {
       .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
   }
   if (route === "inbox") {
-    const draft = page.locator(`[data-inbox-draft-id="${inboxFixture.inboxDraftId}"]`);
-    const proposal = page.locator(`[data-inbox-proposal-id="${inboxFixture.inboxProposalId}"]`);
+    const draft = page.locator(`[data-inbox-draft-id="${teamFixture.inboxDraftId}"]`);
+    const proposal = page.locator(`[data-inbox-proposal-id="${teamFixture.inboxProposalId}"]`);
     await page.locator('[data-inbox-workbench="ready"]')
       .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
     await draft.waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
     await proposal.waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
-    await draft.getByText(inboxFixture.inboxDraftTitle, { exact: true })
+    await draft.getByText(teamFixture.inboxDraftTitle, { exact: true })
       .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
-    await proposal.getByText(inboxFixture.inboxProposalTitle, { exact: true })
+    await proposal.getByText(teamFixture.inboxProposalTitle, { exact: true })
       .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
     const [draftResponse, proposalResponse] = await page.evaluate(async () => Promise.all([
       "/api/v1/inbox/drafts?limit=25",
@@ -130,13 +138,47 @@ async function assertReleaseRouteReady(page, route, inboxFixture) {
     const proposalPage = proposalResponse.body;
     assertInboxFixturePage(draftPage, {
       kind: "draft",
-      id: inboxFixture.inboxDraftId,
-      title: inboxFixture.inboxDraftTitle,
+      id: teamFixture.inboxDraftId,
+      title: teamFixture.inboxDraftTitle,
     });
     assertInboxFixturePage(proposalPage, {
       kind: "proposal",
-      id: inboxFixture.inboxProposalId,
-      title: inboxFixture.inboxProposalTitle,
+      id: teamFixture.inboxProposalId,
+      title: teamFixture.inboxProposalTitle,
+    });
+  }
+  if (route === "relays") {
+    const draft = page.locator(`[data-relay-draft-id="${teamFixture.relayDraftId}"]`);
+    const relay = page.locator(`[data-relay-id="${teamFixture.relayId}"]`);
+    await page.locator('[data-relay-workbench="ready"]')
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    await draft.waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    await relay.waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    await draft.getByText(teamFixture.relayDraftSummary, { exact: true })
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    await relay.getByText(teamFixture.relaySummary, { exact: true })
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    const [draftResponse, relayResponse] = await page.evaluate(async () => Promise.all([
+      "/api/v1/relays/drafts?limit=25",
+      "/api/v1/relays?perspective=mine&state=published,acknowledged&limit=25",
+    ].map(async (path) => {
+      const response = await fetch(path, {
+        headers: { accept: "application/json, application/problem+json" },
+      });
+      return { status: response.status, body: await response.json() };
+    })));
+    if (draftResponse.status !== 200 || relayResponse.status !== 200) {
+      throw new Error("The Relay route fixture APIs did not both return HTTP 200.");
+    }
+    assertRelayFixturePage(draftResponse.body, {
+      kind: "draft",
+      id: teamFixture.relayDraftId,
+      summary: teamFixture.relayDraftSummary,
+    });
+    assertRelayFixturePage(relayResponse.body, {
+      kind: "relay",
+      id: teamFixture.relayId,
+      summary: teamFixture.relaySummary,
     });
   }
 }

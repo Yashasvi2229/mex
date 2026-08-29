@@ -148,10 +148,14 @@ try {
         auth,
         budgets.samples.timing,
         {
-          draftId: baseFixture.firstInboxDraftId,
-          draftTitle: baseFixture.inboxDraftTitle,
-          proposalId: baseFixture.firstInboxProposalId,
-          proposalTitle: baseFixture.inboxProposalTitle,
+          inboxDraftId: baseFixture.firstInboxDraftId,
+          inboxDraftTitle: baseFixture.inboxDraftTitle,
+          inboxProposalId: baseFixture.firstInboxProposalId,
+          inboxProposalTitle: baseFixture.inboxProposalTitle,
+          relayDraftId: baseFixture.firstRelayDraftId,
+          relayDraftSummary: baseFixture.relayDraftSummary,
+          relayId: baseFixture.firstRelayId,
+          relaySummary: baseFixture.relaySummary,
         },
       );
       const apiLatency = commonReads.timings;
@@ -166,10 +170,14 @@ try {
         inboxDraftTitle: baseFixture.inboxDraftTitle,
         inboxProposalId: baseFixture.firstInboxProposalId,
         inboxProposalTitle: baseFixture.inboxProposalTitle,
+        relayDraftId: baseFixture.firstRelayDraftId,
+        relayDraftSummary: baseFixture.relayDraftSummary,
+        relayId: baseFixture.firstRelayId,
+        relaySummary: baseFixture.relaySummary,
       });
       const afterOrdinaryReads = snapshotReleaseReadState(workingRoot, benchmarkEnvironment);
       if (JSON.stringify(afterOrdinaryReads) !== JSON.stringify(beforeOrdinaryReads)) {
-        throw new Error(`${profileName} ordinary Hub/Inbox reads mutated protected repository state.`);
+        throw new Error(`${profileName} ordinary Hub/Inbox/Relay reads mutated protected repository state.`);
       }
       const maintenance = await measureMaintenance({
         server: activeServer,

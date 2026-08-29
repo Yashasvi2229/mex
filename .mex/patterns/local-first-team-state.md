@@ -4,6 +4,7 @@ description: Safe workflow for canonical team Markdown, immutable activity, read
 triggers:
   - "team member"
   - "activity event"
+  - "Relay handoff"
   - "Catch Up cursor"
   - "local team state"
 edges:
@@ -12,7 +13,7 @@ edges:
   - target: "context/conventions.md"
     condition: "when changing canonical serialization or validation"
 grounds_to: []
-last_updated: 2026-08-28
+last_updated: 2026-08-29
 ---
 
 # Local-First Team State
@@ -66,6 +67,18 @@ under `.mex/local/`. Legacy `events/decisions.jsonl` stays byte-for-byte compati
   reviewed presentation before journal intent. Reject hidden batch containers
   as well as disallowed top-level operations when a product facade promises a
   narrower write scope.
+- A local draft create has no optimistic target revision, so a restart-safe
+  receipt must bind its service-minted draft ID. Updates and deletes instead
+  require one exact non-null local revision and must distinguish an absent
+  target from a changed target.
+- Dependency eligibility and dependency freshness are separate checks. A bad
+  Relay recipient or Workstream at preview is a validation failure; after a
+  signed preview, the same Member or Workstream revision changing must fail as
+  a revision conflict before semantic authorization is evaluated. Repeat that
+  ordering under the workflow lease and during intent recovery.
+- Canonical handoff identity comparisons use stable Member IDs. Display names,
+  Git aliases, and serialized actor objects are snapshots for review, not
+  authorization keys.
 
 ## Verify
 
