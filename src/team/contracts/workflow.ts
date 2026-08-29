@@ -58,6 +58,21 @@ export const TEAM_INBOX_SPEC_LIMITS = {
   maxFutureClockSkewMs: 5_000,
 } as const;
 
+/** Internal Checkpoint F Relay product bounds. */
+export const TEAM_RELAY_LIMITS = {
+  maxEnvelopeBytes: 64 * 1024,
+  maxReceiptBytes: 8 * 1024,
+  maxReceiptDepth: 8,
+  maxReceiptNodes: 128,
+  maxPurposeIds: 2,
+  maxRecipients: 32,
+  defaultPageSize: 50,
+  maxPageSize: 100,
+  maxCursorBytes: 4 * 1024,
+  maxPreviewAgeMs: 30 * 60 * 1_000,
+  maxFutureClockSkewMs: 5_000,
+} as const;
+
 export const TEAM_INBOX_SPEC_KINDS = [
   "spec",
   "requirement",
@@ -308,7 +323,9 @@ export interface InboxProposal<TWikiOperationPlan>
   reviewedAt?: string;
 }
 
-export interface Relay extends TeamArtifactBase<"relay"> {
+export interface Relay extends Omit<TeamArtifactBase<"relay">, "schemaVersion"> {
+  /** Legacy Relays are schema v1; Checkpoint F publications are schema v2. */
+  schemaVersion: 1 | 2;
   /** Wiki semantic revision; distinct from the exact-byte artifact revision. */
   entityRevision: number;
   state: RelayState;
@@ -325,6 +342,8 @@ export interface Relay extends TeamArtifactBase<"relay"> {
   code: readonly CodeRef[];
   evidence: readonly TeamEvidenceRef[];
   nextActions: readonly string[];
+  /** Absent only for strict legacy schema-v1 Relay artifacts. */
+  publishedAt?: string;
   acknowledgedBy?: ActorRef;
   acknowledgedAt?: string;
   closedBy?: ActorRef;
@@ -894,6 +913,148 @@ export interface TeamInboxSpecAuthoringPort {
   applyInbox(
     envelope: TeamInboxSpecPreviewEnvelope,
   ): Promise<TeamInboxSpecApplyResult>;
+}
+
+export type TeamRelayPerspective = "mine" | "sent" | "all";
+
+export interface TeamRelayDraftSummary {
+  id: string;
+  revision: Revision;
+  updatedAt: string;
+  recipients: readonly Extract<ActorRef, { kind: "member" }>[];
+  workstream: EntityRef;
+  summary: string;
+}
+
+export interface TeamRelayDraftDetail extends TeamRelayDraftSummary {
+  input: RelayDraftInput;
+}
+
+export interface TeamRelaySummary {
+  schemaVersion: 1 | 2;
+  ref: EntityRef;
+  sourcePath: RepoRelativePath;
+  revision: Revision;
+  state: RelayState;
+  sender: ActorRef;
+  recipients: readonly ActorRef[];
+  workstream: EntityRef;
+  summary: string;
+  publishedAt: string | null;
+  acknowledgedBy?: ActorRef;
+  acknowledgedAt?: string;
+  closedBy?: ActorRef;
+  closedAt?: string;
+}
+
+export interface TeamRelayDetail extends TeamRelaySummary {
+  completed: readonly string[];
+  inProgress: readonly string[];
+  decisions: readonly EntityRef[];
+  blockers: readonly string[];
+  unresolvedQuestions: readonly string[];
+  changedFiles: readonly RepoRelativePath[];
+  code: readonly CodeRef[];
+  evidence: readonly TeamEvidenceRef[];
+  nextActions: readonly string[];
+}
+
+export interface TeamRelayPage<T> {
+  items: readonly T[];
+  nextCursor: string | null;
+  truncated: boolean;
+  sourceTruncated: boolean;
+  deterministicRevision: Revision;
+  diagnostics: readonly Diagnostic[];
+}
+
+export interface TeamRelayDraftListRequest extends PageRequest {}
+
+export interface TeamRelayListRequest extends PageRequest {
+  perspective?: TeamRelayPerspective;
+  states?: readonly RelayState[];
+  workstreamId?: string;
+}
+
+export type TeamRelayAction =
+  | { kind: "relay.draft.save"; draftId?: string; draft: RelayDraftInput }
+  | { kind: "relay.draft.delete"; draftId: string }
+  | { kind: "relay.publish"; draftId: string }
+  | { kind: "relay.acknowledge"; relayId: string }
+  | { kind: "relay.close"; relayId: string };
+
+/** Caller-owned Relay intent. Authority has no caller-controlled slot. */
+export interface TeamRelayCommand {
+  operationId: string;
+  action: TeamRelayAction;
+  expectedRevisions: readonly RevisionExpectation[];
+  actor?: never;
+  occurredAt?: never;
+  repoState?: never;
+  authority?: never;
+}
+
+export interface TeamRelayLocalChange {
+  namespace: "relay-draft";
+  id: string;
+  beforeRevision: Revision | null;
+  afterRevision: Revision | null;
+  summary: string;
+}
+
+export interface TeamRelayPublicPreview {
+  valid: boolean;
+  scope: "canonical" | "local" | "mixed";
+  changes: readonly FileChange[];
+  localChanges: readonly TeamRelayLocalChange[];
+  diagnostics: readonly Diagnostic[];
+}
+
+export interface TeamRelayPurposeId {
+  purpose: "relay-draft" | "relay" | "activity";
+  id: string;
+}
+
+export interface TeamRelayReceipt {
+  schemaVersion: 1;
+  authority: TeamWorkflowAuthority;
+  purposeIds: readonly TeamRelayPurposeId[];
+  requestRevision: Revision;
+  presentationRevision: Revision;
+  previewRevision: Revision;
+}
+
+/** Signed exact preview portable across Relay service processes. */
+export interface TeamRelayPreviewEnvelope {
+  schemaVersion: 1;
+  request: TeamRelayCommand;
+  preview: TeamRelayPublicPreview;
+  receipt: TeamRelayReceipt;
+}
+
+export interface TeamRelayApplyResult {
+  operationId: string;
+  previewRevision: Revision;
+  applied: true;
+  idempotentReplay: boolean;
+  changes: readonly FileChange[];
+  localChanges: readonly TeamRelayLocalChange[];
+  relays: readonly TeamRelayDetail[];
+  events: readonly StoredActivityEvent[];
+}
+
+/** Internal Relay product facade; intentionally absent from the package root. */
+export interface TeamRelayHandoffPort {
+  getRelayDraft(id: string): Promise<TeamRelayDraftDetail | null>;
+  listRelayDrafts(
+    request?: TeamRelayDraftListRequest,
+  ): Promise<TeamRelayPage<TeamRelayDraftSummary>>;
+  getRelay(id: string): Promise<TeamRelayDetail | null>;
+  listRelays(
+    request?: TeamRelayListRequest,
+  ): Promise<TeamRelayPage<TeamRelaySummary>>;
+  previewRelay(command: TeamRelayCommand): Promise<TeamRelayPreviewEnvelope>;
+  applyRelay(envelope: TeamRelayPreviewEnvelope): Promise<TeamRelayApplyResult>;
 }
 
 export interface TeamWorkflowApplyRequest<TWikiOperationPlan> {

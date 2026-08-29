@@ -5109,7 +5109,7 @@ function requiredDraft<TWikiPayload extends JsonValue>(value: StoredLocalDraft |
   return value as StoredLocalDraft<InboxDraftInput<TWikiPayload> | RelayDraftInput>;
 }
 
-function withoutStored<T extends { schemaVersion: 1; ref: EntityRef; kind: string; sourcePath: RepoRelativePath; revision: Revision; entityRevision?: number }>(value: T): Omit<T, "schemaVersion" | "ref" | "kind" | "sourcePath" | "revision" | "entityRevision"> {
+function withoutStored<T extends { schemaVersion: number; ref: EntityRef; kind: string; sourcePath: RepoRelativePath; revision: Revision; entityRevision?: number }>(value: T): Omit<T, "schemaVersion" | "ref" | "kind" | "sourcePath" | "revision" | "entityRevision"> {
   const { schemaVersion: _schema, ref: _ref, kind: _kind, sourcePath: _path, revision: _revision, entityRevision: _entityRevision, ...rest } = value;
   return rest;
 }
