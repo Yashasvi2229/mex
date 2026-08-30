@@ -789,6 +789,7 @@ export function MembersPage() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["actor", "current"] }),
       queryClient.invalidateQueries({ queryKey: ["home"] }),
+      queryClient.invalidateQueries({ queryKey: ["overview"] }),
       queryClient.invalidateQueries({ queryKey: ["inbox"] }),
       queryClient.invalidateQueries({ queryKey: ["relays"] }),
     ]);
@@ -863,6 +864,7 @@ export function MembersPage() {
         queryClient.resetQueries({ queryKey: ["member"] }, { throwOnError: true }),
         queryClient.resetQueries({ queryKey: ["actor", "current"] }, { throwOnError: true }),
         queryClient.invalidateQueries({ queryKey: ["home"] }),
+        queryClient.invalidateQueries({ queryKey: ["overview"] }),
         queryClient.invalidateQueries({ queryKey: ["inbox"] }),
         queryClient.invalidateQueries({ queryKey: ["relays"] }),
       ]);

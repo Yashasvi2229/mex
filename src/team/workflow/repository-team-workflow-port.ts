@@ -1152,7 +1152,12 @@ export class RepositoryTeamWorkflowPort<
   ): Promise<TeamRelayPage<TeamRelaySummary>> {
     this.#root.assertCurrent();
     const filter = normalizeRelayListFilter(request);
-    const currentMemberId = await this.#activeRelayMemberOrNull();
+    // Team-wide observation has no actor-dependent predicate. Avoid resolving
+    // local identity for it so bounded aggregates can reuse their one explicit
+    // current-actor resolution without a hidden second lookup.
+    const currentMemberId = filter.perspective === "all"
+      ? null
+      : await this.#activeRelayMemberOrNull();
     if (filter.perspective !== "all" && currentMemberId === null) {
       throw relayUnauthorized(
         "Select an active Member, or configure one unique active Git alias, to view personal Relays.",

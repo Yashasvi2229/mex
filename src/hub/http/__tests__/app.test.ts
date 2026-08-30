@@ -13,6 +13,7 @@ import type {
   InboxOperationPreviewResponse,
   InboxProposalDetail,
   InboxProposalListResponse,
+  OverviewResponse,
   RelayDetail,
   RelayDraftDetail,
   RelayDraftListResponse,
@@ -1580,6 +1581,24 @@ describe("Project Hub HTTP application", () => {
     }
   });
 
+  it("serves the bounded Overview aggregate through its dedicated route", async () => {
+    const app = fixtureApp();
+    const { cookie } = await bootstrapSession(app);
+    const response = await app.request(`${ORIGIN}/api/v1/overview`, {
+      headers: { host: HOST, cookie },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    await expect(response.json()).resolves.toMatchObject({
+      shell: { repository: { scaffoldId: "mex" } },
+      identity: { availability: "unavailable" },
+      focus: { availability: "unavailable" },
+      activity: { availability: "available", items: [] },
+      context: { availability: "unavailable" },
+      operation: { availability: "available", active: null, latestRelevantFailure: null },
+    });
+  });
+
   it.each([
     {
       status: 400,
@@ -1748,14 +1767,11 @@ function readServices(): HubReadServices {
       dirty: false,
     },
     actor: { kind: "unknown" },
-    sections: {
-      workstreams: { availability: "unavailable", count: null, reason: "Wiki is not connected." },
-      relays: { availability: "unavailable", count: null, reason: "Wiki is not connected." },
-      inbox: { availability: "unavailable", count: null, reason: "Wiki is not connected." },
-      activity: { availability: "available", count: 0 },
+    attention: {
+      relays: { availability: "unavailable", reason: "Relays are not connected." },
+      inbox: { availability: "unavailable", reason: "Inbox is not connected." },
     },
-    activeJobs: 0,
-    attention: [],
+    jobs: { availability: "available", activeCount: 0 },
   };
   const health: HealthResponse = {
     status: "degraded",
@@ -1774,9 +1790,46 @@ function readServices(): HubReadServices {
       diagnostics: [],
     }],
   };
+  const overview: OverviewResponse = {
+    observedAt: home.observedAt,
+    shell: home,
+    identity: {
+      availability: "unavailable",
+      observedAt: home.observedAt,
+      reason: "Current team identity is unavailable in this fixture.",
+    },
+    focus: {
+      availability: "unavailable",
+      observedAt: home.observedAt,
+      reason: "Personal focus sources are unavailable in this fixture.",
+    },
+    activity: {
+      availability: "available",
+      observedAt: home.observedAt,
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+      sourceTruncated: false,
+      deterministicRevision: "a".repeat(64),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    },
+    context: {
+      availability: "unavailable",
+      observedAt: home.observedAt,
+      reason: "Graph and Wiki are unavailable in this fixture.",
+    },
+    operation: {
+      availability: "available",
+      observedAt: home.observedAt,
+      active: null,
+      latestRelevantFailure: null,
+    },
+  };
   return {
     capabilities: () => capabilities,
     home: () => home,
+    overview: () => overview,
     activity: () => ({
       items: [],
       nextCursor: null,

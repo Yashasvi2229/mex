@@ -2,7 +2,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { FolderGit2, GitBranch, GitCommitHorizontal, Menu, X } from "lucide-react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import type { CapabilitiesResponse, HomeResponse, SessionResponse } from "../api/types";
+import type { CapabilitiesResponse, HomeResponse, OverviewResponse, SessionResponse } from "../api/types";
 import { useHubApi } from "../api/context";
 import { formatTime, StatePanel, StatusPill } from "../components/ui";
 import styles from "../styles/shell.module.css";
@@ -87,8 +87,17 @@ export function HubLayout({
   const skipNextMainFocus = useRef(false);
   const [searchFocusRequest, setSearchFocusRequest] = useState(0);
   const clearSearchFocusRequest = useCallback(() => setSearchFocusRequest(0), []);
-  const home = useQuery({ queryKey: ["home"], queryFn: () => api.getHome(), retry: false });
-  const trustedHome = home.isSuccess ? home.data : undefined;
+  const isOverview = location.pathname === "/";
+  const shell = useQuery<HomeResponse | OverviewResponse>({
+    queryKey: [isOverview ? "overview" : "home"],
+    queryFn: () => isOverview ? api.getOverview() : api.getHome(),
+    retry: false,
+  });
+  const trustedHome = shell.isSuccess
+    ? isOverview
+      ? (shell.data as OverviewResponse).shell
+      : shell.data as HomeResponse
+    : undefined;
 
   useEffect(() => {
     if (previousPath.current !== location.pathname) {
@@ -114,7 +123,7 @@ export function HubLayout({
 
   return (
     <div className={styles.viewportFrame}>
-      <JobLifecycleObserver channelScope={session.expiresAt} />
+      {isOverview ? null : <JobLifecycleObserver channelScope={session.expiresAt} />}
       <a className={styles.skipLink} href="#main-content">Skip to main content</a>
       <HubSidebar capabilities={capabilities} home={trustedHome} />
       <div className={styles.workspace}>

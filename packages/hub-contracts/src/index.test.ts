@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as IdRuntime from "./ids.js";
+import { OverviewActivityPanelSchema } from "./overview.js";
 import * as RelayRuntime from "./relay.js";
 import {
   ActivityRequestSchema,
@@ -9,6 +10,7 @@ import {
   CodeWorkspaceResponseSchema,
   CodeKnowledgeResponseSchema,
   HealthResponseSchema,
+  GraphSymbolIdSchema,
   HUB_LIMITS,
   HomeResponseSchema,
   HubCapabilitiesSchema,
@@ -17,6 +19,7 @@ import {
   InboxEvidenceRefSchema,
   InboxOperationPreviewRequestSchema,
   InboxOperationPreviewResponseSchema,
+  InboxProposalIdSchema,
   InboxProposalDetailSchema,
   RelayDetailSchema,
   RelayDraftDetailSchema,
@@ -49,6 +52,7 @@ import {
   TeamWorkstreamListResponseSchema,
   TeamWorkstreamSchema,
   WikiEntityDetailResponseSchema,
+  WikiEntityIdSchema,
   WikiEntityListRequestSchema,
   WikiEntityListResponseSchema,
   WikiRelationsRequestSchema,
@@ -58,6 +62,9 @@ describe("Hub API contracts", () => {
   it("keeps the private ID and Relay runtime entries on the canonical schema instances", () => {
     expect(IdRuntime.TeamMemberIdSchema).toBe(TeamMemberIdSchema);
     expect(IdRuntime.RelayIdSchema).toBe(RelayIdSchema);
+    expect(IdRuntime.InboxProposalIdSchema).toBe(InboxProposalIdSchema);
+    expect(IdRuntime.GraphSymbolIdSchema).toBe(GraphSymbolIdSchema);
+    expect(IdRuntime.WikiEntityIdSchema).toBe(WikiEntityIdSchema);
     expect(RelayRuntime.RelayDetailSchema).toBe(RelayDetailSchema);
     expect(RelayRuntime.RelayDraftDetailSchema).toBe(RelayDraftDetailSchema);
     expect(RelayRuntime.RelayDraftIdSchema).toBe(RelayDraftIdSchema);
@@ -73,6 +80,12 @@ describe("Hub API contracts", () => {
     expect(IdRuntime.TeamMemberIdSchema.parse("member_01ARZ3NDEKTSV4RRFFQ69G5FAV"))
       .toBe("member_01ARZ3NDEKTSV4RRFFQ69G5FAV");
     expect(IdRuntime.TeamMemberIdSchema.safeParse("member-not-portable").success).toBe(false);
+    expect(IdRuntime.InboxProposalIdSchema.parse("proposal_01000000000000000000000001"))
+      .toBe("proposal_01000000000000000000000001");
+    expect(IdRuntime.GraphSymbolIdSchema.parse("symbol:router.handle"))
+      .toBe("symbol:router.handle");
+    expect(IdRuntime.WikiEntityIdSchema.parse("mx_01000000000000000000000001"))
+      .toBe("mx_01000000000000000000000001");
   });
 
   it("rejects unknown request fields and oversized queries", () => {
@@ -1535,6 +1548,15 @@ describe("Hub API contracts", () => {
     expect(ActivityResponseSchema.safeParse(response("src/e\u0301.ts")).success).toBe(false);
     expect(ActivityResponseSchema.safeParse(response("src/\u0080.ts")).success).toBe(false);
     expect(ActivityResponseSchema.safeParse(response(`src/${"é".repeat(192)}x`)).success).toBe(false);
+    expect(OverviewActivityPanelSchema.safeParse({
+      availability: "available",
+      observedAt: "2026-08-23T00:00:00.000Z",
+      ...response("src/ok.ts"),
+      items: Array.from({ length: 6 }, (_, index) => ({
+        ...base,
+        id: `legacy_${String(index).repeat(64)}`,
+      })),
+    }).success).toBe(false);
   });
 
   it("accepts only standard prefixed ULIDs for Hub jobs", () => {
@@ -1554,21 +1576,18 @@ describe("Hub API contracts", () => {
         dirty: false,
       },
       actor: { kind: "unknown" },
-      sections: {
-        workstreams: { availability: "unavailable", count: null, reason: "Wiki is not connected." },
-        relays: { availability: "unavailable", count: null, reason: "Wiki is not connected." },
-        inbox: { availability: "unavailable", count: null, reason: "Wiki is not connected." },
-        activity: { availability: "available", count: 0 },
+      attention: {
+        relays: { availability: "unavailable", reason: "Relays are not connected." },
+        inbox: { availability: "unavailable", reason: "Inbox is not connected." },
       },
-      activeJobs: 0,
-      attention: [],
+      jobs: { availability: "available", activeCount: 0 },
     };
     expect(HomeResponseSchema.safeParse(response).success).toBe(true);
     expect(HomeResponseSchema.safeParse({
       ...response,
-      sections: {
-        ...response.sections,
-        workstreams: { availability: "unavailable", count: 12 },
+      attention: {
+        ...response.attention,
+        inbox: { availability: "unavailable", teamReviewCount: 12 },
       },
     }).success).toBe(false);
   });

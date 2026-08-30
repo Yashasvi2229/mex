@@ -34,6 +34,7 @@ import type {
   RelayOperationPreviewResponse,
   JobsResponse,
   JobSummary,
+  OverviewResponse,
   SearchRequest,
   SearchResponse,
   SessionResponse,
@@ -518,23 +519,16 @@ const home: HomeResponse = {
   repository: {
     scaffoldId: "scf_mex",
     name: "mex",
-    branch: "feat/project-hub-foundation",
-    head: "6484dd00022ac5d704404585d981b4da5f2c1cbf",
+    branch: "codex/hub-ux",
+    head: "aeaf0ab0022ac5d704404585d981b4da5f2c1cbf",
     dirty: true,
   },
-  actor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
-  sections: {
-    workstreams: { availability: "available", count: fixtureWorkstreams.length },
-    relays: { availability: "available", count: 1 },
-    inbox: { availability: "unavailable", count: null, reason: "Inbox workflows are not part of this read-only slice." },
-    activity: { availability: "available", count: 5 },
+  actor: { kind: "member", memberId: fixtureMemberIds[0], displayName: fixtureMembers[0].displayName },
+  attention: {
+    inbox: { availability: "available", teamReviewCount: 3 },
+    relays: { availability: "available", readyToTakeCount: 1, inYourHandsCount: 1 },
   },
-  activeJobs: 1,
-  attention: [
-    { id: "attention_graph", kind: "job", title: "Graph refresh is in progress", summary: "Extraction is processing generation 14.", route: `/jobs?job=${jobs[0].id}`, tone: "neutral" },
-    { id: "attention_graph_freshness", kind: "health", title: "The code graph is behind this branch", summary: "Seven repository changes are outside the last trustworthy graph snapshot.", route: "/health", tone: "warning" },
-    { id: "attention_activity", kind: "activity", title: "Repository activity is available", summary: "MEX records and Project notes can be reviewed without changing the project.", route: "/activity", tone: "neutral" },
-  ],
+  jobs: { availability: "available", activeCount: 1 },
 };
 
 const health: HealthResponse = {
@@ -556,7 +550,7 @@ const health: HealthResponse = {
         indexedAt: timestamp(190),
         indexedBranch: "feat/project-hub-foundation",
         indexedHead: "6484dd00022ac5d704404585d981b4da5f2c1cbf",
-        currentBranch: "feat/hub-graph-integration",
+        currentBranch: "codex/hub-ux",
         currentHead: "aeaf0ab0022ac5d704404585d981b4da5f2c1cbf",
         schemaVersion: 3,
         extractorVersion: "0.7.2",
@@ -610,6 +604,318 @@ const health: HealthResponse = {
     },
     { id: "local_state", label: "Local Hub state", status: "healthy", summary: "Schema v3 jobs, graph phases, and team state are readable.", diagnostics: [] },
   ],
+};
+
+type OverviewVariant = NonNullable<FixtureApiOptions["overviewFixture"]>;
+type HealthComponent = HealthResponse["components"][number];
+
+function fixtureHealthComponent(id: "graph" | "wiki"): HealthComponent {
+  const component = health.components.find((candidate) => candidate.id === id);
+  if (component === undefined) throw new Error(`Missing fixture ${id} health component.`);
+  return structuredClone(component);
+}
+
+function freshGraphComponent(activeJobId: string | null = null): HealthComponent {
+  const component = fixtureHealthComponent("graph");
+  component.status = "healthy";
+  component.summary = "The code Graph matches the current repository snapshot.";
+  component.diagnostics = [];
+  delete component.repairJobKind;
+  component.graph = {
+    ...component.graph!,
+    indexStatus: "fresh",
+    indexedAt: timestamp(61),
+    lastSuccessfulIndexAt: timestamp(61),
+    indexedBranch: home.repository.branch,
+    indexedHead: home.repository.head,
+    currentBranch: home.repository.branch,
+    currentHead: home.repository.head,
+    parseHealth: {
+      total: 183,
+      ok: 183,
+      partial: 0,
+      failed: 0,
+      failedPaths: [],
+      failedPathsTruncated: false,
+    },
+    changes: {
+      total: 0,
+      added: [],
+      modified: [],
+      deleted: [],
+      truncated: false,
+      branchChanged: false,
+      manifestChanged: false,
+      configChanged: false,
+      grammarChanged: false,
+    },
+    recommendedJobKind: null,
+    activeJobId,
+  };
+  return component;
+}
+
+function staleGraphComponent(activeJobId: string | null = null): HealthComponent {
+  const component = fixtureHealthComponent("graph");
+  component.graph = { ...component.graph!, activeJobId };
+  return component;
+}
+
+function degradedGraphComponent(): HealthComponent {
+  const component = freshGraphComponent();
+  component.status = "degraded";
+  component.summary = "The indexed snapshot is usable, but some source files parsed only partially or failed.";
+  component.diagnostics = [{
+    code: "GRAPH_PARSE_DEGRADED",
+    severity: "warning",
+    message: "Five indexed sources did not parse completely.",
+  }];
+  component.repairJobKind = "graph_rebuild";
+  component.graph = {
+    ...component.graph!,
+    indexStatus: "degraded",
+    parseHealth: {
+      total: 183,
+      ok: 178,
+      partial: 4,
+      failed: 1,
+      failedPaths: ["src/legacy/parser.ts"],
+      failedPathsTruncated: false,
+    },
+    recommendedJobKind: "graph_rebuild",
+  };
+  return component;
+}
+
+function missingGraphComponent(): HealthComponent {
+  const component = freshGraphComponent();
+  component.status = "degraded";
+  component.summary = "No trustworthy code Graph index exists yet.";
+  component.diagnostics = [{
+    code: "GRAPH_INDEX_MISSING",
+    severity: "warning",
+    message: "Build the code Graph before using indexed code context.",
+  }];
+  component.repairJobKind = "graph_rebuild";
+  component.graph = {
+    ...component.graph!,
+    indexStatus: "missing",
+    lastSuccessfulIndexAt: null,
+    indexedAt: null,
+    indexedBranch: null,
+    indexedHead: null,
+    schemaVersion: null,
+    extractorVersion: null,
+    grammarVersion: null,
+    parseHealth: {
+      total: 0,
+      ok: 0,
+      partial: 0,
+      failed: 0,
+      failedPaths: [],
+      failedPathsTruncated: false,
+    },
+    changes: {
+      total: 0,
+      added: [],
+      modified: [],
+      deleted: [],
+      truncated: false,
+      branchChanged: false,
+      manifestChanged: false,
+      configChanged: false,
+      grammarChanged: false,
+    },
+    recommendedJobKind: "graph_rebuild",
+    activeJobId: null,
+  };
+  return component;
+}
+
+function freshWikiComponent(activeJobId: string | null = null): HealthComponent {
+  const component = fixtureHealthComponent("wiki");
+  component.wiki = { ...component.wiki!, activeJobId };
+  return component;
+}
+
+function missingWikiComponent(): HealthComponent {
+  const component = freshWikiComponent();
+  component.status = "degraded";
+  component.summary = "No trustworthy Knowledge index exists yet.";
+  component.diagnostics = [{
+    code: "WIKI_INDEX_MISSING",
+    severity: "warning",
+    message: "Build the Knowledge index before using indexed project memory.",
+  }];
+  component.repairJobKind = "wiki_rebuild";
+  component.wiki = {
+    ...component.wiki!,
+    indexStatus: "missing",
+    indexedAt: null,
+    schemaVersion: null,
+    indexedRevision: null,
+    recommendedJobKind: "wiki_rebuild",
+    activeJobId: null,
+  };
+  return component;
+}
+
+function unavailableHealthComponent(id: "graph" | "wiki"): HealthComponent {
+  return {
+    id,
+    label: id === "graph" ? "Code graph" : "Project Wiki",
+    status: "unavailable",
+    summary: id === "graph"
+      ? "Code Graph health could not be read."
+      : "Knowledge index health could not be read.",
+    diagnostics: [{
+      code: id === "graph" ? "GRAPH_HEALTH_UNAVAILABLE" : "WIKI_HEALTH_UNAVAILABLE",
+      severity: "error",
+      message: "The local health source is unavailable.",
+    }],
+  };
+}
+
+function overviewContext(variant: OverviewVariant): OverviewResponse["context"] {
+  if (variant === "unavailable") {
+    return {
+      availability: "unavailable",
+      observedAt: timestamp(0),
+      reason: "Graph and Knowledge health are unavailable in this Hub process.",
+    };
+  }
+  if (variant === "indexes-missing") {
+    return {
+      availability: "available",
+      observedAt: timestamp(0),
+      graph: overviewGraphSource(missingGraphComponent()),
+      wiki: overviewWikiSource(missingWikiComponent()),
+    };
+  }
+  if (variant === "indexes-stale") {
+    return {
+      availability: "available",
+      observedAt: timestamp(0),
+      graph: overviewGraphSource(staleGraphComponent()),
+      wiki: overviewWikiSource(freshWikiComponent()),
+    };
+  }
+  if (variant === "indexes-degraded") {
+    return {
+      availability: "available",
+      observedAt: timestamp(0),
+      graph: overviewGraphSource(degradedGraphComponent()),
+      wiki: overviewWikiSource(freshWikiComponent()),
+    };
+  }
+  if (variant === "partial") {
+    return {
+      availability: "available",
+      observedAt: timestamp(0),
+      graph: {
+        availability: "unavailable",
+        observedAt: timestamp(0),
+        reason: unavailableHealthComponent("graph").summary,
+      },
+      wiki: overviewWikiSource(freshWikiComponent()),
+    };
+  }
+  if (variant === "established") {
+    return {
+      availability: "available",
+      observedAt: timestamp(0),
+      graph: overviewGraphSource(staleGraphComponent(jobs[0].id)),
+      wiki: overviewWikiSource(freshWikiComponent()),
+    };
+  }
+  const activeJobId = variant === "job-determinate" ? jobs[0].id : null;
+  const wikiJobId = variant === "job-indeterminate" ? "job_01K39WVM6H7JK8M9NPQRSTVVWX" : null;
+  return {
+    availability: "available",
+    observedAt: timestamp(0),
+    graph: overviewGraphSource(freshGraphComponent(activeJobId)),
+    wiki: overviewWikiSource(freshWikiComponent(wikiJobId)),
+  };
+}
+
+function overviewGraphSource(
+  component: HealthComponent,
+): Extract<OverviewResponse["context"], { availability: "available" }>["graph"] {
+  if (component.graph === undefined) throw new Error("Fixture graph details are required.");
+  if (component.status === "unavailable") {
+    throw new Error("An unavailable graph component must use the Overview unavailable-source branch.");
+  }
+  const { activeJobId: _activeJobId, ...details } = component.graph;
+  return {
+    availability: "available",
+    observedAt: component.graph.observedAt,
+    status: component.status,
+    summary: component.summary,
+    diagnostics: structuredClone(component.diagnostics),
+    diagnosticsTruncated: false,
+    repairJobKind: component.repairJobKind === "graph_refresh" || component.repairJobKind === "graph_rebuild"
+      ? component.repairJobKind
+      : null,
+    details,
+  };
+}
+
+function overviewWikiSource(
+  component: HealthComponent,
+): Extract<OverviewResponse["context"], { availability: "available" }>["wiki"] {
+  if (component.wiki === undefined) throw new Error("Fixture Wiki details are required.");
+  if (component.status === "unavailable") {
+    throw new Error("An unavailable Wiki component must use the Overview unavailable-source branch.");
+  }
+  const { activeJobId: _activeJobId, ...details } = component.wiki;
+  return {
+    availability: "available",
+    observedAt: component.wiki.observedAt,
+    status: component.status,
+    summary: component.summary,
+    diagnostics: structuredClone(component.diagnostics),
+    diagnosticsTruncated: false,
+    repairJobKind: component.repairJobKind === "wiki_refresh" || component.repairJobKind === "wiki_rebuild"
+      ? component.repairJobKind
+      : null,
+    details,
+  };
+}
+
+const indeterminateJob: JobSummary = {
+  id: "job_01K39WVM6H7JK8M9NPQRSTVVWX",
+  scaffoldId: "scf_mex",
+  kind: "wiki_refresh",
+  generation: 9,
+  phase: "discover",
+  progress: { completed: 37 },
+  state: "running",
+  cancelRequested: false,
+  createdAt: timestamp(5),
+  startedAt: timestamp(4),
+  revision: revision("e"),
+};
+
+const relevantFailedJob: JobSummary = {
+  id: "job_01K39R3X4A5BC6DE7FGHJKMNPQ",
+  scaffoldId: "scf_mex",
+  kind: "graph_refresh",
+  generation: 15,
+  phase: "failed",
+  progress: { completed: 176, total: 183 },
+  state: "failed",
+  cancelRequested: false,
+  createdAt: timestamp(6),
+  startedAt: timestamp(5),
+  finishedAt: timestamp(2),
+  problem: {
+    type: "about:blank",
+    code: "JOB_FAILED",
+    status: 500,
+    title: "Graph refresh failed",
+    detail: "The previous trustworthy Graph index was preserved.",
+  },
+  revision: revision("f"),
 };
 
 const graphRevision = revision("7");
@@ -1692,6 +1998,40 @@ function fixtureTimelineEvent(event: TeamActivityEvent): ActivityItem {
   };
 }
 
+type OverviewFocusAvailable = Extract<OverviewResponse["focus"], { availability: "available" }>;
+type OverviewInboxItem = Extract<OverviewFocusAvailable["inbox"], { availability: "available" }>["items"][number];
+type OverviewRelayItem = Extract<OverviewFocusAvailable["relays"], { availability: "available" }>["readyToTake"][number];
+
+function fixtureInboxProposalSummary(proposal: InboxProposalDetail): OverviewInboxItem {
+  const {
+    change: _change,
+    rationale: _rationale,
+    evidence: _evidence,
+    targetRevisions: _targetRevisions,
+    reviewRationale: _reviewRationale,
+    ...summary
+  } = proposal;
+  return structuredClone(summary);
+}
+
+function fixtureRelaySummary(relay: RelayDetail): OverviewRelayItem {
+  const {
+    completed: _completed,
+    inProgress: _inProgress,
+    decisions: _decisions,
+    blockers: _blockers,
+    unresolvedQuestions: _unresolvedQuestions,
+    changedFiles: _changedFiles,
+    code: _code,
+    evidence: _evidence,
+    nextActions: _nextActions,
+    diagnostics: _diagnostics,
+    diagnosticsTruncated: _diagnosticsTruncated,
+    ...summary
+  } = relay;
+  return structuredClone(summary);
+}
+
 class FixtureHubApi implements HubApi {
   readonly #jobs = structuredClone(jobs);
   readonly #members: TeamMember[];
@@ -1700,6 +2040,7 @@ class FixtureHubApi implements HubApi {
   readonly #relayFixture: FixtureApiOptions["relayFixture"];
   readonly #activityFixture: FixtureApiOptions["activityFixture"];
   readonly #memberFixture: NonNullable<FixtureApiOptions["memberFixture"]>;
+  readonly #overviewFixture: OverviewVariant;
   readonly #gitIdentity: FixtureGitIdentity | null;
   readonly #inboxDrafts: InboxDraftDetail[];
   readonly #inboxProposals: InboxProposalDetail[];
@@ -1713,8 +2054,11 @@ class FixtureHubApi implements HubApi {
     this.#inboxFixture = options.inboxFixture;
     this.#relayFixture = options.relayFixture;
     this.#activityFixture = options.activityFixture;
+    this.#overviewFixture = options.overviewFixture ?? "established";
     this.#memberFixture = options.memberFixture
-      ?? (options.inboxFixture === "unknown"
+      ?? (options.overviewFixture === "identity-unresolved"
+        ? "unknown"
+        : options.inboxFixture === "unknown"
         ? "unknown"
         : options.relayFixture === "missing"
           ? "stale"
@@ -1777,6 +2121,50 @@ class FixtureHubApi implements HubApi {
     return fixtureCurrentActor(this.#members, this.#selection, this.#gitIdentity);
   }
 
+  #homeForCurrent(current: TeamCurrentActorResponse): HomeResponse {
+    const actor = current.actor;
+    const teamReviewCount = this.#inboxProposals.filter((item) => (
+      item.state === "pending" || item.state === "stale"
+    )).length;
+    const readyToTakeCount = actor.kind !== "member" ? null : this.#relays.filter((relay) => (
+      relay.state === "published"
+      && relay.recipients.some((recipient) => (
+        recipient.kind === "member" && recipient.memberId === actor.memberId
+      ))
+    )).length;
+    const inYourHandsCount = actor.kind !== "member" ? null : this.#relays.filter((relay) => (
+      relay.state === "acknowledged"
+      && relay.acknowledgedBy?.kind === "member"
+      && relay.acknowledgedBy.memberId === actor.memberId
+    )).length;
+    return {
+      ...home,
+      actor: actor.kind === "member"
+        ? { ...actor, displayName: actor.displayName ?? actor.memberId }
+        : actor,
+      attention: {
+        inbox: {
+          availability: "available",
+          teamReviewCount,
+        },
+        relays: actor.kind !== "member"
+          ? {
+              availability: "unavailable",
+              reason: "Select an active Member to see your personal Relay handoffs.",
+            }
+          : {
+              availability: "available",
+              readyToTakeCount: readyToTakeCount!,
+              inYourHandsCount: inYourHandsCount!,
+            },
+      },
+      jobs: {
+        availability: "available",
+        activeCount: this.#jobs.filter((job) => job.state === "queued" || job.state === "running").length,
+      },
+    };
+  }
+
   bootstrap() { return Promise.resolve({ expiresAt: session.expiresAt }); }
   getSession() { return Promise.resolve(session); }
   getCapabilities() {
@@ -1803,40 +2191,234 @@ class FixtureHubApi implements HubApi {
     }
     return Promise.resolve(projected);
   }
-  getHome() {
-    const actor = this.#currentActor().actor;
-    return Promise.resolve({
-      ...home,
-      actor: actor.kind === "member"
-        ? { ...actor, displayName: actor.displayName ?? actor.memberId }
-        : actor,
-      sections: {
-        ...home.sections,
-        workstreams: {
-          availability: "available" as const,
-          count: this.#workstreams.filter((item) => item.state !== "archived").length,
-        },
-        relays: actor.kind !== "member"
-          ? { availability: "unavailable" as const, count: null, reason: "Select an active Member to see your open Relay handoffs." }
-          : {
-              availability: "available" as const,
-              count: this.#relays.filter((relay) => (
-                (relay.state === "published" && relay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === actor.memberId))
-                || (relay.state === "acknowledged" && relay.acknowledgedBy?.kind === "member" && relay.acknowledgedBy.memberId === actor.memberId)
-              )).length,
-            },
-        inbox: {
-          availability: "available" as const,
-          count: this.#inboxProposals.filter((item) => (
-            item.state === "pending" || item.state === "stale"
-          )).length,
-        },
-        activity: {
-          availability: "available" as const,
-          count: this.#activityItems.filter((item) => item.source === "activity").length,
-        },
-      },
-    });
+  getHome(): Promise<HomeResponse> {
+    return Promise.resolve(this.#homeForCurrent(this.#currentActor()));
+  }
+  async getOverview(): Promise<OverviewResponse> {
+    const current = this.#currentActor();
+    const baseShell = this.#homeForCurrent(current);
+    const variant = this.#overviewFixture;
+    let inbox: HomeResponse["attention"]["inbox"] = baseShell.attention.inbox;
+    let relays: HomeResponse["attention"]["relays"] = baseShell.attention.relays;
+    let jobsProjection: HomeResponse["jobs"] = baseShell.jobs;
+
+    if (variant === "caught-up"
+      || variant === "indexes-stale"
+      || variant === "indexes-degraded"
+      || variant === "indexes-missing"
+      || variant === "job-determinate"
+      || variant === "job-indeterminate"
+      || variant === "failure") {
+      inbox = { availability: "available", teamReviewCount: 0 };
+      relays = { availability: "available", readyToTakeCount: 0, inYourHandsCount: 0 };
+    } else if (variant === "pending-review") {
+      inbox = { availability: "available", teamReviewCount: 3 };
+      relays = { availability: "available", readyToTakeCount: 0, inYourHandsCount: 0 };
+    } else if (variant === "relay-ready") {
+      inbox = { availability: "available", teamReviewCount: 0 };
+      relays = { availability: "available", readyToTakeCount: 1, inYourHandsCount: 0 };
+    } else if (variant === "relay-in-hand") {
+      inbox = { availability: "available", teamReviewCount: 0 };
+      relays = { availability: "available", readyToTakeCount: 0, inYourHandsCount: 1 };
+    } else if (variant === "identity-unresolved") {
+      inbox = { availability: "available", teamReviewCount: 0 };
+      relays = {
+        availability: "unavailable",
+        reason: "Select an active Member to see your personal Relay handoffs.",
+      };
+    } else if (variant === "partial") {
+      inbox = { availability: "available", teamReviewCount: 2 };
+      relays = {
+        availability: "unavailable",
+        reason: "Relay attention could not be read from the bounded source.",
+      };
+    } else if (variant === "unavailable") {
+      inbox = {
+        availability: "unavailable",
+        reason: "Inbox attention could not be read from the bounded source.",
+      };
+      relays = {
+        availability: "unavailable",
+        reason: "Relay attention could not be read from the bounded source.",
+      };
+    }
+
+    if (variant === "job-determinate" || variant === "job-indeterminate" || variant === "established") {
+      jobsProjection = { availability: "available", activeCount: 1 };
+    } else if (variant === "unavailable") {
+      jobsProjection = {
+        availability: "unavailable",
+        reason: "Job state is unavailable in this Hub process.",
+      };
+    } else {
+      jobsProjection = { availability: "available", activeCount: 0 };
+    }
+
+    const shell: HomeResponse = {
+      ...baseShell,
+      attention: { inbox, relays },
+      jobs: jobsProjection,
+    };
+    const currentMemberId = current.actor.kind === "member" ? current.actor.memberId : null;
+    const identityNeedsAttention = current.actor.kind !== "member"
+      || current.diagnostics.some((diagnostic) => (
+        diagnostic.code === "ACTOR_MEMBER_MISSING"
+        || diagnostic.code === "ACTOR_MEMBER_INACTIVE"
+        || diagnostic.code === "ACTOR_ALIAS_AMBIGUOUS"
+      ));
+    const identity: OverviewResponse["identity"] = variant === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: "Current team identity could not be resolved in this Hub process.",
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          current: structuredClone(current),
+        };
+    const focusIdentity: OverviewFocusAvailable["identity"] = variant === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: "Current team identity could not be resolved in this Hub process.",
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          requiresAttention: identityNeedsAttention,
+        };
+    const proposalItems = this.#inboxProposals
+      .filter((proposal) => proposal.state === "pending" || proposal.state === "stale")
+      .slice(0, 3)
+      .map(fixtureInboxProposalSummary);
+    const readyRelayItems = currentMemberId === null ? [] : this.#relays
+      .filter((relay) => (
+        relay.state === "published"
+        && relay.recipients.some((recipient) => (
+          recipient.kind === "member" && recipient.memberId === currentMemberId
+        ))
+      ))
+      .slice(0, 3)
+      .map(fixtureRelaySummary);
+    const inHandRelayItems = currentMemberId === null ? [] : this.#relays
+      .filter((relay) => (
+        relay.state === "acknowledged"
+        && relay.acknowledgedBy?.kind === "member"
+        && relay.acknowledgedBy.memberId === currentMemberId
+      ))
+      .slice(0, 3)
+      .map(fixtureRelaySummary);
+    const focusInbox: OverviewFocusAvailable["inbox"] = inbox.availability === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: inbox.reason,
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          teamReviewCount: inbox.teamReviewCount,
+          items: inbox.teamReviewCount === 0
+            ? []
+            : proposalItems.slice(0, inbox.teamReviewCount),
+          deterministicRevision: revision("5"),
+          sourceTruncated: false,
+          diagnostics: [],
+          diagnosticsTruncated: false,
+        };
+    const focusRelays: OverviewFocusAvailable["relays"] = relays.availability === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: relays.reason,
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          readyToTakeCount: relays.readyToTakeCount,
+          inYourHandsCount: relays.inYourHandsCount,
+          readyToTake: relays.readyToTakeCount === 0
+            ? []
+            : readyRelayItems.slice(0, relays.readyToTakeCount),
+          inYourHands: relays.inYourHandsCount === 0
+            ? []
+            : inHandRelayItems.slice(0, relays.inYourHandsCount),
+          deterministicRevision: revision("b"),
+          sourceTruncated: false,
+          diagnostics: [],
+          diagnosticsTruncated: false,
+        };
+    const focus: OverviewResponse["focus"] = focusIdentity.availability === "unavailable"
+      && focusInbox.availability === "unavailable"
+      && focusRelays.availability === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: "Identity, Inbox, and Relay attention are unavailable in this Hub process.",
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          identity: focusIdentity,
+          inbox: focusInbox,
+          relays: focusRelays,
+        };
+    const activityPreview = variant === "indexes-missing"
+      ? []
+      : this.#activityItems.slice(0, 5);
+    const activity: OverviewResponse["activity"] = variant === "partial" || variant === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: "Recent team Activity could not be read from the bounded source.",
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          items: structuredClone(activityPreview),
+          nextCursor: activityPreview.length < this.#activityItems.length
+            ? `fixture_${activityPreview.length}`
+            : null,
+          hasMore: activityPreview.length < this.#activityItems.length,
+          sourceTruncated: this.#activityFixture === "partial",
+          deterministicRevision: revision("7"),
+          diagnostics: this.#activityFixture === "empty" || this.#activityFixture === "legacy"
+            ? []
+            : [{
+                code: "LEGACY_ACTIVITY_MALFORMED",
+                severity: "warning",
+                message: "One malformed project-note row was excluded while valid history was retained.",
+                path: ".mex/events/decisions.jsonl",
+              }],
+          diagnosticsTruncated: this.#activityFixture === "partial",
+        };
+    const operation: OverviewResponse["operation"] = variant === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: "Job state is unavailable in this Hub process.",
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          active: variant === "established" || variant === "job-determinate"
+            ? structuredClone(this.#jobs.find((job) => job.state === "running") ?? jobs[0])
+            : variant === "job-indeterminate"
+              ? structuredClone(indeterminateJob)
+              : null,
+          latestRelevantFailure: variant === "failure" ? structuredClone(relevantFailedJob) : null,
+        };
+
+    return {
+      observedAt: timestamp(0),
+      shell,
+      identity,
+      focus,
+      activity,
+      context: overviewContext(variant),
+      operation,
+    };
   }
   getMembers(request: TeamMemberListRequest): Promise<TeamMemberListResponse> {
     const filtered = this.#members.filter((member) => (

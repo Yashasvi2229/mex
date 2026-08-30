@@ -463,8 +463,8 @@ describe("Inbox Spec-authoring workbench", () => {
     expect(within(confirmation).getByText(".mex/events/operations.jsonl")).toBeVisible();
     expect(within(confirmation).getByText(`.mex/inbox/${PROPOSAL_ID}.md`)).toBeVisible();
     expect(within(confirmation).getByText(/^\.mex\/events\/activity\/2026-08\/event_/u)).toBeVisible();
-    expect(within(confirmation).getByText("feat/project-hub-foundation", { exact: true })).toBeVisible();
-    expect(within(confirmation).getByText("6484dd00022ac5d704404585d981b4da5f2c1cbf", { exact: true })).toBeVisible();
+    expect(within(confirmation).getByText("codex/hub-ux", { exact: true })).toBeVisible();
+    expect(within(confirmation).getByText("aeaf0ab0022ac5d704404585d981b4da5f2c1cbf", { exact: true })).toBeVisible();
     expect(within(confirmation).getByText("Dirty · local changes", { exact: true })).toBeVisible();
     expect(within(confirmation).getAllByText("23 Aug, 08:45 UTC", { exact: true })).toHaveLength(2);
     expect(preview.mock.calls[0]![0].action).toEqual({

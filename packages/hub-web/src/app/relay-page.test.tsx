@@ -543,7 +543,7 @@ describe("Relay handoff workbench", () => {
     expect(technical).toHaveAttribute("aria-expanded", "true");
     expect(within(dialog).getByText("relay.acknowledge")).toBeVisible();
     expect(within(dialog).getByLabelText(/Exact diff for \.mex\/relays\//u)).toBeVisible();
-    expect(within(dialog).getByText("feat/project-hub-foundation", { exact: true })).toBeVisible();
+    expect(within(dialog).getByText("codex/hub-ux", { exact: true })).toBeVisible();
     expect(within(dialog).getByText("Dirty", { exact: true })).toBeVisible();
 
     const exactEnvelope = await preview.mock.results[0]!.value;
@@ -772,7 +772,7 @@ describe("Relay handoff workbench", () => {
     await user.click(within(dialog).getByRole("button", { name: "Close handoff" }));
 
     expect(await screen.findByText("The open handoff queue could not be refreshed. Try again before choosing what to open next.")).toBeVisible();
-    expect(routeLocation()).not.toContain("relay=");
+    await waitFor(() => expect(routeLocation()).not.toContain("relay="));
     expect(screen.queryByRole("heading", { name: "Finish the keyboard and screen-reader pass for the Hub review surfaces." })).not.toBeInTheDocument();
   });
 
@@ -1502,9 +1502,9 @@ describe("Relay handoff workbench", () => {
     expect(within(dialog).getByText(/commit and push.*teammates can receive/i)).toBeVisible();
     expect(within(dialog).getByText(/does not create a commit or capture source-file or local-change contents/i)).toBeVisible();
     expect(await within(dialog).findByText(/Acting as Ada Lovelace/i)).toBeVisible();
-    const repositoryAtPublication = within(dialog).getByText(/feat\/project-hub-foundation,/i).closest("p");
+    const repositoryAtPublication = within(dialog).getByText(/codex\/hub-ux,/i).closest("p");
     expect(repositoryAtPublication).not.toBeNull();
-    expect(repositoryAtPublication as HTMLElement).toHaveTextContent(/Repository at publication:.*feat\/project-hub-foundation.*HEAD 6484dd00.*local changes present.*observed/i);
+    expect(repositoryAtPublication as HTMLElement).toHaveTextContent(/Repository at publication:.*codex\/hub-ux.*HEAD aeaf0ab0.*local changes present.*observed/i);
     const technical = within(dialog).getByRole("button", { name: "Technical details" });
     expect(technical).toHaveAttribute("aria-expanded", "false");
     expect(within(dialog).queryByText(`.mex/team/members/${GRACE_ID}.md`)).not.toBeInTheDocument();

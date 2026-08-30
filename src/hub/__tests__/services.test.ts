@@ -14,9 +14,12 @@ import {
   InboxProposalListResponseSchema,
   SpecDetailResponseSchema,
   SpecListResponseSchema,
+  type HubJobSnapshot,
 } from "@mex/hub-contracts";
+import { OverviewResponseSchema } from "@mex/hub-contracts/overview";
 import type { GitPort } from "../../team/contracts/git.js";
 import type { Diagnostic, Revision } from "../../team/contracts/shared.js";
+import type { GraphStatus } from "../../team/contracts/graph.js";
 import type {
   TeamMember,
   TeamMemberListRequest,
@@ -27,12 +30,14 @@ import type {
   TeamInboxSpecPreviewEnvelope,
   TeamInboxSpecProposalDetail,
   TeamPage,
+  TeamRelaySummary,
   Workstream,
 } from "../../team/contracts/workflow.js";
 import {
   createLocalHubReadServices as createLocalHubReadServicesBase,
   type HubTeamIdentityActivityService,
   type HubInboxSpecAuthoringService,
+  type HubRelayHandoffService,
   type HubTeamWorkstreamService,
   type HubGraphReadService,
   type HubWikiReadService,
@@ -260,7 +265,354 @@ function wikiSummary(id: string, kind: string, title: string): WikiEntitySummary
   };
 }
 
+function overviewRelay(
+  id: string,
+  state: "published" | "acknowledged",
+): TeamRelaySummary {
+  return {
+    schemaVersion: 3,
+    ref: { id, kind: "relay", title: state === "published" ? "Ready handoff" : "Claimed handoff" },
+    sourcePath: `.mex/relays/${id}.md`,
+    revision: (state === "published" ? "8" : "9").repeat(64) as Revision,
+    state,
+    sender: { kind: "member", memberId: "member_02000000000000000000000001", displayName: "Grace" },
+    recipients: [{ kind: "member", memberId: MEMBER, displayName: "Daksh" }],
+    workstream: null,
+    summary: state === "published" ? "Ready handoff" : "Claimed handoff",
+    publishedAt: NOW.toISOString(),
+    publishedRepoState: {
+      branch: "feat/project-hub-foundation",
+      head: "a".repeat(40),
+      dirty: false,
+      observedAt: NOW.toISOString(),
+    },
+    ...(state === "acknowledged"
+      ? {
+          acknowledgedBy: { kind: "member" as const, memberId: MEMBER, displayName: "Daksh" },
+          acknowledgedAt: NOW.toISOString(),
+        }
+      : {}),
+  };
+}
+
+function overviewJob(
+  id: string,
+  kind: HubJobSnapshot["kind"],
+  state: HubJobSnapshot["state"],
+  createdAt: string,
+  progress: HubJobSnapshot["progress"] = null,
+): HubJobSnapshot {
+  return {
+    id,
+    scaffoldId: "scaffold-local",
+    kind,
+    generation: 1,
+    phase: state === "running" ? "parse" : state === "succeeded" ? "complete" : "failed",
+    progress,
+    state,
+    cancelRequested: false,
+    createdAt,
+    ...(state === "running" ? { startedAt: createdAt } : { finishedAt: createdAt }),
+    revision: id.endsWith("1") ? "1".repeat(64) : id.endsWith("2") ? "2".repeat(64) : "3".repeat(64),
+  };
+}
+
 describe("createLocalHubReadServices", () => {
+  it("keeps Team-wide Relay reads independent from local actor resolution", async () => {
+    const getIdentity = vi.fn(git.getIdentity);
+    const relayGit = { ...git, getIdentity } as GitPort;
+    const team = createRepositoryTeamWorkflowPortWithDependencies(projectRoot, {
+      scaffoldId: "scaffold-local",
+      wiki: createRepositoryWikiPort(projectRoot, { now: () => NOW.toISOString() }),
+      git: relayGit,
+      now: () => new Date(NOW),
+    });
+
+    await expect(team.listRelays({ perspective: "all", limit: 100 })).resolves.toMatchObject({
+      items: [],
+      nextCursor: null,
+    });
+    expect(getIdentity).not.toHaveBeenCalled();
+    await expect(team.listRelays({ perspective: "mine", limit: 100 })).rejects.toMatchObject({
+      problem: { code: "UNAUTHORIZED" },
+    });
+    expect(getIdentity).toHaveBeenCalledTimes(1);
+  });
+
+  it("builds Overview from one bounded read per source and reuses one actor resolution", async () => {
+    const unused = async (): Promise<never> => { throw new Error("unused"); };
+    const getRepoState = vi.fn(git.getRepoState);
+    const overviewGit = { ...git, getRepoState } as GitPort;
+    const getCurrentActor = vi.fn(async () => ({
+      actor: { kind: "member" as const, memberId: MEMBER, displayName: "Daksh" },
+      source: "git-alias" as const,
+      selection: null,
+      diagnostics: [] as Diagnostic[],
+    }));
+    const previewIdentityActivity = vi.fn(unused);
+    const applyIdentityActivity = vi.fn(unused);
+    const team: HubTeamIdentityActivityService = {
+      getMember: unused,
+      listMembers: unused,
+      getCurrentActor,
+      getActivity: unused,
+      listActivity: unused,
+      previewIdentityActivity,
+      applyIdentityActivity,
+    };
+    const proposal = inboxProposalFixture("pending");
+    const listInboxProposals = vi.fn(async () => ({
+      items: [proposal],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "4".repeat(64) as Revision,
+      diagnostics: [] as Diagnostic[],
+    }));
+    const inbox: HubInboxSpecAuthoringService = {
+      getInboxDraft: unused,
+      listInboxDrafts: unused,
+      getInboxProposal: unused,
+      listInboxProposals,
+      previewInbox: vi.fn(unused),
+      applyInbox: vi.fn(unused),
+    };
+    const relays = [
+      overviewRelay("relay_01000000000000000000000001", "published"),
+      overviewRelay("relay_01000000000000000000000002", "acknowledged"),
+    ];
+    const listRelays = vi.fn(async () => ({
+      items: relays,
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "5".repeat(64) as Revision,
+      diagnostics: [] as Diagnostic[],
+    }));
+    const relay: HubRelayHandoffService = {
+      getRelayDraft: unused,
+      listRelayDrafts: unused,
+      getRelay: unused,
+      listRelays,
+      previewRelay: vi.fn(unused),
+      applyRelay: vi.fn(unused),
+    };
+    const graphStatus: GraphStatus = {
+      status: "stale",
+      observedAt: NOW.toISOString(),
+      currentRepo: {
+        branch: "feat/project-hub-foundation",
+        head: "a".repeat(40),
+        dirty: true,
+        observedAt: NOW.toISOString(),
+      },
+      lastSuccessfulIndexAt: "2026-08-22T00:00:00.000Z",
+      indexedAt: "2026-08-22T00:00:00.000Z",
+      indexedBranch: "feat/project-hub-foundation",
+      indexedHead: "b".repeat(40),
+      schemaVersion: 3,
+      extractorVersion: "tree-sitter-v1",
+      grammarVersion: "grammar-v1",
+      parseHealth: { total: 3, ok: 2, partial: 1, failed: 0, failedPaths: [], failedPathsTruncated: false },
+      changes: {
+        total: 2,
+        added: ["src/new.ts"],
+        modified: ["src/changed.ts"],
+        deleted: [],
+        truncated: false,
+        branchChanged: false,
+        manifestChanged: false,
+        configChanged: false,
+        grammarChanged: false,
+      },
+      diagnostics: [],
+    };
+    const inspectStatus = vi.fn(async () => graphStatus);
+    const graph: HubGraphReadService = {
+      inspectStatus,
+      searchBundle: unused,
+      readSymbolWorkspace: unused,
+    };
+    const wiki = wikiWithStatus("fresh");
+    const inspectIndex = vi.spyOn(wiki, "inspectIndex");
+    const jobs = [
+      overviewJob("job_01000000000000000000000003", "wiki_rebuild", "running", "2026-08-23T00:03:00.000Z", { completed: 124, total: 183 }),
+      overviewJob("job_01000000000000000000000002", "graph_refresh", "succeeded", "2026-08-23T00:02:00.000Z"),
+      overviewJob("job_01000000000000000000000001", "graph_refresh", "failed", "2026-08-23T00:01:00.000Z"),
+      overviewJob("job_01000000000000000000000005", "graph_rebuild", "failed", "2026-08-23T00:00:30.000Z"),
+      overviewJob("job_01000000000000000000000004", "wiki_refresh", "failed", "2026-08-15T00:00:00.000Z"),
+    ];
+    const listJobs = vi.fn(() => ({ items: jobs, nextCursor: null }));
+    const listWorkstreams = vi.fn(unused);
+    const activityRead = vi.spyOn(ActivityRepository.prototype, "readAll");
+    const services = createLocalHubReadServicesBase({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git: overviewGit,
+      team,
+      inbox,
+      relays: relay,
+      workstreams: {
+        getWorkstream: unused,
+        listWorkstreams,
+        previewWorkstream: unused,
+        applyWorkstream: unused,
+      },
+      graph,
+      wiki,
+      jobs: { list: listJobs },
+      now: () => new Date(NOW),
+    });
+
+    const overview = await services.overview?.();
+    expect(OverviewResponseSchema.parse(overview)).toEqual(overview);
+    expect(overview).toMatchObject({
+      shell: {
+        attention: {
+          inbox: { availability: "available", teamReviewCount: 1 },
+          relays: { availability: "available", readyToTakeCount: 1, inYourHandsCount: 1 },
+        },
+        jobs: { availability: "available", activeCount: 1 },
+      },
+      identity: { availability: "available", current: { source: "git-alias" } },
+      focus: {
+        availability: "available",
+        inbox: { availability: "available", teamReviewCount: 1, items: [{ title: proposal.title }] },
+        relays: {
+          availability: "available",
+          readyToTakeCount: 1,
+          inYourHandsCount: 1,
+          readyToTake: [{ ref: { id: "relay_01000000000000000000000001" } }],
+          inYourHands: [{ ref: { id: "relay_01000000000000000000000002" } }],
+        },
+      },
+      activity: { availability: "available", items: [] },
+      context: {
+        availability: "available",
+        graph: { availability: "available", details: { indexStatus: "stale", changes: { total: 2 } } },
+        wiki: { availability: "available", details: { indexStatus: "fresh" } },
+      },
+      operation: {
+        availability: "available",
+        active: { id: "job_01000000000000000000000003", progress: { completed: 124, total: 183 } },
+        latestRelevantFailure: { id: "job_01000000000000000000000005", kind: "graph_rebuild" },
+      },
+    });
+    expect(JSON.stringify(overview?.context)).not.toContain("activeJobId");
+    expect(getCurrentActor).toHaveBeenCalledTimes(1);
+    expect(getRepoState).toHaveBeenCalledTimes(1);
+    expect(listInboxProposals).toHaveBeenCalledTimes(1);
+    expect(listInboxProposals).toHaveBeenCalledWith({ states: ["pending", "stale"], limit: 100 });
+    expect(listRelays).toHaveBeenCalledTimes(1);
+    expect(listRelays).toHaveBeenCalledWith({ perspective: "all", states: ["published", "acknowledged"], limit: 100 });
+    expect(listJobs).toHaveBeenCalledTimes(1);
+    expect(activityRead).toHaveBeenCalledTimes(1);
+    expect(inspectStatus).toHaveBeenCalledTimes(1);
+    expect(inspectIndex).toHaveBeenCalledTimes(1);
+    expect(listWorkstreams).not.toHaveBeenCalled();
+    expect(previewIdentityActivity).not.toHaveBeenCalled();
+    expect(applyIdentityActivity).not.toHaveBeenCalled();
+    expect(inbox.previewInbox).not.toHaveBeenCalled();
+    expect(inbox.applyInbox).not.toHaveBeenCalled();
+    expect(relay.previewRelay).not.toHaveBeenCalled();
+    expect(relay.applyRelay).not.toHaveBeenCalled();
+    activityRead.mockRestore();
+  });
+
+  it("fails bounded Overview sources closed without collapsing independent panels", async () => {
+    const unused = async (): Promise<never> => { throw new Error("unused"); };
+    const team = identityService();
+    const inbox: HubInboxSpecAuthoringService = {
+      getInboxDraft: unused,
+      listInboxDrafts: unused,
+      getInboxProposal: unused,
+      listInboxProposals: async () => ({
+        items: [inboxProposalFixture()],
+        nextCursor: "more-inbox",
+        truncated: true,
+        sourceTruncated: false,
+        deterministicRevision: "6".repeat(64) as Revision,
+        diagnostics: [],
+      }),
+      previewInbox: unused,
+      applyInbox: unused,
+    };
+    const relays: HubRelayHandoffService = {
+      getRelayDraft: unused,
+      listRelayDrafts: unused,
+      getRelay: unused,
+      listRelays: async () => ({
+        items: [overviewRelay("relay_01000000000000000000000001", "published")],
+        nextCursor: "more-relays",
+        truncated: true,
+        sourceTruncated: false,
+        deterministicRevision: "7".repeat(64) as Revision,
+        diagnostics: [],
+      }),
+      previewRelay: unused,
+      applyRelay: unused,
+    };
+    const failingGraph: HubGraphReadService = {
+      inspectStatus: async () => { throw new Error("private graph failure"); },
+      searchBundle: unused,
+      readSymbolWorkspace: unused,
+    };
+    const activityRead = vi.spyOn(ActivityRepository.prototype, "readAll")
+      .mockImplementationOnce(() => { throw new Error("private activity failure"); });
+    const services = createLocalHubReadServicesBase({
+      projectRoot,
+      scaffoldId: "scaffold-local",
+      git,
+      team,
+      inbox,
+      relays,
+      graph: failingGraph,
+      wiki: wikiWithStatus("fresh"),
+      jobs: { list: () => ({ items: [], nextCursor: "more-jobs" }) },
+      now: () => new Date(NOW),
+    });
+
+    const overview = await services.overview?.();
+    expect(OverviewResponseSchema.parse(overview)).toEqual(overview);
+    expect(overview).toMatchObject({
+      shell: {
+        attention: {
+          inbox: { availability: "unavailable" },
+          relays: { availability: "unavailable" },
+        },
+        jobs: { availability: "unavailable" },
+      },
+      focus: {
+        availability: "available",
+        identity: { availability: "available", requiresAttention: true },
+        inbox: {
+          availability: "unavailable",
+          deterministicRevision: "6".repeat(64),
+          truncated: true,
+          sourceTruncated: false,
+          diagnostics: [],
+        },
+        relays: {
+          availability: "unavailable",
+          deterministicRevision: "7".repeat(64),
+          truncated: true,
+          sourceTruncated: false,
+          diagnostics: [],
+        },
+      },
+      activity: { availability: "unavailable" },
+      context: {
+        availability: "available",
+        graph: { availability: "unavailable" },
+        wiki: { availability: "available", details: { indexStatus: "fresh" } },
+      },
+      operation: { availability: "unavailable" },
+    });
+    expect(JSON.stringify(overview)).not.toContain("private graph failure");
+    expect(JSON.stringify(overview)).not.toContain("private activity failure");
+    activityRead.mockRestore();
+  });
+
   it("strict-parses a real E1 multiline draft preview, apply, list, and detail through Hub projectors", async () => {
     let activitySequence = 0;
     const context = join(projectRoot, ".mex", "context");
@@ -469,25 +821,14 @@ The governed authoring test keeps one canonical entity available to the exact-re
       deterministicRevision: "7".repeat(64),
       diagnostics: [] as Diagnostic[],
     }));
-    const listInboxProposals = vi.fn(async (request?: { cursor?: string; states?: readonly string[] }) => (
-      request?.cursor === "proposal-page-2"
-        ? {
-            items: [stale],
-            nextCursor: null,
-            truncated: false,
-            sourceTruncated: false,
-            deterministicRevision: "8".repeat(64),
-            diagnostics: [] as Diagnostic[],
-          }
-        : {
-            items: [pending],
-            nextCursor: "proposal-page-2",
-            truncated: true,
-            sourceTruncated: false,
-            deterministicRevision: "8".repeat(64),
-            diagnostics: [] as Diagnostic[],
-          }
-    ));
+    const listInboxProposals = vi.fn(async (_request?: { cursor?: string; states?: readonly string[] }) => ({
+      items: [pending, stale],
+      nextCursor: null,
+      truncated: false,
+      sourceTruncated: false,
+      deterministicRevision: "8".repeat(64),
+      diagnostics: [] as Diagnostic[],
+    }));
     const applyInbox = vi.fn(async (envelope: TeamInboxSpecPreviewEnvelope): Promise<TeamInboxSpecApplyResult> => ({
       operationId: envelope.request.operationId,
       previewRevision: envelope.receipt.previewRevision,
@@ -525,10 +866,10 @@ The governed authoring test keeps one canonical entity available to the exact-re
       },
     });
     const home = await services.home();
-    expect(home.sections.inbox).toEqual({ availability: "available", count: 2 });
+    expect(home.attention.inbox).toEqual({ availability: "available", teamReviewCount: 2 });
     expect(listInboxDrafts).not.toHaveBeenCalled();
-    expect(listInboxProposals.mock.calls.slice(0, 2).map(([request]) => request?.states))
-      .toEqual([["pending", "stale"], ["pending", "stale"]]);
+    expect(listInboxProposals.mock.calls.map(([request]) => request?.states))
+      .toEqual([["pending", "stale"]]);
 
     const draftPage = await services.inboxDrafts?.({ limit: 25 });
     const proposalPage = await services.inboxProposals?.({ states: ["pending", "stale"], limit: 25 });
@@ -862,32 +1203,17 @@ The governed authoring test keeps one canonical entity available to the exact-re
       items: [{ id, state: "active", sourcePath: `.mex/workstreams/${id}.md` }],
     });
     await expect(services.workstream?.(id)).resolves.toMatchObject({ id, entityRevision: 2 });
+    const activityRead = vi.spyOn(ActivityRepository.prototype, "readAll");
     await expect(services.home()).resolves.toMatchObject({
-      sections: { workstreams: { availability: "available", count: 1 } },
-    });
-    listWorkstreams.mockResolvedValueOnce({
-      items: [workstream],
-      nextCursor: null,
-      truncated: false,
-      sourceTruncated: false,
-      deterministicRevision: "5".repeat(64) as Revision,
-      diagnostics: [{
-        code: "WORKSTREAM_SOURCE_WARNING",
-        severity: "warning",
-        message: "A bounded canonical source diagnostic was retained.",
-      }],
-    });
-    await expect(services.home()).resolves.toMatchObject({
-      sections: {
-        workstreams: {
-          availability: "unavailable",
-          count: null,
-          reason: "The Workstream summary could not establish one complete diagnostic-free page.",
-        },
+      attention: {
+        inbox: { availability: "unavailable" },
+        relays: { availability: "unavailable" },
       },
     });
     expect(listWorkstreams).toHaveBeenCalledWith({ states: ["active"], limit: 25 });
-    expect(listWorkstreams).toHaveBeenCalledWith({ includeArchived: false, limit: 100 });
+    expect(listWorkstreams).toHaveBeenCalledTimes(1);
+    expect(activityRead).not.toHaveBeenCalled();
+    activityRead.mockRestore();
   });
 
   it("shrinks Spec pages coherently and projects strict safe detail evidence", async () => {
@@ -1206,14 +1532,11 @@ The worker drains the durable queue.
         dirty: true,
       },
       actor: { kind: "git", name: "Daksh", email: "daksh@example.test" },
-      sections: {
-        workstreams: { availability: "unavailable", count: null },
-        relays: { availability: "unavailable", count: null },
-        inbox: { availability: "unavailable", count: null },
-        activity: { availability: "available", count: 0 },
+      attention: {
+        relays: { availability: "unavailable" },
+        inbox: { availability: "unavailable" },
       },
-      activeJobs: 0,
-      attention: [],
+      jobs: { availability: "available", activeCount: 0 },
     });
   });
 
@@ -1672,8 +1995,8 @@ The worker drains the durable queue.
     await expect(services.capabilities()).resolves.toMatchObject({
       activity: { availability: "available" },
     });
-    await expect(services.home()).resolves.toMatchObject({
-      sections: { activity: { availability: "available", count: 1 } },
+    await expect(services.overview?.()).resolves.toMatchObject({
+      activity: { availability: "available", items: expect.any(Array) },
     });
 
     const result = await services.activity({ limit: 25 });

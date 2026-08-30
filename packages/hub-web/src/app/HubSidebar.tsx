@@ -76,10 +76,17 @@ function countBadge(count: number | undefined, source: NavigationCountSource): R
 
 function itemCount(home: HomeResponse | undefined, item: NavigationItem): number | undefined {
   if (!home || !item.countSource) return undefined;
-  const section = home.sections[item.countSource];
-  return section.availability === "available" && typeof section.count === "number"
-    ? section.count
-    : undefined;
+  if (item.countSource === "inbox") {
+    return home.attention.inbox.availability === "available"
+      ? home.attention.inbox.teamReviewCount
+      : undefined;
+  }
+  if (item.countSource === "relays") {
+    return home.attention.relays.availability === "available"
+      ? home.attention.relays.readyToTakeCount + home.attention.relays.inYourHandsCount
+      : undefined;
+  }
+  return undefined;
 }
 
 function groupCount(
@@ -90,7 +97,7 @@ function groupCount(
   if (group.countSource !== "active-jobs" || !home) return undefined;
   const jobs = navigationItems.find((item) => item.id === "jobs");
   if (jobs && capabilityStatus(capabilities, jobs)?.availability === "unavailable") return undefined;
-  return home.activeJobs;
+  return home.jobs.availability === "available" ? home.jobs.activeCount : undefined;
 }
 
 function identityText(home: HomeResponse | undefined): string {

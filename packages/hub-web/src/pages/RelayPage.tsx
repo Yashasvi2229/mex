@@ -848,6 +848,7 @@ export function RelayPage() {
         queryClient.invalidateQueries({ queryKey: ["members"] }),
         queryClient.invalidateQueries({ queryKey: ["relays", "lifecycle-principals"] }),
         queryClient.invalidateQueries({ queryKey: ["home"] }),
+        queryClient.invalidateQueries({ queryKey: ["overview"] }),
       ]);
       setRefreshGeneration((generation) => generation + 1);
       setStatus("Relays refreshed.");
@@ -888,6 +889,7 @@ export function RelayPage() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["relays"] }),
       queryClient.invalidateQueries({ queryKey: ["home"] }),
+      queryClient.invalidateQueries({ queryKey: ["overview"] }),
       queryClient.invalidateQueries({ queryKey: ["activity"] }),
     ]);
     const next = new URLSearchParams(searchParams);

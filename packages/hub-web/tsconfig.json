@@ -16,6 +16,7 @@
       "@/*": ["src/*"],
       "@mex/hub-contracts": ["../hub-contracts/src/index.ts"],
       "@mex/hub-contracts/ids": ["../hub-contracts/src/ids.ts"],
+      "@mex/hub-contracts/overview": ["../hub-contracts/src/overview.ts"],
       "@mex/hub-contracts/relay": ["../hub-contracts/src/relay.ts"],
       "virtual:mex-hub-fixture-api": ["src/dev/fixture-api.ts"]
     },

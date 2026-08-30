@@ -22,9 +22,11 @@ function renderRoute(route: string, api: HubApi = createFixtureApi()) {
   );
 }
 
+const fixtureOverviewHeading = "Your project context needs attention";
+
 describe("Project Hub routes", () => {
   it.each([
-    ["/", "Overview"],
+    ["/", fixtureOverviewHeading],
     ["/search", "Search"],
     ["/knowledge", "Knowledge"],
     ["/code", "Code"],
@@ -47,7 +49,7 @@ describe("Project Hub routes", () => {
   it("exposes keyboard navigation and a skip link", async () => {
     const user = userEvent.setup();
     renderRoute("/");
-    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    await screen.findByRole("heading", { level: 1, name: fixtureOverviewHeading });
     const skip = screen.getByRole("link", { name: "Skip to main content" });
     skip.focus();
     expect(skip).toHaveFocus();
@@ -58,7 +60,7 @@ describe("Project Hub routes", () => {
   it("renders the sidebar information architecture in its exact semantic order", async () => {
     const user = userEvent.setup();
     renderRoute("/");
-    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    await screen.findByRole("heading", { level: 1, name: fixtureOverviewHeading });
 
     const sidebar = screen.getByRole("complementary", { name: "Project Hub navigation" });
     expect(within(sidebar).getByRole("link", { name: "Search project" })).toHaveAttribute("href", "/search");
@@ -104,7 +106,7 @@ describe("Project Hub routes", () => {
   it("keeps disclosure state independent and resets it after remount", async () => {
     const user = userEvent.setup();
     const first = renderRoute("/");
-    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    await screen.findByRole("heading", { level: 1, name: fixtureOverviewHeading });
 
     const projectMemory = screen.getByRole("button", { name: "Project Memory" });
     const teamwork = screen.getByRole("button", { name: "Teamwork" });
@@ -125,7 +127,7 @@ describe("Project Hub routes", () => {
 
     first.unmount();
     renderRoute("/");
-    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    await screen.findByRole("heading", { level: 1, name: fixtureOverviewHeading });
     expect(screen.getByRole("button", { name: "Project Memory" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", { name: "Teamwork" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("button", { name: "Coming Soon" })).toHaveAttribute("aria-expanded", "false");
@@ -175,7 +177,7 @@ describe("Project Hub routes", () => {
       </QueryClientProvider>,
     );
 
-    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    await screen.findByRole("heading", { level: 1, name: fixtureOverviewHeading });
     expect(screen.getByRole("button", { name: /^System/u })).toHaveAttribute("aria-expanded", "false");
     await user.click(screen.getByRole("button", { name: "Open jobs route" }));
     expect(await screen.findByRole("heading", { level: 1, name: "Jobs" })).toBeVisible();
@@ -186,7 +188,7 @@ describe("Project Hub routes", () => {
 
   it("uses slash to open Search and focus its existing project input", async () => {
     renderRoute("/");
-    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    await screen.findByRole("heading", { level: 1, name: fixtureOverviewHeading });
     expect(screen.getByRole("link", { name: "Search project" })).toHaveAttribute("aria-keyshortcuts", "/");
 
     fireEvent.keyDown(document, { key: "/", shiftKey: true });
@@ -209,13 +211,13 @@ describe("Project Hub routes", () => {
   it("consumes shortcut focus so a later ordinary Search navigation focuses main content", async () => {
     const user = userEvent.setup();
     renderRoute("/");
-    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    await screen.findByRole("heading", { level: 1, name: fixtureOverviewHeading });
 
     fireEvent.keyDown(document, { key: "/" });
     expect(await screen.findByRole("searchbox", { name: "Search project memory and code" })).toHaveFocus();
 
     await user.click(screen.getByRole("link", { name: "Overview" }));
-    expect(await screen.findByRole("heading", { level: 1, name: "Overview" })).toBeVisible();
+    expect(await screen.findByRole("heading", { level: 1, name: fixtureOverviewHeading })).toBeVisible();
     expect(document.querySelector("#main-content")).toHaveFocus();
 
     await user.click(screen.getByRole("link", { name: "Search project" }));
@@ -225,7 +227,7 @@ describe("Project Hub routes", () => {
 
   it("ignores slash in editable controls, dialogs, and modified shortcuts", async () => {
     renderRoute("/");
-    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    await screen.findByRole("heading", { level: 1, name: fixtureOverviewHeading });
 
     for (const control of [
       document.createElement("input"),
@@ -280,7 +282,7 @@ describe("Project Hub routes", () => {
     });
 
     renderRoute("/", api);
-    await screen.findByRole("heading", { level: 1, name: "Overview" });
+    await screen.findByRole("heading", { level: 1, name: fixtureOverviewHeading });
 
     expect(within(screen.getByRole("link", { name: /Relays/u })).getByText("Unavailable")).toBeVisible();
     expect(within(screen.getByRole("link", { name: /^Inbox/u })).queryByText("Unavailable")).not.toBeInTheDocument();
@@ -325,11 +327,12 @@ describe("Project Hub routes", () => {
     expect(getHome).toHaveBeenCalledTimes(2);
   });
 
-  it("shares the trusted shell Home projection with route outlets without another request", async () => {
+  it("uses one Overview aggregate and no separate Home request on the root route", async () => {
     const api = createFixtureApi();
     const session = await api.getSession();
     const capabilities = await api.getCapabilities();
     const getHome = vi.spyOn(api, "getHome");
+    const getOverview = vi.spyOn(api, "getOverview");
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
     });
@@ -354,7 +357,42 @@ describe("Project Hub routes", () => {
     );
 
     await waitFor(() => expect(screen.getByLabelText("Outlet Home repository")).toHaveTextContent("mex"));
+    expect(getOverview).toHaveBeenCalledTimes(1);
+    expect(getHome).not.toHaveBeenCalled();
+  });
+
+  it("keeps deep routes on the lightweight Home shell without loading Overview", async () => {
+    const api = createFixtureApi();
+    const session = await api.getSession();
+    const capabilities = await api.getCapabilities();
+    const getHome = vi.spyOn(api, "getHome");
+    const getOverview = vi.spyOn(api, "getOverview");
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+
+    function DeepOutletProbe() {
+      const { home } = useOutletContext<HubOutletContext>();
+      return <output aria-label="Deep route Home repository">{home?.repository.name ?? "Home unavailable"}</output>;
+    }
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <HubApiProvider api={api}>
+          <MemoryRouter initialEntries={["/deep"]}>
+            <Routes>
+              <Route element={<HubLayout capabilities={capabilities} session={session} />}>
+                <Route path="deep" element={<DeepOutletProbe />} />
+              </Route>
+            </Routes>
+          </MemoryRouter>
+        </HubApiProvider>
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Deep route Home repository")).toHaveTextContent("mex"));
     expect(getHome).toHaveBeenCalledTimes(1);
+    expect(getOverview).not.toHaveBeenCalled();
   });
 
   it("keeps routes behind a safe, retryable capabilities error", async () => {
@@ -389,25 +427,39 @@ describe("Project Hub routes", () => {
     expect(screen.getByText("Source matches", { selector: "h2" })).toBeVisible();
   });
 
-  it("links Home to canonical Workstreams, Inbox, Relay, and Activity surfaces", async () => {
+  it("links Overview focus, team memory, context, and active operation to exact supported routes", async () => {
     renderRoute("/");
-    const workstreamMetric = await screen.findByRole("link", { name: /Canonical delivery threads/ });
-    expect(workstreamMetric).toHaveAttribute("href", "/workstreams");
-    const activityMetric = screen.getByRole("link", { name: /Canonical events/ });
-    expect(activityMetric).toHaveAttribute("href", "/activity");
-    expect(screen.getByRole("link", { name: "All jobs" })).toHaveAttribute("href", "/jobs");
-    expect(screen.getByRole("link", { name: "Open Graph refresh" })).toHaveAttribute(
+    const focus = await screen.findByRole("region", { name: "Your focus" });
+    expect(within(focus).getByRole("button", { name: "Open Inbox" })).toHaveAttribute(
+      "href",
+      "/inbox?view=review&proposal=proposal_01000000000000000000001720",
+    );
+    expect(within(focus).getByText("Take the handoff waiting for you").closest("a")).toHaveAttribute(
+      "href",
+      "/relays?view=mine&state=open&relay=relay_01000000000000000000000001",
+    );
+    expect(within(focus).getByText("Continue the handoff you took").closest("a")).toHaveAttribute(
+      "href",
+      "/relays?view=mine&state=open&relay=relay_01000000000000000000000002",
+    );
+
+    expect(within(screen.getByRole("region", { name: "Latest team memory" }))
+      .getByRole("button", { name: "View Activity" })).toHaveAttribute("href", "/activity");
+    expect(within(screen.getByRole("region", { name: "Context readiness" }))
+      .getByRole("button", { name: "Open full Health details" })).toHaveAttribute("href", "/health");
+    expect(within(screen.getByRole("region", { name: "Active operation" }))
+      .getByRole("button", { name: "View operation" })).toHaveAttribute(
       "href",
       "/jobs?job=job_01K36WVM6H7JK8M9NPQRSTVVWX",
     );
+
     expect(screen.getByRole("link", { name: "Activity" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/members");
-    expect(screen.getByRole("link", { name: /Open member identity for Ada Lovelace/ })).toHaveAttribute("href", "/members");
     expect(screen.getByRole("link", { name: /^Inbox/u })).toHaveAttribute("href", "/inbox");
     expect(screen.getByRole("link", { name: /^Relays/u })).toHaveAttribute("href", "/relays");
-    const relaySection = within(screen.getByRole("region", { name: "Project sections" })).getByText("Relays").closest('[role="listitem"]');
-    expect(relaySection).toHaveTextContent("Relays2");
-    expect(screen.queryByText("Wiki unavailable")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Project sections" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Recent jobs" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Canonical events")).not.toBeInTheDocument();
   });
 
   it("loads the lazy Relay workbench when the private Relay service is connected", async () => {

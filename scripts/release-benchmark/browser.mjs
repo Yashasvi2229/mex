@@ -101,6 +101,10 @@ export async function measureWorkbenchHeap({
 }
 
 async function assertReleaseRouteReady(page, route, teamFixture) {
+  if (route === "home") {
+    await page.locator('[data-overview-workbench="ready"]')
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+  }
   if (route === "workstreams") {
     await page.getByRole("heading", { name: "Release benchmark Workstream", exact: true })
       .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });

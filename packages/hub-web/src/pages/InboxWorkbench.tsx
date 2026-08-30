@@ -1152,8 +1152,8 @@ export function InboxPage() {
     retry: false,
   });
   const trustedCurrentIdentity = currentActor.isError ? undefined : currentActor.data;
-  const exactReviewCount = home?.sections.inbox.availability === "available"
-    ? home.sections.inbox.count
+  const exactReviewCount = home?.attention.inbox.availability === "available"
+    ? home.attention.inbox.teamReviewCount
     : null;
   const searchKey = searchParams.toString();
   const resolveOperationFinalFocus = () => operationTrigger.current;
@@ -1349,6 +1349,7 @@ export function InboxPage() {
         queryClient.invalidateQueries({ queryKey: ["inbox"] }),
         queryClient.invalidateQueries({ queryKey: ["actor", "current"] }),
         queryClient.invalidateQueries({ queryKey: ["home"] }),
+        queryClient.invalidateQueries({ queryKey: ["overview"] }),
       ]);
       setRefreshGeneration((generation) => generation + 1);
       setStatus("Inbox refreshed.");
@@ -1375,6 +1376,7 @@ export function InboxPage() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["inbox"] }),
       queryClient.invalidateQueries({ queryKey: ["home"] }),
+      queryClient.invalidateQueries({ queryKey: ["overview"] }),
       queryClient.invalidateQueries({ queryKey: ["activity"] }),
       queryClient.invalidateQueries({ queryKey: ["specs"] }),
       queryClient.invalidateQueries({ queryKey: ["spec"] }),

@@ -1,7 +1,19 @@
 import { z } from "zod";
-import { RelayIdSchema, TeamMemberIdSchema } from "./ids.js";
+import {
+  GraphSymbolIdSchema,
+  InboxProposalIdSchema,
+  RelayIdSchema,
+  TeamMemberIdSchema,
+  WikiEntityIdSchema,
+} from "./ids.js";
 
-export { RelayIdSchema, TeamMemberIdSchema } from "./ids.js";
+export {
+  GraphSymbolIdSchema,
+  InboxProposalIdSchema,
+  RelayIdSchema,
+  TeamMemberIdSchema,
+  WikiEntityIdSchema,
+} from "./ids.js";
 
 export const HUB_API_VERSION = "v1" as const;
 
@@ -84,6 +96,11 @@ const scaffoldId = z.string().min(1).max(512)
 const hubJobId = z.string()
   .regex(/^job_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Hub job ID.");
 const revision = z.string().regex(/^[a-f0-9]{64}$/, "Invalid SHA-256 revision.");
+
+/** Shared primitives for route-private contract entry points. */
+export const HubIsoTimestampSchema = isoTimestamp;
+export const HubBoundedReasonSchema = boundedReason;
+export const HubRevisionSchema = revision;
 const utf8Text = (maximum: number, minimum = 1) => z.string().min(minimum).max(maximum).refine(
   (value) => new TextEncoder().encode(value).byteLength <= maximum,
   `Text exceeds the ${maximum}-byte display limit.`,
@@ -251,18 +268,41 @@ export const HubAttentionItemSchema = z.object({
   route: z.string().startsWith("/").max(2_048),
 }).strict();
 
+const homeUnavailable = z.object({
+  availability: z.literal("unavailable"),
+  reason: boundedReason,
+}).strict();
+
+const homeAvailable = <Shape extends z.ZodRawShape>(shape: Shape) => (
+  z.discriminatedUnion("availability", [
+    z.object({ availability: z.literal("available"), ...shape }).strict(),
+    homeUnavailable,
+  ])
+);
+
+export const HomeInboxAttentionSchema = homeAvailable({
+  teamReviewCount: z.number().int().nonnegative(),
+});
+
+export const HomeRelayAttentionSchema = homeAvailable({
+  readyToTakeCount: z.number().int().nonnegative(),
+  inYourHandsCount: z.number().int().nonnegative(),
+});
+
+export const HomeJobsSummarySchema = homeAvailable({
+  activeCount: z.number().int().nonnegative(),
+});
+
+/** Lightweight shell projection used by HubLayout on non-Overview routes. */
 export const HomeResponseSchema = z.object({
   observedAt: isoTimestamp,
   repository: HubRepositoryContextSchema,
   actor: HubActorSchema,
-  sections: z.object({
-    workstreams: HubSectionSummarySchema,
-    relays: HubSectionSummarySchema,
-    inbox: HubSectionSummarySchema,
-    activity: HubSectionSummarySchema,
+  attention: z.object({
+    inbox: HomeInboxAttentionSchema,
+    relays: HomeRelayAttentionSchema,
   }).strict(),
-  activeJobs: z.number().int().nonnegative(),
-  attention: z.array(HubAttentionItemSchema).max(100),
+  jobs: HomeJobsSummarySchema,
 }).strict();
 
 const teamMemberId = TeamMemberIdSchema;
@@ -810,8 +850,6 @@ export const InboxDraftIdSchema = z.string().min(1).refine(
     && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value),
   "Invalid Inbox draft ID.",
 );
-export const InboxProposalIdSchema = z.string()
-  .regex(/^proposal_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Inbox proposal ID.");
 const inboxSpecEntityId = z.string()
   .regex(/^mx_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Spec entity ID.");
 
@@ -2051,9 +2089,6 @@ export const {
   RelayOperationApplyResponseSchema,
 } = relayContracts;
 
-export const GraphSymbolIdSchema = z.string().min(1).max(128)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "Graph symbol ID contains unsafe characters.");
-
 export const GraphSymbolSchema = z.object({
   id: GraphSymbolIdSchema,
   symbolKind: utf8Text(128),
@@ -2066,9 +2101,6 @@ export const GraphSymbolSchema = z.object({
   signature: utf8Text(2_048).optional(),
   route: z.string().startsWith("/code/symbols/").max(2_048),
 }).strict();
-
-export const WikiEntityIdSchema = z.string()
-  .regex(/^mx_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Wiki entity ID.");
 
 export const WikiLifecycleStateSchema = z.enum([
   "in_flight",
@@ -3112,6 +3144,9 @@ export type CapabilityStatus = z.infer<typeof CapabilityStatusSchema>;
 export type HubCapabilities = z.infer<typeof HubCapabilitiesSchema>;
 export type HubActor = z.infer<typeof HubActorSchema>;
 export type HomeResponse = z.infer<typeof HomeResponseSchema>;
+export type HomeInboxAttention = z.infer<typeof HomeInboxAttentionSchema>;
+export type HomeRelayAttention = z.infer<typeof HomeRelayAttentionSchema>;
+export type HomeJobsSummary = z.infer<typeof HomeJobsSummarySchema>;
 export type TeamMemberId = z.infer<typeof TeamMemberIdSchema>;
 export type TeamGitAlias = z.infer<typeof TeamGitAliasSchema>;
 export type TeamMember = z.infer<typeof TeamMemberSchema>;
@@ -3244,6 +3279,19 @@ export type HubJobState = z.infer<typeof HubJobStateSchema>;
 export type HubJobPhase = z.infer<typeof HubJobPhaseSchema>;
 export type HubJobProgress = z.infer<typeof HubJobProgressSchema>;
 export type HubJobSnapshot = z.infer<typeof HubJobSnapshotSchema>;
+export type {
+  OverviewActivityPanel,
+  OverviewContextPanel,
+  OverviewFocusIdentitySource,
+  OverviewFocusInboxSource,
+  OverviewFocusPanel,
+  OverviewFocusRelaySource,
+  OverviewGraphHealthDetails,
+  OverviewIdentityPanel,
+  OverviewOperationPanel,
+  OverviewResponse,
+  OverviewWikiHealthDetails,
+} from "./overview.js";
 export type JobPageRequest = z.infer<typeof JobPageRequestSchema>;
 export type JobPageResponse = z.infer<typeof JobPageResponseSchema>;
 export type JobStartRequest = z.infer<typeof JobStartRequestSchema>;

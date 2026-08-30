@@ -33,6 +33,7 @@ export async function invalidateGraphReads(queryClient: QueryClient): Promise<vo
     queryClient.invalidateQueries({ queryKey: ["jobs"] }),
     queryClient.invalidateQueries({ queryKey: ["capabilities"] }),
     queryClient.invalidateQueries({ queryKey: ["home"] }),
+    queryClient.invalidateQueries({ queryKey: ["overview"] }),
   ]);
 }
 
@@ -48,6 +49,7 @@ export async function invalidateWikiReads(queryClient: QueryClient): Promise<voi
     queryClient.invalidateQueries({ queryKey: ["jobs"] }),
     queryClient.invalidateQueries({ queryKey: ["capabilities"] }),
     queryClient.invalidateQueries({ queryKey: ["home"] }),
+    queryClient.invalidateQueries({ queryKey: ["overview"] }),
   ]);
 }
 
@@ -57,6 +59,7 @@ export async function invalidateIndexOperationState(queryClient: QueryClient): P
     queryClient.invalidateQueries({ queryKey: ["jobs"] }),
     queryClient.invalidateQueries({ queryKey: ["capabilities"] }),
     queryClient.invalidateQueries({ queryKey: ["home"] }),
+    queryClient.invalidateQueries({ queryKey: ["overview"] }),
   ]);
 }
 
@@ -169,7 +172,10 @@ export function JobLifecycleObserver({ channelScope }: { channelScope?: string }
         mergeLifecyclePage(current, message.job)
       ));
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
-      if (becameActive) void queryClient.invalidateQueries({ queryKey: ["home"] });
+      if (becameActive) {
+        void queryClient.invalidateQueries({ queryKey: ["home"] });
+        void queryClient.invalidateQueries({ queryKey: ["overview"] });
+      }
       observeTerminal(message.job);
     };
     return () => {

@@ -6,7 +6,7 @@
  * per-chunk inventory.
  */
 export const RELEASE_ROUTE_MANIFEST_HINTS = Object.freeze({
-  home: Object.freeze(["HomePage"]),
+  home: Object.freeze(["HomePage", "hub-contracts/dist/overview"]),
   search: Object.freeze(["SearchPage"]),
   knowledge: Object.freeze(["KnowledgePage"]),
   knowledgeDetail: Object.freeze(["KnowledgePage"]),

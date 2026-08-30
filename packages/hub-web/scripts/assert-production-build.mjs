@@ -60,6 +60,18 @@ for (const entry of workbenchEntries) {
     throw new Error(`The production Hub Home workbench eagerly imports ${entry.source}.`);
   }
 }
+const overviewRuntimeKey = Object.keys(manifest).find((candidate) => {
+  const record = manifest[candidate] ?? {};
+  return record.name === "overview" || [candidate, record.src].some((value) => (
+    typeof value === "string" && /(?:^|\/)hub-contracts\/dist\/overview\.js$/u.test(value)
+  ));
+});
+if (!overviewRuntimeKey || !manifest[overviewRuntimeKey].isDynamicEntry) {
+  throw new Error("The production Hub manifest has no lazy Overview aggregate validator.");
+}
+if (initialChunks.has(overviewRuntimeKey)) {
+  throw new Error("The Overview aggregate validator leaked into the application shell.");
+}
 const relayEntry = workbenchEntries.find((entry) => entry.source === "src/pages/RelayPage.tsx");
 const relayComposerKey = Object.keys(manifest).find((candidate) => (
   candidate === "src/pages/RelayDraftComposer.tsx"

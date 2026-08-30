@@ -15,20 +15,12 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useOutletContext, useSearchParams } from "react-router-dom";
-import {
-  GraphSymbolIdSchema,
-  InboxProposalIdSchema,
-  WikiEntityIdSchema,
-} from "@mex/hub-contracts";
-import { RelayIdSchema } from "@mex/hub-contracts/ids";
 import { HubApiError } from "../api/client";
 import { useHubApi } from "../api/context";
 import type {
-  ActivityActor,
   ActivityDiagnostic,
   ActivityItem,
   ActivitySource,
-  ActivitySubject,
   CapabilitiesResponse,
 } from "../api/types";
 import { Alert, AlertDescription, AlertTitle } from "../components/primitives/alert";
@@ -58,43 +50,24 @@ import {
   MAX_ACCUMULATED_WORKBENCH_ITEMS,
   MAX_WORKBENCH_PAGES,
 } from "../lib/bounds";
+import {
+  activityActorLabel,
+  activityHeadline,
+  activityPrimaryContext,
+  activityProjectNoteKind,
+  activitySubjectRoute,
+  sameActivityActor,
+  type ActivityContextReference,
+} from "../lib/activity-presentation";
 import styles from "../styles/activity.module.css";
 
 type ActivityFilter = "all" | ActivitySource;
-type CanonicalActivityItem = Extract<ActivityItem, { source: "activity" }>;
-
-interface WorkflowNarration {
-  action: string;
-  headline: string;
-}
-
-interface ContextReference {
-  label: string;
-  subject: ActivitySubject | null;
-}
 
 const ACTIVITY_PAGE_SIZE = 25;
 const ACTIVITY_FILTERS: readonly ActivityFilter[] = ["all", "activity", "legacy"];
 const ActivityEntryContext = lazy(() => import("./ActivityEntryContext").then((module) => ({
   default: module.ActivityEntryContext,
 })));
-const WORKFLOW_NARRATION: Readonly<Record<string, WorkflowNarration>> = {
-  "inbox.publish": { action: "inbox.published", headline: "Proposed a Spec change" },
-  "inbox.approve": { action: "inbox.approved", headline: "Approved and applied a Spec change" },
-  "inbox.reject": { action: "inbox.rejected", headline: "Rejected a Spec change" },
-  "inbox.withdraw": { action: "inbox.withdrawn", headline: "Withdrew a Spec change" },
-  "inbox.mark-stale": { action: "inbox.marked-stale", headline: "Marked a Spec proposal stale" },
-  "inbox.repair": { action: "inbox.repaired", headline: "Repaired a Spec proposal" },
-  "relay.publish": { action: "relay.published", headline: "Published a handoff" },
-  "relay.acknowledge": { action: "relay.acknowledged", headline: "Took a handoff" },
-  "relay.close": { action: "relay.closed", headline: "Closed a handoff" },
-  "member.add": { action: "member.added", headline: "Added a teammate" },
-  "member.update": { action: "member.updated", headline: "Updated a teammate" },
-  "member.deactivate": { action: "member.deactivated", headline: "Deactivated a teammate" },
-  "workstream.create": { action: "workstream.created", headline: "Created a Workstream" },
-  "workstream.update": { action: "workstream.updated", headline: "Updated a Workstream" },
-  "workstream.archive": { action: "workstream.archived", headline: "Archived a Workstream" },
-};
 
 function validDate(value: string | null): value is string {
   if (value === null || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -106,120 +79,10 @@ function toSinceTimestamp(value: string): string {
   return new Date(`${value}T00:00:00.000Z`).toISOString();
 }
 
-function humanizeIdentifier(value: string): string {
-  return value
-    .replaceAll(/[._-]+/g, " ")
-    .replace(/^./, (character) => character.toUpperCase());
-}
-
 function activityFilterLabel(value: ActivityFilter): string {
   if (value === "activity") return "MEX records";
   if (value === "legacy") return "Project notes";
   return "All activity";
-}
-
-function projectNoteKind(value: string): string {
-  if (["decision", "risk", "note", "todo"].includes(value)) return humanizeIdentifier(value);
-  return "Project note";
-}
-
-function actorLabel(actor: ActivityActor, technical = false): string {
-  if (actor.kind === "member") {
-    if (technical) {
-      return actor.displayName
-        ? `${actor.displayName} (${actor.memberId})`
-        : actor.memberId;
-    }
-    return actor.displayName ?? "Recorded team member";
-  }
-  if (actor.kind === "git") {
-    if (technical) {
-      return [actor.name, actor.email].filter((value): value is string => value !== null).join(" · ");
-    }
-    return actor.name ?? actor.email ?? "Recorded Git identity";
-  }
-  return technical ? "Unknown actor" : "Actor not recorded";
-}
-
-function sameActor(left: ActivityActor, right: ActivityActor): boolean {
-  if (left.kind !== right.kind) return false;
-  if (left.kind === "unknown" || right.kind === "unknown") return true;
-  if (left.kind === "member" && right.kind === "member") {
-    return left.memberId === right.memberId && left.displayName === right.displayName;
-  }
-  if (left.kind === "git" && right.kind === "git") {
-    return left.name === right.name && left.email === right.email;
-  }
-  return false;
-}
-
-function verifiedWorkflowNarration(item: CanonicalActivityItem): (WorkflowNarration & { operation: string }) | null {
-  if (item.recordOrigin.kind !== "workflow") return null;
-  const narration = WORKFLOW_NARRATION[item.recordOrigin.operation];
-  if (narration === undefined || narration.action !== item.action) return null;
-  return { ...narration, operation: item.recordOrigin.operation };
-}
-
-function activityHeadline(item: ActivityItem): string {
-  if (item.source === "legacy") return item.message || `${projectNoteKind(item.action)} recorded`;
-  return verifiedWorkflowNarration(item)?.headline ?? `Recorded “${item.action}”`;
-}
-
-function subjectLabel(subject: ActivitySubject): string {
-  if (subject.kind === "entity") {
-    return subject.entity.title ?? humanizeIdentifier(subject.entity.entityKind);
-  }
-  if (subject.kind === "symbol") return subject.symbolId;
-  if (subject.kind === "file") return subject.path;
-  return subject.hash.slice(0, 12);
-}
-
-function primarySubjectRoute(subject: ActivitySubject, item: ActivityItem): string | null {
-  if (subject.kind === "symbol") {
-    const parsed = GraphSymbolIdSchema.safeParse(subject.symbolId);
-    return parsed.success
-      ? `/code/symbols/${encodeURIComponent(parsed.data)}?view=overview`
-      : null;
-  }
-  if (subject.kind !== "entity") return null;
-
-  const { entity } = subject;
-  if (entity.entityKind === "proposal") {
-    const parsed = InboxProposalIdSchema.safeParse(entity.id);
-    return parsed.success
-      ? `/inbox?view=review&proposal=${encodeURIComponent(parsed.data)}`
-      : null;
-  }
-  if (entity.entityKind === "relay") {
-    const parsed = RelayIdSchema.safeParse(entity.id);
-    if (!parsed.success || item.source !== "activity") return null;
-    const operation = verifiedWorkflowNarration(item)?.operation;
-    const state = operation === "relay.close" ? "closed" : null;
-    return state === null
-      ? null
-      : `/relays?view=all&state=${state}&relay=${encodeURIComponent(parsed.data)}`;
-  }
-
-  const wikiId = WikiEntityIdSchema.safeParse(entity.id);
-  if (!wikiId.success) return null;
-  return entity.entityKind === "spec"
-    ? `/specs/${encodeURIComponent(wikiId.data)}`
-    : `/knowledge/${encodeURIComponent(wikiId.data)}`;
-}
-
-function primaryContext(item: ActivityItem): ContextReference | null {
-  const titledEntity = item.subjects.find((subject) => (
-    subject.kind === "entity" && subject.entity.title !== null
-  ));
-  if (item.source === "activity" && item.label) {
-    return {
-      label: item.label,
-      subject: item.subjects.find((subject) => subject.kind === "entity") ?? titledEntity ?? null,
-    };
-  }
-  if (titledEntity) return { label: subjectLabel(titledEntity), subject: titledEntity };
-  const contextual = item.subjects.find((subject) => subject.kind === "symbol" || subject.kind === "file");
-  return contextual ? { label: subjectLabel(contextual), subject: contextual } : null;
 }
 
 function formatDay(timestamp: string): string {
@@ -254,8 +117,8 @@ function formatAccessibleTimestamp(timestamp: string): string {
   }).format(new Date(timestamp));
 }
 
-function PrimaryContext({ context, item }: { context: ContextReference; item: ActivityItem }) {
-  const href = context.subject ? primarySubjectRoute(context.subject, item) : null;
+function PrimaryContext({ context, item }: { context: ActivityContextReference; item: ActivityItem }) {
+  const href = context.subject ? activitySubjectRoute(context.subject, item) : null;
   if (href) {
     return (
       <Link
@@ -291,10 +154,10 @@ function ActivityEntry({
   const contextId = useId();
   const canonical = item.source === "activity" ? item : null;
   const headline = activityHeadline(item);
-  const context = primaryContext(item);
-  const actorRemapped = canonical ? !sameActor(canonical.recordedActor, canonical.effectiveActor) : false;
+  const context = activityPrimaryContext(item);
+  const actorRemapped = canonical ? !sameActivityActor(canonical.recordedActor, canonical.effectiveActor) : false;
   const contextControlLabel = context?.label
-    ?? (canonical ? actorLabel(canonical.recordedActor) : "actor not recorded");
+    ?? (canonical ? activityActorLabel(canonical.recordedActor) : "actor not recorded");
   const contextAccessibleName = `${headline}: ${contextControlLabel}, timeline entry ${position}, recorded ${formatAccessibleTimestamp(item.timestamp)}`;
   const EntryIcon = canonical ? Activity : ScrollText;
   return (
@@ -305,7 +168,7 @@ function ActivityEntry({
         <div className={styles.activityEntryTopline}>
           {item.source === "legacy" ? (
             <Badge variant={item.action === "risk" ? "destructive" : item.action === "note" ? "outline" : "secondary"}>
-              {projectNoteKind(item.action)}
+              {activityProjectNoteKind(item.action)}
             </Badge>
           ) : null}
           {canonical?.actorDiagnostics.length ? <Badge variant="outline">Identity note</Badge> : null}
@@ -313,12 +176,12 @@ function ActivityEntry({
         <h3 id={headingId}>{headline}</h3>
         <p className={styles.activityActorLine}>
           <UserRound aria-hidden="true" />
-          <span>{canonical ? actorLabel(canonical.recordedActor) : "Actor not recorded"}</span>
+          <span>{canonical ? activityActorLabel(canonical.recordedActor) : "Actor not recorded"}</span>
           <span aria-hidden="true">·</span>
           <time dateTime={item.timestamp}>{formatClock(item.timestamp)}</time>
         </p>
         {actorRemapped && canonical ? (
-          <p className={styles.activityRemap}>Currently matched to {actorLabel(canonical.effectiveActor)}</p>
+          <p className={styles.activityRemap}>Currently matched to {activityActorLabel(canonical.effectiveActor)}</p>
         ) : null}
         {item.source === "legacy" && item.messageTruncated ? (
           <p className={styles.activityBoundedNote}>This project-note message was shortened by the safe response limit.</p>

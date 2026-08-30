@@ -318,10 +318,12 @@ describe("Hub Relay projections", () => {
       now: () => new Date(NOW),
     });
     await expect(services.home()).resolves.toMatchObject({
-      sections: { relays: { availability: "available", count: 1 } },
+      attention: {
+        relays: { availability: "available", readyToTakeCount: 1, inYourHandsCount: 0 },
+      },
     });
     expect(listRelays).toHaveBeenCalledWith({
-      perspective: "mine",
+      perspective: "all",
       states: ["published", "acknowledged"],
       limit: 100,
     });
@@ -350,11 +352,10 @@ describe("Hub Relay projections", () => {
       now: () => new Date(NOW),
     });
     await expect(unsafe.home()).resolves.toMatchObject({
-      sections: {
+      attention: {
         relays: {
           availability: "unavailable",
-          count: null,
-          reason: "Your open Relay summary could not establish a complete diagnostic-free corpus.",
+          reason: "Open Relay handoffs exceeded a bounded, trustworthy first-page summary.",
         },
       },
     });
@@ -370,15 +371,18 @@ describe("Hub Relay projections", () => {
       now: () => new Date(NOW),
     });
     await expect(noMember.home()).resolves.toMatchObject({
-      sections: {
+      attention: {
         relays: {
           availability: "unavailable",
-          count: null,
-          reason: "Select an active Member to see your open Relay handoffs.",
+          reason: "Select an active Member to see your personal Relay handoffs.",
         },
       },
     });
-    expect(unavailableList).not.toHaveBeenCalled();
+    expect(unavailableList).toHaveBeenCalledWith({
+      perspective: "all",
+      states: ["published", "acknowledged"],
+      limit: 100,
+    });
   });
 
   it("projects the exact bounded dirty-publication warning in a publish preview", async () => {

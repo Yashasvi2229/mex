@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "provisional": false,
   "calibration": {
-    "status": "calibrated-from-pinned-runs-33005876613-33083122092-33117048710-E33169865368-F33249296778",
+    "status": "calibrated-from-pinned-runs-33005876613-33083122092-33117048710-E33169865368-F33249296778-Goverview",
     "runtimeFormula": "ceil(measured p95 * 1.15)",
     "assetFormula": "ceil(built bytes * 1.05)"
   },
@@ -17,14 +17,14 @@
     "idleMemory": 5
   },
   "assets": {
-    "maxJsChunkBytes": 460810,
+    "maxJsChunkBytes": 484475,
     "initial": {
-      "jsBytes": 460810,
+      "jsBytes": 484475,
       "cssBytes": 70902,
       "fontBytes": 88961
     },
     "routes": {
-      "home": { "jsBytes": 16029, "cssBytes": 4412, "fontBytes": 0 },
+      "home": { "jsBytes": 132302, "cssBytes": 17820, "fontBytes": 0 },
       "search": { "jsBytes": 31589, "cssBytes": 6875, "fontBytes": 0 },
       "knowledge": { "jsBytes": 73579, "cssBytes": 11097, "fontBytes": 0 },
       "knowledgeDetail": { "jsBytes": 73579, "cssBytes": 11097, "fontBytes": 0 },

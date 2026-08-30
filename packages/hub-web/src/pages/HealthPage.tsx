@@ -26,6 +26,7 @@ import {
 import { ErrorState, formatDate, PageHeader, StatePanel, StatusPill, stateTone, sentenceCase } from "../components/ui";
 import { cn } from "../lib/utils";
 import { invalidateIndexOperationState } from "../app/JobLifecycleObserver";
+import { graphParseComposition, shortRepositoryHead } from "../lib/health-presentation";
 import healthStyles from "../styles/health.module.css";
 
 type HealthComponent = HealthResponse["components"][number];
@@ -43,10 +44,6 @@ function HealthIcon({ status }: { status: string }) {
   if (status === "healthy") return <CheckCircle2 aria-hidden="true" />;
   if (status === "degraded") return <CircleDashed aria-hidden="true" />;
   return <Database aria-hidden="true" />;
-}
-
-function shortHead(value: string | null): string {
-  return value ? value.slice(0, 10) : "Not indexed";
 }
 
 function Diagnostics({ diagnostics }: { diagnostics: HealthComponent["diagnostics"] }) {
@@ -150,12 +147,11 @@ function GraphHealthReadout({ graph }: { graph: GraphHealthDetails }) {
     graph.changes.configChanged ? "Config changed" : null,
     graph.changes.grammarChanged ? "Grammar changed" : null,
   ].filter((value): value is string => value !== null);
-  const parseTotal = graph.parseHealth.total;
-  const percent = (value: number) => parseTotal === 0 ? 0 : (value / parseTotal) * 100;
+  const parse = graphParseComposition(graph.parseHealth);
   const parseStyle = {
-    "--parse-ok": `${percent(graph.parseHealth.ok)}%`,
-    "--parse-partial": `${percent(graph.parseHealth.partial)}%`,
-    "--parse-failed": `${percent(graph.parseHealth.failed)}%`,
+    "--parse-ok": `${parse.okPercent}%`,
+    "--parse-partial": `${parse.partialPercent}%`,
+    "--parse-failed": `${parse.failedPercent}%`,
   } as CSSProperties;
 
   return (
@@ -174,13 +170,13 @@ function GraphHealthReadout({ graph }: { graph: GraphHealthDetails }) {
         <section className={healthStyles.snapshot} aria-labelledby="indexed-snapshot-heading">
           <small id="indexed-snapshot-heading">Indexed snapshot</small>
           <strong>{graph.indexedBranch ?? "Detached / unavailable"}</strong>
-          <code>{shortHead(graph.indexedHead)}</code>
+          <code>{shortRepositoryHead(graph.indexedHead)}</code>
         </section>
         <span className={healthStyles.compareGlyph} aria-hidden="true"><GitCompare /></span>
         <section className={healthStyles.snapshot} data-current="true" aria-labelledby="current-repository-heading">
           <small id="current-repository-heading">Current repository</small>
           <strong>{graph.currentBranch ?? "Detached / unborn"}</strong>
-          <code>{shortHead(graph.currentHead)}</code>
+          <code>{shortRepositoryHead(graph.currentHead)}</code>
         </section>
       </div>
 
@@ -191,7 +187,7 @@ function GraphHealthReadout({ graph }: { graph: GraphHealthDetails }) {
             <strong>{graph.parseHealth.ok}/{graph.parseHealth.total}</strong>
           </div>
           <div
-            aria-label={`${graph.parseHealth.ok} parsed successfully, ${graph.parseHealth.partial} partial, ${graph.parseHealth.failed} failed`}
+            aria-label={parse.accessibleLabel}
             className={healthStyles.parseComposition}
             role="img"
             style={parseStyle}

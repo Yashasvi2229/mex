@@ -293,12 +293,27 @@ try {
     redirect: "error",
   });
   const homeBody = await home.json();
+  const overview = await fetch(`${url.origin}/api/v1/overview`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const overviewBody = await overview.json();
   const activity = await fetch(`${url.origin}/api/v1/activity`, {
     headers: { cookie },
     redirect: "error",
   });
   const activityBody = await activity.json();
-  if (!home.ok || homeBody.sections?.activity?.count !== 1) {
+  const overviewCanonicalActivityCount = overviewBody.activity?.availability === "available"
+    && Array.isArray(overviewBody.activity.items)
+    ? overviewBody.activity.items.filter((item) => item?.source === "activity").length
+    : null;
+  if (
+    !home.ok
+    || Object.hasOwn(homeBody, "sections")
+    || Object.hasOwn(homeBody, "activity")
+    || !overview.ok
+    || overviewCanonicalActivityCount !== 1
+  ) {
     const diagnosticCodes = Array.isArray(activityBody?.diagnostics)
       ? activityBody.diagnostics.slice(0, 10).map((item) => ({
           code: typeof item?.code === "string" ? item.code : "UNKNOWN",
@@ -308,7 +323,10 @@ try {
     const detail = JSON.stringify({
       homeStatus: home.status,
       homeProblemCode: typeof homeBody?.code === "string" ? homeBody.code : null,
-      homeActivity: homeBody.sections?.activity ?? null,
+      homeHasActivity: Object.hasOwn(homeBody, "sections") || Object.hasOwn(homeBody, "activity"),
+      overviewStatus: overview.status,
+      overviewProblemCode: typeof overviewBody?.code === "string" ? overviewBody.code : null,
+      overviewCanonicalActivityCount,
       activityStatus: activity.status,
       canonicalActivityCount: Array.isArray(activityBody?.items)
         ? activityBody.items.filter((item) => item?.source === "activity").length
@@ -325,7 +343,7 @@ try {
       ).includes(13),
       diagnosticCodes,
     });
-    throw new Error(`The packaged Hub did not report the exact canonical activity count: ${detail}`);
+    throw new Error(`The packaged Hub did not keep the shell lightweight and Overview Activity exact: ${detail}`);
   }
   const packedActivity = activityBody.items?.find((item) => (
     item.source === "activity" && item.action === "activity.packed"

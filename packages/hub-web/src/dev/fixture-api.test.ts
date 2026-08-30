@@ -35,16 +35,20 @@ import {
   WikiEntityListResponseSchema,
   WikiRelationsResponseSchema,
 } from "@mex/hub-contracts";
+import { OverviewResponseSchema } from "@mex/hub-contracts/overview";
 import { describe, expect, it } from "vitest";
+import type { OverviewFixtureVariant } from "../api/client";
+import { activityHeadline } from "../lib/activity-presentation";
 import { createFixtureApi } from "./fixture-api";
 
 describe("development-only populated fixture", () => {
   it("stays inside every shared wire contract", async () => {
     const api = createFixtureApi();
-    const [session, capabilities, home, activity, search, code, health, jobs, entities, detail, relations, backlinks, codeKnowledge, workstreams, specs, drafts, proposals] = await Promise.all([
+    const [session, capabilities, home, overview, activity, search, code, health, jobs, entities, detail, relations, backlinks, codeKnowledge, workstreams, specs, drafts, proposals] = await Promise.all([
       api.getSession(),
       api.getCapabilities(),
       api.getHome(),
+      api.getOverview(),
       api.getActivity({ limit: 25 }),
       api.search({ q: "bootstrap", limit: 25 }),
       api.getCodeSymbol("sym.createHubServer", { view: "impact", depth: 2 }),
@@ -64,10 +68,12 @@ describe("development-only populated fixture", () => {
     expect(SessionResponseSchema.safeParse(session).success).toBe(true);
     expect(HubCapabilitiesSchema.safeParse(capabilities).success).toBe(true);
     expect(HomeResponseSchema.safeParse(home).success).toBe(true);
+    expect(OverviewResponseSchema.safeParse(overview).success).toBe(true);
     expect(ActivityResponseSchema.safeParse(activity).success).toBe(true);
-    expect(home.sections.activity).toEqual({ availability: "available", count: 5 });
-    expect(home.sections.inbox).toEqual({ availability: "available", count: 3 });
-    expect(home.sections.relays).toEqual({ availability: "available", count: 2 });
+    expect(home.attention.inbox).toEqual({ availability: "available", teamReviewCount: 3 });
+    expect(home.attention.relays).toEqual({ availability: "available", readyToTakeCount: 1, inYourHandsCount: 1 });
+    expect(home.jobs).toEqual({ availability: "available", activeCount: 1 });
+    expect(overview.shell).toEqual(home);
     expect(activity.items.some((item) => item.source === "activity")).toBe(true);
     expect(activity.items.some((item) => item.source === "legacy")).toBe(true);
     const activityTail = await api.getActivity({
@@ -221,6 +227,241 @@ describe("development-only populated fixture", () => {
     ]);
   });
 
+  it("keeps every Overview fixture scenario inside the production aggregate contract", async () => {
+    const variants: OverviewFixtureVariant[] = [
+      "established",
+      "caught-up",
+      "pending-review",
+      "relay-ready",
+      "relay-in-hand",
+      "identity-unresolved",
+      "indexes-stale",
+      "indexes-degraded",
+      "indexes-missing",
+      "job-determinate",
+      "job-indeterminate",
+      "failure",
+      "partial",
+      "unavailable",
+    ];
+
+    for (const variant of variants) {
+      const overview = await createFixtureApi({ overviewFixture: variant }).getOverview();
+      const parsed = OverviewResponseSchema.safeParse(overview);
+      expect(parsed.success, variant).toBe(true);
+      expect(overview.focus.availability === "unavailable"
+        ? true
+        : overview.focus.inbox.availability === "unavailable"
+          || overview.focus.inbox.items.length <= 3, variant).toBe(true);
+      expect(overview.focus.availability === "unavailable"
+        ? true
+        : overview.focus.relays.availability === "unavailable"
+          || (overview.focus.relays.readyToTake.length <= 3
+            && overview.focus.relays.inYourHands.length <= 3), variant).toBe(true);
+      expect(overview.activity.availability === "unavailable"
+        ? true
+        : overview.activity.items.length <= 5, variant).toBe(true);
+    }
+  });
+
+  it("defaults the Overview fixture to the established production-like scenario", async () => {
+    const [implicit, explicit] = await Promise.all([
+      createFixtureApi().getOverview(),
+      createFixtureApi({ overviewFixture: "established" }).getOverview(),
+    ]);
+    expect(implicit).toEqual(explicit);
+  });
+
+  it("projects bounded Overview focus semantics without fixture-only attention", async () => {
+    const established = await createFixtureApi({ overviewFixture: "established" }).getOverview();
+    expect(established.shell.attention).toEqual({
+      inbox: { availability: "available", teamReviewCount: 3 },
+      relays: { availability: "available", readyToTakeCount: 1, inYourHandsCount: 1 },
+    });
+    expect(established.focus).toMatchObject({
+      availability: "available",
+      identity: { availability: "available", requiresAttention: false },
+      inbox: { availability: "available", teamReviewCount: 3 },
+      relays: { availability: "available", readyToTakeCount: 1, inYourHandsCount: 1 },
+    });
+    if (established.focus.availability !== "available"
+      || established.focus.inbox.availability !== "available"
+      || established.focus.relays.availability !== "available") {
+      throw new Error("Expected the established Overview focus sources.");
+    }
+    expect(established.focus.inbox.items).toHaveLength(3);
+    expect(established.focus.relays.readyToTake).toHaveLength(1);
+    expect(established.focus.relays.readyToTake[0]?.state).toBe("published");
+    expect(established.focus.relays.inYourHands).toHaveLength(1);
+    expect(established.focus.relays.inYourHands[0]?.state).toBe("acknowledged");
+    expect(established.context).toMatchObject({
+      availability: "available",
+      graph: {
+        availability: "available",
+        details: { indexStatus: "stale", changes: { total: 7 } },
+      },
+      wiki: { availability: "available", details: { indexStatus: "fresh" } },
+    });
+    if (established.context.availability !== "available"
+      || established.context.graph.availability !== "available") {
+      throw new Error("Expected established Graph context.");
+    }
+    expect(established.context.graph.details.currentBranch).toBe(established.shell.repository.branch);
+    expect(established.context.graph.details.currentHead).toBe(established.shell.repository.head);
+
+    const caughtUp = await createFixtureApi({ overviewFixture: "caught-up" }).getOverview();
+    expect(caughtUp.shell.attention).toEqual({
+      inbox: { availability: "available", teamReviewCount: 0 },
+      relays: { availability: "available", readyToTakeCount: 0, inYourHandsCount: 0 },
+    });
+    expect(caughtUp.operation).toMatchObject({
+      availability: "available",
+      active: null,
+      latestRelevantFailure: null,
+    });
+
+    const pending = await createFixtureApi({ overviewFixture: "pending-review" }).getOverview();
+    expect(pending.shell.attention.inbox).toEqual({ availability: "available", teamReviewCount: 3 });
+    const ready = await createFixtureApi({ overviewFixture: "relay-ready" }).getOverview();
+    expect(ready.shell.attention.relays).toEqual({
+      availability: "available",
+      readyToTakeCount: 1,
+      inYourHandsCount: 0,
+    });
+    const inHand = await createFixtureApi({ overviewFixture: "relay-in-hand" }).getOverview();
+    expect(inHand.shell.attention.relays).toEqual({
+      availability: "available",
+      readyToTakeCount: 0,
+      inYourHandsCount: 1,
+    });
+  });
+
+  it("keeps unresolved identity and independent source failures honest", async () => {
+    const identity = await createFixtureApi({ overviewFixture: "identity-unresolved" }).getOverview();
+    expect(identity.identity).toMatchObject({
+      availability: "available",
+      current: {
+        actor: { kind: "unknown" },
+        source: "unknown",
+        diagnostics: [{ code: "GIT_IDENTITY_UNAVAILABLE" }],
+      },
+    });
+    expect(identity.focus).toMatchObject({
+      availability: "available",
+      identity: { availability: "available", requiresAttention: true },
+      relays: { availability: "unavailable" },
+    });
+
+    const partial = await createFixtureApi({ overviewFixture: "partial" }).getOverview();
+    expect(partial.focus).toMatchObject({
+      availability: "available",
+      inbox: { availability: "available", teamReviewCount: 2 },
+      relays: { availability: "unavailable" },
+    });
+    expect(partial.activity).toMatchObject({ availability: "unavailable" });
+    expect(partial.context).toMatchObject({
+      availability: "available",
+      graph: { availability: "unavailable" },
+      wiki: { availability: "available", details: { indexStatus: "fresh" } },
+    });
+
+    const unavailableOverview = await createFixtureApi({ overviewFixture: "unavailable" }).getOverview();
+    expect(unavailableOverview.identity.availability).toBe("unavailable");
+    expect(unavailableOverview.focus.availability).toBe("unavailable");
+    expect(unavailableOverview.activity.availability).toBe("unavailable");
+    expect(unavailableOverview.context.availability).toBe("unavailable");
+    expect(unavailableOverview.operation.availability).toBe("unavailable");
+    expect(unavailableOverview.shell).toMatchObject({
+      attention: {
+        inbox: { availability: "unavailable" },
+        relays: { availability: "unavailable" },
+      },
+      jobs: { availability: "unavailable" },
+    });
+  });
+
+  it("projects exact index states, parse composition, and active-operation progress", async () => {
+    const stale = await createFixtureApi({ overviewFixture: "indexes-stale" }).getOverview();
+    expect(stale.context).toMatchObject({
+      availability: "available",
+      graph: {
+        availability: "available",
+        details: { indexStatus: "stale", changes: { total: 7 } },
+      },
+      wiki: { availability: "available", details: { indexStatus: "fresh" } },
+    });
+
+    const degraded = await createFixtureApi({ overviewFixture: "indexes-degraded" }).getOverview();
+    expect(degraded.context).toMatchObject({
+      availability: "available",
+      graph: {
+        availability: "available",
+        details: {
+          indexStatus: "degraded",
+          parseHealth: { total: 183, ok: 178, partial: 4, failed: 1 },
+        },
+      },
+    });
+    const missing = await createFixtureApi({ overviewFixture: "indexes-missing" }).getOverview();
+    expect(missing.context).toMatchObject({
+      availability: "available",
+      graph: { availability: "available", details: { indexStatus: "missing" } },
+      wiki: { availability: "available", details: { indexStatus: "missing" } },
+    });
+
+    const determinate = await createFixtureApi({ overviewFixture: "job-determinate" }).getOverview();
+    expect(determinate.operation).toMatchObject({
+      availability: "available",
+      active: { kind: "graph_refresh", progress: { completed: 124, total: 183 } },
+      latestRelevantFailure: null,
+    });
+    const indeterminate = await createFixtureApi({ overviewFixture: "job-indeterminate" }).getOverview();
+    expect(indeterminate.operation).toMatchObject({
+      availability: "available",
+      active: { kind: "wiki_refresh", progress: { completed: 37 } },
+      latestRelevantFailure: null,
+    });
+    if (indeterminate.operation.availability !== "available") throw new Error("Expected an operation panel.");
+    expect(indeterminate.operation.active?.progress).not.toHaveProperty("total");
+  });
+
+  it("keeps superseded failures quiet and exposes only a relevant latest failure", async () => {
+    const established = await createFixtureApi({ overviewFixture: "established" }).getOverview();
+    expect(established.operation).toMatchObject({
+      availability: "available",
+      latestRelevantFailure: null,
+    });
+
+    const failure = await createFixtureApi({ overviewFixture: "failure" }).getOverview();
+    expect(failure.operation).toMatchObject({
+      availability: "available",
+      active: null,
+      latestRelevantFailure: {
+        kind: "graph_refresh",
+        generation: 15,
+        state: "failed",
+        problem: { code: "JOB_FAILED" },
+      },
+    });
+  });
+
+  it("reuses Activity origin truth and preserves the unknown-action fallback in its bounded preview", async () => {
+    const overview = await createFixtureApi({ overviewFixture: "established" }).getOverview();
+    if (overview.activity.availability !== "available") throw new Error("Expected recent Activity.");
+    expect(overview.activity.items).toHaveLength(5);
+    expect(overview.activity.items.map(activityHeadline)).toEqual([
+      "Proposed a Spec change",
+      "Took a handoff",
+      "Keep activity immutable and preserve Project notes as a read-only projection.",
+      "Updated a teammate",
+      "Recorded “relay.closed”",
+    ]);
+    expect(overview.activity.sourceTruncated).toBe(false);
+    expect(overview.activity.diagnostics).toEqual([
+      expect.objectContaining({ code: "LEGACY_ACTIVITY_MALFORMED" }),
+    ]);
+  });
+
   it("projects each bounded Member identity through Current, Home, Relay, and receipt reads", async () => {
     const cases = [
       {
@@ -311,18 +552,17 @@ describe("development-only populated fixture", () => {
       expect(preview.receipt.authority.actor, fixtureCase.variant).toEqual(actor.actor);
 
       if (actor.actor.kind === "member") {
-        expect(homeResult.sections.relays, fixtureCase.variant)
-          .toEqual({ availability: "available", count: 2 });
+        expect(homeResult.attention.relays, fixtureCase.variant)
+          .toEqual({ availability: "available", readyToTakeCount: 1, inYourHandsCount: 1 });
         await expect(api.getRelays({
           perspective: "mine",
           states: ["published", "acknowledged"],
           limit: 25,
         })).resolves.toMatchObject({ items: expect.any(Array) });
       } else {
-        expect(homeResult.sections.relays, fixtureCase.variant).toEqual({
+        expect(homeResult.attention.relays, fixtureCase.variant).toEqual({
           availability: "unavailable",
-          count: null,
-          reason: "Select an active Member to see your open Relay handoffs.",
+          reason: "Select an active Member to see your personal Relay handoffs.",
         });
         await expect(api.getRelays({
           perspective: "mine",
@@ -388,7 +628,7 @@ describe("development-only populated fixture", () => {
       diagnostics: [],
     });
     expect(homeResult.actor).toEqual(actor.actor);
-    expect(homeResult.sections.relays).toEqual({ availability: "available", count: 2 });
+    expect(homeResult.attention.relays).toEqual({ availability: "available", readyToTakeCount: 1, inYourHandsCount: 1 });
     await expect(api.getRelays({
       perspective: "mine",
       states: ["published", "acknowledged"],
@@ -907,7 +1147,7 @@ describe("development-only populated fixture", () => {
       proposalMutation: { availability: "available" },
       specApproval: { availability: "available" },
     });
-    expect(homeResult.sections.inbox).toEqual({ availability: "available", count: 0 });
+    expect(homeResult.attention.inbox).toEqual({ availability: "available", teamReviewCount: 0 });
     expect(drafts).toMatchObject({ items: [], nextCursor: null, truncated: false });
     expect(proposals).toMatchObject({ items: [], nextCursor: null, truncated: false });
     expect(actor.actor).toMatchObject({ kind: "member", displayName: "Ada Lovelace" });
@@ -940,7 +1180,7 @@ describe("development-only populated fixture", () => {
       diagnosticsTruncated: false,
     });
     expect(homeResult.actor).toEqual({ kind: "unknown" });
-    expect(homeResult.sections.inbox).toEqual({ availability: "available", count: 3 });
+    expect(homeResult.attention.inbox).toEqual({ availability: "available", teamReviewCount: 3 });
     expect(drafts.items).toHaveLength(1);
     expect(proposals.items).toHaveLength(3);
   });
@@ -969,7 +1209,7 @@ describe("development-only populated fixture", () => {
       },
     });
     expect(capability.wiki.read).toEqual({ availability: "available" });
-    expect(homeResult.sections.inbox).toEqual({ availability: "available", count: 3 });
+    expect(homeResult.attention.inbox).toEqual({ availability: "available", teamReviewCount: 3 });
     expect(drafts.items).toHaveLength(1);
     expect(proposals.items).toHaveLength(3);
     expect(WikiEntityListResponseSchema.safeParse(wiki).success).toBe(true);
@@ -988,7 +1228,7 @@ describe("development-only populated fixture", () => {
     expect(ActivityResponseSchema.safeParse(page).success).toBe(true);
     expect(capability.activity).toEqual({ availability: "available" });
     expect(capability.activityRecord).toEqual({ availability: "available" });
-    expect(homeResult.sections.activity).toEqual({ availability: "available", count: 0 });
+    expect(homeResult.attention.inbox).toEqual({ availability: "available", teamReviewCount: 3 });
     expect(page).toEqual({
       items: [],
       nextCursor: null,
@@ -1010,7 +1250,7 @@ describe("development-only populated fixture", () => {
 
     expect(ActivityResponseSchema.safeParse(all).success).toBe(true);
     expect(ActivityResponseSchema.safeParse(canonical).success).toBe(true);
-    expect(homeResult.sections.activity).toEqual({ availability: "available", count: 0 });
+    expect(homeResult.attention.inbox).toEqual({ availability: "available", teamReviewCount: 3 });
     expect(all.items).toHaveLength(2);
     expect(all.items.every((item) => item.source === "legacy")).toBe(true);
     expect(all.diagnostics).toEqual([]);
@@ -1026,7 +1266,7 @@ describe("development-only populated fixture", () => {
     ]);
 
     expect(ActivityResponseSchema.safeParse(page).success).toBe(true);
-    expect(homeResult.sections.activity).toEqual({ availability: "available", count: 5 });
+    expect(homeResult.attention.inbox).toEqual({ availability: "available", teamReviewCount: 3 });
     expect(page.items).toHaveLength(4);
     expect(page.nextCursor).not.toBeNull();
     expect(page.sourceTruncated).toBe(true);
@@ -1060,7 +1300,7 @@ describe("development-only populated fixture", () => {
       publish: { availability: "available" },
       lifecycleMutation: { availability: "available" },
     });
-    expect(homeResult.sections.relays).toEqual({ availability: "available", count: 0 });
+    expect(homeResult.attention.relays).toEqual({ availability: "available", readyToTakeCount: 0, inYourHandsCount: 0 });
     expect(drafts).toMatchObject({ items: [], nextCursor: null, truncated: false });
     expect(open).toMatchObject({ items: [], nextCursor: null, truncated: false });
     expect(closed).toMatchObject({ items: [], nextCursor: null, truncated: false });
@@ -1076,7 +1316,7 @@ describe("development-only populated fixture", () => {
       api.getRelays({ perspective: "all", states: ["closed"], limit: 25 }),
     ]);
 
-    expect(homeResult.sections.relays).toEqual({ availability: "available", count: 0 });
+    expect(homeResult.attention.relays).toEqual({ availability: "available", readyToTakeCount: 0, inYourHandsCount: 0 });
     expect(open.items).toEqual([]);
     expect(closed.items.map((relay) => relay.ref.id)).toEqual([
       "relay_01000000000000000000000005",
@@ -1110,7 +1350,7 @@ describe("development-only populated fixture", () => {
         message: "The referenced member no longer exists.",
       }],
     });
-    expect(homeResult.sections.relays).toEqual({ availability: "available", count: 2 });
+    expect(homeResult.attention.relays).toEqual({ availability: "available", readyToTakeCount: 1, inYourHandsCount: 1 });
     expect(team.items).toHaveLength(4);
     expect(drafts.items).toHaveLength(2);
     await expect(api.getRelays({
@@ -1142,7 +1382,7 @@ describe("development-only populated fixture", () => {
         reason: "Relay lifecycle writes are not connected in this Hub process.",
       },
     });
-    expect(homeResult.sections.relays).toEqual({ availability: "available", count: 2 });
+    expect(homeResult.attention.relays).toEqual({ availability: "available", readyToTakeCount: 1, inYourHandsCount: 1 });
     expect(drafts.items).toHaveLength(2);
     expect(relays.items).toHaveLength(2);
   });

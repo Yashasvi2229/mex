@@ -639,6 +639,14 @@ export function defineTeamRelayHandoffContract(
           "Claimed by sender",
           "Legacy self handoff",
         ]);
+        const senderMineFirst = await harness.port.listRelays({
+          perspective: "mine",
+          limit: 1,
+        });
+        expect(senderMineFirst.items.map((relay) => relay.summary)).toEqual([
+          "Claimed by sender",
+        ]);
+        expect(senderMineFirst.nextCursor).not.toBeNull();
 
         const first = await harness.port.listRelays({
           perspective: "all",
@@ -666,11 +674,18 @@ export function defineTeamRelayHandoffContract(
         }), ["REVISION_CONFLICT"]);
 
         const recipient = await harness.selectActor("recipient");
-        await expectProblemCode(recipient.listRelays({
+        expect((await recipient.listRelays({
           perspective: "all",
           states: ["published"],
           limit: 1,
           cursor: first.nextCursor!,
+        })).items.map((relay) => relay.summary)).toEqual([
+          "Legacy self handoff",
+        ]);
+        await expectProblemCode(recipient.listRelays({
+          perspective: "mine",
+          limit: 1,
+          cursor: senderMineFirst.nextCursor!,
         }), ["REVISION_CONFLICT"]);
         expect((await recipient.listRelays({ perspective: "mine" })).items
           .map((relay) => relay.summary)).toEqual(["Published to recipient"]);

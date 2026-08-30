@@ -9,6 +9,7 @@ const buildAliases = hubContractAliases(packageRoot, "build");
 const expectedServeEntries = new Map([
   ["@mex/hub-contracts", resolve(packageRoot, "../hub-contracts/src/index.ts")],
   ["@mex/hub-contracts/ids", resolve(packageRoot, "../hub-contracts/src/ids.ts")],
+  ["@mex/hub-contracts/overview", resolve(packageRoot, "../hub-contracts/src/overview.ts")],
   ["@mex/hub-contracts/relay", resolve(packageRoot, "../hub-contracts/src/relay.ts")],
 ]);
 

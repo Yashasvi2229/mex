@@ -6,6 +6,7 @@ import {
   fixturesEnabled,
   inboxFixtureVariant,
   memberFixtureVariant,
+  overviewFixtureVariant,
   relayFixtureVariant,
   readBootstrapToken,
   resolveApi,
@@ -68,6 +69,7 @@ describe("bootstrap fragment handling", () => {
     expect(fixturesEnabled(true, "?fixture=populated&relayFixture=legacy")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=populated&activityFixture=partial")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=populated&memberFixture=git-alias")).toBe(true);
+    expect(fixturesEnabled(true, "?fixture=populated&overviewFixture=established")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=empty")).toBe(false);
   });
 
@@ -126,6 +128,29 @@ describe("bootstrap fragment handling", () => {
     expect(memberFixtureVariant(search)).toBe(expected);
   });
 
+  it.each([
+    ["?fixture=populated&overviewFixture=established", "established"],
+    ["?fixture=populated&overviewFixture=caught-up", "caught-up"],
+    ["?fixture=populated&overviewFixture=pending-review", "pending-review"],
+    ["?fixture=populated&overviewFixture=relay-ready", "relay-ready"],
+    ["?fixture=populated&overviewFixture=relay-in-hand", "relay-in-hand"],
+    ["?fixture=populated&overviewFixture=identity-unresolved", "identity-unresolved"],
+    ["?fixture=populated&overviewFixture=indexes-stale", "indexes-stale"],
+    ["?fixture=populated&overviewFixture=indexes-degraded", "indexes-degraded"],
+    ["?fixture=populated&overviewFixture=indexes-missing", "indexes-missing"],
+    ["?fixture=populated&overviewFixture=job-determinate", "job-determinate"],
+    ["?fixture=populated&overviewFixture=job-indeterminate", "job-indeterminate"],
+    ["?fixture=populated&overviewFixture=failure", "failure"],
+    ["?fixture=populated&overviewFixture=partial", "partial"],
+    ["?fixture=populated&overviewFixture=unavailable", "unavailable"],
+    ["?fixture=populated", undefined],
+    ["?fixture=populated&overviewFixture=populated", undefined],
+    ["?fixture=populated&overviewFixture=ESTABLISHED", undefined],
+    ["?fixture=populated&overviewFixture=../../private", undefined],
+  ])("bounds the Overview fixture variant in %s", (search, expected) => {
+    expect(overviewFixtureVariant(search)).toBe(expected);
+  });
+
   it("passes a bounded Member variant into the development fixture API", async () => {
     vi.stubGlobal("window", {
       location: { search: "?fixture=populated&memberFixture=unknown" },
@@ -139,9 +164,33 @@ describe("bootstrap fragment handling", () => {
       diagnostics: [{ code: "GIT_IDENTITY_UNAVAILABLE" }],
     });
   });
+
+  it("passes a bounded Overview variant into the development fixture API", async () => {
+    vi.stubGlobal("window", {
+      location: { search: "?fixture=populated&overviewFixture=identity-unresolved" },
+    });
+
+    const api = await resolveApi();
+
+    await expect(api.getOverview()).resolves.toMatchObject({
+      shell: { actor: { kind: "unknown" } },
+    });
+  });
 });
 
 describe("HttpHubApi shared-contract boundary", () => {
+  it("reads the bounded Overview aggregate from its dedicated endpoint", async () => {
+    const response = await createFixtureApi({ overviewFixture: "caught-up" }).getOverview();
+    const fetchMock = vi.fn().mockResolvedValue(json(response));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new HttpHubApi().getOverview()).resolves.toEqual(response);
+
+    const [rawUrl, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(new URL(rawUrl, "http://127.0.0.1").pathname).toBe("/api/v1/overview");
+    expect(init.method).toBeUndefined();
+  });
+
   it("sends independent search cursors through the strict shared contract", async () => {
     const response = await createFixtureApi().search({ q: "graph", limit: 25 });
     const fetchMock = vi.fn().mockResolvedValue(json(response));

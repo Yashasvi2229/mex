@@ -36,11 +36,10 @@ function renderSidebar({
 function homeWithCounts(home: HomeResponse, count: number): HomeResponse {
   return {
     ...home,
-    activeJobs: count,
-    sections: {
-      ...home.sections,
-      inbox: { availability: "available", count },
-      relays: { availability: "available", count },
+    jobs: { availability: "available", activeCount: count },
+    attention: {
+      inbox: { availability: "available", teamReviewCount: count },
+      relays: { availability: "available", readyToTakeCount: count, inYourHandsCount: 0 },
     },
   };
 }
@@ -83,10 +82,9 @@ describe("HubSidebar dynamic state", () => {
       capabilities,
       home: {
         ...home,
-        sections: {
-          ...home.sections,
-          inbox: { availability: "unavailable", count: null, reason: "Count unavailable." },
-          relays: { availability: "unavailable", count: null, reason: "Count unavailable." },
+        attention: {
+          inbox: { availability: "unavailable", reason: "Count unavailable." },
+          relays: { availability: "unavailable", reason: "Count unavailable." },
         },
       },
     });

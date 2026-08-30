@@ -11,14 +11,7 @@ import {
   UserRound,
 } from "lucide-react";
 import { Link } from "react-router-dom";
-import {
-  GraphSymbolIdSchema,
-  InboxProposalIdSchema,
-  WikiEntityIdSchema,
-} from "@mex/hub-contracts";
-import { RelayIdSchema } from "@mex/hub-contracts/ids";
 import type {
-  ActivityActor,
   ActivityItem,
   ActivitySubject,
 } from "../api/types";
@@ -29,113 +22,24 @@ import {
   CollapsibleTrigger,
 } from "../components/primitives/collapsible";
 import { Separator } from "../components/primitives/separator";
+import {
+  activityActorLabel,
+  activityProjectNoteKind,
+  activitySubjectKindLabel,
+  activitySubjectLabel,
+  activitySubjectRawValue,
+  activitySubjectRoute,
+  sameActivityActor,
+} from "../lib/activity-presentation";
 import styles from "../styles/activity.module.css";
 
 type CanonicalActivityItem = Extract<ActivityItem, { source: "activity" }>;
-
-const RELAY_OPERATIONS: Readonly<Record<string, string>> = {
-  "relay.publish": "relay.published",
-  "relay.acknowledge": "relay.acknowledged",
-  "relay.close": "relay.closed",
-};
-
-function actorLabel(actor: ActivityActor, technical = false): string {
-  if (actor.kind === "member") {
-    return technical
-      ? actor.displayName ? `${actor.displayName} (${actor.memberId})` : actor.memberId
-      : actor.displayName ?? "Recorded team member";
-  }
-  if (actor.kind === "git") {
-    return technical
-      ? [actor.name, actor.email].filter((value): value is string => value !== null).join(" · ")
-      : actor.name ?? actor.email ?? "Recorded Git identity";
-  }
-  return technical ? "Unknown actor" : "Actor not recorded";
-}
-
-function sameActor(left: ActivityActor, right: ActivityActor): boolean {
-  if (left.kind !== right.kind) return false;
-  if (left.kind === "unknown" || right.kind === "unknown") return true;
-  if (left.kind === "member" && right.kind === "member") {
-    return left.memberId === right.memberId && left.displayName === right.displayName;
-  }
-  if (left.kind === "git" && right.kind === "git") {
-    return left.name === right.name && left.email === right.email;
-  }
-  return false;
-}
-
-function rawSubjectValue(subject: ActivitySubject): string {
-  if (subject.kind === "entity") return subject.entity.id;
-  if (subject.kind === "symbol") return subject.symbolId;
-  if (subject.kind === "file") return subject.path;
-  return subject.hash;
-}
-
-function subjectLabel(subject: ActivitySubject): string {
-  if (subject.kind === "entity") {
-    return subject.entity.title ?? subject.entity.entityKind.replaceAll(/[._-]+/g, " ");
-  }
-  if (subject.kind === "symbol") return subject.symbolId;
-  if (subject.kind === "file") return subject.path;
-  return subject.hash.slice(0, 12);
-}
-
-function subjectKindLabel(subject: ActivitySubject): string {
-  if (subject.kind === "entity") {
-    const value = subject.entity.entityKind.replaceAll(/[._-]+/g, " ");
-    return value.replace(/^./, (character) => character.toUpperCase());
-  }
-  if (subject.kind === "symbol") return "Code symbol";
-  if (subject.kind === "file") return "File";
-  return "Commit reference";
-}
 
 function SubjectIcon({ subject }: { subject: ActivitySubject }) {
   if (subject.kind === "entity") return <Box aria-hidden="true" />;
   if (subject.kind === "symbol") return <Braces aria-hidden="true" />;
   if (subject.kind === "file") return <FileText aria-hidden="true" />;
   return <GitCommitHorizontal aria-hidden="true" />;
-}
-
-function verifiedRelayOperation(item: CanonicalActivityItem): string | null {
-  if (item.recordOrigin.kind !== "workflow") return null;
-  return RELAY_OPERATIONS[item.recordOrigin.operation] === item.action
-    ? item.recordOrigin.operation
-    : null;
-}
-
-function subjectRoute(subject: ActivitySubject, item: ActivityItem): string | null {
-  if (subject.kind === "symbol") {
-    const parsed = GraphSymbolIdSchema.safeParse(subject.symbolId);
-    return parsed.success
-      ? `/code/symbols/${encodeURIComponent(parsed.data)}?view=overview`
-      : null;
-  }
-  if (subject.kind !== "entity") return null;
-
-  const { entity } = subject;
-  if (entity.entityKind === "proposal") {
-    const parsed = InboxProposalIdSchema.safeParse(entity.id);
-    return parsed.success
-      ? `/inbox?view=review&proposal=${encodeURIComponent(parsed.data)}`
-      : null;
-  }
-  if (entity.entityKind === "relay") {
-    const parsed = RelayIdSchema.safeParse(entity.id);
-    if (!parsed.success || item.source !== "activity") return null;
-    const operation = verifiedRelayOperation(item);
-    const state = operation === "relay.close" ? "closed" : null;
-    return state === null
-      ? null
-      : `/relays?view=all&state=${state}&relay=${encodeURIComponent(parsed.data)}`;
-  }
-
-  const parsed = WikiEntityIdSchema.safeParse(entity.id);
-  if (!parsed.success) return null;
-  return entity.entityKind === "spec"
-    ? `/specs/${encodeURIComponent(parsed.data)}`
-    : `/knowledge/${encodeURIComponent(parsed.data)}`;
 }
 
 function formatTimestamp(timestamp: string): string {
@@ -175,14 +79,14 @@ function RelatedItems({ item }: { item: ActivityItem }) {
             </li>
           ) : null}
           {item.subjects.map((subject, index) => {
-            const href = subjectRoute(subject, item);
-            const label = subjectLabel(subject);
+            const href = activitySubjectRoute(subject, item);
+            const label = activitySubjectLabel(subject);
             const technical = subject.kind !== "entity" || subject.entity.title === null;
             return (
-              <li key={`${subject.kind}-${rawSubjectValue(subject)}-${index}`}>
+              <li key={`${subject.kind}-${activitySubjectRawValue(subject)}-${index}`}>
                 <span className={styles.relatedIcon}><SubjectIcon subject={subject} /></span>
                 <span className={styles.relatedCopy}>
-                  <small>{subjectKindLabel(subject)}</small>
+                  <small>{activitySubjectKindLabel(subject)}</small>
                   <strong className={technical ? styles.mono : undefined}>{label}</strong>
                 </span>
                 {href ? (
@@ -231,7 +135,7 @@ function RepositoryContext({ item }: { item: CanonicalActivityItem }) {
 }
 
 function IdentityContext({ item }: { item: CanonicalActivityItem }) {
-  const remapped = !sameActor(item.recordedActor, item.effectiveActor);
+  const remapped = !sameActivityActor(item.recordedActor, item.effectiveActor);
   if (!remapped && item.actorDiagnostics.length === 0) return null;
   return (
     <section className={styles.contextSection} aria-label="Identity note">
@@ -241,7 +145,7 @@ function IdentityContext({ item }: { item: CanonicalActivityItem }) {
       </div>
       {remapped ? (
         <p className={styles.identityNote}>
-          Recorded as <strong>{actorLabel(item.recordedActor)}</strong>. Currently matched to <strong>{actorLabel(item.effectiveActor)}</strong> using today’s Member aliases.
+          Recorded as <strong>{activityActorLabel(item.recordedActor)}</strong>. Currently matched to <strong>{activityActorLabel(item.effectiveActor)}</strong> using today’s Member aliases.
         </p>
       ) : null}
       {item.actorDiagnostics.length > 0 ? (
@@ -300,9 +204,9 @@ function RawSubjectReferences({ item }: { item: ActivityItem }) {
       {item.subjects.length > 0 ? (
         <ul>
           {item.subjects.map((subject, index) => (
-            <li key={`${subject.kind}-${rawSubjectValue(subject)}-${index}`}>
+            <li key={`${subject.kind}-${activitySubjectRawValue(subject)}-${index}`}>
               <span>{subject.kind === "entity" ? subject.entity.entityKind : subject.kind}</span>
-              <code>{rawSubjectValue(subject)}</code>
+              <code>{activitySubjectRawValue(subject)}</code>
             </li>
           ))}
         </ul>
@@ -312,11 +216,6 @@ function RawSubjectReferences({ item }: { item: ActivityItem }) {
       ) : null}
     </section>
   );
-}
-
-function projectNoteKind(value: string): string {
-  if (!["decision", "risk", "note", "todo"].includes(value)) return "Project note";
-  return value.replace(/^./, (character) => character.toUpperCase());
 }
 
 function TechnicalDetails({ item, headline }: { item: ActivityItem; headline: string }) {
@@ -346,8 +245,8 @@ function TechnicalDetails({ item, headline }: { item: ActivityItem; headline: st
               ? `Workflow: ${canonical.recordOrigin.operation}`
               : canonical.recordOrigin.kind === "custom" ? "Direct/custom Activity record" : "Unknown for this older event"} />
             <TechnicalValue label="Stored label" value={canonical.label ?? "Not recorded"} />
-            <TechnicalValue label="Recorded actor" value={actorLabel(canonical.recordedActor, true)} />
-            <TechnicalValue label="Effective actor now" value={actorLabel(canonical.effectiveActor, true)} />
+            <TechnicalValue label="Recorded actor" value={activityActorLabel(canonical.recordedActor, true)} />
+            <TechnicalValue label="Effective actor now" value={activityActorLabel(canonical.effectiveActor, true)} />
             <TechnicalValue
               label="Actor diagnostics"
               value={canonical.actorDiagnostics.length > 0
@@ -366,7 +265,7 @@ function TechnicalDetails({ item, headline }: { item: ActivityItem; headline: st
           <>
             <p className={styles.projectNoteBoundary}>This older project-log format does not record a verified actor or verified repository context.</p>
             <dl className={styles.technicalGrid}>
-              <TechnicalValue label="Project-note kind" value={projectNoteKind(item.action)} />
+              <TechnicalValue label="Project-note kind" value={activityProjectNoteKind(item.action)} />
               <TechnicalValue label="Record ID" value={item.id} mono copy />
               <TechnicalValue label="Source path" value={item.sourcePath} mono copy />
               <TechnicalValue label="Source line" value={String(projectNote?.sourceLine ?? "Unknown")} mono />
@@ -391,7 +290,7 @@ export function ActivityEntryContext({
   const canonical = item.source === "activity" ? item : null;
   const hasRelated = item.subjectCount > 0 || Boolean(canonical?.workstream?.title);
   const hasIdentity = canonical !== null
-    && (!sameActor(canonical.recordedActor, canonical.effectiveActor) || canonical.actorDiagnostics.length > 0);
+    && (!sameActivityActor(canonical.recordedActor, canonical.effectiveActor) || canonical.actorDiagnostics.length > 0);
   return (
     <div className={styles.activityContext}>
       {hasRelated ? <RelatedItems item={item} /> : null}

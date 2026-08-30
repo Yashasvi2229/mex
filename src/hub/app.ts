@@ -78,6 +78,7 @@ import {
   type ActivityRequest,
   type ActivityResponse,
   type HomeResponse,
+  type OverviewResponse,
   type HubCapabilities,
   type HubJobKind,
   type HubJobSnapshot,
@@ -126,6 +127,7 @@ import {
   type WikiRelationsRequest,
   type WikiRelationsResponse,
 } from "@mex/hub-contracts";
+import { OverviewResponseSchema } from "@mex/hub-contracts/overview";
 import { Hono, type Context } from "hono";
 import { getCookie, generateCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
@@ -181,6 +183,7 @@ export interface HubJobService {
 export interface HubReadServices {
   capabilities(): Promise<HubCapabilities> | HubCapabilities;
   home(): Promise<HomeResponse> | HomeResponse;
+  overview?(): Promise<OverviewResponse> | OverviewResponse;
   activity(request: ActivityRequest): Promise<ActivityResponse> | ActivityResponse;
   members?(
     request: TeamMemberListRequest,
@@ -360,6 +363,14 @@ export function createHubApp(options: CreateHubAppOptions): Hono<HubEnvironment>
     HomeResponseSchema,
     await options.services.home(),
   ));
+
+  app.get("/api/v1/overview", async () => {
+    const overview = options.services.overview;
+    if (overview === undefined) {
+      throw unavailable("Overview reads are not connected in this build.");
+    }
+    return resourceResponse(OverviewResponseSchema, await overview());
+  });
 
   app.get("/api/v1/members", async (context) => {
     const request = parseInput(

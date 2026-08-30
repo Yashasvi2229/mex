@@ -86,6 +86,17 @@ of `12640` bytes (`ceil(12038 * 1.05)`); its existing `93022`-byte JS ceiling
 and every other asset and runtime budget remain unchanged. A clean pinned
 enforcing run on the final exact head remains required before release.
 
+The flagship Overview workbench was measured from its final local production
+build after the bounded aggregate validator moved behind the lazy Home route.
+That isolation removed roughly 20 KiB of accidental validator weight from the
+initial shell. The final build measured `461404` initial JavaScript bytes and
+`126001` JavaScript / `16971` CSS bytes for Home. Only the initial/maximum
+JavaScript ceilings and Home JavaScript/CSS ceilings were recalibrated to the
+exact measured-plus-five-percent candidates: `484475`, `132302`, and `17820`
+bytes respectively. Initial CSS/fonts and every unrelated route/runtime budget
+remain unchanged. A clean pinned enforcing run on the final exact head remains
+required before release.
+
 ## Runner contract
 
 `npm run benchmark:release` builds the package and writes the bounded JSON

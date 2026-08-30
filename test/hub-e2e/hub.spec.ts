@@ -34,47 +34,19 @@ async function expectAccessible(page: Page): Promise<void> {
   expect(report.violations).toEqual([]);
 }
 
-async function normalizeEstablishedVisualGolden(
-  page: Page,
-  surface?: "home",
-): Promise<void> {
-  if (surface === "home") {
-    const summary = page.getByRole("region", { name: "Project summary" });
-    await summary.getByText("Canonical delivery threads", { exact: true }).evaluate((element) => {
-      element.textContent = "Not connected";
-    });
-    await summary.getByText("3", { exact: true }).evaluate((element) => {
-      element.textContent = "—";
-    });
-    await summary.locator('a[href="/workstreams"]').evaluate((element) => {
-      const card = element.firstElementChild;
-      if (!card) throw new Error("The Workstream visual golden card is unavailable.");
-      element.replaceWith(card);
-    });
-    await page.getByRole("region", { name: "Project sections" }).evaluate((element) => {
-      const rows = [...element.querySelectorAll<HTMLElement>('[role="listitem"]')];
-      for (const label of ["Workstreams", "Relays", "Inbox"]) {
-        const row = rows.find((candidate) => candidate.textContent?.includes(label));
-        const status = row?.querySelector<HTMLElement>('[data-tone]');
-        if (!status) throw new Error(`The ${label} visual golden status is unavailable.`);
-        status.dataset.tone = "warning";
-        status.textContent = "Unavailable";
-      }
-    });
-    await page.locator('a[aria-label^="Open member identity for"]').evaluate((element) => {
-      const template = document.querySelector<HTMLElement>('[data-slot="badge"][data-variant="outline"]');
-      if (!template) throw new Error("The visual golden badge template is unavailable.");
-      const badge = document.createElement("span");
-      badge.className = template.className.split(/\s+/).filter((name) => !name.startsWith("_")).join(" ");
-      badge.dataset.slot = "badge";
-      badge.dataset.variant = "outline";
-      for (const child of [...element.childNodes]) badge.append(child);
-      badge.querySelector('[data-icon="inline-end"]')?.remove();
-      const text = [...badge.childNodes].find((node) => node.nodeType === Node.TEXT_NODE);
-      if (text) text.textContent = " Daksh";
-      element.replaceWith(badge);
-    });
-  }
+async function expectNoHorizontalOverflow(page: Page, width: number): Promise<void> {
+  const geometry = await page.evaluate(() => ({
+    viewportWidth: window.innerWidth,
+    documentClientWidth: document.documentElement.clientWidth,
+    documentScrollWidth: document.documentElement.scrollWidth,
+    bodyScrollWidth: document.body.scrollWidth,
+  }));
+  expect(geometry).toEqual({
+    viewportWidth: width,
+    documentClientWidth: width,
+    documentScrollWidth: width,
+    bodyScrollWidth: width,
+  });
 }
 
 async function expectLoadedActivity(page: Page, count: number): Promise<void> {
@@ -85,14 +57,198 @@ async function expectLoadedActivity(page: Page, count: number): Promise<void> {
 test.describe("populated development fixture", () => {
   test("renders the deterministic Home workbench", async ({ page }) => {
     const errors = watchBrowserErrors(page);
-    await page.goto("/?fixture=populated");
-    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
-    await expect(page.getByLabel("Repository context").getByText("feat/project-hub-foundation", { exact: true })).toBeVisible();
-    await expect(page.getByText("The code graph is behind this branch", { exact: true })).toBeVisible();
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/?fixture=populated&overviewFixture=established");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Your project context needs attention", exact: true })).toBeVisible();
+
+    const focus = page.getByRole("region", { name: "Your focus" });
+    await expect(focus.getByRole("heading", { name: "Review 3 proposed Spec changes" })).toBeVisible();
+    await expect(focus.getByRole("button", { name: "Open Inbox" })).toHaveAttribute(
+      "href",
+      "/inbox?view=review&proposal=proposal_01000000000000000000001720",
+    );
+    await expect(focus.getByText("Take the handoff waiting for you", { exact: true })).toBeVisible();
+    await expect(focus.getByText("Continue the handoff you took", { exact: true })).toBeVisible();
+    await expect(focus.getByText("Review local context health", { exact: true })).toBeVisible();
+
+    const activity = page.getByRole("region", { name: "Latest team memory" });
+    await expect(activity.getByText("Proposed a Spec change", { exact: true })).toBeVisible();
+    await expect(activity.getByText("Took a handoff", { exact: true })).toBeVisible();
+    await expect(activity.getByText("Actor not recorded", { exact: true })).toBeVisible();
+    await expect(activity.getByRole("button", { name: "View Activity" })).toHaveAttribute("href", "/activity");
+
+    const readiness = page.getByRole("region", { name: "Context readiness" });
+    await expect(readiness.getByText("Needs attention", { exact: true })).toBeVisible();
+    await expect(readiness.getByRole("img", { name: /Repository now .* indexed snapshot .* Code graph stale/ })).toBeVisible();
+    await expect(readiness.getByText("The repository moved beyond this index", { exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Active operation" })).toBeVisible();
     await expectAccessible(page);
     expect(errors).toEqual([]);
-    await normalizeEstablishedVisualGolden(page, "home");
     await expect(page).toHaveScreenshot("hub-home.png", { fullPage: true });
+  });
+
+  test("keeps Overview focus priorities and exact destinations honest", async ({ page }) => {
+    await page.goto("/?fixture=populated&overviewFixture=pending-review");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    await expect(page.getByRole("region", { name: "Your focus" }).getByRole("button", { name: "Open Inbox" })).toHaveAttribute(
+      "href",
+      "/inbox?view=review&proposal=proposal_01000000000000000000001720",
+    );
+
+    await page.goto("/?fixture=populated&overviewFixture=relay-ready");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    await expect(page.getByRole("region", { name: "Your focus" }).getByRole("button", { name: "Open handoff" })).toHaveAttribute(
+      "href",
+      `/relays?view=mine&state=open&relay=${readyRelayId}`,
+    );
+
+    await page.goto("/?fixture=populated&overviewFixture=relay-in-hand");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    await expect(page.getByRole("region", { name: "Your focus" }).getByRole("button", { name: "Continue handoff" })).toHaveAttribute(
+      "href",
+      `/relays?view=mine&state=open&relay=${claimedRelayId}`,
+    );
+
+    await page.goto("/?fixture=populated&overviewFixture=identity-unresolved");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    const identityFocus = page.getByRole("region", { name: "Your focus" });
+    await expect(identityFocus.getByRole("heading", { name: "Resolve who you’re working as" })).toBeVisible();
+    await expect(identityFocus.getByRole("button", { name: "Review identity" })).toHaveAttribute("href", "/members");
+    await expect(identityFocus.getByText("Relay focus unavailable", { exact: true })).toBeVisible();
+
+    await page.goto("/?fixture=populated&overviewFixture=failure");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    const failureFocus = page.getByRole("region", { name: "Your focus" });
+    await expect(failureFocus.getByRole("heading", { name: "Review the failed Graph refresh" })).toBeVisible();
+    await expect(failureFocus.getByRole("button", { name: "View operation" })).toHaveAttribute(
+      "href",
+      "/jobs?job=job_01K39R3X4A5BC6DE7FGHJKMNPQ",
+    );
+    await expect(page.getByRole("region", { name: "Operation needs attention" })).toBeVisible();
+  });
+
+  test("distinguishes caught-up, first-index, stale, and degraded context", async ({ page }) => {
+    await page.goto("/?fixture=populated&overviewFixture=caught-up");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Your project context is ready" })).toBeVisible();
+    const caughtUp = page.getByRole("region", { name: "Your focus" });
+    await expect(caughtUp.getByText("You’re caught up", { exact: true })).toBeVisible();
+    await expect(caughtUp.getByRole("button", { name: "Browse project memory" })).toHaveAttribute("href", "/search");
+    await expect(page.getByRole("region", { name: "Active operation" })).toHaveCount(0);
+
+    await page.goto("/?fixture=populated&overviewFixture=indexes-missing");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    await expect(page.getByRole("heading", { name: "MEX is preparing project context" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Your focus" }).getByRole("heading", { name: "Prepare local project context" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Context readiness" }).getByText("Preparing", { exact: true })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Latest team memory" }).getByText("No team memory yet", { exact: true })).toBeVisible();
+
+    await page.goto("/?fixture=populated&overviewFixture=indexes-stale");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    await expect(page.getByText("The repository moved beyond this index", { exact: true })).toBeVisible();
+    await expect(page.getByText("7", { exact: true })).toBeVisible();
+
+    await page.goto("/?fixture=populated&overviewFixture=indexes-degraded");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    const degraded = page.getByRole("region", { name: "Context readiness" });
+    await expect(degraded.getByText("178 complete · 4 partial · 1 failed", { exact: true })).toBeVisible();
+    await expect(degraded.getByRole("img", { name: "178 parsed successfully, 4 partial, 1 failed", exact: true })).toBeVisible();
+  });
+
+  test("renders determinate and indeterminate operations without inventing progress", async ({ page }) => {
+    await page.goto("/?fixture=populated&overviewFixture=job-determinate");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    const determinate = page.getByRole("region", { name: "Active operation" });
+    const determinateProgress = determinate.getByRole("progressbar");
+    await expect(determinateProgress).toHaveAttribute("aria-valuenow", "68");
+    await expect(determinate.getByText("124 / 183", { exact: true })).toBeVisible();
+    await expect(determinate.getByRole("button", { name: "View operation" })).toHaveAttribute(
+      "href",
+      `/jobs?job=${runningJobId}`,
+    );
+
+    await page.goto("/?fixture=populated&overviewFixture=job-indeterminate");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    const indeterminate = page.getByRole("region", { name: "Active operation" });
+    const indeterminateProgress = indeterminate.getByRole("progressbar");
+    await expect(indeterminateProgress).not.toHaveAttribute("aria-valuenow");
+    await expect(indeterminate.getByText("37 completed", { exact: true })).toBeVisible();
+  });
+
+  test("keeps partial Overview panels independently useful and retryable", async ({ page }) => {
+    await page.goto("/?fixture=populated&overviewFixture=partial");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    const focus = page.getByRole("region", { name: "Your focus" });
+    await expect(focus.getByRole("heading", { name: "Review 2 proposed Spec changes" })).toBeVisible();
+    await expect(focus.getByText("Relay focus unavailable", { exact: true })).toBeVisible();
+    await expect(focus.getByRole("button", { name: "Try loading Relay focus again" })).toBeVisible();
+
+    const activity = page.getByRole("region", { name: "Latest team memory" });
+    await expect(activity.getByText("Latest team memory unavailable", { exact: true })).toBeVisible();
+    await expect(activity.getByRole("button", { name: "Try loading Latest team memory again" })).toBeVisible();
+
+    const context = page.getByRole("region", { name: "Context readiness" });
+    await expect(context.getByText("Code graph context unavailable", { exact: true })).toBeVisible();
+    await expect(context.getByRole("definition").filter({ hasText: /^Fresh$/ })).toBeVisible();
+    await expect(context.getByRole("button", { name: "Try loading Code graph context again" })).toBeVisible();
+    await expectAccessible(page);
+  });
+
+  test("refreshes explicitly without polling, mutation requests, or outbound traffic", async ({ page }) => {
+    const observed: Array<{ method: string; url: string }> = [];
+    page.on("request", (request) => observed.push({ method: request.method(), url: request.url() }));
+    await page.goto("/?fixture=populated&overviewFixture=established");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    observed.length = 0;
+
+    await page.waitForTimeout(5_500);
+    expect(observed.filter(({ url }) => new URL(url).pathname === "/api/v1/overview")).toHaveLength(0);
+    expect(observed.filter(({ method }) => !["GET", "HEAD", "OPTIONS"].includes(method))).toEqual([]);
+    expect(observed.filter(({ url }) => new URL(url).hostname !== "127.0.0.1")).toEqual([]);
+
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Overview refreshed." })).toBeVisible();
+    expect(observed.filter(({ method }) => !["GET", "HEAD", "OPTIONS"].includes(method))).toEqual([]);
+    expect(observed.filter(({ url }) => new URL(url).hostname !== "127.0.0.1")).toEqual([]);
+  });
+
+  for (const width of [1440, 1024] as const) {
+    test(`keeps the Overview atlas accessible and overflow-free at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: width === 1440 ? 900 : 768 });
+      await page.goto("/?fixture=populated&overviewFixture=established");
+      await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+      const focus = await page.getByRole("region", { name: "Your focus" }).boundingBox();
+      const activity = await page.getByRole("region", { name: "Latest team memory" }).boundingBox();
+      expect(focus).not.toBeNull();
+      expect(activity).not.toBeNull();
+      if (width === 1440) {
+        expect(focus!.x).toBeLessThan(activity!.x);
+        expect(Math.abs(focus!.y - activity!.y)).toBeLessThanOrEqual(1);
+      } else {
+        expect(focus!.y).toBeLessThan(activity!.y);
+      }
+      await expectNoHorizontalOverflow(page, width);
+      await expectAccessible(page);
+    });
+  }
+
+  test("suppresses Overview operation and queue motion when reduced motion is requested", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/?fixture=populated&overviewFixture=job-indeterminate");
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
+    const operationIcon = page.getByRole("region", { name: "Active operation" }).locator("svg.lucide-loader-circle");
+    const progressIndicator = page.getByRole("region", { name: "Active operation" }).locator('[data-slot="progress-indicator"]');
+    const queueLink = page.getByRole("region", { name: "Latest team memory" }).getByRole("button", { name: "View Activity" });
+    const motion = await Promise.all([
+      operationIcon.evaluate((element) => getComputedStyle(element).animationName),
+      progressIndicator.evaluate((element) => getComputedStyle(element).animationName),
+      queueLink.evaluate((element) => getComputedStyle(element).transitionDuration),
+    ]);
+    expect(motion[0]).toBe("none");
+    expect(motion[1]).toBe("none");
+    expect(Number.parseFloat(motion[2])).toBeLessThanOrEqual(0.00001);
   });
 
   test("keeps real Wiki, symbol, and source search groups separate", async ({ page }) => {
@@ -108,7 +264,6 @@ test.describe("populated development fixture", () => {
     await expect(page.getByText("This source failed independently.")).toHaveCount(0);
     await expectAccessible(page);
     expect(errors).toEqual([]);
-    await normalizeEstablishedVisualGolden(page);
     await expect(page).toHaveScreenshot("hub-search.png", { fullPage: true });
   });
 
@@ -175,7 +330,6 @@ test.describe("populated development fixture", () => {
     await expectAccessible(page);
     expect(external).toEqual([]);
     expect(errors).toEqual([]);
-    await normalizeEstablishedVisualGolden(page);
     await expect(page).toHaveScreenshot("hub-knowledge.png", { fullPage: true });
 
     const relations = page.getByRole("tab", { name: "Relations" });
@@ -260,7 +414,6 @@ test.describe("populated development fixture", () => {
     await expectAccessible(page);
     expect(external).toEqual([]);
     expect(errors).toEqual([]);
-    await normalizeEstablishedVisualGolden(page);
     await expect(page).toHaveScreenshot("hub-code.png", { fullPage: true });
   });
 
@@ -372,7 +525,6 @@ test.describe("populated development fixture", () => {
     await expect(page.getByLabel("Services").getByText("New operations wait for the active job.", { exact: true })).toBeVisible();
     await expectAccessible(page);
     expect(errors).toEqual([]);
-    await normalizeEstablishedVisualGolden(page);
     await expect(page).toHaveScreenshot("hub-health.png", { fullPage: true });
   });
 
@@ -388,7 +540,6 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("button", { name: "Rebuild Wiki" })).toBeDisabled();
     await expectAccessible(page);
     expect(errors).toEqual([]);
-    await normalizeEstablishedVisualGolden(page);
     await expect(page).toHaveScreenshot("hub-jobs.png", { fullPage: true });
   });
 
@@ -655,7 +806,7 @@ test.describe("populated development fixture", () => {
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/?fixture=populated");
-    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
     expect(requests.some((request) => request.includes("/src/pages/MembersPage"))).toBe(false);
     expect(requests.some((request) => request.includes("/src/pages/MembersMutationDialogs"))).toBe(false);
 
@@ -1548,7 +1699,7 @@ test.describe("populated development fixture", () => {
     await expect(publishDialog.getByText(/records branch, HEAD, clean or dirty state, and observation time/i)).toBeVisible();
     await expect(publishDialog.getByText(/does not create a commit or capture source-file or local-change contents/i)).toBeVisible();
     await expect(publishDialog.getByText(/Commit and push are still required/i)).toBeVisible();
-    await expect(publishDialog.getByText(/feat\/project-hub-foundation, HEAD 6484dd00, local changes present, observed/i)).toBeVisible();
+    await expect(publishDialog.getByText(/codex\/hub-ux, HEAD aeaf0ab0, local changes present, observed/i)).toBeVisible();
     await expect(publishDialog.getByRole("button", { name: "Technical details" })).toHaveAttribute("aria-expanded", "false");
     await publishDialog.getByRole("button", { name: "Publish handoff" }).click();
     await expect(page.getByText(
@@ -1638,7 +1789,7 @@ test.describe("populated development fixture", () => {
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/?fixture=populated");
-    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
     expect(requests.some((request) => request.includes("/src/pages/RelayPage.tsx"))).toBe(false);
 
     await page.getByRole("link", { name: /^Relays(?: |$)/ }).click();
@@ -1675,7 +1826,7 @@ test.describe("populated development fixture", () => {
   test("renders the exact sidebar IA and keeps disclosures independent and reload-local", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/?fixture=populated");
-    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
 
     const sidebar = page.locator('aside[aria-label="Project Hub navigation"]');
     const primary = page.getByRole("navigation", { name: "Primary" });
@@ -1737,7 +1888,7 @@ test.describe("populated development fixture", () => {
     await expect(systemDisclosure).toHaveAttribute("aria-expanded", "true");
 
     await page.reload();
-    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
     await expect(projectMemoryDisclosure).toHaveAttribute("aria-expanded", "true");
     await expect(teamworkDisclosure).toHaveAttribute("aria-expanded", "true");
     await expect(comingSoonDisclosure).toHaveAttribute("aria-expanded", "false");
@@ -1844,7 +1995,7 @@ test.describe("populated development fixture", () => {
 
   test("exposes neutral queue counts, team identity, and exact locality guidance", async ({ page }) => {
     await page.goto("/?fixture=populated");
-    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
     const sidebar = page.locator('aside[aria-label="Project Hub navigation"]');
     await expect(sidebar.getByLabel("3 proposals awaiting team review.")).toHaveText("3");
     await expect(sidebar.getByLabel("2 open Relays for you.")).toHaveText("2");
@@ -1865,7 +2016,7 @@ test.describe("populated development fixture", () => {
 
   test("keeps both fully expanded and fully collapsed sidebar states accessible", async ({ page }) => {
     await page.goto("/?fixture=populated");
-    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
     const disclosures = {
       projectMemory: page.getByRole("button", { name: "Project Memory" }),
       teamwork: page.getByRole("button", { name: "Teamwork" }),
@@ -1945,7 +2096,7 @@ test.describe("populated development fixture", () => {
     }
 
     await page.getByRole("link", { name: "Overview", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
     await expect(page.locator("#main-content")).toBeFocused();
     await page.goto("/outside-the-workbench?fixture=populated");
     await expect(page.getByText("404", { exact: true })).toBeVisible();
@@ -1981,7 +2132,7 @@ test.describe("populated development fixture", () => {
     test(`fits the complete desktop workbench at ${viewport.width}x${viewport.height}`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto("/?fixture=populated");
-      await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+      await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
 
       const sidebarLocator = page.locator('aside[aria-label="Project Hub navigation"]');
       const navViewport = sidebarLocator.locator('[data-sidebar-scroll="true"]');
@@ -2046,7 +2197,7 @@ test.describe("populated development fixture", () => {
       if (host !== "127.0.0.1") external.push(request.url());
     });
     await page.goto("/?fixture=populated");
-    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
     await page.goto("/activity?fixture=populated");
     await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
     await page.goto("/members?fixture=populated");
@@ -2130,7 +2281,7 @@ test.describe("built production Hub", () => {
       }
     });
     const response = await page.goto(bootstrapUrl);
-    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
     await expect.poll(() => page.url()).not.toContain("#token=");
     await expect(page.getByRole("link", { name: "Knowledge", exact: true })).toBeVisible();
     await expect(page.getByRole("link", { name: "Code", exact: true })).toBeVisible();

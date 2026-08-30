@@ -116,7 +116,7 @@ describe("Members identity and team directory", () => {
     expect(within(identity).queryByText(/fallback/i)).not.toBeInTheDocument();
     await waitFor(() => expect(routeLocation()).toContain(`member=${ADA_ID}`));
     const detail = await screen.findByRole("region", { name: "Selected Member detail" });
-    expect(within(detail).getByText("You", { selector: "[data-slot='badge']" })).toBeVisible();
+    expect(await within(detail).findByText("You", { selector: "[data-slot='badge']" })).toBeVisible();
     expect(within(detail).queryByText(/not selected/i)).not.toBeInTheDocument();
   });
 
