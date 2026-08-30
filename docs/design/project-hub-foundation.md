@@ -58,12 +58,13 @@ The browser receives direct resource bodies. Failures use RFC-style
 details are projected through a safe allowlist so local paths, stderr, and stack
 traces cannot cross the HTTP boundary.
 
-The Activity read model combines Lane C's canonical event artifacts with the
-legacy decision JSONL without rewriting either source. Its cursor is bound to a
-deterministic timeline revision. Pagination and source safety truncation remain
-separate, canonical metadata and legacy cwd/trace/origin fields are omitted,
-and recorded actors are returned alongside—not replaced by—their current alias
-resolution. Home reports only the exact trusted canonical-event count.
+The Activity read model combines Lane C's canonical event artifacts with
+Project notes stored in `decisions.jsonl` without rewriting either source. Its
+cursor is bound to a deterministic timeline revision.
+Pagination and source safety truncation remain separate, canonical metadata
+and legacy cwd/trace/origin fields are omitted, and recorded actors are returned
+alongside—not replaced by—their current alias resolution. Home reports only the
+exact trusted canonical-event count.
 
 ## Job lifecycle
 
@@ -91,10 +92,13 @@ transcripts, diffs, arbitrary commands, or secrets.
 The shell represents every planned route, with complete Home, Search, Health,
 Jobs, Members, and Activity states. Members exposes bounded canonical reads,
 effective actor resolution, local selection, and exact preview/apply for the
-Checkpoint C mutations. Activity is a date-grouped canonical and legacy feed
-with bounded provenance, revision-safe pagination, explicit partial-read
-diagnostics, and an append-only reviewed record flow. Knowledge and Code remain
-read-only index workspaces. Checkpoint D supersedes the original Workstreams and
+Checkpoint C mutations. Activity is a date-grouped, read-only feed of MEX
+records and Project notes with bounded provenance, revision-safe
+pagination, and explicit partial-read diagnostics. Schema-v2 MEX records expose
+their service-owned workflow/custom origin and optional human label; schema-v1
+records remain unchanged and appear with unknown origin. Direct Activity
+recording remains a structured CLI/private-API workflow rather than a manual
+Hub composer. Knowledge and Code remain read-only index workspaces. Checkpoint D supersedes the original Workstreams and
 Specs placeholders with a canonical Workstream preview/apply workbench and a
 fresh-index, read-only Spec hierarchy. Playbooks, Inbox, and Relays remain
 capability-aware foundations rather than fake CRUD.

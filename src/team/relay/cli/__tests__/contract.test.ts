@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -9,6 +9,8 @@ import type { RelayMutationCommandName } from "../request-file.js";
 import { readRelayCommandFile, readRelayPreviewFile } from "../request-file.js";
 
 const MEMBER_ID = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const WORKSTREAM_ID = "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const REVISION = "a".repeat(64);
 const roots: string[] = [];
 
 afterEach(() => {
@@ -101,11 +103,52 @@ describe("Relay contract resolver CLI", () => {
 
     const root = mkdtempSync(join(tmpdir(), "mex-relay-contract-"));
     roots.push(root);
-    for (const example of envelope.data.requestFile.examples) {
+    expect(envelope.data.requestFile.examples[0]).toMatchObject({
+      command: "relay.draft.save",
+      request: {
+        action: {
+          kind: "relay.draft.save",
+          draft: {
+            recipients: [{ kind: "member", memberId: MEMBER_ID }],
+            summary: expect.any(String),
+          },
+        },
+      },
+    });
+    expect(Object.keys((envelope.data.requestFile.examples[0]!.request as any).action.draft).sort())
+      .toEqual(["recipients", "summary"]);
+    const exampleEvidence = envelope.data.requestFile.examples.flatMap((example) => {
+      const draft = (example.request as any)?.action?.draft;
+      return Array.isArray(draft?.evidence) ? draft.evidence : [];
+    });
+    expect(exampleEvidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "commit" }),
+      expect.objectContaining({ kind: "external" }),
+    ]));
+
+    for (const [index, example] of envelope.data.requestFile.examples.entries()) {
       expect(validateRequest(example.request), JSON.stringify(validateRequest.errors)).toBe(true);
-      const path = join(root, `${example.command}.json`);
+      const path = join(root, `${index}-${example.command}.json`);
       writeFileSync(path, JSON.stringify(example.request));
-      expect(readRelayCommandFile(path, example.command)).toEqual(example.request);
+      const normalized = readRelayCommandFile(path, example.command);
+      if (normalized.action.kind === "relay.draft.save") {
+        expect(normalized.action.draft).toMatchObject({
+          recipients: (example.request as any).action.draft.recipients,
+          summary: (example.request as any).action.draft.summary,
+          completed: expect.any(Array),
+          inProgress: expect.any(Array),
+          decisions: expect.any(Array),
+          blockers: expect.any(Array),
+          unresolvedQuestions: expect.any(Array),
+          changedFiles: expect.any(Array),
+          code: expect.any(Array),
+          evidence: expect.any(Array),
+          nextActions: expect.any(Array),
+        });
+        expect(normalized.action.draft).not.toHaveProperty("workstream");
+      } else {
+        expect(normalized).toEqual(example.request);
+      }
     }
 
     const publish = structuredClone(
@@ -120,6 +163,14 @@ describe("Relay contract resolver CLI", () => {
     const localExpectation = publish.expectedRevisions.find(
       (expectation: any) => expectation.target.kind === "local",
     );
+    expect(publish.expectedRevisions).toHaveLength(2);
+    expect(publish.expectedRevisions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        target: expect.objectContaining({
+          path: expect.stringMatching(/^\.mex\/workstreams\//u),
+        }),
+      }),
+    ]));
     const invalidPublishTopologies = [
       [localExpectation],
       [
@@ -159,6 +210,16 @@ describe("Relay contract resolver CLI", () => {
       expect(() => readRelayCommandFile(publishPath, "relay.publish")).toThrow();
     }
 
+    const legacyDependencyPublish = structuredClone(publish);
+    legacyDependencyPublish.expectedRevisions.push({
+      target: { kind: "artifact", path: `.mex/workstreams/${WORKSTREAM_ID}.md` },
+      revision: REVISION,
+    });
+    expect(validateRequest(legacyDependencyPublish)).toBe(false);
+    writeFileSync(publishPath, JSON.stringify(legacyDependencyPublish));
+    expect(() => readRelayCommandFile(publishPath, "relay.publish"))
+      .toThrow(/preview again/i);
+
     const save = structuredClone(envelope.data.requestFile.examples[0]!.request) as any;
     save.action.draft.recipients = Array.from({ length: 33 }, (_, index) => ({
       kind: "member",
@@ -174,14 +235,124 @@ describe("Relay contract resolver CLI", () => {
     save.action.draft.summary = "Relay\u0085Agent";
     expect(validateRequest(save)).toBe(false);
 
-    const canonicalDraft = structuredClone(
-      envelope.data.requestFile.examples[0]!.request,
-    ) as any;
+    const canonicalDraft = structuredClone(envelope.data.requestFile.examples[0]!.request) as any;
     expect(validateRequest(canonicalDraft), JSON.stringify(validateRequest.errors)).toBe(true);
     const canonicalDraftPath = join(root, "canonical-draft.json");
     writeFileSync(canonicalDraftPath, JSON.stringify(canonicalDraft));
     expect(readRelayCommandFile(canonicalDraftPath, "relay.draft.save"))
-      .toEqual(canonicalDraft);
+      .toMatchObject({
+        action: {
+          draft: {
+            recipients: canonicalDraft.action.draft.recipients,
+            summary: canonicalDraft.action.draft.summary,
+            completed: [],
+            inProgress: [],
+            decisions: [],
+            blockers: [],
+            unresolvedQuestions: [],
+            changedFiles: [],
+            code: [],
+            evidence: [],
+            nextActions: [],
+          },
+        },
+      });
+
+    const legacyDraft = {
+      operationId: "relay-legacy-draft-translation-001",
+      action: {
+        kind: "relay.draft.save",
+        draft: legacyDraftInput([{ kind: "manual", note: "Existing evidence" }]),
+      },
+      expectedRevisions: [],
+    };
+    expect(validateRequest(legacyDraft), JSON.stringify(validateRequest.errors)).toBe(true);
+    const legacyDraftPath = join(root, "legacy-draft.json");
+    const legacyBytes = JSON.stringify(legacyDraft);
+    writeFileSync(legacyDraftPath, legacyBytes);
+    expect(readRelayCommandFile(legacyDraftPath, "relay.draft.save")).toMatchObject({
+      action: {
+        draft: {
+          evidence: [
+            { kind: "entity", entity: { id: WORKSTREAM_ID, kind: "workstream", title: "Legacy lane" } },
+            { kind: "manual", note: "Existing evidence" },
+          ],
+        },
+      },
+    });
+    expect((readRelayCommandFile(legacyDraftPath, "relay.draft.save") as any).action.draft)
+      .not.toHaveProperty("workstream");
+    expect(readFileSync(legacyDraftPath, "utf8")).toBe(legacyBytes);
+
+    const fullLegacyEvidence = Array.from({ length: 64 }, (_, index) => ({
+      kind: "manual",
+      note: `Legacy evidence ${String(index).padStart(2, "0")}`,
+    }));
+    const fullLegacyDraft = structuredClone(legacyDraft) as any;
+    fullLegacyDraft.operationId = "relay-legacy-draft-full-evidence-001";
+    fullLegacyDraft.action.draft.evidence = fullLegacyEvidence;
+    expect(validateRequest(fullLegacyDraft), JSON.stringify(validateRequest.errors)).toBe(true);
+    writeFileSync(legacyDraftPath, JSON.stringify(fullLegacyDraft));
+    const translatedFull = readRelayCommandFile(legacyDraftPath, "relay.draft.save") as any;
+    expect(translatedFull.action.draft.evidence).toHaveLength(65);
+    expect(translatedFull.action.draft.evidence[0]).toEqual({
+      kind: "entity",
+      entity: { id: WORKSTREAM_ID, kind: "workstream", title: "Legacy lane" },
+    });
+    expect(translatedFull.action.draft.evidence.slice(1)).toEqual(fullLegacyEvidence);
+
+    const migratedCanonicalUpdate = structuredClone(fullLegacyDraft) as any;
+    migratedCanonicalUpdate.operationId = "relay-migrated-draft-followup-001";
+    migratedCanonicalUpdate.action.draftId = "relay-legacy-draft-existing";
+    migratedCanonicalUpdate.action.draft = translatedFull.action.draft;
+    migratedCanonicalUpdate.expectedRevisions = [{
+      target: {
+        kind: "local",
+        namespace: "relay-draft",
+        id: migratedCanonicalUpdate.action.draftId,
+      },
+      revision: REVISION,
+    }];
+    writeFileSync(canonicalDraftPath, JSON.stringify(migratedCanonicalUpdate));
+    expect((readRelayCommandFile(canonicalDraftPath, "relay.draft.save") as any)
+      .action.draft.evidence).toHaveLength(65);
+
+    const duplicateLegacyDraft = structuredClone(fullLegacyDraft) as any;
+    duplicateLegacyDraft.operationId = "relay-legacy-draft-deduplicate-001";
+    duplicateLegacyDraft.action.draft.evidence = [
+      { kind: "entity", entity: { id: WORKSTREAM_ID, kind: "workstream", title: "Legacy lane" } },
+      ...fullLegacyEvidence.slice(0, 63),
+    ];
+    writeFileSync(legacyDraftPath, JSON.stringify(duplicateLegacyDraft));
+    const translatedDuplicate = readRelayCommandFile(legacyDraftPath, "relay.draft.save") as any;
+    expect(translatedDuplicate.action.draft.evidence).toHaveLength(64);
+    expect(translatedDuplicate.action.draft.evidence.filter((item: any) => (
+      item.kind === "entity" && item.entity?.id === WORKSTREAM_ID
+    ))).toHaveLength(1);
+
+    const callerAuthoredOverLimit = structuredClone(canonicalDraft) as any;
+    callerAuthoredOverLimit.operationId = "relay-new-draft-over-limit-001";
+    callerAuthoredOverLimit.action.draft.evidence = [
+      { kind: "entity", entity: { id: WORKSTREAM_ID, kind: "workstream", title: "Legacy lane" } },
+      ...fullLegacyEvidence,
+    ];
+    expect(validateRequest(callerAuthoredOverLimit), JSON.stringify(validateRequest.errors)).toBe(true);
+    writeFileSync(canonicalDraftPath, JSON.stringify(callerAuthoredOverLimit));
+    expect(() => readRelayCommandFile(canonicalDraftPath, "relay.draft.save"))
+      .toThrow(/(?:64|migration|legacy)/i);
+
+    const callerPublicationState = structuredClone(canonicalDraft) as any;
+    callerPublicationState.operationId = "relay-caller-publication-state-001";
+    callerPublicationState.action.draft.publishedRepoState = {
+      branch: "main",
+      head: "b".repeat(40),
+      dirty: false,
+      observedAt: "2026-08-29T00:00:00.000Z",
+    };
+    expect(validateRequest(callerPublicationState)).toBe(false);
+    writeFileSync(canonicalDraftPath, JSON.stringify(callerPublicationState));
+    expect(() => readRelayCommandFile(canonicalDraftPath, "relay.draft.save"))
+      .toThrow();
 
     const invalidDrafts = [
       ...[
@@ -189,7 +360,7 @@ describe("Relay contract resolver CLI", () => {
         MEMBER_ID,
         "ws_81ARZ3NDEKTSV4RRFFQ69G5FAV",
       ].map((id) => {
-        const candidate = structuredClone(canonicalDraft);
+        const candidate = structuredClone(legacyDraft) as any;
         candidate.action.draft.workstream.id = id;
         return candidate;
       }),
@@ -270,8 +441,10 @@ describe("Relay contract resolver CLI", () => {
     const path = join(root, "preview.json");
 
     const saveRequest = contract.requestFile.examples[0]!.request as any;
-    const publishRequest = contract.requestFile.examples[1]!.request as any;
-    const acknowledgeRequest = contract.requestFile.examples[2]!.request as any;
+    const publishRequest = contract.requestFile.examples.find((example: any) =>
+      example.request?.action?.kind === "relay.publish")!.request as any;
+    const acknowledgeRequest = contract.requestFile.examples.find((example: any) =>
+      example.request?.action?.kind === "relay.acknowledge")!.request as any;
     const draftId = publishRequest.action.draftId as string;
     const relayId = acknowledgeRequest.action.relayId as string;
     const revision = acknowledgeRequest.expectedRevisions[0].revision as string;
@@ -413,6 +586,51 @@ describe("Relay contract resolver CLI", () => {
     writeFileSync(path, JSON.stringify(wrongLifecycleTarget));
     expect(() => readRelayPreviewFile(path, "relay.close"))
       .toThrow();
+
+    const legacyPublishRequest = structuredClone(publishRequest) as any;
+    legacyPublishRequest.expectedRevisions.push({
+      target: { kind: "artifact", path: `.mex/workstreams/${WORKSTREAM_ID}.md` },
+      revision: REVISION,
+    });
+    const legacyPublishPreview = previewEnvelope(
+      legacyPublishRequest,
+      "relay.publish",
+      [
+        { purpose: "activity", id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+        { purpose: "relay", id: relayId },
+      ],
+    );
+    expect(validate(legacyPublishPreview), JSON.stringify(validate.errors)).toBe(true);
+    writeFileSync(path, JSON.stringify(legacyPublishPreview));
+    expect(readRelayPreviewFile(path, "relay.publish").request)
+      .toEqual(legacyPublishRequest);
+
+    const legacyDraftRequest = {
+      operationId: "relay-legacy-preview-full-evidence-001",
+      action: {
+        kind: "relay.draft.save",
+        draft: legacyDraftInput(Array.from({ length: 64 }, (_, index) => ({
+          kind: "manual",
+          note: `Legacy evidence ${String(index).padStart(2, "0")}`,
+        }))),
+      },
+      expectedRevisions: [],
+    };
+    const legacyRequestPath = join(root, "legacy-full-request.json");
+    writeFileSync(legacyRequestPath, JSON.stringify(legacyDraftRequest));
+    const normalizedLegacyRequest = readRelayCommandFile(
+      legacyRequestPath,
+      "relay.draft.save",
+    );
+    const translatedPreview = previewEnvelope(
+      normalizedLegacyRequest,
+      "relay.draft.save",
+      [{ purpose: "relay-draft", id: "relay-legacy-preview-created" }],
+    );
+    expect(validate(translatedPreview), JSON.stringify(validate.errors)).toBe(true);
+    writeFileSync(path, JSON.stringify(translatedPreview));
+    expect((readRelayPreviewFile(path, "relay.draft.save").request as any).action.draft.evidence)
+      .toHaveLength(65);
   });
 
   it("does not require JSON mode or repository state", () => {
@@ -428,6 +646,23 @@ describe("Relay contract resolver CLI", () => {
     ]);
   });
 });
+
+function legacyDraftInput(evidence: unknown[] = []): Record<string, unknown> {
+  return {
+    recipients: [{ kind: "member", memberId: MEMBER_ID }],
+    workstream: { id: WORKSTREAM_ID, kind: "workstream", title: "Legacy lane" },
+    summary: "Continue the legacy Relay handoff.",
+    completed: [],
+    inProgress: [],
+    decisions: [],
+    blockers: [],
+    unresolvedQuestions: [],
+    changedFiles: [],
+    code: [],
+    evidence,
+    nextActions: [],
+  };
+}
 
 function previewEnvelope(
   request: unknown,

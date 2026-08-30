@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import {
   ActivityResponseSchema,
+  HomeResponseSchema,
   HubCapabilitiesSchema,
   SpecDetailResponseSchema,
   SpecListResponseSchema,
@@ -127,6 +128,29 @@ describe("real Project Hub Team identity integration", () => {
     const memberDetail = await hub.get(`/api/v1/members/${encodeURIComponent(member.id)}`);
     expect(memberDetail.status).toBe(200);
     expect(await memberDetail.json()).toEqual(member);
+
+    const beforeNoOp = snapshotReadProtectedState(root);
+    const noOp = await hub.post("/api/v1/team/operations/preview", {
+      operationId: "hub_member_noop_update",
+      action: {
+        kind: "member.update",
+        memberId: member.id,
+        patch: {
+          displayName: member.displayName,
+          gitAliases: member.gitAliases,
+        },
+      },
+      expectedRevisions: [{
+        target: { kind: "artifact", path: member.sourcePath },
+        revision: member.revision,
+      }],
+    });
+    expect(noOp.status).toBe(422);
+    expect(await noOp.json()).toMatchObject({
+      code: "VALIDATION_FAILED",
+      title: "Validation failed",
+    });
+    expect(snapshotReadProtectedState(root)).toEqual(beforeNoOp);
 
     const replayed = TeamOperationApplyResponseSchema.parse(
       await (await hub.post("/api/v1/team/operations/apply", addPreview)).json(),
@@ -340,12 +364,42 @@ Every active release has one bounded Workstream.
     expect(TeamWorkstreamSchema.parse(
       await (await hub.get(`/api/v1/workstreams/${created.id}`)).json(),
     )).toEqual(created);
+    const listWorkstreams = vi.spyOn(team, "listWorkstreams");
     expect(TeamWorkstreamListResponseSchema.parse(
       await (await hub.get("/api/v1/workstreams?state=planned&limit=10")).json(),
     ).items).toEqual([created]);
-    expect(await (await hub.get("/api/v1/home")).json()).toMatchObject({
-      sections: { workstreams: { availability: "available", count: 1 } },
+    expect(listWorkstreams).toHaveBeenCalledTimes(1);
+
+    const rawHome = await (await hub.get("/api/v1/home")).json() as Record<string, unknown>;
+    expect(Object.keys(rawHome).sort()).toEqual([
+      "actor",
+      "attention",
+      "jobs",
+      "observedAt",
+      "repository",
+    ]);
+    const home = HomeResponseSchema.parse(rawHome);
+    expect(home).toMatchObject({
+      repository: {
+        scaffoldId: "hub-team-identity",
+        branch: "main",
+        dirty: true,
+      },
+      actor: {
+        kind: "git",
+        name: "Hub Identity",
+        email: "hub-identity@example.invalid",
+      },
+      attention: {
+        inbox: { availability: "unavailable" },
+        relays: { availability: "unavailable" },
+      },
+      jobs: { availability: "available", activeCount: 0 },
     });
+    expect(home.repository.head).toMatch(/^[a-f0-9]{40}$/);
+    // Home is the globally mounted lightweight shell. Workstreams remain
+    // independently readable, but this request must not scan them.
+    expect(listWorkstreams).toHaveBeenCalledTimes(1);
     expect(snapshotIndexAndGitInternals(root)).toEqual(beforeReads);
     expect(adapters.graphCalls).not.toHaveBeenCalled();
     expect(adapters.wikiCalls).not.toHaveBeenCalled();

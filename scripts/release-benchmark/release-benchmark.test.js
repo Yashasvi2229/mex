@@ -47,32 +47,48 @@ const budgets = JSON.parse(readFileSync(new URL("./budgets.json", import.meta.ur
 const budgetsSchema = JSON.parse(readFileSync(new URL("./budgets.schema.json", import.meta.url), "utf8"));
 const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 const reportSchema = JSON.parse(readFileSync(new URL("./report.schema.json", import.meta.url), "utf8"));
-const PRE_RELAY_FROZEN_BUDGETS_SHA256 = "29b2cb936db33977d452ea8361e010ad6bddc1b961dd3b0897b5f793763d3328";
+const FROZEN_NON_OVERVIEW_UX_BUDGETS_SHA256 = "e970dea48bdaffd3ca258ce62dd56327a7692f89fd0e740c72bca61092ea10d8";
 
-function frozenRelayCalibrationProjection(value) {
+function frozenAllowedCalibrationProjection(value) {
   const projected = structuredClone(value);
   projected.calibration.status = "__RELAY_CALIBRATION_STATUS__";
+  projected.assets.maxJsChunkBytes = "__OVERVIEW_INITIAL_JS_CALIBRATION__";
+  projected.assets.initial.jsBytes = "__OVERVIEW_INITIAL_JS_CALIBRATION__";
+  projected.assets.routes.home.jsBytes = "__OVERVIEW_HOME_JS_CALIBRATION__";
+  projected.assets.routes.home.cssBytes = "__OVERVIEW_HOME_CSS_CALIBRATION__";
   projected.assets.routes.relays = { jsBytes: 0, cssBytes: 0, fontBytes: 0 };
+  projected.assets.routes.members.cssBytes = "__MEMBERS_CSS_CALIBRATION__";
+  projected.assets.routes.activity.jsBytes = "__ACTIVITY_JS_CALIBRATION__";
+  projected.assets.routes.activity.cssBytes = "__ACTIVITY_CSS_CALIBRATION__";
+  delete projected.assets.routes.catchUp;
   for (const profile of ["small", "medium", "large"]) {
     delete projected.runtime.apiLatencyMs[profile].relayDrafts;
     delete projected.runtime.apiLatencyMs[profile].relays;
     projected.runtime.browserHeapBytes[profile].home = 0;
     projected.runtime.browserHeapBytes[profile].members = 0;
     projected.runtime.browserHeapBytes[profile].relays = 0;
+    delete projected.runtime.browserHeapBytes[profile].catchUp;
   }
   return projected;
 }
 
 describe("release benchmark contract", () => {
-  it("permits calibration to change only the Checkpoint F Relay whitelist", () => {
+  it("permits only the calibrated Overview, Relay, Activity, or Members asset budgets", () => {
     const digest = (value) => createHash("sha256")
-      .update(JSON.stringify(frozenRelayCalibrationProjection(value)))
+      .update(JSON.stringify(frozenAllowedCalibrationProjection(value)))
       .digest("hex");
-    expect(digest(budgets)).toBe(PRE_RELAY_FROZEN_BUDGETS_SHA256);
+    expect(digest(budgets)).toBe(FROZEN_NON_OVERVIEW_UX_BUDGETS_SHA256);
 
     const allowed = structuredClone(budgets);
     allowed.calibration.status = "calibrated-from-pinned-run-example";
     allowed.assets.routes.relays = { jsBytes: 123, cssBytes: 45, fontBytes: 0 };
+    allowed.assets.routes.members.cssBytes += 1;
+    allowed.assets.routes.activity.jsBytes += 1;
+    allowed.assets.routes.activity.cssBytes += 1;
+    allowed.assets.maxJsChunkBytes += 1;
+    allowed.assets.initial.jsBytes += 1;
+    allowed.assets.routes.home.jsBytes += 1;
+    allowed.assets.routes.home.cssBytes += 1;
     for (const profile of ["small", "medium", "large"]) {
       allowed.runtime.apiLatencyMs[profile].relayDrafts = 3;
       allowed.runtime.apiLatencyMs[profile].relays = 4;
@@ -80,11 +96,11 @@ describe("release benchmark contract", () => {
       allowed.runtime.browserHeapBytes[profile].members += 1;
       allowed.runtime.browserHeapBytes[profile].relays += 1;
     }
-    expect(digest(allowed)).toBe(PRE_RELAY_FROZEN_BUDGETS_SHA256);
+    expect(digest(allowed)).toBe(FROZEN_NON_OVERVIEW_UX_BUDGETS_SHA256);
 
     const forbidden = structuredClone(allowed);
     forbidden.runtime.apiLatencyMs.small.search += 1;
-    expect(digest(forbidden)).not.toBe(PRE_RELAY_FROZEN_BUDGETS_SHA256);
+    expect(digest(forbidden)).not.toBe(FROZEN_NON_OVERVIEW_UX_BUDGETS_SHA256);
   });
 
   it("locks the sample counts and deterministic route budget surface", () => {
@@ -148,10 +164,20 @@ describe("release benchmark contract", () => {
       },
       heap: { small: 7753875, medium: 7754561, large: 7748627 },
     });
+    expect(budgets.assets.routes.members).toEqual({
+      jsBytes: 93022,
+      cssBytes: 12640,
+      fontBytes: 0,
+    });
     expect(budgets.assets.routes.code).toEqual(budgets.assets.routes.search);
+    expect(budgets.assets.routes.catchUp).toEqual(budgets.assets.routes.playbooks);
+    for (const profile of ["small", "medium", "large"]) {
+      expect(budgets.runtime.browserHeapBytes[profile].catchUp)
+        .toBe(budgets.runtime.browserHeapBytes[profile].playbooks);
+    }
     expect(budgets.provisional).toBe(false);
     expect(budgets.calibration).toEqual({
-      status: "calibrated-from-pinned-runs-33005876613-33083122092-33117048710-E33169865368-F33249296778",
+      status: "calibrated-from-pinned-runs-33005876613-33083122092-33117048710-E33169865368-F33249296778-Goverview",
       runtimeFormula: "ceil(measured p95 * 1.15)",
       assetFormula: "ceil(built bytes * 1.05)",
     });
@@ -536,6 +562,14 @@ describe("release benchmark contract", () => {
       ref: { id: "relay_fixed" },
       summary: "Published Relay fixture",
       state: "published",
+      schemaVersion: 3,
+      workstream: null,
+      publishedRepoState: {
+        branch: "benchmark",
+        head: null,
+        dirty: false,
+        observedAt: "2026-08-01T00:00:00.000Z",
+      },
     }), {
       kind: "relay",
       id: "relay_fixed",
@@ -545,11 +579,31 @@ describe("release benchmark contract", () => {
       ref: { id: "relay_fixed" },
       summary: "Published Relay fixture",
       state: "acknowledged",
+      schemaVersion: 3,
+      workstream: null,
+      publishedRepoState: {
+        branch: "benchmark",
+        head: null,
+        dirty: false,
+        observedAt: "2026-08-01T00:00:00.000Z",
+      },
     }), {
       kind: "relay",
       id: "relay_fixed",
       summary: "Published Relay fixture",
     })).toThrow(/not published/u);
+    expect(() => assertRelayFixturePage(page({
+      ref: { id: "relay_fixed" },
+      summary: "Published Relay fixture",
+      state: "published",
+      schemaVersion: 2,
+      workstream: { id: "ws_legacy", kind: "workstream" },
+      publishedRepoState: null,
+    }), {
+      kind: "relay",
+      id: "relay_fixed",
+      summary: "Published Relay fixture",
+    })).toThrow(/standalone schema-v3 publication/u);
     expect(() => assertRelayFixturePage({
       ...page({ id: "relay-draft-fixed", summary: "Local Relay fixture" }),
       diagnostics: [{ code: "RELAY_PUBLISHED_AT_MISSING" }],
@@ -765,7 +819,7 @@ describe("release benchmark contract", () => {
     }
 
     const exactMetrics = committedConfirmableRuntimeMetrics();
-    expect(exactMetrics).toHaveLength(108);
+    expect(exactMetrics).toHaveLength(111);
     for (const metric of exactMetrics) {
       expect(runtimeMaterialityPolicy(metric)).not.toBeNull();
       const violation = runtimeViolation(metric);

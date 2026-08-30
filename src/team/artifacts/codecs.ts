@@ -11,6 +11,7 @@ import { isRepoRelativePath } from "../contracts/shared.js";
 import {
   TEAM_READ_LIMITS,
   type ActivityEvent,
+  type ActivityRecordOrigin,
   type ActivitySubjectRef,
   type MemberGitAlias,
   type StoredActivityEvent,
@@ -24,6 +25,7 @@ export const MEMBER_ARTIFACT_MAX_BYTES = 64 * 1024;
 export const ACTIVITY_ARTIFACT_MAX_BYTES = 64 * 1024;
 export const MEMBER_GIT_ALIAS_LIMIT = 32;
 export const ACTIVITY_SUBJECT_LIMIT = 64;
+export const ACTIVITY_LABEL_MAX_BYTES = 512;
 
 const MEMBER_KEYS = [
   "schema_version",
@@ -42,6 +44,7 @@ const ACTIVITY_REQUIRED_KEYS = [
   "subjects",
   "repo_state",
 ] as const;
+const ACTIVITY_V2_REQUIRED_KEYS = [...ACTIVITY_REQUIRED_KEYS, "origin"] as const;
 
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const ACTION = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
@@ -146,11 +149,17 @@ export function parseMemberArtifact(
 export function serializeActivityArtifact(event: ActivityEvent): string {
   const normalized = validateActivityEvent(event);
   const document = encodeFrontmatter([
-    ["schema_version", 1],
+    ["schema_version", normalized.schemaVersion],
     ["id", normalized.id],
     ["timestamp", normalized.timestamp],
     ["actor", normalized.actor],
     ["action", normalized.action],
+    ...(normalized.schemaVersion === 1
+      ? []
+      : [["origin", normalized.origin] as const]),
+    ...(normalized.schemaVersion === 2 && normalized.label !== undefined
+      ? [["label", normalized.label] as const]
+      : []),
     ["subjects", normalized.subjects],
     ...(normalized.workstream === undefined
       ? []
@@ -171,21 +180,24 @@ export function parseActivityArtifact(
   assertRepoPath(sourcePath, "activity source path");
   const exactBytes = asBytes(bytes);
   const raw = parseCanonicalFrontmatter(exactBytes, sourcePath, ACTIVITY_ARTIFACT_MAX_BYTES);
+  if (raw.schema_version !== 1 && raw.schema_version !== 2) {
+    fail("Activity schema_version must be 1 or 2.", sourcePath);
+  }
   assertExactKeys(
     raw,
-    ACTIVITY_REQUIRED_KEYS,
-    ["workstream", "metadata"],
+    raw.schema_version === 1 ? ACTIVITY_REQUIRED_KEYS : ACTIVITY_V2_REQUIRED_KEYS,
+    raw.schema_version === 1
+      ? ["workstream", "metadata"]
+      : ["workstream", "metadata", "label"],
     "activity artifact",
     sourcePath,
   );
-  if (raw.schema_version !== 1) fail("Activity schema_version must be 1.", sourcePath);
   if (typeof raw.id !== "string") fail("Activity id must be a string.", sourcePath);
   if (typeof raw.timestamp !== "string") fail("Activity timestamp must be a string.", sourcePath);
   if (typeof raw.action !== "string") fail("Activity action must be a string.", sourcePath);
   if (!Array.isArray(raw.subjects)) fail("Activity subjects must be an array.", sourcePath);
 
-  const event: ActivityEvent = {
-    schemaVersion: 1,
+  const common = {
     id: raw.id,
     timestamp: raw.timestamp,
     actor: parseActor(raw.actor, sourcePath),
@@ -199,6 +211,16 @@ export function parseActivityArtifact(
       ? { metadata: parseMetadata(raw.metadata, sourcePath) }
       : {}),
   };
+  const event: ActivityEvent = raw.schema_version === 1
+    ? { schemaVersion: 1, ...common }
+    : {
+        schemaVersion: 2,
+        ...common,
+        origin: parseActivityOrigin(raw.origin, sourcePath),
+        ...(Object.hasOwn(raw, "label")
+          ? { label: parseActivityLabel(raw.label, sourcePath) }
+          : {}),
+      };
   const normalized = validateActivityEvent(event);
   const expectedPath = activityArtifactPath(normalized);
   if (sourcePath !== expectedPath) {
@@ -242,8 +264,8 @@ function validateMemberInput(input: MemberArtifactInput): MemberArtifactInput {
 }
 
 function validateActivityEvent(event: ActivityEvent): ActivityEvent {
-  if (event.schemaVersion !== 1) {
-    throw artifactError("VALIDATION_FAILED", "Invalid activity event", "Activity schemaVersion must be 1.");
+  if (event.schemaVersion !== 1 && event.schemaVersion !== 2) {
+    throw artifactError("VALIDATION_FAILED", "Invalid activity event", "Activity schemaVersion must be 1 or 2.");
   }
   assertArtifactId(event.id, "event", "activity event ID");
   assertIsoTimestamp(event.timestamp, "activity timestamp");
@@ -276,8 +298,7 @@ function validateActivityEvent(event: ActivityEvent): ActivityEvent {
   }
   const repoState = validateRepoState(event.repoState);
   const metadata = event.metadata === undefined ? undefined : validateMetadata(event.metadata);
-  return {
-    schemaVersion: 1,
+  const common = {
     id: event.id,
     timestamp: event.timestamp,
     actor,
@@ -287,6 +308,78 @@ function validateActivityEvent(event: ActivityEvent): ActivityEvent {
     repoState,
     ...(metadata === undefined ? {} : { metadata }),
   };
+  if (event.schemaVersion === 1) {
+    if (Object.hasOwn(event, "origin") || Object.hasOwn(event, "label")) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Invalid activity event",
+        "Activity schemaVersion 1 cannot contain provenance fields.",
+      );
+    }
+    return { schemaVersion: 1, ...common };
+  }
+  return {
+    schemaVersion: 2,
+    ...common,
+    origin: validateActivityOrigin(event.origin),
+    ...(event.label === undefined
+      ? {}
+      : { label: validateActivityLabel(event.label) }),
+  };
+}
+
+function validateActivityOrigin(value: unknown): ActivityRecordOrigin {
+  if (!isRecord(value) || typeof value.kind !== "string") {
+    throw artifactError("VALIDATION_FAILED", "Invalid activity event", "Activity origin is invalid.");
+  }
+  if (value.kind === "custom") {
+    assertObjectKeys(value, ["kind"], "activity custom origin");
+    return { kind: "custom" };
+  }
+  if (value.kind === "workflow") {
+    assertObjectKeys(value, ["kind", "operation"], "activity workflow origin");
+    const operation = assertCanonicalText(value.operation, "activity workflow operation", 128);
+    if (!ACTION.test(operation)) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Invalid activity event",
+        "Activity workflow operation must be a lower-case namespaced identifier.",
+      );
+    }
+    return { kind: "workflow", operation };
+  }
+  throw artifactError("VALIDATION_FAILED", "Invalid activity event", "Activity origin kind is invalid.");
+}
+
+function parseActivityOrigin(
+  value: unknown,
+  path: RepoRelativePath,
+): Extract<ActivityEvent, { schemaVersion: 2 }>["origin"] {
+  try {
+    return validateActivityOrigin(value);
+  } catch {
+    fail("Activity origin is invalid.", path);
+  }
+}
+
+function parseActivityLabel(value: unknown, path: RepoRelativePath): string {
+  try {
+    return validateActivityLabel(value);
+  } catch {
+    fail("Activity label is invalid.", path);
+  }
+}
+
+function validateActivityLabel(value: unknown): string {
+  const label = assertCanonicalText(value, "activity label", ACTIVITY_LABEL_MAX_BYTES);
+  if (/[\u0080-\u009f\u2028\u2029]/u.test(label)) {
+    throw artifactError(
+      "VALIDATION_FAILED",
+      "Invalid activity event",
+      "Activity label must be canonical single-line text.",
+    );
+  }
+  return label;
 }
 
 function validateAlias(alias: MemberGitAlias, index: number): MemberGitAlias {

@@ -1,5 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpHubApi, HubApiError, fixturesEnabled, readBootstrapToken } from "./client";
+import {
+  HttpHubApi,
+  HubApiError,
+  activityFixtureVariant,
+  fixturesEnabled,
+  inboxFixtureVariant,
+  memberFixtureVariant,
+  overviewFixtureVariant,
+  relayFixtureVariant,
+  readBootstrapToken,
+  resolveApi,
+} from "./client";
 import type { ActivityResponse, JobSummary, RelayOperationPreviewRequest } from "./types";
 import { createFixtureApi } from "../dev/fixture-api";
 
@@ -54,11 +65,132 @@ describe("bootstrap fragment handling", () => {
   it("cannot enable populated fixtures in a production build", () => {
     expect(fixturesEnabled(false, "?fixture=populated")).toBe(false);
     expect(fixturesEnabled(true, "?fixture=populated")).toBe(true);
+    expect(fixturesEnabled(true, "?fixture=populated&inboxFixture=empty")).toBe(true);
+    expect(fixturesEnabled(true, "?fixture=populated&relayFixture=legacy")).toBe(true);
+    expect(fixturesEnabled(true, "?fixture=populated&activityFixture=partial")).toBe(true);
+    expect(fixturesEnabled(true, "?fixture=populated&memberFixture=git-alias")).toBe(true);
+    expect(fixturesEnabled(true, "?fixture=populated&overviewFixture=established")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=empty")).toBe(false);
+  });
+
+  it.each([
+    ["?fixture=populated&inboxFixture=empty", "empty"],
+    ["?fixture=populated&inboxFixture=unknown", "unknown"],
+    ["?fixture=populated&inboxFixture=partial", "partial"],
+    ["?fixture=populated", undefined],
+    ["?fixture=populated&inboxFixture=populated", undefined],
+    ["?fixture=populated&inboxFixture=EMPTY", undefined],
+    ["?fixture=populated&inboxFixture=../../private", undefined],
+  ])("bounds the Inbox fixture variant in %s", (search, expected) => {
+    expect(inboxFixtureVariant(search)).toBe(expected);
+  });
+
+  it.each([
+    ["?fixture=populated&relayFixture=empty", "empty"],
+    ["?fixture=populated&relayFixture=closed", "closed"],
+    ["?fixture=populated&relayFixture=missing", "missing"],
+    ["?fixture=populated&relayFixture=partial", "partial"],
+    ["?fixture=populated&relayFixture=legacy", "legacy"],
+    ["?fixture=populated", undefined],
+    ["?fixture=populated&relayFixture=populated", undefined],
+    ["?fixture=populated&relayFixture=LEGACY", undefined],
+    ["?fixture=populated&relayFixture=../../private", undefined],
+  ])("bounds the Relay fixture variant in %s", (search, expected) => {
+    expect(relayFixtureVariant(search)).toBe(expected);
+  });
+
+  it.each([
+    ["?fixture=populated&activityFixture=empty", "empty"],
+    ["?fixture=populated&activityFixture=legacy", "legacy"],
+    ["?fixture=populated&activityFixture=partial", "partial"],
+    ["?fixture=populated", undefined],
+    ["?fixture=populated&activityFixture=populated", undefined],
+    ["?fixture=populated&activityFixture=PARTIAL", undefined],
+    ["?fixture=populated&activityFixture=../../private", undefined],
+  ])("bounds the Activity fixture variant in %s", (search, expected) => {
+    expect(activityFixtureVariant(search)).toBe(expected);
+  });
+
+  it.each([
+    ["?fixture=populated&memberFixture=configured", "configured"],
+    ["?fixture=populated&memberFixture=git-alias", "git-alias"],
+    ["?fixture=populated&memberFixture=git-fallback", "git-fallback"],
+    ["?fixture=populated&memberFixture=unknown", "unknown"],
+    ["?fixture=populated&memberFixture=stale", "stale"],
+    ["?fixture=populated&memberFixture=inactive", "inactive"],
+    ["?fixture=populated&memberFixture=ambiguous", "ambiguous"],
+    ["?fixture=populated&memberFixture=partial", "partial"],
+    ["?fixture=populated", undefined],
+    ["?fixture=populated&memberFixture=populated", undefined],
+    ["?fixture=populated&memberFixture=GIT-ALIAS", undefined],
+    ["?fixture=populated&memberFixture=../../private", undefined],
+  ])("bounds the Member fixture variant in %s", (search, expected) => {
+    expect(memberFixtureVariant(search)).toBe(expected);
+  });
+
+  it.each([
+    ["?fixture=populated&overviewFixture=established", "established"],
+    ["?fixture=populated&overviewFixture=caught-up", "caught-up"],
+    ["?fixture=populated&overviewFixture=pending-review", "pending-review"],
+    ["?fixture=populated&overviewFixture=relay-ready", "relay-ready"],
+    ["?fixture=populated&overviewFixture=relay-in-hand", "relay-in-hand"],
+    ["?fixture=populated&overviewFixture=identity-unresolved", "identity-unresolved"],
+    ["?fixture=populated&overviewFixture=indexes-stale", "indexes-stale"],
+    ["?fixture=populated&overviewFixture=indexes-degraded", "indexes-degraded"],
+    ["?fixture=populated&overviewFixture=indexes-missing", "indexes-missing"],
+    ["?fixture=populated&overviewFixture=job-determinate", "job-determinate"],
+    ["?fixture=populated&overviewFixture=job-indeterminate", "job-indeterminate"],
+    ["?fixture=populated&overviewFixture=failure", "failure"],
+    ["?fixture=populated&overviewFixture=partial", "partial"],
+    ["?fixture=populated&overviewFixture=unavailable", "unavailable"],
+    ["?fixture=populated", undefined],
+    ["?fixture=populated&overviewFixture=populated", undefined],
+    ["?fixture=populated&overviewFixture=ESTABLISHED", undefined],
+    ["?fixture=populated&overviewFixture=../../private", undefined],
+  ])("bounds the Overview fixture variant in %s", (search, expected) => {
+    expect(overviewFixtureVariant(search)).toBe(expected);
+  });
+
+  it("passes a bounded Member variant into the development fixture API", async () => {
+    vi.stubGlobal("window", {
+      location: { search: "?fixture=populated&memberFixture=unknown" },
+    });
+
+    const api = await resolveApi();
+
+    await expect(api.getCurrentActor()).resolves.toMatchObject({
+      actor: { kind: "unknown" },
+      source: "unknown",
+      diagnostics: [{ code: "GIT_IDENTITY_UNAVAILABLE" }],
+    });
+  });
+
+  it("passes a bounded Overview variant into the development fixture API", async () => {
+    vi.stubGlobal("window", {
+      location: { search: "?fixture=populated&overviewFixture=identity-unresolved" },
+    });
+
+    const api = await resolveApi();
+
+    await expect(api.getOverview()).resolves.toMatchObject({
+      shell: { actor: { kind: "unknown" } },
+    });
   });
 });
 
 describe("HttpHubApi shared-contract boundary", () => {
+  it("reads the bounded Overview aggregate from its dedicated endpoint", async () => {
+    const response = await createFixtureApi({ overviewFixture: "caught-up" }).getOverview();
+    const fetchMock = vi.fn().mockResolvedValue(json(response));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(new HttpHubApi().getOverview()).resolves.toEqual(response);
+
+    const [rawUrl, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(new URL(rawUrl, "http://127.0.0.1").pathname).toBe("/api/v1/overview");
+    expect(init.method).toBeUndefined();
+  });
+
   it("sends independent search cursors through the strict shared contract", async () => {
     const response = await createFixtureApi().search({ q: "graph", limit: 25 });
     const fetchMock = vi.fn().mockResolvedValue(json(response));
@@ -265,6 +397,7 @@ describe("HttpHubApi shared-contract boundary", () => {
       limit: 25,
     });
     const relay = await fixture.getRelay(relays.items[0]!.ref.id);
+    const legacyWorkstreamId = "ws_01K37WVM6H7JK8M9NPQRSTVVW0";
     const request: RelayOperationPreviewRequest = {
       operationId: "hub_relay_client_exact_envelope",
       action: { kind: "relay.draft.save", draft: draft.input },
@@ -289,7 +422,7 @@ describe("HttpHubApi shared-contract boundary", () => {
     await api.getRelays({
       perspective: "mine",
       states: ["published", "acknowledged"],
-      workstreamId: relay.workstream.id,
+      workstreamId: legacyWorkstreamId,
       cursor: "relay-page-2",
       limit: 25,
     });
@@ -308,7 +441,7 @@ describe("HttpHubApi shared-contract boundary", () => {
       perspective: "mine",
       limit: "25",
       state: "published,acknowledged",
-      workstreamId: relay.workstream.id,
+      workstreamId: legacyWorkstreamId,
       cursor: "relay-page-2",
     });
     expect(new URL(calls[4]![0], "http://127.0.0.1").pathname).toBe(`/api/v1/relays/${relay.ref.id}`);

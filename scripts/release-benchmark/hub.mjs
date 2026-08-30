@@ -255,8 +255,22 @@ export function assertRelayFixturePage(page, expected) {
   if (id !== expected.id || item?.summary !== expected.summary) {
     throw new Error(`The benchmark Relay ${expected.kind} list returned unexpected fixture content.`);
   }
-  if (expected.kind === "relay" && item?.state !== "published") {
-    throw new Error("The benchmark Relay is not published.");
+  if (expected.kind === "relay") {
+    if (item?.state !== "published") {
+      throw new Error("The benchmark Relay is not published.");
+    }
+    if (
+      item?.schemaVersion !== 3
+      || item?.workstream !== null
+      || item?.publishedRepoState?.branch !== "benchmark"
+      || item?.publishedRepoState?.head !== null
+      || item?.publishedRepoState?.dirty !== false
+      || item?.publishedRepoState?.observedAt !== "2026-08-01T00:00:00.000Z"
+    ) {
+      throw new Error(
+        "The benchmark Relay is not the expected standalone schema-v3 publication.",
+      );
+    }
   }
 }
 

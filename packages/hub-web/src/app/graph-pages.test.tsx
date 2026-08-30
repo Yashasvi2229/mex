@@ -451,12 +451,12 @@ describe("Graph health and operations", () => {
       publish = onSnapshot;
       return { close() {} };
     });
-    const rendered = renderRoute("/", apiWith({
+    const rendered = renderRoute("/search", apiWith({
       getJobs: () => Promise.resolve({ items: [running], nextCursor: null }),
       subscribeToJob,
     }));
     const invalidate = vi.spyOn(rendered.queryClient, "invalidateQueries");
-    await screen.findByRole("heading", { name: "Overview" });
+    await screen.findByRole("heading", { name: "Search" });
     await waitFor(() => expect(subscribeToJob).toHaveBeenCalled());
 
     publish?.({ ...running, state: "running", phase: "validate" });

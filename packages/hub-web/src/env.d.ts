@@ -10,7 +10,7 @@ interface ImportMeta {
 }
 
 declare module "virtual:mex-hub-fixture-api" {
-  import type { HubApi } from "./api/client";
+  import type { FixtureApiOptions, HubApi } from "./api/client";
 
-  export const createFixtureApi: (() => HubApi) | null;
+  export const createFixtureApi: ((options?: FixtureApiOptions) => HubApi) | null;
 }

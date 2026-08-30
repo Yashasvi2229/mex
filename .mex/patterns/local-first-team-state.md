@@ -72,10 +72,19 @@ under `.mex/local/`. Legacy `events/decisions.jsonl` stays byte-for-byte compati
   require one exact non-null local revision and must distinguish an absent
   target from a changed target.
 - Dependency eligibility and dependency freshness are separate checks. A bad
-  Relay recipient or Workstream at preview is a validation failure; after a
-  signed preview, the same Member or Workstream revision changing must fail as
-  a revision conflict before semantic authorization is evaluated. Repeat that
-  ordering under the workflow lease and during intent recovery.
+  Relay recipient at preview is a validation failure; after a signed preview,
+  the same Member revision changing must fail as a revision conflict before
+  semantic authorization is evaluated. Standalone Relay publication accepts
+  only the exact local draft and recipient Member revisions; a Workstream
+  expectation is unrelated and must fail closed. Repeat that ordering under the
+  workflow lease and during intent recovery.
+- Persist immutable publication provenance from the signed authority already in
+  hand. For schema-v3 Relays, copy branch, HEAD, dirty flag, and observation time
+  into the canonical artifact and publication Activity; preserve it unchanged
+  through Take and Close. Never fabricate this context for legacy artifacts.
+- A dirty repository observation is intentionally coarse. Revalidation detects
+  branch, HEAD, and clean/dirty drift, but cannot prove that dirty tree A has the
+  same bytes as dirty tree B. Do not describe it as a source snapshot.
 - Canonical handoff identity comparisons use stable Member IDs. Display names,
   Git aliases, and serialized actor objects are snapshots for review, not
   authorization keys.

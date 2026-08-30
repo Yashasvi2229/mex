@@ -364,12 +364,30 @@ function withoutId<T extends { id?: string }>(value: T): Omit<T, "id"> {
 
 function relayReplacement(relay: Awaited<ReturnType<RelayRepository["get"]>> & {}) {
   if (relay === null) throw new Error("missing relay");
-  return {
-    sender: relay.sender, recipients: relay.recipients, workstream: relay.workstream, summary: relay.summary, completed: relay.completed,
+  const content = {
+    sender: relay.sender, recipients: relay.recipients, summary: relay.summary, completed: relay.completed,
     inProgress: relay.inProgress, decisions: relay.decisions, blockers: relay.blockers, unresolvedQuestions: relay.unresolvedQuestions,
     changedFiles: relay.changedFiles, code: relay.code, evidence: relay.evidence, nextActions: relay.nextActions,
-    ...(relay.publishedAt === undefined ? {} : { publishedAt: relay.publishedAt }),
   };
+  return relay.schemaVersion === 3
+    ? {
+        ...content,
+        schemaVersion: 3 as const,
+        publishedAt: relay.publishedAt,
+        publishedRepoState: relay.publishedRepoState,
+      }
+    : relay.schemaVersion === 2
+      ? {
+          ...content,
+          schemaVersion: 2 as const,
+          workstream: relay.workstream,
+          publishedAt: relay.publishedAt,
+        }
+      : {
+          ...content,
+          schemaVersion: 1 as const,
+          workstream: relay.workstream,
+        };
 }
 
 function id(prefix: "member" | "ws" | "proposal" | "relay" | "playbook" | "run", fill: number): string {

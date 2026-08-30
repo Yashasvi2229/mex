@@ -67,6 +67,12 @@ interface ResultGroupView {
   group: ResultGroupData;
 }
 
+interface SearchOutletContext {
+  capabilities?: CapabilitiesResponse;
+  clearSearchFocusRequest?: () => void;
+  searchFocusRequest?: number;
+}
+
 const cursorField: Record<GroupKind, "wikiCursor" | "symbolCursor" | "sourceCursor"> = {
   wiki: "wikiCursor",
   symbols: "symbolCursor",
@@ -251,11 +257,20 @@ function ResultGroup({
   );
 }
 
-function SearchWorkbench({ scope }: { scope: "project" | "code" }) {
+function SearchWorkbench({
+  focusRequest = 0,
+  onFocusRequestHandled,
+  scope,
+}: {
+  focusRequest?: number;
+  onFocusRequestHandled?: () => void;
+  scope: "project" | "code";
+}) {
   const api = useHubApi();
   const [params, setParams] = useSearchParams();
   const query = (params.get("q") ?? "").slice(0, 256);
   const [draft, setDraft] = useState(query);
+  const inputRef = useRef<HTMLInputElement>(null);
   const summaryRef = useRef<HTMLDivElement>(null);
   const search = useQuery({
     queryKey: ["search", query],
@@ -271,6 +286,13 @@ function SearchWorkbench({ scope }: { scope: "project" | "code" }) {
   useEffect(() => {
     if (search.data) summaryRef.current?.focus({ preventScroll: true });
   }, [search.data]);
+
+  useEffect(() => {
+    if (scope === "project" && focusRequest > 0) {
+      inputRef.current?.focus({ preventScroll: true });
+      onFocusRequestHandled?.();
+    }
+  }, [focusRequest, onFocusRequestHandled, scope]);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -299,7 +321,7 @@ function SearchWorkbench({ scope }: { scope: "project" | "code" }) {
                 <Search aria-hidden="true" />
               </InputGroupAddon>
               <label className={styles.srOnly} htmlFor={`${scope}-search`}>{scope === "project" ? "Search project memory and code" : "Search code symbols and source"}</label>
-              <InputGroupInput autoComplete="off" id={`${scope}-search`} maxLength={256} onChange={(event) => setDraft(event.target.value)} placeholder={scope === "project" ? "Search knowledge, symbols, or source" : "Search symbols, signatures, paths, or source"} type="search" value={draft} />
+              <InputGroupInput autoComplete="off" id={`${scope}-search`} maxLength={256} onChange={(event) => setDraft(event.target.value)} placeholder={scope === "project" ? "Search knowledge, symbols, or source" : "Search symbols, signatures, paths, or source"} ref={inputRef} type="search" value={draft} />
               <InputGroupAddon align="inline-end" className={styles.searchInputActions}>
                 <InputGroupText className={styles.queryCount}>{draft.length}/256</InputGroupText>
                 {draft ? <InputGroupButton aria-label="Clear search" onClick={clear} size="icon-xs" type="button" variant="ghost"><X aria-hidden="true" /></InputGroupButton> : null}
@@ -351,16 +373,24 @@ function SearchWorkbench({ scope }: { scope: "project" | "code" }) {
 }
 
 export function SearchPage() {
+  const {
+    clearSearchFocusRequest,
+    searchFocusRequest = 0,
+  } = useOutletContext<SearchOutletContext>();
   return (
     <div className={styles.page}>
       <PageHeader title="Search" />
-      <SearchWorkbench scope="project" />
+      <SearchWorkbench
+        focusRequest={searchFocusRequest}
+        onFocusRequestHandled={clearSearchFocusRequest}
+        scope="project"
+      />
     </div>
   );
 }
 
 export function CodePage() {
-  const { capabilities } = useOutletContext<{ capabilities?: CapabilitiesResponse }>();
+  const { capabilities } = useOutletContext<SearchOutletContext>();
   const unavailable = capabilities?.graph.read.availability === "unavailable";
   return (
     <div className={styles.page}>

@@ -92,6 +92,13 @@ describe("JobLifecycleObserver", () => {
       await waitFor(() => expect(secondSubscribe).toHaveBeenCalledWith(running.id, expect.any(Function)));
       await act(async () => publishFromSecondTab?.(running));
       await waitFor(() => expect(firstSubscribe).toHaveBeenCalledWith(running.id, expect.any(Function)));
+      await waitFor(() => expect(invalidateFirst).toHaveBeenCalledWith({ queryKey: ["home"] }));
+      const activeHomeInvalidations = invalidateFirst.mock.calls
+        .filter(([filters]) => filters?.queryKey?.[0] === "home").length;
+
+      await act(async () => publishFromSecondTab?.({ ...running, progress: { completed: 2, total: 4 } }));
+      expect(invalidateFirst.mock.calls.filter(([filters]) => filters?.queryKey?.[0] === "home"))
+        .toHaveLength(activeHomeInvalidations);
 
       await act(async () => publishFromSecondTab?.({
         ...running,
@@ -100,6 +107,8 @@ describe("JobLifecycleObserver", () => {
         finishedAt: "2026-08-26T12:01:00.000Z",
       }));
       await waitFor(() => expect(invalidateFirst).toHaveBeenCalledWith({ queryKey: ["search"] }));
+      expect(invalidateFirst.mock.calls.filter(([filters]) => filters?.queryKey?.[0] === "home"))
+        .toHaveLength(activeHomeInvalidations + 1);
       expect(firstApi.getJobs).toHaveBeenCalledTimes(1);
     } finally {
       first.unmount();

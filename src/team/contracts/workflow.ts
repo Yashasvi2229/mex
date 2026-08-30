@@ -323,15 +323,12 @@ export interface InboxProposal<TWikiOperationPlan>
   reviewedAt?: string;
 }
 
-export interface Relay extends Omit<TeamArtifactBase<"relay">, "schemaVersion"> {
-  /** Legacy Relays are schema v1; Checkpoint F publications are schema v2. */
-  schemaVersion: 1 | 2;
+interface RelayBase extends Omit<TeamArtifactBase<"relay">, "schemaVersion"> {
   /** Wiki semantic revision; distinct from the exact-byte artifact revision. */
   entityRevision: number;
   state: RelayState;
   sender: ActorRef;
   recipients: readonly ActorRef[];
-  workstream: EntityRef;
   summary: string;
   completed: readonly string[];
   inProgress: readonly string[];
@@ -342,13 +339,37 @@ export interface Relay extends Omit<TeamArtifactBase<"relay">, "schemaVersion"> 
   code: readonly CodeRef[];
   evidence: readonly TeamEvidenceRef[];
   nextActions: readonly string[];
-  /** Absent only for strict legacy schema-v1 Relay artifacts. */
-  publishedAt?: string;
   acknowledgedBy?: ActorRef;
   acknowledgedAt?: string;
   closedBy?: ActorRef;
   closedAt?: string;
 }
+
+/** Original Relay format. Its Workstream is immutable and publication time was not recorded. */
+export interface RelayV1 extends RelayBase {
+  schemaVersion: 1;
+  workstream: EntityRef;
+  publishedAt?: never;
+  publishedRepoState?: never;
+}
+
+/** Timestamped legacy Relay format. Its Workstream remains canonical related context. */
+export interface RelayV2 extends RelayBase {
+  schemaVersion: 2;
+  workstream: EntityRef;
+  publishedAt: string;
+  publishedRepoState?: never;
+}
+
+/** Standalone Relay format with immutable publication-time repository provenance. */
+export interface RelayV3 extends RelayBase {
+  schemaVersion: 3;
+  workstream?: never;
+  publishedAt: string;
+  publishedRepoState: RepoState;
+}
+
+export type Relay = RelayV1 | RelayV2 | RelayV3;
 
 export interface PlaybookStepDefinition {
   id: string;
@@ -421,7 +442,6 @@ export interface InboxDraft<TWikiOperationPlan>
 
 export interface RelayDraft extends LocalDraftBase<"relay"> {
   recipients: readonly ActorRef[];
-  workstream: EntityRef;
   summary: string;
   completed: readonly string[];
   inProgress: readonly string[];
@@ -457,8 +477,11 @@ export type ActivitySubjectRef =
   | { kind: "file"; path: RepoRelativePath }
   | { kind: "commit"; hash: string };
 
-export interface ActivityEvent {
-  schemaVersion: 1;
+export type ActivityRecordOrigin =
+  | { kind: "workflow"; operation: string }
+  | { kind: "custom" };
+
+interface ActivityEventBase {
   id: string;
   timestamp: string;
   actor: ActorRef;
@@ -469,11 +492,27 @@ export interface ActivityEvent {
   metadata?: Readonly<Record<string, JsonValue>>;
 }
 
+/** Historical Activity bytes whose creation path cannot be proven. */
+export interface ActivityEventV1 extends ActivityEventBase {
+  schemaVersion: 1;
+  origin?: never;
+  label?: never;
+}
+
+/** Activity with service-owned creation provenance and a bounded human label. */
+export interface ActivityEventV2 extends ActivityEventBase {
+  schemaVersion: 2;
+  origin: ActivityRecordOrigin;
+  label?: string;
+}
+
+export type ActivityEvent = ActivityEventV1 | ActivityEventV2;
+
 /** Canonical activity event plus its storage identity. */
-export interface StoredActivityEvent extends ActivityEvent {
+export type StoredActivityEvent = ActivityEvent & {
   sourcePath: RepoRelativePath;
   revision: Revision;
-}
+};
 
 export interface TeamMemberListRequest extends PageRequest {
   active?: boolean;
@@ -547,7 +586,6 @@ export interface InboxDraftInput<TWikiOperationPlan> {
 
 export interface RelayDraftInput {
   recipients: readonly ActorRef[];
-  workstream: EntityRef;
   summary: string;
   completed: readonly string[];
   inProgress: readonly string[];
@@ -922,7 +960,6 @@ export interface TeamRelayDraftSummary {
   revision: Revision;
   updatedAt: string;
   recipients: readonly Extract<ActorRef, { kind: "member" }>[];
-  workstream: EntityRef;
   summary: string;
 }
 
@@ -931,16 +968,17 @@ export interface TeamRelayDraftDetail extends TeamRelayDraftSummary {
 }
 
 export interface TeamRelaySummary {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   ref: EntityRef;
   sourcePath: RepoRelativePath;
   revision: Revision;
   state: RelayState;
   sender: ActorRef;
   recipients: readonly ActorRef[];
-  workstream: EntityRef;
+  workstream: EntityRef | null;
   summary: string;
   publishedAt: string | null;
+  publishedRepoState: RepoState | null;
   acknowledgedBy?: ActorRef;
   acknowledgedAt?: string;
   closedBy?: ActorRef;

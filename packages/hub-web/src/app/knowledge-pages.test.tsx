@@ -177,7 +177,7 @@ describe("Read-only Knowledge browse", () => {
     expect(screen.getByText("Project Hub read boundaries")).toBeVisible();
   });
 
-  it("keeps Knowledge unavailable honest while product-adjacent routes stay structurally unavailable", async () => {
+  it("keeps Knowledge unavailable honest", async () => {
     const fixture = createFixtureApi();
     const capabilities = await fixture.getCapabilities();
     const api = apiWith({
@@ -189,10 +189,22 @@ describe("Read-only Knowledge browse", () => {
     renderRoute("/knowledge", api);
     expect(await screen.findByRole("heading", { name: "Knowledge unavailable" })).toBeVisible();
     expect(screen.getByText("Wiki migration must be reviewed manually.")).toBeVisible();
+  });
 
-    renderRoute("/playbooks");
-    expect(await screen.findByRole("heading", { name: "Playbooks" })).toBeVisible();
-    expect(screen.getByText("This read-only checkpoint does not mount this product surface.")).toBeVisible();
+  it.each([
+    ["/playbooks", "Playbooks", "Reusable team workflows are planned but are not available in this release."],
+    ["/catch-up", "Catch Up", "A personalized summary of project changes and team activity is planned but is not available in this release."],
+  ] as const)("keeps the %s roadmap destination honest and discoverable", async (route, title, copy) => {
+    renderRoute(route);
+
+    expect(await screen.findByRole("heading", { level: 1, name: title })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 2, name: `${title} is coming soon` })).toBeVisible();
+    expect(screen.getByText(copy)).toBeVisible();
+    expect(screen.getByText("Soon", { selector: '[data-slot="badge"][role="status"]' })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Coming Soon" })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("link", { name: `${title} Soon` })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByText("Read only")).not.toBeInTheDocument();
+    expect(screen.queryByText("No data requested")).not.toBeInTheDocument();
   });
 });
 

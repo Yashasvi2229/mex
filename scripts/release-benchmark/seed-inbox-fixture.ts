@@ -43,7 +43,6 @@ const [
   proposalId,
   specId,
   specPathValue,
-  workstreamId,
   publisherMemberId,
   recipientMemberId,
   relayDraftId,
@@ -58,14 +57,13 @@ if (
   || !proposalId
   || !specId
   || !specPathValue
-  || !workstreamId
   || !publisherMemberId
   || !recipientMemberId
   || !relayDraftId
   || !relayId
   || !relayEventId
 ) {
-  throw new Error("Usage: seed-inbox-fixture <canonical|local> <root> <scaffold-id> <draft-id> <proposal-id> <spec-id> <spec-path> <workstream-id> <publisher-member-id> <recipient-member-id> <relay-draft-id> <relay-id> <relay-event-id>");
+  throw new Error("Usage: seed-inbox-fixture <canonical|local> <root> <scaffold-id> <draft-id> <proposal-id> <spec-id> <spec-path> <publisher-member-id> <recipient-member-id> <relay-draft-id> <relay-id> <relay-event-id>");
 }
 
 const root = resolve(rootValue);
@@ -84,12 +82,6 @@ const recipient = Object.freeze({
   memberId: recipientMemberId,
   displayName: "MEX Release Benchmark",
 });
-const workstream = Object.freeze({
-  id: workstreamId,
-  kind: "workstream" as const,
-  title: "Release benchmark Workstream",
-});
-
 const proposalInput: TeamInboxSpecDraftInput = {
   change: {
     kind: "spec.update",
@@ -128,17 +120,7 @@ const localDraftInput: TeamInboxSpecDraftInput = {
 
 const relayDraftInput = normalizeRelayProductDraftInput({
   recipients: [recipient],
-  workstream,
   summary: RELAY_DRAFT_SUMMARY,
-  completed: ["Pinned the deterministic release fixture."],
-  inProgress: ["Exercise the local Relay draft projection."],
-  decisions: [],
-  blockers: [],
-  unresolvedQuestions: ["Will the release budget remain within its exact envelope?"],
-  changedFiles: ["src/module-0000.ts"],
-  code: [{ kind: "file" as const, path: "src/module-0000.ts" }],
-  evidence: [{ kind: "manual" as const, note: "Pinned release benchmark fixture" }],
-  nextActions: ["Review the retained release report."],
 });
 
 if (mode === "canonical") {
@@ -206,10 +188,16 @@ if (mode === "canonical") {
 
 
   const relays = new RelayRepository(root, { idFactory: () => relayId });
+  const publishedRepoState = {
+    branch: "benchmark",
+    head: null,
+    dirty: false,
+    observedAt: RELAY_PUBLISHED_AT,
+  } as const;
   const relayPreview = await relays.previewCreate({
+    schemaVersion: 3,
     sender: publisher,
     recipients: [recipient],
-    workstream,
     summary: RELAY_SUMMARY,
     completed: ["Prepared the deterministic Relay fixture."],
     inProgress: ["Measure the real Relay workbench."],
@@ -219,16 +207,19 @@ if (mode === "canonical") {
     changedFiles: ["src/module-0000.ts"],
     code: [{ kind: "file", path: "src/module-0000.ts" }],
     evidence: [{ kind: "manual", note: "Pinned release benchmark fixture" }],
-    nextActions: ["Claim the Relay from the My open queue."],
+    nextActions: ["Take the handoff from the For you queue."],
     publishedAt: RELAY_PUBLISHED_AT,
+    publishedRepoState,
   });
   const relay = (await relays.apply(relayPreview, relayPreview.previewRevision)).artifact;
   const relayPage = await relays.list({ limit: 100, states: ["published"] });
   if (
-    relay.schemaVersion !== 2
+    relay.schemaVersion !== 3
     || relay.ref.id !== relayId
     || relay.summary !== RELAY_SUMMARY
     || relay.publishedAt !== RELAY_PUBLISHED_AT
+    || relay.workstream !== undefined
+    || JSON.stringify(relay.publishedRepoState) !== JSON.stringify(publishedRepoState)
     || relayPage.items.length !== 1
     || relayPage.items[0]?.ref.id !== relayId
   ) {
@@ -241,13 +232,7 @@ if (mode === "canonical") {
     actor: publisher,
     action: "relay.published",
     subjects: [{ kind: "entity" as const, entity: relay.ref }],
-    workstream,
-    repoState: {
-      branch: "benchmark",
-      head: null,
-      dirty: false,
-      observedAt: RELAY_PUBLISHED_AT,
-    },
+    repoState: publishedRepoState,
   };
   atomicCreateArtifact(
     root,

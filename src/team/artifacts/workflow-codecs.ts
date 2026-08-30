@@ -5,6 +5,7 @@ import type {
   EntityRef,
   JsonValue,
   RepoRelativePath,
+  RepoState,
   Revision,
   RevisionExpectation,
 } from "../contracts/shared.js";
@@ -47,7 +48,72 @@ type WithoutStored<T> = Omit<T, StoredKeys>;
 export type WorkstreamArtifactInput = WithoutStored<Workstream> & { id: string };
 export type InboxProposalArtifactInput<TPayload> =
   WithoutStored<InboxProposal<TPayload>> & { id: string };
-export type RelayArtifactInput = WithoutStored<Relay> & { id: string };
+type RelaySharedArtifactInput = {
+  id: string;
+  entityRevision: number;
+  state: Relay["state"];
+  sender: ActorRef;
+  recipients: readonly ActorRef[];
+  summary: string;
+  completed: readonly string[];
+  inProgress: readonly string[];
+  decisions: readonly EntityRef[];
+  blockers: readonly string[];
+  unresolvedQuestions: readonly string[];
+  changedFiles: readonly RepoRelativePath[];
+  code: readonly CodeRef[];
+  evidence: readonly TeamEvidenceRef[];
+  nextActions: readonly string[];
+  acknowledgedBy?: ActorRef;
+  acknowledgedAt?: string;
+  closedBy?: ActorRef;
+  closedAt?: string;
+};
+
+/**
+ * Repository input retains the pre-v3 implicit v1/v2 discriminator so existing
+ * callers and exact legacy update paths remain source compatible. Parsed
+ * artifacts themselves are always the strict schema-discriminated `Relay`.
+ */
+export type RelayArtifactInput =
+  | (RelaySharedArtifactInput & {
+      schemaVersion?: 1;
+      workstream: EntityRef;
+      publishedAt?: never;
+      publishedRepoState?: never;
+    })
+  | (RelaySharedArtifactInput & {
+      schemaVersion?: 2;
+      workstream: EntityRef;
+      publishedAt: string;
+      publishedRepoState?: never;
+    })
+  | (RelaySharedArtifactInput & {
+      schemaVersion: 3;
+      workstream?: never;
+      publishedAt: string;
+      publishedRepoState: RepoState;
+    });
+
+type NormalizedRelayArtifactInput =
+  | (RelaySharedArtifactInput & {
+      schemaVersion: 1;
+      workstream: EntityRef;
+      publishedAt?: never;
+      publishedRepoState?: never;
+    })
+  | (RelaySharedArtifactInput & {
+      schemaVersion: 2;
+      workstream: EntityRef;
+      publishedAt: string;
+      publishedRepoState?: never;
+    })
+  | (RelaySharedArtifactInput & {
+      schemaVersion: 3;
+      workstream?: never;
+      publishedAt: string;
+      publishedRepoState: RepoState;
+    });
 export type PlaybookArtifactInput = WithoutStored<Playbook> & { id: string };
 export type PlaybookRunArtifactInput = WithoutStored<PlaybookRun> & { id: string };
 
@@ -69,6 +135,12 @@ const RELAY_REQUIRED_KEYS = [
   "next_actions",
 ] as const;
 const RELAY_V2_REQUIRED_KEYS = [...RELAY_REQUIRED_KEYS, "published_at"] as const;
+const RELAY_V3_REQUIRED_KEYS = [
+  "schema_version", "id", "mex", "state", "sender", "recipients",
+  "summary", "completed", "in_progress", "decisions", "blockers",
+  "unresolved_questions", "changed_files", "code", "evidence",
+  "next_actions", "published_at", "published_repo_state",
+] as const;
 const RELAY_OPTIONAL_KEYS = ["acknowledged_by", "acknowledged_at", "closed_by", "closed_at"] as const;
 const PLAYBOOK_KEYS = [
   "schema_version", "id", "mex", "state", "title", "purpose", "trigger",
@@ -164,15 +236,18 @@ export function parseInboxProposalArtifact<TPayload = JsonValue>(bytes: string |
 
 export function serializeRelayArtifact(input: RelayArtifactInput): string {
   const value = normalizeRelay(input);
-  const schemaVersion = value.publishedAt === undefined ? 1 : 2;
   return encodeArtifact([
-    ["schema_version", schemaVersion], ["id", value.id],
+    ["schema_version", value.schemaVersion], ["id", value.id],
     ["mex", wikiMetadata(value.id, "relay", relayWikiState(value.state), value.entityRevision, `Relay ${value.id}`, value.summary)],
-    ["state", value.state], ["sender", value.sender], ["recipients", value.recipients], ["workstream", value.workstream],
+    ["state", value.state], ["sender", value.sender], ["recipients", value.recipients],
+    ...(value.schemaVersion === 3 ? [] : [["workstream", value.workstream] as const]),
     ["summary", value.summary], ["completed", value.completed], ["in_progress", value.inProgress], ["decisions", value.decisions],
     ["blockers", value.blockers], ["unresolved_questions", value.unresolvedQuestions], ["changed_files", value.changedFiles],
     ["code", value.code], ["evidence", value.evidence], ["next_actions", value.nextActions],
     ...(value.publishedAt === undefined ? [] : [["published_at", value.publishedAt] as const]),
+    ...(value.schemaVersion === 3
+      ? [["published_repo_state", value.publishedRepoState] as const]
+      : []),
     ...(value.acknowledgedBy === undefined ? [] : [["acknowledged_by", value.acknowledgedBy] as const]),
     ...(value.acknowledgedAt === undefined ? [] : [["acknowledged_at", value.acknowledgedAt] as const]),
     ...(value.closedBy === undefined ? [] : [["closed_by", value.closedBy] as const]),
@@ -181,40 +256,61 @@ export function serializeRelayArtifact(input: RelayArtifactInput): string {
 }
 
 export function parseRelayArtifact(bytes: string | Uint8Array, sourcePath: RepoRelativePath): Relay {
-  const { exactBytes, raw } = parseArtifact(bytes, sourcePath, [1, 2]);
-  const schemaVersion = raw.schema_version as 1 | 2;
+  const { exactBytes, raw } = parseArtifact(bytes, sourcePath, [1, 2, 3]);
+  const schemaVersion = raw.schema_version as 1 | 2 | 3;
   exactKeys(
     raw,
-    schemaVersion === 2 ? RELAY_V2_REQUIRED_KEYS : RELAY_REQUIRED_KEYS,
+    schemaVersion === 3
+      ? RELAY_V3_REQUIRED_KEYS
+      : schemaVersion === 2
+        ? RELAY_V2_REQUIRED_KEYS
+        : RELAY_REQUIRED_KEYS,
     RELAY_OPTIONAL_KEYS,
     "relay",
     sourcePath,
   );
   const mex = parseWikiMetadata(raw.mex, sourcePath);
-  const value = normalizeRelay({
+  const common = {
     id: raw.id as string, entityRevision: mex.revision, state: raw.state as Relay["state"], sender: raw.sender as ActorRef,
-    recipients: raw.recipients as ActorRef[], workstream: raw.workstream as EntityRef, summary: raw.summary as string,
+    recipients: raw.recipients as ActorRef[], summary: raw.summary as string,
     completed: raw.completed as string[], inProgress: raw.in_progress as string[], decisions: raw.decisions as EntityRef[],
     blockers: raw.blockers as string[], unresolvedQuestions: raw.unresolved_questions as string[], changedFiles: raw.changed_files as RepoRelativePath[],
     code: raw.code as CodeRef[], evidence: raw.evidence as TeamEvidenceRef[], nextActions: raw.next_actions as string[],
-    ...(schemaVersion === 1 ? {} : { publishedAt: raw.published_at as string }),
     ...(raw.acknowledged_by === undefined ? {} : { acknowledgedBy: raw.acknowledged_by as ActorRef }),
     ...(raw.acknowledged_at === undefined ? {} : { acknowledgedAt: raw.acknowledged_at as string }),
     ...(raw.closed_by === undefined ? {} : { closedBy: raw.closed_by as ActorRef }),
     ...(raw.closed_at === undefined ? {} : { closedAt: raw.closed_at as string }),
-  });
+  };
+  const value = normalizeRelay(schemaVersion === 3
+    ? {
+        ...common,
+        schemaVersion,
+        publishedAt: raw.published_at as string,
+        publishedRepoState: raw.published_repo_state as RepoState,
+      }
+    : schemaVersion === 2
+      ? {
+          ...common,
+          schemaVersion,
+          workstream: raw.workstream as EntityRef,
+          publishedAt: raw.published_at as string,
+        }
+      : {
+          ...common,
+          schemaVersion,
+          workstream: raw.workstream as EntityRef,
+        });
   const expectedPath = relayArtifactPath(value.id);
   if (sourcePath !== expectedPath) fail(`Relay path must be ${expectedPath}.`, sourcePath);
   assertWikiMetadata(mex, value.id, "relay", relayWikiState(value.state), value.entityRevision, `Relay ${value.id}`, value.summary, sourcePath);
   canonicalBytes(exactBytes, serializeRelayArtifact(value), sourcePath);
   return {
-    schemaVersion,
     ref: { id: value.id, kind: "relay" },
     kind: "relay",
     sourcePath,
     revision: revisionOf(exactBytes),
     ...withoutId(value),
-  };
+  } as Relay;
 }
 
 export function serializePlaybookArtifact(input: PlaybookArtifactInput): string {
@@ -296,30 +392,70 @@ export function normalizeInboxEvidence(value: unknown): readonly TeamEvidenceRef
   return evidenceList(value, true);
 }
 
-/** Strict canonical projection used before a local Relay draft is persisted. */
-export function normalizeRelayDraftInput(input: RelayDraftInput): RelayDraftInput {
+/**
+ * Canonical standalone Relay draft projection. Sparse caller input is expanded
+ * before hashing or persistence. The optional Workstream key is a read-time
+ * compatibility seam for pre-v3 checkout-local payloads only.
+ */
+export function normalizeRelayDraftInput(input: unknown): RelayDraftInput {
+  return normalizeRelayDraftInputWithLegacy(input).input;
+}
+
+export interface NormalizedRelayDraftWithLegacy {
+  input: RelayDraftInput;
+  /** Validated pre-translation fields used only by exact legacy intent recovery. */
+  legacy: {
+    workstream: EntityRef;
+    evidence: readonly TeamEvidenceRef[];
+  } | null;
+}
+
+export function normalizeRelayDraftInputWithLegacy(
+  input: unknown,
+): NormalizedRelayDraftWithLegacy {
   const value = record(input, "Relay draft");
-  exactObject(value, [
-    "recipients", "workstream", "summary", "completed", "inProgress",
-    "decisions", "blockers", "unresolvedQuestions", "changedFiles",
-    "code", "evidence", "nextActions",
-  ], [], "Relay draft");
+  exactObject(
+    value,
+    ["recipients", "summary"],
+    [
+      "workstream", "completed", "inProgress", "decisions", "blockers",
+      "unresolvedQuestions", "changedFiles", "code", "evidence",
+      "nextActions",
+    ],
+    "Relay draft",
+  );
+  const legacyWorkstream = value.workstream === undefined
+    ? null
+    : entity(value.workstream, "legacy Relay draft Workstream", "workstream");
+  if (
+    legacyWorkstream !== null
+    && !isArtifactId(legacyWorkstream.id, "ws")
+  ) {
+    invalid("Legacy Relay draft Workstream must use a ws_ prefixed ULID.");
+  }
+  const originalEvidence = legacyWorkstream === null
+    ? null
+    : evidenceList(value.evidence ?? []);
   return {
+    input: {
     recipients: actorSet(value.recipients, "Relay draft recipients", true),
-    workstream: entity(value.workstream, "Relay draft Workstream", "workstream"),
     summary: text(value.summary, "Relay draft summary", 8 * 1024),
-    completed: textList(value.completed, "Relay draft completed items"),
-    inProgress: textList(value.inProgress, "Relay draft in-progress items"),
-    decisions: entitySet(value.decisions, "Relay draft decisions"),
-    blockers: textList(value.blockers, "Relay draft blockers"),
+    completed: textList(value.completed ?? [], "Relay draft completed items"),
+    inProgress: textList(value.inProgress ?? [], "Relay draft in-progress items"),
+    decisions: entitySet(value.decisions ?? [], "Relay draft decisions"),
+    blockers: textList(value.blockers ?? [], "Relay draft blockers"),
     unresolvedQuestions: textList(
-      value.unresolvedQuestions,
+      value.unresolvedQuestions ?? [],
       "Relay draft unresolved questions",
     ),
-    changedFiles: pathSet(value.changedFiles, "Relay draft changed files"),
-    code: codeSet(value.code, "Relay draft code references"),
-    evidence: evidenceList(value.evidence),
-    nextActions: textList(value.nextActions, "Relay draft next actions"),
+    changedFiles: pathSet(value.changedFiles ?? [], "Relay draft changed files"),
+    code: codeSet(value.code ?? [], "Relay draft code references"),
+    evidence: normalizeRelayDraftEvidence(value.evidence ?? [], legacyWorkstream),
+    nextActions: textList(value.nextActions ?? [], "Relay draft next actions"),
+    },
+    legacy: legacyWorkstream === null
+      ? null
+      : { workstream: legacyWorkstream, evidence: originalEvidence! },
   };
 }
 
@@ -409,14 +545,52 @@ function normalizeProposal<TPayload>(input: InboxProposalArtifactInput<TPayload>
   };
 }
 
-function normalizeRelay(input: RelayArtifactInput): RelayArtifactInput {
+function normalizeRelay(input: RelayArtifactInput): NormalizedRelayArtifactInput {
   const value = record(input, "relay");
-  exactObject(value, [
-    "id", "entityRevision", "state", "sender", "recipients", "workstream", "summary", "completed", "inProgress",
-    "decisions", "blockers", "unresolvedQuestions", "changedFiles", "code", "evidence", "nextActions",
-  ], ["publishedAt", "acknowledgedBy", "acknowledgedAt", "closedBy", "closedAt"], "relay");
+  const inferredSchemaVersion = value.schemaVersion === undefined
+    ? value.publishedAt === undefined ? 1 : 2
+    : value.schemaVersion;
+  if (
+    inferredSchemaVersion !== 1
+    && inferredSchemaVersion !== 2
+    && inferredSchemaVersion !== 3
+  ) invalid("Relay schema version is invalid.");
+  const schemaVersion = inferredSchemaVersion as 1 | 2 | 3;
+  const commonKeys = [
+    "id", "entityRevision", "state", "sender", "recipients", "summary",
+    "completed", "inProgress", "decisions", "blockers",
+    "unresolvedQuestions", "changedFiles", "code", "evidence",
+    "nextActions",
+  ] as const;
+  const lifecycleKeys = [
+    "acknowledgedBy", "acknowledgedAt", "closedBy", "closedAt",
+  ] as const;
+  if (schemaVersion === 3) {
+    exactObject(
+      value,
+      [...commonKeys, "schemaVersion", "publishedAt", "publishedRepoState"],
+      lifecycleKeys,
+      "schema-v3 relay",
+    );
+  } else if (schemaVersion === 2) {
+    exactObject(
+      value,
+      [...commonKeys, "workstream", "publishedAt"],
+      ["schemaVersion", ...lifecycleKeys],
+      "schema-v2 relay",
+    );
+  } else {
+    exactObject(
+      value,
+      [...commonKeys, "workstream"],
+      ["schemaVersion", ...lifecycleKeys],
+      "schema-v1 relay",
+    );
+  }
   const state = enumValue(value.state, RELAY_STATES, "relay state");
-  const publishedAt = value.publishedAt === undefined ? undefined : timestamp(value.publishedAt, "relay publication time");
+  const publishedAt = schemaVersion === 1
+    ? undefined
+    : timestamp(value.publishedAt, "relay publication time");
   const acknowledgedBy = value.acknowledgedBy === undefined ? undefined : actor(value.acknowledgedBy, "relay acknowledger");
   const acknowledgedAt = value.acknowledgedAt === undefined ? undefined : timestamp(value.acknowledgedAt, "relay acknowledgement time");
   const closedBy = value.closedBy === undefined ? undefined : actor(value.closedBy, "relay closer");
@@ -428,20 +602,60 @@ function normalizeRelay(input: RelayArtifactInput): RelayArtifactInput {
   if (state === "closed" && (acknowledgedBy === undefined || closedBy === undefined)) invalid("Closed relays require acknowledgement and close authority.");
   if (publishedAt !== undefined && acknowledgedAt !== undefined && publishedAt > acknowledgedAt) invalid("Relay publication cannot follow acknowledgement.");
   if (acknowledgedAt !== undefined && closedAt !== undefined && acknowledgedAt > closedAt) invalid("Relay acknowledgement cannot follow closure.");
-  return {
+  const sender = actor(value.sender, "relay sender");
+  const recipients = actorSet(value.recipients, "relay recipients", true);
+  if (schemaVersion === 3) {
+    if (sender.kind !== "member") {
+      invalid("Schema-v3 Relay sender must be a canonical Member.");
+    }
+    if (
+      recipients.length > 32
+      || recipients.some((recipient) => recipient.kind !== "member")
+    ) {
+      invalid("Schema-v3 Relay recipients must contain between 1 and 32 canonical Members.");
+    }
+    const recipientIds = recipients.map((recipient) =>
+      (recipient as Extract<ActorRef, { kind: "member" }>).memberId);
+    if (new Set(recipientIds).size !== recipientIds.length) {
+      invalid("Schema-v3 Relay recipient Member IDs must be unique.");
+    }
+    if (
+      (acknowledgedBy !== undefined && acknowledgedBy.kind !== "member")
+      || (closedBy !== undefined && closedBy.kind !== "member")
+    ) {
+      invalid("Schema-v3 Relay lifecycle principals must be canonical Members.");
+    }
+  }
+  const common = {
     id: artifactId(value.id, "relay", "relay ID"),
     entityRevision: semanticRevision(value.entityRevision), state,
-    sender: actor(value.sender, "relay sender"), recipients: actorSet(value.recipients, "relay recipients", true),
-    workstream: entity(value.workstream, "relay workstream", "workstream"),
+    sender, recipients,
     summary: text(value.summary, "relay summary", 8 * 1024), completed: textList(value.completed, "relay completed items"),
     inProgress: textList(value.inProgress, "relay in-progress items"), decisions: entitySet(value.decisions, "relay decisions"),
     blockers: textList(value.blockers, "relay blockers"), unresolvedQuestions: textList(value.unresolvedQuestions, "relay unresolved questions"),
     changedFiles: pathSet(value.changedFiles, "relay changed files"), code: codeSet(value.code, "relay code references"),
-    evidence: evidenceList(value.evidence), nextActions: textList(value.nextActions, "relay next actions"),
-    ...(publishedAt === undefined ? {} : { publishedAt }),
+    evidence: schemaVersion === 3
+      ? normalizeRelayDraftEvidence(value.evidence, null)
+      : evidenceList(value.evidence),
+    nextActions: textList(value.nextActions, "relay next actions"),
     ...(acknowledgedBy === undefined ? {} : { acknowledgedBy }), ...(acknowledgedAt === undefined ? {} : { acknowledgedAt }),
     ...(closedBy === undefined ? {} : { closedBy }), ...(closedAt === undefined ? {} : { closedAt }),
   };
+  if (schemaVersion === 3) {
+    return {
+      ...common,
+      schemaVersion,
+      publishedAt: publishedAt!,
+      publishedRepoState: repoState(
+        value.publishedRepoState,
+        "relay publication repository state",
+      ),
+    };
+  }
+  const workstream = entity(value.workstream, "relay workstream", "workstream");
+  return schemaVersion === 2
+    ? { ...common, schemaVersion, workstream, publishedAt: publishedAt! }
+    : { ...common, schemaVersion, workstream };
 }
 
 function normalizePlaybook(input: PlaybookArtifactInput): PlaybookArtifactInput {
@@ -596,8 +810,9 @@ function portableWorkflowRevisionExpectations(
 function evidenceList(
   value: unknown,
   inboxCanonicalText = false,
+  limit = WORKFLOW_ARTIFACT_MAX_COLLECTION_ENTRIES,
 ): readonly TeamEvidenceRef[] {
-  return array(value, "proposal/relay evidence", WORKFLOW_ARTIFACT_MAX_COLLECTION_ENTRIES).map((entry, index) => {
+  return array(value, "proposal/relay evidence", limit).map((entry, index) => {
     const item = record(entry, `evidence ${index}`);
     if (item.kind === "entity") {
       exactObject(item, ["kind", "entity"], [], `entity evidence ${index}`);
@@ -631,6 +846,38 @@ function evidenceList(
     }
     invalid(`Evidence ${index} kind is invalid.`);
   });
+}
+
+function normalizeRelayDraftEvidence(
+  value: unknown,
+  legacyWorkstream: EntityRef | null,
+): readonly TeamEvidenceRef[] {
+  if (legacyWorkstream !== null) {
+    const evidence = evidenceList(value);
+    const translated = { kind: "entity" as const, entity: legacyWorkstream };
+    return evidence.some((item) => stableJson(item) === stableJson(translated))
+      ? evidence
+      : [translated, ...evidence];
+  }
+  const evidence = evidenceList(
+    value,
+    false,
+    WORKFLOW_ARTIFACT_MAX_COLLECTION_ENTRIES + 1,
+  );
+  if (evidence.length <= WORKFLOW_ARTIFACT_MAX_COLLECTION_ENTRIES) {
+    return evidence;
+  }
+  const migrationEvidence = evidence[0];
+  if (
+    migrationEvidence?.kind !== "entity"
+    || migrationEvidence.entity.kind !== "workstream"
+    || !isArtifactId(migrationEvidence.entity.id, "ws")
+  ) {
+    invalid(
+      "Relay evidence exceeds 64 entries without the reserved translated Workstream evidence slot.",
+    );
+  }
+  return evidence;
 }
 
 function actor(value: unknown, label: string): ActorRef {
@@ -846,6 +1093,31 @@ function timestamp(value: unknown, label: string): string {
     invalid(`${label} must be an exact UTC ISO-8601 timestamp.`);
   }
   return result;
+}
+
+function repoState(value: unknown, label: string): RepoState {
+  const item = record(value, label);
+  exactObject(
+    item,
+    ["branch", "head", "dirty", "observedAt"],
+    [],
+    label,
+  );
+  const branch = item.branch === null
+    ? null
+    : text(item.branch, `${label} branch`, 1_024);
+  const head = item.head === null
+    ? null
+    : gitHash(item.head, `${label} HEAD`);
+  if (typeof item.dirty !== "boolean") {
+    invalid(`${label} dirty flag must be boolean.`);
+  }
+  return {
+    branch,
+    head,
+    dirty: item.dirty,
+    observedAt: timestamp(item.observedAt, `${label} observation time`),
+  };
 }
 
 function text(value: unknown, label: string, maxBytes: number): string {

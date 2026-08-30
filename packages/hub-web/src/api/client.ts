@@ -71,6 +71,7 @@ import type {
   RelayOperationPreviewResponse,
   JobsResponse,
   JobSummary,
+  OverviewResponse,
   ProblemDetails,
   SearchRequest,
   SearchResponse,
@@ -120,11 +121,48 @@ export interface JobSubscription {
   close(): void;
 }
 
+export type InboxFixtureVariant = "empty" | "unknown" | "partial";
+export type RelayFixtureVariant = "empty" | "closed" | "missing" | "partial" | "legacy";
+export type ActivityFixtureVariant = "empty" | "legacy" | "partial";
+export type MemberFixtureVariant =
+  | "configured"
+  | "git-alias"
+  | "git-fallback"
+  | "unknown"
+  | "stale"
+  | "inactive"
+  | "ambiguous"
+  | "partial";
+export type OverviewFixtureVariant =
+  | "established"
+  | "caught-up"
+  | "pending-review"
+  | "relay-ready"
+  | "relay-in-hand"
+  | "identity-unresolved"
+  | "indexes-stale"
+  | "indexes-degraded"
+  | "indexes-missing"
+  | "job-determinate"
+  | "job-indeterminate"
+  | "failure"
+  | "partial"
+  | "unavailable";
+
+export interface FixtureApiOptions {
+  inboxFixture?: InboxFixtureVariant;
+  relayFixture?: RelayFixtureVariant;
+  activityFixture?: ActivityFixtureVariant;
+  memberFixture?: MemberFixtureVariant;
+  overviewFixture?: OverviewFixtureVariant;
+}
+
 export interface HubApi {
   bootstrap(token: string): Promise<BootstrapResponse>;
   getSession(): Promise<SessionResponse>;
   getCapabilities(): Promise<CapabilitiesResponse>;
   getHome(): Promise<HomeResponse>;
+  getOverview(): Promise<OverviewResponse>;
   getMembers(request: TeamMemberListRequest): Promise<TeamMemberListResponse>;
   getMember(id: string): Promise<TeamMember>;
   getCurrentActor(): Promise<TeamCurrentActorResponse>;
@@ -253,6 +291,7 @@ function assertSafeInboxProposalId(value: string): string {
 }
 
 const loadRelayClient = () => import("./relay-client");
+const loadOverviewContract = () => import("@mex/hub-contracts/overview");
 
 export function readBootstrapToken(hash = window.location.hash): string | null {
   if (!hash || hash === "#") return null;
@@ -276,7 +315,6 @@ export class HttpHubApi implements HubApi {
       throw new HubApiError(fallbackProblem(400, detail));
     },
   };
-
   async #request<T>(
     path: string,
     schema: Parser<T>,
@@ -320,6 +358,11 @@ export class HttpHubApi implements HubApi {
 
   getHome(): Promise<HomeResponse> {
     return this.#request("/home", HomeResponseSchema);
+  }
+
+  async getOverview(): Promise<OverviewResponse> {
+    const { OverviewResponseSchema } = await loadOverviewContract();
+    return this.#request("/overview", OverviewResponseSchema);
   }
 
   getMembers(request: TeamMemberListRequest): Promise<TeamMemberListResponse> {
@@ -624,12 +667,82 @@ export function fixturesEnabled(isDevelopment: boolean, search: string): boolean
   return isDevelopment && new URLSearchParams(search).get("fixture") === "populated";
 }
 
+export function inboxFixtureVariant(search: string): InboxFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("inboxFixture");
+  return value === "empty" || value === "unknown" || value === "partial"
+    ? value
+    : undefined;
+}
+
+export function relayFixtureVariant(search: string): RelayFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("relayFixture");
+  return value === "empty"
+    || value === "closed"
+    || value === "missing"
+    || value === "partial"
+    || value === "legacy"
+    ? value
+    : undefined;
+}
+
+export function activityFixtureVariant(search: string): ActivityFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("activityFixture");
+  return value === "empty" || value === "legacy" || value === "partial"
+    ? value
+    : undefined;
+}
+
+export function memberFixtureVariant(search: string): MemberFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("memberFixture");
+  return value === "configured"
+    || value === "git-alias"
+    || value === "git-fallback"
+    || value === "unknown"
+    || value === "stale"
+    || value === "inactive"
+    || value === "ambiguous"
+    || value === "partial"
+    ? value
+    : undefined;
+}
+
+export function overviewFixtureVariant(search: string): OverviewFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("overviewFixture");
+  return value === "established"
+    || value === "caught-up"
+    || value === "pending-review"
+    || value === "relay-ready"
+    || value === "relay-in-hand"
+    || value === "identity-unresolved"
+    || value === "indexes-stale"
+    || value === "indexes-degraded"
+    || value === "indexes-missing"
+    || value === "job-determinate"
+    || value === "job-indeterminate"
+    || value === "failure"
+    || value === "partial"
+    || value === "unavailable"
+    ? value
+    : undefined;
+}
+
 export async function resolveApi(): Promise<HubApi> {
   if (
     createFixtureApi !== null
     && fixturesEnabled(import.meta.env.DEV, window.location.search)
   ) {
-    return createFixtureApi();
+    const inboxVariant = inboxFixtureVariant(window.location.search);
+    const relayVariant = relayFixtureVariant(window.location.search);
+    const activityVariant = activityFixtureVariant(window.location.search);
+    const memberVariant = memberFixtureVariant(window.location.search);
+    const overviewVariant = overviewFixtureVariant(window.location.search);
+    return createFixtureApi({
+      ...(inboxVariant === undefined ? {} : { inboxFixture: inboxVariant }),
+      ...(relayVariant === undefined ? {} : { relayFixture: relayVariant }),
+      ...(activityVariant === undefined ? {} : { activityFixture: activityVariant }),
+      ...(memberVariant === undefined ? {} : { memberFixture: memberVariant }),
+      ...(overviewVariant === undefined ? {} : { overviewFixture: overviewVariant }),
+    });
   }
   return new HttpHubApi();
 }

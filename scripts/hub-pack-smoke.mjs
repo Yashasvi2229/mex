@@ -113,6 +113,68 @@ try {
   ) {
     throw new Error("The packed install omitted the static Relay command contract.");
   }
+  const relayExamples = relayContract?.data?.requestFile?.examples;
+  const sparseRelayDraft = relayExamples?.[0]?.request?.action?.draft;
+  if (
+    !Array.isArray(relayExamples)
+    || relayExamples.length === 0
+    || relayExamples[0]?.command !== "relay.draft.save"
+    || JSON.stringify(Object.keys(sparseRelayDraft ?? {}).sort())
+      !== JSON.stringify(["recipients", "summary"])
+    || !relayExamples.some((example) => (
+      Array.isArray(example?.request?.action?.draft?.evidence)
+      && example.request.action.draft.evidence.some((item) => item?.kind === "commit")
+      && example.request.action.draft.evidence.some((item) => item?.kind === "external")
+    ))
+  ) {
+    throw new Error("The packed Relay resolver did not lead with the sparse standalone v1 request contract.");
+  }
+  const sparseRelayRequest = join(work, "relay-sparse-request.json");
+  writeFileSync(sparseRelayRequest, JSON.stringify(relayExamples[0].request));
+  const sparseRelayPreview = JSON.parse(run(
+    process.execPath,
+    [cli, "relay", "draft", "save", sparseRelayRequest, "--json"],
+    project,
+  ));
+  const normalizedSparseDraft = sparseRelayPreview?.data?.request?.action?.draft;
+  if (
+    sparseRelayPreview?.ok !== true
+    || Object.hasOwn(normalizedSparseDraft ?? {}, "workstream")
+    || ![
+      "completed",
+      "inProgress",
+      "decisions",
+      "blockers",
+      "unresolvedQuestions",
+      "changedFiles",
+      "code",
+      "evidence",
+      "nextActions",
+    ].every((key) => Array.isArray(normalizedSparseDraft?.[key]))
+  ) {
+    throw new Error("The packed Relay CLI did not normalize the sparse standalone draft.");
+  }
+  const packedCapabilitiesOutput = run(
+    process.execPath,
+    [cli, "capabilities", "--json"],
+    project,
+  );
+  if (Buffer.byteLength(packedCapabilitiesOutput, "utf8") > 32_768) {
+    throw new Error("The packed capability manifest exceeded its 32 KiB output ceiling.");
+  }
+  const packedCapabilities = JSON.parse(packedCapabilitiesOutput);
+  const packedRelayCommands = Object.values(packedCapabilities?.data?.commands ?? {})
+    .flat()
+    .filter((entry) => typeof entry?.id === "string" && entry.id.startsWith("relay."));
+  if (
+    packedRelayCommands.length !== 1
+    || packedRelayCommands[0]?.id !== "relay.contract"
+    || packedRelayCommands[0]?.contractResolver !== "relay.contract"
+    || packedCapabilitiesOutput.includes("team-relay-request-v1.json")
+    || packedCapabilitiesOutput.includes("team-relay-preview-envelope-v1.json")
+  ) {
+    throw new Error("The packed capability manifest expanded the compact Relay resolver descriptor.");
+  }
   run(process.execPath, [cli, "graph", "rebuild", "--root", project, "--json"], project);
   const graphScope = run(process.execPath, [
     cli,
@@ -231,12 +293,27 @@ try {
     redirect: "error",
   });
   const homeBody = await home.json();
+  const overview = await fetch(`${url.origin}/api/v1/overview`, {
+    headers: { cookie },
+    redirect: "error",
+  });
+  const overviewBody = await overview.json();
   const activity = await fetch(`${url.origin}/api/v1/activity`, {
     headers: { cookie },
     redirect: "error",
   });
   const activityBody = await activity.json();
-  if (!home.ok || homeBody.sections?.activity?.count !== 1) {
+  const overviewCanonicalActivityCount = overviewBody.activity?.availability === "available"
+    && Array.isArray(overviewBody.activity.items)
+    ? overviewBody.activity.items.filter((item) => item?.source === "activity").length
+    : null;
+  if (
+    !home.ok
+    || Object.hasOwn(homeBody, "sections")
+    || Object.hasOwn(homeBody, "activity")
+    || !overview.ok
+    || overviewCanonicalActivityCount !== 1
+  ) {
     const diagnosticCodes = Array.isArray(activityBody?.diagnostics)
       ? activityBody.diagnostics.slice(0, 10).map((item) => ({
           code: typeof item?.code === "string" ? item.code : "UNKNOWN",
@@ -246,7 +323,10 @@ try {
     const detail = JSON.stringify({
       homeStatus: home.status,
       homeProblemCode: typeof homeBody?.code === "string" ? homeBody.code : null,
-      homeActivity: homeBody.sections?.activity ?? null,
+      homeHasActivity: Object.hasOwn(homeBody, "sections") || Object.hasOwn(homeBody, "activity"),
+      overviewStatus: overview.status,
+      overviewProblemCode: typeof overviewBody?.code === "string" ? overviewBody.code : null,
+      overviewCanonicalActivityCount,
       activityStatus: activity.status,
       canonicalActivityCount: Array.isArray(activityBody?.items)
         ? activityBody.items.filter((item) => item?.source === "activity").length
@@ -263,15 +343,20 @@ try {
       ).includes(13),
       diagnosticCodes,
     });
-    throw new Error(`The packaged Hub did not report the exact canonical activity count: ${detail}`);
+    throw new Error(`The packaged Hub did not keep the shell lightweight and Overview Activity exact: ${detail}`);
   }
+  const packedActivity = activityBody.items?.find((item) => (
+    item.source === "activity" && item.action === "activity.packed"
+  ));
   if (
     !activity.ok
     || activityBody.items?.length !== 2
-    || !activityBody.items.some((item) => item.source === "activity" && item.action === "activity.packed")
+    || !packedActivity
+    || packedActivity.recordOrigin?.kind !== "unknown"
+    || packedActivity.label !== null
     || !activityBody.items.some((item) => item.source === "legacy" && item.message === "Packed legacy decision")
   ) {
-    throw new Error("The packaged Hub did not project real canonical and legacy activity.");
+    throw new Error("The packaged Hub did not project v1 Activity as unknown-origin beside Project notes.");
   }
   const serializedActivity = JSON.stringify(activityBody);
   for (const secret of [

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RepoRelativePath } from "../../contracts/shared.js";
-import type { ActivityEvent } from "../../contracts/workflow.js";
+import type { ActivityEventV1, ActivityEventV2 } from "../../contracts/workflow.js";
 import {
   activityArtifactPath,
   memberArtifactPath,
@@ -101,6 +101,49 @@ describe("member artifact codec", () => {
 });
 
 describe("activity artifact codec", () => {
+  it("preserves the frozen schema-v1 Activity byte format exactly", () => {
+    const frozenEvent: ActivityEventV1 = {
+      schemaVersion: 1,
+      id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      timestamp: "2026-08-23T01:02:03.000Z",
+      actor: {
+        kind: "member",
+        memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        displayName: "Ada Lovelace",
+      },
+      action: "member.observed",
+      subjects: [],
+      repoState: {
+        branch: "main",
+        head: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        dirty: false,
+        observedAt: "2026-08-23T01:02:02.000Z",
+      },
+    };
+    const frozenBytes = [
+      "---",
+      "schema_version: 1",
+      'id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAV"',
+      'timestamp: "2026-08-23T01:02:03.000Z"',
+      'actor: {"displayName":"Ada Lovelace","kind":"member","memberId":"member_01ARZ3NDEKTSV4RRFFQ69G5FAV"}',
+      'action: "member.observed"',
+      "subjects: []",
+      'repo_state: {"branch":"main","dirty":false,"head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","observedAt":"2026-08-23T01:02:02.000Z"}',
+      "---",
+      "",
+    ].join("\n");
+
+    expect(serializeActivityArtifact(frozenEvent)).toBe(frozenBytes);
+    const path = activityArtifactPath(frozenEvent);
+    const parsed = parseActivityArtifact(Buffer.from(frozenBytes, "utf8"), path);
+    expect(parsed).toEqual({
+      ...frozenEvent,
+      sourcePath: path,
+      revision: revisionOf(frozenBytes),
+    });
+    expect(serializeActivityArtifact(parsed)).toBe(frozenBytes);
+  });
+
   it("round-trips all stable subject forms with recursively sorted metadata", () => {
     const event = sampleEvent({
       metadata: { z: 1, a: { safe: true } },
@@ -112,6 +155,8 @@ describe("activity artifact codec", () => {
     const document = serializeActivityArtifact(event);
     expect(serializeActivityArtifact(alternate)).toBe(document);
     expect(document).toContain("metadata: {\"a\":{\"safe\":true},\"z\":1}");
+    expect(document).not.toContain("\norigin:");
+    expect(document).not.toContain("\nlabel:");
     expect(document.endsWith("---\n")).toBe(true);
 
     const path = activityArtifactPath(event);
@@ -123,6 +168,68 @@ describe("activity artifact codec", () => {
       sourcePath: path,
       revision: revisionOf(document),
     });
+  });
+
+  it("round-trips schema-v2 workflow and custom provenance without changing v1 bytes", () => {
+    const historical = sampleEvent();
+    const historicalBytes = serializeActivityArtifact(historical);
+    const workflow = sampleEventV2({
+      origin: { kind: "workflow", operation: "relay.close" },
+      label: "Refresh-token ownership handoff",
+      action: "relay.closed",
+    });
+    const custom = sampleEventV2({
+      id: generateArtifactId("event", {
+        now: Date.UTC(2026, 7, 23),
+        random: new Uint8Array(10).fill(3),
+      }),
+      origin: { kind: "custom" },
+      action: "relay.closed",
+    });
+
+    for (const event of [workflow, custom]) {
+      const document = serializeActivityArtifact(event);
+      const parsed = parseActivityArtifact(document, activityArtifactPath(event));
+      expect(parsed).toEqual({
+        ...event,
+        sourcePath: activityArtifactPath(event),
+        revision: revisionOf(document),
+      });
+      expect(document).toContain("schema_version: 2");
+    }
+    expect(serializeActivityArtifact(historical)).toBe(historicalBytes);
+  });
+
+  it("strictly validates schema-v2 provenance and its bounded human label", () => {
+    expect(() => serializeActivityArtifact(sampleEventV2({
+      origin: { kind: "workflow", operation: "Relay Close" } as any,
+    }))).toThrow(/workflow operation/);
+    expect(() => serializeActivityArtifact(sampleEventV2({
+      origin: { kind: "custom", operation: "relay.close" } as any,
+    }))).toThrow(/invalid fields/);
+    expect(() => serializeActivityArtifact(sampleEventV2({
+      label: "x".repeat(513),
+    }))).toThrow(/activity label exceeds 512 bytes/);
+    expect(() => serializeActivityArtifact(sampleEventV2({
+      label: "é".repeat(257),
+    }))).toThrow(/activity label exceeds 512 bytes/);
+    expect(() => serializeActivityArtifact(sampleEventV2({
+      label: "unsafe\u2028label",
+    }))).toThrow(/canonical single-line text/);
+    expect(() => serializeActivityArtifact({
+      ...sampleEvent(),
+      origin: { kind: "custom" },
+    } as any)).toThrow(/schemaVersion 1 cannot contain provenance/);
+
+    const v1 = serializeActivityArtifact(sampleEvent());
+    expect(() => parseActivityArtifact(
+      v1.replace("subjects:", 'origin: {"kind":"custom"}\nsubjects:'),
+      activityArtifactPath(sampleEvent()),
+    )).toThrow(/invalid fields/);
+    expect(() => parseActivityArtifact(
+      v1.replace("schema_version: 1", "schema_version: 3"),
+      activityArtifactPath(sampleEvent()),
+    )).toThrow(/schema_version must be 1 or 2/);
   });
 
   it.each([
@@ -222,7 +329,7 @@ describe("activity artifact codec", () => {
   });
 });
 
-function sampleEvent(overrides: Partial<ActivityEvent> = {}): ActivityEvent {
+function sampleEvent(overrides: Partial<ActivityEventV1> = {}): ActivityEventV1 {
   return {
     schemaVersion: 1,
     id: EVENT_ID,
@@ -242,6 +349,23 @@ function sampleEvent(overrides: Partial<ActivityEvent> = {}): ActivityEvent {
       dirty: true,
       observedAt: "2026-08-23T01:02:02.000Z",
     },
+    ...overrides,
+  };
+}
+
+function sampleEventV2(overrides: Partial<ActivityEventV2> = {}): ActivityEventV2 {
+  const historical = sampleEvent();
+  const {
+    schemaVersion: _schemaVersion,
+    origin: _origin,
+    label: _label,
+    ...common
+  } = historical;
+  return {
+    schemaVersion: 2,
+    ...common,
+    origin: { kind: "workflow", operation: "member.update" },
+    label: "Ada Lovelace",
     ...overrides,
   };
 }

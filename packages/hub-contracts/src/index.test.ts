@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import * as IdRuntime from "./ids.js";
+import { OverviewActivityPanelSchema } from "./overview.js";
 import * as RelayRuntime from "./relay.js";
 import {
   ActivityRequestSchema,
@@ -8,6 +10,7 @@ import {
   CodeWorkspaceResponseSchema,
   CodeKnowledgeResponseSchema,
   HealthResponseSchema,
+  GraphSymbolIdSchema,
   HUB_LIMITS,
   HomeResponseSchema,
   HubCapabilitiesSchema,
@@ -16,6 +19,7 @@ import {
   InboxEvidenceRefSchema,
   InboxOperationPreviewRequestSchema,
   InboxOperationPreviewResponseSchema,
+  InboxProposalIdSchema,
   InboxProposalDetailSchema,
   RelayDetailSchema,
   RelayDraftDetailSchema,
@@ -25,6 +29,7 @@ import {
   RelayDraftSummarySchema,
   RelayIdSchema,
   RelayListResponseSchema,
+  RelayOperationApplyRequestSchema,
   RelayOperationApplyResponseSchema,
   RelayOperationPreviewRequestSchema,
   RelayOperationPreviewResponseSchema,
@@ -35,6 +40,8 @@ import {
   SpecListRequestSchema,
   SpecListResponseSchema,
   TeamCurrentActorResponseSchema,
+  TeamActivityEventSchema,
+  TeamMemberIdSchema,
   TeamMemberListRequestSchema,
   TeamMemberListResponseSchema,
   TeamMemberSchema,
@@ -45,13 +52,19 @@ import {
   TeamWorkstreamListResponseSchema,
   TeamWorkstreamSchema,
   WikiEntityDetailResponseSchema,
+  WikiEntityIdSchema,
   WikiEntityListRequestSchema,
   WikiEntityListResponseSchema,
   WikiRelationsRequestSchema,
 } from "./index.js";
 
 describe("Hub API contracts", () => {
-  it("keeps the private Relay runtime entry on the canonical schema instances", () => {
+  it("keeps the private ID and Relay runtime entries on the canonical schema instances", () => {
+    expect(IdRuntime.TeamMemberIdSchema).toBe(TeamMemberIdSchema);
+    expect(IdRuntime.RelayIdSchema).toBe(RelayIdSchema);
+    expect(IdRuntime.InboxProposalIdSchema).toBe(InboxProposalIdSchema);
+    expect(IdRuntime.GraphSymbolIdSchema).toBe(GraphSymbolIdSchema);
+    expect(IdRuntime.WikiEntityIdSchema).toBe(WikiEntityIdSchema);
     expect(RelayRuntime.RelayDetailSchema).toBe(RelayDetailSchema);
     expect(RelayRuntime.RelayDraftDetailSchema).toBe(RelayDraftDetailSchema);
     expect(RelayRuntime.RelayDraftIdSchema).toBe(RelayDraftIdSchema);
@@ -60,6 +73,19 @@ describe("Hub API contracts", () => {
     expect(RelayRuntime.RelayListResponseSchema).toBe(RelayListResponseSchema);
     expect(RelayRuntime.RelayOperationApplyResponseSchema).toBe(RelayOperationApplyResponseSchema);
     expect(RelayRuntime.RelayOperationPreviewResponseSchema).toBe(RelayOperationPreviewResponseSchema);
+    expect(RelayRuntime.RelayIdSchema).toBe(IdRuntime.RelayIdSchema);
+    expect(IdRuntime.RelayIdSchema.parse("relay_01000000000000000000000001"))
+      .toBe("relay_01000000000000000000000001");
+    expect(IdRuntime.RelayIdSchema.safeParse("relay-not-portable").success).toBe(false);
+    expect(IdRuntime.TeamMemberIdSchema.parse("member_01ARZ3NDEKTSV4RRFFQ69G5FAV"))
+      .toBe("member_01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    expect(IdRuntime.TeamMemberIdSchema.safeParse("member-not-portable").success).toBe(false);
+    expect(IdRuntime.InboxProposalIdSchema.parse("proposal_01000000000000000000000001"))
+      .toBe("proposal_01000000000000000000000001");
+    expect(IdRuntime.GraphSymbolIdSchema.parse("symbol:router.handle"))
+      .toBe("symbol:router.handle");
+    expect(IdRuntime.WikiEntityIdSchema.parse("mx_01000000000000000000000001"))
+      .toBe("mx_01000000000000000000000001");
   });
 
   it("rejects unknown request fields and oversized queries", () => {
@@ -100,13 +126,12 @@ describe("Hub API contracts", () => {
       .toBe(false);
   });
 
-  it("locks strict Relay drafts, all evidence variants, and dual lifecycle projections", () => {
+  it("locks sparse standalone Relay drafts, all evidence variants, and v1/v2/v3 lifecycle projections", () => {
     const revision = "a".repeat(64);
     const member = { kind: "member" as const, memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV", displayName: "Ada" };
     const workstream = { kind: "workstream" as const, id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV", title: "Relay" };
     const draft = {
       recipients: [member],
-      workstream,
       summary: "A complete Relay handoff.",
       completed: ["Captured the characterization."],
       inProgress: ["Reviewing the final gate."],
@@ -126,6 +151,23 @@ describe("Hub API contracts", () => {
       nextActions: ["Run the final gate."],
     };
     expect(RelayDraftInputSchema.parse(draft)).toEqual(draft);
+    expect(RelayDraftInputSchema.parse({
+      recipients: [member],
+      summary: "A sparse standalone handoff.",
+    })).toEqual({
+      recipients: [member],
+      summary: "A sparse standalone handoff.",
+      completed: [],
+      inProgress: [],
+      decisions: [],
+      blockers: [],
+      unresolvedQuestions: [],
+      changedFiles: [],
+      code: [],
+      evidence: [],
+      nextActions: [],
+    });
+    expect(RelayDraftInputSchema.safeParse({ ...draft, workstream }).success).toBe(false);
     expect(RelayDraftInputSchema.safeParse({
       ...draft,
       recipients: [{ ...member, displayName: "M".repeat(512) }],
@@ -157,13 +199,29 @@ describe("Hub API contracts", () => {
       evidence: [draft.evidence[0], draft.evidence[0]],
     }).success).toBe(true);
     expect(RelayDraftInputSchema.safeParse({ ...draft, recipients: [member, member] }).success).toBe(false);
+    const translatedEvidence = [
+      { kind: "entity" as const, entity: workstream },
+      ...Array.from({ length: 64 }, (_, index) => ({
+        kind: "manual" as const,
+        note: `Legacy evidence ${index}`,
+      })),
+    ];
+    expect(RelayDraftInputSchema.safeParse({
+      ...draft,
+      evidence: translatedEvidence,
+    }).success).toBe(false);
+    expect(RelayDraftInputSchema.safeParse({
+      ...draft,
+      evidence: translatedEvidence.map((item, index) => index === 0
+        ? { kind: "manual" as const, note: "Not a translated Workstream" }
+        : item),
+    }).success).toBe(false);
     expect(RelayDraftSummarySchema.safeParse({
       id: "relay-draft-summary",
       revision,
       updatedAt: "2026-08-29T01:00:00.000Z",
       summary: draft.summary,
       recipients: [member, member],
-      workstream,
     }).success).toBe(false);
     expect(RelayDraftInputSchema.safeParse({ ...draft, summary: "not\nsingle line" }).success).toBe(false);
 
@@ -175,11 +233,64 @@ describe("Hub API contracts", () => {
     expect(RelayOperationPreviewRequestSchema.parse(save)).toEqual(save);
     expect(RelayOperationPreviewRequestSchema.safeParse({
       ...save,
+      action: { ...save.action, draft: { ...draft, evidence: translatedEvidence } },
+    }).success).toBe(false);
+    const migratedSave = {
+      ...save,
+      action: {
+        ...save.action,
+        draftId: "relay-migrated-draft",
+        draft: { ...draft, evidence: translatedEvidence },
+      },
+      expectedRevisions: [{
+        target: {
+          kind: "local" as const,
+          namespace: "relay-draft" as const,
+          id: "relay-migrated-draft",
+        },
+        revision,
+      }],
+    };
+    expect(RelayOperationPreviewRequestSchema.safeParse(migratedSave).success).toBe(true);
+    expect(RelayOperationPreviewRequestSchema.safeParse({
+      ...save,
       expectedRevisions: [{
         target: { kind: "artifact", path: ".mex/workstreams/ws_01ARZ3NDEKTSV4RRFFQ69G5FAV.md" },
         revision,
       }],
     }).success).toBe(false);
+
+    const manualEvidence = Array.from({ length: 64 }, (_, index) => ({
+      kind: "manual" as const,
+      note: `Legacy ${index}:`,
+    }));
+    const rawNearLimit = {
+      ...draft,
+      workstream,
+      evidence: manualEvidence,
+    };
+    const size = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    let remaining = HUB_LIMITS.maxMutationBodyBytes - 8 - size(rawNearLimit);
+    for (let index = 0; index < manualEvidence.length && remaining > 0; index += 1) {
+      const addition = Math.min(remaining, 4_000 - manualEvidence[index]!.note.length);
+      manualEvidence[index]!.note += "x".repeat(addition);
+      remaining -= addition;
+    }
+    const translatedNearLimit = {
+      ...draft,
+      evidence: [{ kind: "entity" as const, entity: workstream }, ...manualEvidence],
+    };
+    expect(size(rawNearLimit)).toBeLessThanOrEqual(HUB_LIMITS.maxMutationBodyBytes);
+    expect(size(translatedNearLimit)).toBeGreaterThan(HUB_LIMITS.maxMutationBodyBytes);
+    expect(RelayDraftInputSchema.safeParse(translatedNearLimit).success).toBe(false);
+    expect(RelayDraftDetailSchema.safeParse({
+      id: "relay-near-limit-legacy",
+      revision,
+      updatedAt: "2026-08-29T01:00:00.000Z",
+      summary: translatedNearLimit.summary,
+      recipients: translatedNearLimit.recipients,
+      input: translatedNearLimit,
+    }).success).toBe(true);
 
     const relay = {
       schemaVersion: 2 as const,
@@ -203,6 +314,7 @@ describe("Hub API contracts", () => {
       diagnostics: [],
       diagnosticsTruncated: false,
       publishedAt: "2026-08-29T01:00:00.000Z",
+      publishedRepoState: null,
       acknowledgedBy: member,
       acknowledgedAt: "2026-08-29T02:00:00.000Z",
       closedBy: member,
@@ -215,12 +327,42 @@ describe("Hub API contracts", () => {
       ...relay,
       schemaVersion: 1,
       publishedAt: null,
+      publishedRepoState: null,
       diagnostics: [{
         code: "RELAY_LEGACY_PUBLICATION_TIME",
         severity: "warning",
         message: "One or more legacy schema-v1 Relays have no canonical publication timestamp.",
       }],
     }).success).toBe(true);
+
+    const standaloneRelay = {
+      ...relay,
+      schemaVersion: 3 as const,
+      workstream: null,
+      publishedRepoState: {
+        branch: "feature/relay-v3",
+        head: "f".repeat(40),
+        dirty: true,
+        observedAt: "2026-08-29T01:00:00.000Z",
+      },
+    };
+    expect(RelayDetailSchema.parse(standaloneRelay)).toEqual(standaloneRelay);
+    expect(RelayDetailSchema.safeParse({
+      ...standaloneRelay,
+      workstream,
+    }).success).toBe(false);
+    expect(RelayDetailSchema.safeParse({
+      ...standaloneRelay,
+      publishedRepoState: null,
+    }).success).toBe(false);
+    expect(RelayDetailSchema.safeParse({
+      ...standaloneRelay,
+      evidence: translatedEvidence,
+    }).success).toBe(true);
+    expect(RelayDetailSchema.safeParse({
+      ...relay,
+      evidence: translatedEvidence,
+    }).success).toBe(false);
 
     const legacyMember = { ...member, displayName: "M".repeat(201) };
     const legacyGit = {
@@ -272,6 +414,7 @@ describe("Hub API contracts", () => {
       workstream: legacyRelay.workstream,
       summary: legacyRelay.summary,
       publishedAt: legacyRelay.publishedAt,
+      publishedRepoState: legacyRelay.publishedRepoState,
       acknowledgedBy: legacyRelay.acknowledgedBy,
       acknowledgedAt: legacyRelay.acknowledgedAt,
       closedBy: legacyRelay.closedBy,
@@ -325,6 +468,7 @@ describe("Hub API contracts", () => {
       workstream: relay.workstream,
       summary: relay.summary,
       publishedAt: relay.publishedAt,
+      publishedRepoState: relay.publishedRepoState,
       acknowledgedBy: relay.acknowledgedBy,
       acknowledgedAt: relay.acknowledgedAt,
       closedBy: relay.closedBy,
@@ -383,10 +527,6 @@ describe("Hub API contracts", () => {
       target: { kind: "local" as const, namespace: "relay-draft" as const, id: "draft-publish" },
       revision,
     };
-    const workstreamTarget = {
-      target: { kind: "artifact" as const, path: `.mex/workstreams/${workstream.id}.md` },
-      revision,
-    };
     const memberTarget = {
       target: { kind: "artifact" as const, path: `.mex/team/members/${member.memberId}.md` },
       revision,
@@ -394,19 +534,36 @@ describe("Hub API contracts", () => {
     const publish = {
       operationId: "relay_contract_publish",
       action: { kind: "relay.publish" as const, draftId: "draft-publish" },
-      expectedRevisions: [memberTarget, draftTarget, workstreamTarget],
+      expectedRevisions: [memberTarget, draftTarget],
     };
     expect(RelayOperationPreviewRequestSchema.parse(publish)).toEqual(publish);
     for (const expectedRevisions of [
-      [draftTarget, memberTarget],
-      [draftTarget, workstreamTarget],
-      [draftTarget, workstreamTarget, memberTarget, {
+      [draftTarget],
+      [memberTarget],
+      [draftTarget, memberTarget, {
         target: { kind: "artifact" as const, path: "README.md" },
+        revision,
+      }],
+      [draftTarget, memberTarget, {
+        target: { kind: "artifact" as const, path: `.mex/workstreams/${workstream.id}.md` },
         revision,
       }],
     ]) {
       expect(RelayOperationPreviewRequestSchema.safeParse({ ...publish, expectedRevisions }).success).toBe(false);
     }
+
+    const legacyPublish = {
+      ...publish,
+      expectedRevisions: [
+        draftTarget,
+        memberTarget,
+        {
+          target: { kind: "artifact" as const, path: `.mex/workstreams/${workstream.id}.md` },
+          revision,
+        },
+      ],
+    };
+    expect(RelayOperationPreviewRequestSchema.safeParse(legacyPublish).success).toBe(false);
 
     const previewEnvelope = {
       schemaVersion: 1 as const,
@@ -437,6 +594,22 @@ describe("Hub API contracts", () => {
       },
     };
     expect(RelayOperationPreviewResponseSchema.parse(previewEnvelope)).toEqual(previewEnvelope);
+    const legacyPublishEnvelope = {
+      ...previewEnvelope,
+      request: legacyPublish,
+      preview: { ...previewEnvelope.preview, scope: "mixed" as const },
+      receipt: {
+        ...previewEnvelope.receipt,
+        purposeIds: [
+          { purpose: "activity" as const, id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+          { purpose: "relay" as const, id: "relay_01000000000000000000000001" },
+        ],
+      },
+    };
+    expect(RelayOperationPreviewResponseSchema.safeParse(legacyPublishEnvelope).success)
+      .toBe(false);
+    expect(RelayOperationApplyRequestSchema.safeParse(legacyPublishEnvelope).success)
+      .toBe(true);
     const maximumServiceMember = { ...member, displayName: "S".repeat(512) };
     const maximumAuthorityEnvelope = {
       ...previewEnvelope,
@@ -487,6 +660,15 @@ describe("Hub API contracts", () => {
       }],
     };
     expect(RelayOperationApplyResponseSchema.parse(relayApply)).toEqual(relayApply);
+    expect(RelayOperationApplyResponseSchema.safeParse({
+      ...relayApply,
+      events: [{
+        ...relayApply.events[0],
+        schemaVersion: 2,
+        origin: { kind: "workflow", operation: "relay.publish" },
+        label: "Authentication handoff",
+      }],
+    }).success).toBe(true);
     expect(RelayOperationApplyResponseSchema.safeParse({
       ...relayApply,
       events: [{
@@ -889,6 +1071,51 @@ describe("Hub API contracts", () => {
     }).success).toBe(false);
   });
 
+  it("accepts strict schema-v1 and provenance-aware schema-v2 Activity events", () => {
+    const base = {
+      id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAB",
+      timestamp: "2026-08-27T04:05:06.000Z",
+      actor: { kind: "unknown" as const },
+      action: "relay.closed",
+      subjects: [],
+      workstream: null,
+      repoState: {
+        branch: "main",
+        head: "b".repeat(40),
+        dirty: false,
+        observedAt: "2026-08-27T04:05:06.000Z",
+      },
+    };
+    const v1 = { schemaVersion: 1 as const, ...base };
+    const workflow = {
+      schemaVersion: 2 as const,
+      ...base,
+      origin: { kind: "workflow" as const, operation: "relay.close" },
+      label: "Authentication handoff",
+    };
+    const custom = {
+      schemaVersion: 2 as const,
+      ...base,
+      origin: { kind: "custom" as const },
+    };
+
+    expect(TeamActivityEventSchema.parse(v1)).toEqual(v1);
+    expect(TeamActivityEventSchema.parse(workflow)).toEqual(workflow);
+    expect(TeamActivityEventSchema.parse(custom)).toEqual(custom);
+    expect(TeamActivityEventSchema.safeParse({
+      ...v1,
+      origin: { kind: "custom" },
+    }).success).toBe(false);
+    expect(TeamActivityEventSchema.safeParse({
+      ...workflow,
+      origin: { kind: "custom", operation: "relay.close" },
+    }).success).toBe(false);
+    expect(TeamActivityEventSchema.safeParse({
+      ...workflow,
+      label: "é".repeat(257),
+    }).success).toBe(false);
+  });
+
   it("locks the portable preview/apply golden and its byte bounds", () => {
     const envelope = teamPreviewGolden();
     expect(TeamOperationPreviewResponseSchema.parse(envelope)).toEqual(envelope);
@@ -1207,6 +1434,8 @@ describe("Hub API contracts", () => {
         displayName: "Daksh",
       },
       actorDiagnostics: [],
+      recordOrigin: { kind: "unknown" },
+      label: null,
       workstream: null,
       repository: {
         branch: "feat/activity",
@@ -1245,6 +1474,21 @@ describe("Hub API contracts", () => {
       diagnosticsTruncated: false,
     };
     expect(ActivityResponseSchema.safeParse(response).success).toBe(true);
+    expect(ActivityResponseSchema.safeParse({
+      ...response,
+      items: [{
+        ...canonical,
+        recordOrigin: { kind: "workflow", operation: "member.update" },
+        label: "Daksh",
+      }, legacy],
+    }).success).toBe(true);
+    expect(ActivityResponseSchema.safeParse({
+      ...response,
+      items: [{
+        ...canonical,
+        recordOrigin: { kind: "custom", operation: "member.update" },
+      }, legacy],
+    }).success).toBe(false);
     expect(ActivityResponseSchema.safeParse({
       ...response,
       items: [{ ...canonical, metadata: { secret: "must-not-cross" } }],
@@ -1304,6 +1548,15 @@ describe("Hub API contracts", () => {
     expect(ActivityResponseSchema.safeParse(response("src/e\u0301.ts")).success).toBe(false);
     expect(ActivityResponseSchema.safeParse(response("src/\u0080.ts")).success).toBe(false);
     expect(ActivityResponseSchema.safeParse(response(`src/${"é".repeat(192)}x`)).success).toBe(false);
+    expect(OverviewActivityPanelSchema.safeParse({
+      availability: "available",
+      observedAt: "2026-08-23T00:00:00.000Z",
+      ...response("src/ok.ts"),
+      items: Array.from({ length: 6 }, (_, index) => ({
+        ...base,
+        id: `legacy_${String(index).repeat(64)}`,
+      })),
+    }).success).toBe(false);
   });
 
   it("accepts only standard prefixed ULIDs for Hub jobs", () => {
@@ -1323,21 +1576,18 @@ describe("Hub API contracts", () => {
         dirty: false,
       },
       actor: { kind: "unknown" },
-      sections: {
-        workstreams: { availability: "unavailable", count: null, reason: "Wiki is not connected." },
-        relays: { availability: "unavailable", count: null, reason: "Wiki is not connected." },
-        inbox: { availability: "unavailable", count: null, reason: "Wiki is not connected." },
-        activity: { availability: "available", count: 0 },
+      attention: {
+        relays: { availability: "unavailable", reason: "Relays are not connected." },
+        inbox: { availability: "unavailable", reason: "Inbox is not connected." },
       },
-      activeJobs: 0,
-      attention: [],
+      jobs: { availability: "available", activeCount: 0 },
     };
     expect(HomeResponseSchema.safeParse(response).success).toBe(true);
     expect(HomeResponseSchema.safeParse({
       ...response,
-      sections: {
-        ...response.sections,
-        workstreams: { availability: "unavailable", count: 12 },
+      attention: {
+        ...response.attention,
+        inbox: { availability: "unavailable", teamReviewCount: 12 },
       },
     }).success).toBe(false);
   });

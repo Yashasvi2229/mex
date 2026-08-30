@@ -16,6 +16,7 @@ import {
   ActivityResponseSchema,
   type ActivityResponse,
 } from "@mex/hub-contracts";
+import { OverviewResponseSchema } from "@mex/hub-contracts/overview";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHubApp } from "../src/hub/app.js";
 import { HubJobManager } from "../src/hub/jobs/index.js";
@@ -31,7 +32,10 @@ import {
   serializeActivityArtifact,
   serializeMemberArtifact,
 } from "../src/team/artifacts/codecs.js";
-import type { ActivityEvent } from "../src/team/contracts/workflow.js";
+import type {
+  ActivityEvent,
+  ActivityEventV1,
+} from "../src/team/contracts/workflow.js";
 import { TeamLocalState } from "../src/team/local-state/index.js";
 import { createRepositoryTeamWorkflowPort } from "../src/team/workflow/repository-team-workflow-port.js";
 
@@ -110,6 +114,14 @@ describe("real Project Hub activity integration", () => {
         branch: "feat/hub-activity-timeline",
         dirty: true,
       });
+      expect(canonical.recordOrigin).toEqual({ kind: "unknown" });
+      expect(canonical.label).toBeNull();
+      expect(firstBody.items[1]).toMatchObject({
+        source: "activity",
+        action: "relay.closed",
+        recordOrigin: { kind: "workflow", operation: "relay.close" },
+        label: "Authentication handoff",
+      });
 
       const legacyResponse = await harness.get("/api/v1/activity?source=legacy");
       expect(legacyResponse.status).toBe(200);
@@ -152,11 +164,14 @@ describe("real Project Hub activity integration", () => {
         EVENT_TWO,
       ]);
 
-      const home = await harness.get("/api/v1/home");
-      expect(home.status).toBe(200);
-      expect(await home.json()).toMatchObject({
-        sections: { activity: { availability: "available", count: 2 } },
-      });
+      const overview = await harness.get("/api/v1/overview");
+      expect(overview.status).toBe(200);
+      const overviewBody = OverviewResponseSchema.parse(await overview.json());
+      expect(overviewBody.activity.availability).toBe("available");
+      if (overviewBody.activity.availability !== "available") {
+        throw new Error("Expected an available bounded Activity preview.");
+      }
+      expect(overviewBody.activity.items.filter((item) => item.source === "activity")).toHaveLength(2);
 
       const cursorPage = ActivityResponseSchema.parse(
         await (await harness.get("/api/v1/activity?limit=1")).json(),
@@ -191,6 +206,7 @@ describe("real Project Hub activity integration", () => {
       }
       expect((await harness.get("/api/v1/activity?source=legacy")).status).toBe(200);
       expect((await harness.get("/api/v1/home")).status).toBe(200);
+      expect((await harness.get("/api/v1/overview")).status).toBe(200);
 
       expect(snapshotProtectedState(harness.projectRoot)).toEqual(before);
     } finally {
@@ -213,16 +229,12 @@ describe("real Project Hub activity integration", () => {
       expect(JSON.stringify(body)).not.toContain("outside source secret");
       expect(JSON.stringify(body)).not.toContain("private/var");
 
-      const home = await harness.get("/api/v1/home");
-      expect(home.status).toBe(200);
-      expect(await home.json()).toMatchObject({
-        sections: {
-          activity: {
-            availability: "unavailable",
-            count: null,
-            reason: "Canonical activity could not be read safely.",
-          },
-        },
+      const overview = await harness.get("/api/v1/overview");
+      expect(overview.status).toBe(200);
+      const overviewBody = OverviewResponseSchema.parse(await overview.json());
+      expect(overviewBody.activity).toMatchObject({
+        availability: "unavailable",
+        reason: "Recent team activity could not be read safely.",
       });
       expect(snapshotTree(external)).toEqual(outsideBefore);
     } finally {
@@ -322,14 +334,20 @@ function prepareProject(options: { activitySymlinkTarget?: string } = {}): strin
       }),
     );
     writeActivity(projectRoot, activityEvent());
-    writeActivity(projectRoot, activityEvent({
+    const second = activityEvent({
       id: EVENT_TWO,
       timestamp: "2026-08-23T02:00:00.000Z",
       actor: { kind: "git", name: "Grace Git", email: "grace@example.test" },
-      action: "activity.second",
+      action: "relay.closed",
       subjects: [{ kind: "file", path: "src/second.ts" }],
       metadata: undefined,
-    }));
+    });
+    writeActivity(projectRoot, {
+      ...second,
+      schemaVersion: 2,
+      origin: { kind: "workflow", operation: "relay.close" },
+      label: "Authentication handoff",
+    });
     writeFileSync(
       join(projectRoot, ".mex", "events", "activity", "2026-08", "not-an-event.md"),
       "malformed canonical secret /Users/alice/canonical\n",
@@ -360,8 +378,8 @@ function prepareProject(options: { activitySymlinkTarget?: string } = {}): strin
   return projectRoot;
 }
 
-function activityEvent(overrides: Partial<ActivityEvent> = {}): ActivityEvent {
-  const subjects: ActivityEvent["subjects"] = [
+function activityEvent(overrides: Partial<ActivityEventV1> = {}): ActivityEventV1 {
+  const subjects: ActivityEventV1["subjects"] = [
     { kind: "entity", entity: { id: MEMBER_ID, kind: "member", title: "Ada" } },
     { kind: "code", code: { kind: "symbol", symbolId: "function:activity" } },
     { kind: "code", code: { kind: "file", path: "src/activity.ts" } },

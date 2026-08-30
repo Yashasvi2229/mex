@@ -35,6 +35,10 @@ import {
   type InboxProposalListResponse,
   type InboxProposalSummary,
   type InboxSpecChange,
+  type OverviewContextPanel,
+  type OverviewFocusInboxSource,
+  type OverviewFocusRelaySource,
+  type OverviewResponse,
   type RelayDetail,
   type RelayDraftDetail,
   type RelayDraftInput,
@@ -95,6 +99,7 @@ import {
   type Diagnostic,
   type EntityRef,
   type JsonValue,
+  type RepoState,
   type RevisionExpectation,
   type FileChange,
 } from "../team/contracts/shared.js";
@@ -161,6 +166,7 @@ import {
   ActivityRepository,
   TimelineReader,
   type ResolvedTimelineEntry,
+  type ResolvedTimelinePage,
 } from "../team/activity/repository.js";
 import { createRepositoryGitPort } from "../team/git/git-port.js";
 import { ActorResolver } from "../team/identity/actor-resolver.js";
@@ -191,6 +197,7 @@ import {
 interface HubJobReader {
   list(request?: { limit?: number }): {
     items: readonly HubJobSnapshot[];
+    nextCursor?: string | null;
   };
 }
 
@@ -278,9 +285,9 @@ export interface LocalHubReadServicesOptions {
 /**
  * Honest production read model for the local Hub.
  *
- * Git, Activity, durable jobs, and injected repository Graph/Wiki adapters are
- * real. Later workflow aggregates stay explicitly unavailable; populated
- * visual data is never built here.
+ * Every populated projection comes from bounded repository services. Missing
+ * adapters stay explicitly unavailable; the read model never invents visual
+ * data or performs a mutation to make a panel look ready.
  */
 export function createLocalHubReadServices(
   options: LocalHubReadServicesOptions,
@@ -357,46 +364,57 @@ export function createLocalHubReadServices(
     },
 
     async home(): Promise<HomeResponse> {
-      const [repository, actorResolution, workstreamSummary, relaySummary, inboxSummary] = await Promise.all([
+      const observedAt = now().toISOString();
+      const [repository, identity, inboxRead, relayRead] = await Promise.all([
         git.getRepoState(),
-        team.getCurrentActor(),
-        homeWorkstreamSummary(workstreams),
-        homeRelaySummary(relays, team),
-        homeInboxSummary(inbox),
+        readOverviewIdentity(team, observedAt),
+        readOverviewInbox(inbox, observedAt),
+        readOverviewRelays(relays, observedAt),
       ]);
-      const jobs = options.jobs.list({ limit: 100 }).items;
-      const active = jobs.filter((job) => job.state === "queued" || job.state === "running");
-      const attention = jobs
-        .filter((job) => job.state === "failed" || job.state === "interrupted")
-        .slice(0, 5)
-        .map((job) => jobAttention(job));
-      let activity: HomeResponse["sections"]["activity"];
-      try {
-        const read = canonicalActivity.readAll();
-        if (read.sourceTruncated) throw new Error("Canonical Activity source was truncated.");
-        activity = { availability: "available", count: read.events.length };
-      } catch {
-        activity = unavailableSection("Canonical activity could not be read safely.");
-      }
+      const jobsRead = readOverviewJobs(options.jobs, observedAt);
+      return projectHomeResponse({
+        observedAt,
+        scaffoldId: options.scaffoldId,
+        projectRoot: options.projectRoot,
+        repository,
+        identity,
+        inbox: inboxRead,
+        relays: relayRead,
+        jobs: jobsRead,
+      });
+    },
 
+    async overview(): Promise<OverviewResponse> {
+      const observedAt = now().toISOString();
+      const [repository, identity, inboxRead, relayRead, activity, graphRead, wikiRead] = await Promise.all([
+        git.getRepoState(),
+        readOverviewIdentity(team, observedAt),
+        readOverviewInbox(inbox, observedAt),
+        readOverviewRelays(relays, observedAt),
+        readOverviewActivity(timeline, observedAt),
+        readOverviewGraph(graph, observedAt),
+        readOverviewWiki(wiki, observedAt),
+      ]);
+      const jobsRead = readOverviewJobs(options.jobs, observedAt);
+      const shell = projectHomeResponse({
+        observedAt,
+        scaffoldId: options.scaffoldId,
+        projectRoot: options.projectRoot,
+        repository,
+        identity,
+        inbox: inboxRead,
+        relays: relayRead,
+        jobs: jobsRead,
+      });
+      const focusSources = projectOverviewFocus(identity, inboxRead, relayRead, observedAt);
       return {
-        observedAt: now().toISOString(),
-        repository: {
-          scaffoldId: options.scaffoldId,
-          name: basename(options.projectRoot),
-          branch: repository.branch,
-          head: repository.head,
-          dirty: repository.dirty,
-        },
-        actor: actorResolution.actor as HubActor,
-        sections: {
-          workstreams: workstreamSummary,
-          relays: relaySummary,
-          inbox: inboxSummary,
-          activity,
-        },
-        activeJobs: active.length,
-        attention,
+        observedAt,
+        shell,
+        identity,
+        focus: focusSources,
+        activity,
+        context: projectOverviewContext(graphRead, wikiRead, observedAt),
+        operation: projectOverviewOperation(jobsRead, observedAt),
       };
     },
 
@@ -674,15 +692,7 @@ export function createLocalHubReadServices(
     },
 
     async currentActor(): Promise<TeamCurrentActorResponse> {
-      const current = await team.getCurrentActor();
-      const diagnostics = current.diagnostics.map(projectDiagnostic);
-      return {
-        actor: cloneActor(current.actor),
-        source: current.source,
-        selection: current.selection === null ? null : { ...current.selection },
-        diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
-        diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
-      };
+      return projectCurrentActor(await team.getCurrentActor());
     },
 
     async previewTeamOperation(
@@ -734,16 +744,7 @@ export function createLocalHubReadServices(
       let pageLimit = request.limit;
       while (true) {
         const page = await timeline.listResolved({ ...request, limit: pageLimit });
-        const diagnostics = page.diagnostics.map(projectDiagnostic);
-        const response: ActivityResponse = {
-          items: page.items.map(projectTimelineEntry),
-          nextCursor: page.nextCursor,
-          hasMore: page.truncated,
-          sourceTruncated: page.sourceTruncated,
-          deterministicRevision: page.deterministicRevision,
-          diagnostics: diagnostics.slice(0, 50),
-          diagnosticsTruncated: diagnostics.length > 50,
-        };
+        const response = projectActivityPage(page);
         if (Buffer.byteLength(JSON.stringify(response), "utf8") <= HUB_LIMITS.maxJsonResponseBytes) {
           return response;
         }
@@ -1514,33 +1515,11 @@ async function projectWikiHealth(
 ): Promise<HealthResponse["components"][number]> {
   try {
     const status = await wiki.inspectIndex();
-    const allowedJobKinds = allowedWikiOperations(status);
-    const recommendedJobKind = recommendedWikiOperation(status, allowedJobKinds);
     const active = jobs.list({ limit: 100 }).items.find((job) => (
       (job.kind === "wiki_refresh" || job.kind === "wiki_rebuild")
       && (job.state === "queued" || job.state === "running")
     ));
-    const wikiDetails: WikiHealthDetails = {
-      indexStatus: status.state,
-      observedAt: status.observedAt,
-      indexedAt: status.indexedAt,
-      schemaVersion: status.schemaVersion,
-      indexedRevision: status.indexedRevision,
-      allowedJobKinds,
-      recommendedJobKind,
-      activeJobId: active?.id ?? null,
-    };
-    return {
-      id: "wiki",
-      label: "Wiki index",
-      status: status.state === "fresh" ? "healthy" : "degraded",
-      summary: wikiHealthSummary(status),
-      diagnostics: status.diagnostics
-        .slice(0, HUB_LIMITS.maxDiagnosticCount)
-        .map(projectWikiDiagnostic),
-      ...(recommendedJobKind === null ? {} : { repairJobKind: recommendedJobKind }),
-      wiki: wikiDetails,
-    };
+    return projectWikiHealthStatus(status, active?.id ?? null);
   } catch {
     return {
       id: "wiki",
@@ -1550,6 +1529,35 @@ async function projectWikiHealth(
       diagnostics: [],
     };
   }
+}
+
+function projectWikiHealthStatus(
+  status: WikiIndexStatus,
+  activeJobId: string | null,
+): HealthResponse["components"][number] {
+  const allowedJobKinds = allowedWikiOperations(status);
+  const recommendedJobKind = recommendedWikiOperation(status, allowedJobKinds);
+  const wikiDetails: WikiHealthDetails = {
+    indexStatus: status.state,
+    observedAt: status.observedAt,
+    indexedAt: status.indexedAt,
+    schemaVersion: status.schemaVersion,
+    indexedRevision: status.indexedRevision,
+    allowedJobKinds,
+    recommendedJobKind,
+    activeJobId,
+  };
+  return {
+    id: "wiki",
+    label: "Wiki index",
+    status: status.state === "fresh" ? "healthy" : "degraded",
+    summary: wikiHealthSummary(status),
+    diagnostics: status.diagnostics
+      .slice(0, HUB_LIMITS.maxDiagnosticCount)
+      .map(projectWikiDiagnostic),
+    ...(recommendedJobKind === null ? {} : { repairJobKind: recommendedJobKind }),
+    wiki: wikiDetails,
+  };
 }
 
 function allowedWikiOperations(
@@ -1620,19 +1628,35 @@ async function projectGraphHealth(
 ): Promise<HealthResponse["components"][number]> {
   try {
     const status = await graph.inspectStatus();
-    const allowedJobKinds = allowedGraphOperations(status);
-    const recommendedJobKind = recommendedGraphOperation(status, allowedJobKinds);
     const active = jobs.list({ limit: 100 }).items.find((job) => (
       (job.kind === "graph_refresh" || job.kind === "graph_rebuild")
       && (job.state === "queued" || job.state === "running")
     ));
-    const failedPaths = status.parseHealth.failedPaths
+    return projectGraphHealthStatus(status, active?.id ?? null);
+  } catch {
+    return {
+      id: "graph",
+      label: "Code graph",
+      status: "unavailable",
+      summary: "Graph status could not be observed against a stable local snapshot.",
+      diagnostics: [],
+    };
+  }
+}
+
+function projectGraphHealthStatus(
+  status: GraphStatus,
+  activeJobId: string | null,
+): HealthResponse["components"][number] {
+  const allowedJobKinds = allowedGraphOperations(status);
+  const recommendedJobKind = recommendedGraphOperation(status, allowedJobKinds);
+  const failedPaths = status.parseHealth.failedPaths
       .filter(isCanonicalRepoPath)
       .slice(0, 25);
-    const added = status.changes.added.filter(isCanonicalRepoPath).slice(0, 25);
-    const modified = status.changes.modified.filter(isCanonicalRepoPath).slice(0, 25);
-    const deleted = status.changes.deleted.filter(isCanonicalRepoPath).slice(0, 25);
-    const graphDetails: GraphHealthDetails = {
+  const added = status.changes.added.filter(isCanonicalRepoPath).slice(0, 25);
+  const modified = status.changes.modified.filter(isCanonicalRepoPath).slice(0, 25);
+  const deleted = status.changes.deleted.filter(isCanonicalRepoPath).slice(0, 25);
+  const graphDetails: GraphHealthDetails = {
       indexStatus: status.status,
       observedAt: status.observedAt,
       lastSuccessfulIndexAt: status.lastSuccessfulIndexAt,
@@ -1669,28 +1693,19 @@ async function projectGraphHealth(
       },
       allowedJobKinds,
       recommendedJobKind,
-      activeJobId: active?.id ?? null,
-    };
-    return {
-      id: "graph",
-      label: "Code graph",
-      status: status.status === "fresh" && status.parseHealth.failed === 0
-        ? "healthy"
-        : "degraded",
-      summary: graphHealthSummary(status),
-      diagnostics: status.diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount).map(projectGraphDiagnostic),
-      ...(recommendedJobKind === null ? {} : { repairJobKind: recommendedJobKind }),
-      graph: graphDetails,
-    };
-  } catch {
-    return {
-      id: "graph",
-      label: "Code graph",
-      status: "unavailable",
-      summary: "Graph status could not be observed against a stable local snapshot.",
-      diagnostics: [],
-    };
-  }
+    activeJobId,
+  };
+  return {
+    id: "graph",
+    label: "Code graph",
+    status: status.status === "fresh" && status.parseHealth.failed === 0
+      ? "healthy"
+      : "degraded",
+    summary: graphHealthSummary(status),
+    diagnostics: status.diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount).map(projectGraphDiagnostic),
+    ...(recommendedJobKind === null ? {} : { repairJobKind: recommendedJobKind }),
+    graph: graphDetails,
+  };
 }
 
 function allowedGraphOperations(status: GraphStatus): Array<"graph_refresh" | "graph_rebuild"> {
@@ -1937,7 +1952,7 @@ function projectRelayEntity(entity: EntityRef): { id: string; kind: string; titl
   };
 }
 
-function projectRelayWorkstream(entity: EntityRef): RelayDraftInput["workstream"] {
+function projectRelayWorkstream(entity: EntityRef): NonNullable<RelaySummary["workstream"]> {
   if (entity.kind !== "workstream") throw invalidRelayProjection();
   return { ...projectRelayEntity(entity), kind: "workstream" };
 }
@@ -1976,7 +1991,6 @@ function projectRelayEvidence(evidence: TeamEvidenceRef): RelayEvidenceRef {
 function projectRelayDraftInput(input: TeamRelayDraftDetail["input"]): RelayDraftInput {
   return {
     recipients: input.recipients.map(projectRelayMemberActor),
-    workstream: projectRelayWorkstream(input.workstream),
     summary: input.summary,
     completed: [...input.completed],
     inProgress: [...input.inProgress],
@@ -1997,7 +2011,6 @@ function projectRelayDraftSummary(draft: TeamRelayDraftSummary): RelayDraftSumma
     updatedAt: draft.updatedAt,
     summary: draft.summary,
     recipients: draft.recipients.map(projectRelayMemberActor),
-    workstream: projectRelayWorkstream(draft.workstream),
   };
 }
 
@@ -2015,9 +2028,14 @@ function projectRelaySummary(relay: TeamRelaySummary): RelaySummary {
     state: relay.state,
     sender: projectRelayActor(relay.sender),
     recipients: relay.recipients.map(projectRelayActor),
-    workstream: projectRelayWorkstream(relay.workstream),
+    workstream: relay.workstream === null
+      ? null
+      : projectRelayWorkstream(relay.workstream),
     summary: relay.summary,
     publishedAt: relay.publishedAt,
+    publishedRepoState: relay.publishedRepoState === null
+      ? null
+      : { ...relay.publishedRepoState },
     acknowledgedBy: relay.acknowledgedBy === undefined ? null : projectRelayActor(relay.acknowledgedBy),
     acknowledgedAt: relay.acknowledgedAt ?? null,
     closedBy: relay.closedBy === undefined ? null : projectRelayActor(relay.closedBy),
@@ -2046,7 +2064,6 @@ function projectRelayDetail(relay: TeamRelayDetail): RelayDetail {
 function projectRelayDraftInputToService(input: RelayDraftInput): TeamRelayDraftDetail["input"] {
   return {
     recipients: input.recipients.map((actor) => ({ ...actor })),
-    workstream: { ...input.workstream },
     summary: input.summary,
     completed: [...input.completed],
     inProgress: [...input.inProgress],
@@ -2143,6 +2160,7 @@ function relayDiagnosticMessage(code: string): string {
   switch (code) {
     case "ENVELOPE_TOO_LARGE": return "The Relay operation exceeded its bounded preview envelope.";
     case "PATH_OUTSIDE_PROJECT": return "A Relay preview path was rejected at the repository boundary.";
+    case "RELAY_DIRTY_PUBLICATION_STATE": return "MEX recorded that local changes existed when this Relay was published; it did not record their paths, diff, or contents.";
     case "REVISION_CONFLICT": return "The Relay operation no longer matches the observed repository revision.";
     case "VALIDATION_FAILED": return "The Relay operation failed bounded validation.";
     default: return "The Relay operation reported a bounded diagnostic.";
@@ -2994,8 +3012,7 @@ function projectTeamActivityEvent(event: ActivityEvent): TeamOperationApplyRespo
   ) {
     throw invalidTeamProjection();
   }
-  return {
-    schemaVersion: 1,
+  const common = {
     id: event.id,
     timestamp: event.timestamp,
     actor: cloneActor(event.actor),
@@ -3003,8 +3020,17 @@ function projectTeamActivityEvent(event: ActivityEvent): TeamOperationApplyRespo
     subjects: event.subjects.map(cloneActivitySubject),
     workstream: event.workstream === undefined
       ? null
-      : { ...event.workstream, kind: "workstream" },
+      : { ...event.workstream, kind: "workstream" as const },
     repoState: { ...event.repoState },
+  };
+  if (event.schemaVersion === 1) return { schemaVersion: 1, ...common };
+  return {
+    schemaVersion: 2,
+    ...common,
+    origin: event.origin.kind === "custom"
+      ? { kind: "custom" }
+      : { kind: "workflow", operation: event.origin.operation },
+    ...(event.label === undefined ? {} : { label: event.label }),
   };
 }
 
@@ -3385,6 +3411,12 @@ function projectTimelineEntry(item: ResolvedTimelineEntry): ActivityResponse["it
     recordedActor: projectActor(item.recordedActor ?? entry.actor),
     effectiveActor: projectActor(item.effectiveActor ?? entry.actor),
     actorDiagnostics: item.diagnostics.slice(0, 2).map(projectDiagnostic),
+    recordOrigin: entry.event.schemaVersion === 1
+      ? { kind: "unknown" }
+      : entry.event.origin.kind === "custom"
+        ? { kind: "custom" }
+        : { kind: "workflow", operation: entry.event.origin.operation },
+    label: entry.event.schemaVersion === 1 ? null : entry.event.label ?? null,
     workstream: entry.event.workstream === undefined
       ? null
       : projectEntity(entry.event.workstream),
@@ -3525,107 +3557,446 @@ async function gitCapability(git: GitPort): Promise<CapabilityStatus> {
   }
 }
 
-function unavailableSection(reason: string): HomeResponse["sections"]["activity"] {
-  return { availability: "unavailable", count: null, reason };
+type OverviewIdentityRead = OverviewResponse["identity"];
+type OverviewContextAvailable = Extract<OverviewContextPanel, { availability: "available" }>;
+type OverviewGraphRead = OverviewContextAvailable["graph"];
+type OverviewWikiRead = OverviewContextAvailable["wiki"];
+
+type OverviewRelayCorpus =
+  | {
+      availability: "available";
+      observedAt: string;
+      items: RelaySummary[];
+      deterministicRevision: string;
+      diagnostics: ActivityDiagnostic[];
+      diagnosticsTruncated: boolean;
+    }
+  | {
+      availability: "unavailable";
+      observedAt: string;
+      reason: string;
+      deterministicRevision?: string;
+      truncated?: boolean;
+      sourceTruncated?: boolean;
+      diagnostics?: ActivityDiagnostic[];
+      diagnosticsTruncated?: boolean;
+    };
+
+type OverviewJobsRead =
+  | { availability: "available"; observedAt: string; items: HubJobSnapshot[] }
+  | { availability: "unavailable"; observedAt: string; reason: string };
+
+async function readOverviewIdentity(
+  team: HubTeamIdentityActivityService,
+  observedAt: string,
+): Promise<OverviewIdentityRead> {
+  try {
+    return {
+      availability: "available",
+      observedAt,
+      current: projectCurrentActor(await team.getCurrentActor()),
+    };
+  } catch {
+    return {
+      availability: "unavailable",
+      observedAt,
+      reason: "Current team identity could not be resolved safely.",
+    };
+  }
 }
 
-async function homeWorkstreamSummary(
-  workstreams: HubTeamWorkstreamService | undefined,
-): Promise<HomeResponse["sections"]["workstreams"]> {
-  if (workstreams === undefined) {
-    return unavailableSection("Workstreams are not connected in this build.");
+function projectCurrentActor(current: TeamCurrentActor): TeamCurrentActorResponse {
+  const diagnostics = current.diagnostics.map(projectDiagnostic);
+  return {
+    actor: cloneActor(current.actor),
+    source: current.source,
+    selection: current.selection === null ? null : { ...current.selection },
+    diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+    diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+  };
+}
+
+async function readOverviewInbox(
+  inbox: HubInboxSpecAuthoringService | undefined,
+  observedAt: string,
+): Promise<OverviewFocusInboxSource> {
+  if (inbox === undefined) {
+    return { availability: "unavailable", observedAt, reason: "Inbox workflows are not connected in this build." };
   }
   try {
-    const page = await workstreams.listWorkstreams({ includeArchived: false, limit: 100 });
+    const page = await inbox.listInboxProposals({ states: ["pending", "stale"], limit: 100 });
+    const diagnostics = page.diagnostics.map(projectDiagnostic);
     if (
       page.sourceTruncated
       || page.truncated
       || page.nextCursor !== null
       || page.diagnostics.length > 0
     ) {
-      return unavailableSection("The Workstream summary could not establish one complete diagnostic-free page.");
+      return {
+        availability: "unavailable",
+        observedAt,
+        reason: "The team review queue exceeded a bounded, trustworthy first-page summary.",
+        deterministicRevision: page.deterministicRevision,
+        truncated: page.truncated || page.nextCursor !== null,
+        sourceTruncated: page.sourceTruncated,
+        diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+        diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+      };
     }
-    return { availability: "available", count: page.items.length };
+    return {
+      availability: "available",
+      observedAt,
+      teamReviewCount: page.items.length,
+      items: page.items.slice(0, 3).map(projectInboxProposalSummary),
+      deterministicRevision: page.deterministicRevision,
+      sourceTruncated: false,
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    };
   } catch {
-    return unavailableSection("Workstreams could not be read safely.");
+    return { availability: "unavailable", observedAt, reason: "Inbox proposals could not be read safely." };
   }
 }
 
-async function homeInboxSummary(
-  inbox: HubInboxSpecAuthoringService | undefined,
-): Promise<HomeResponse["sections"]["inbox"]> {
-  if (inbox === undefined) {
-    return unavailableSection("Inbox workflows are not connected in this build.");
-  }
-  try {
-    let cursor: string | undefined;
-    let count = 0;
-    let pages = 0;
-    do {
-      const page = await inbox.listInboxProposals({
-        states: ["pending", "stale"],
-        limit: 100,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
-      if (page.sourceTruncated || page.diagnostics.length > 0) {
-        return unavailableSection("The actionable Inbox summary could not establish a complete diagnostic-free corpus.");
-      }
-      count += page.items.length;
-      cursor = page.nextCursor ?? undefined;
-      pages += 1;
-      if (pages > 21 || count > 2_048) {
-        return unavailableSection("The actionable Inbox summary exceeded its bounded canonical corpus.");
-      }
-    } while (cursor !== undefined);
-    return { availability: "available", count };
-  } catch {
-    return unavailableSection("Inbox proposals could not be read safely.");
-  }
-}
-
-async function homeRelaySummary(
+async function readOverviewRelays(
   relays: HubRelayHandoffService | undefined,
-  team: HubTeamIdentityActivityService,
-): Promise<HomeResponse["sections"]["relays"]> {
+  observedAt: string,
+): Promise<OverviewRelayCorpus> {
   if (relays === undefined) {
-    return unavailableSection("Relay workflows are not connected in this build.");
+    return { availability: "unavailable", observedAt, reason: "Relay workflows are not connected in this build." };
   }
   try {
-    const current = await team.getCurrentActor();
-    if (current.actor.kind !== "member") {
-      return unavailableSection("Select an active Member to see your open Relay handoffs.");
+    const page = await relays.listRelays({
+      perspective: "all",
+      states: ["published", "acknowledged"],
+      limit: 100,
+    });
+    const unsafeDiagnostic = page.diagnostics.some(
+      (diagnostic) => diagnostic.code !== "RELAY_LEGACY_PUBLICATION_TIME",
+    );
+    const diagnostics = page.diagnostics.map(projectDiagnostic);
+    if (page.sourceTruncated || page.truncated || page.nextCursor !== null || unsafeDiagnostic) {
+      return {
+        availability: "unavailable",
+        observedAt,
+        reason: "Open Relay handoffs exceeded a bounded, trustworthy first-page summary.",
+        deterministicRevision: page.deterministicRevision,
+        truncated: page.truncated || page.nextCursor !== null,
+        sourceTruncated: page.sourceTruncated,
+        diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+        diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+      };
     }
-    const member = await team.getMember(current.actor.memberId);
-    if (member?.active !== true) {
-      return unavailableSection("Select an active Member to see your open Relay handoffs.");
-    }
-    let cursor: string | undefined;
-    let count = 0;
-    let pages = 0;
-    do {
-      const page = await relays.listRelays({
-        perspective: "mine",
-        states: ["published", "acknowledged"],
-        limit: 100,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
-      const hasUnsafeDiagnostic = page.diagnostics.some((diagnostic) => (
-        diagnostic.code !== "RELAY_LEGACY_PUBLICATION_TIME"
-      ));
-      if (page.sourceTruncated || hasUnsafeDiagnostic) {
-        return unavailableSection("Your open Relay summary could not establish a complete diagnostic-free corpus.");
-      }
-      count += page.items.length;
-      cursor = page.nextCursor ?? undefined;
-      pages += 1;
-      if (pages > 21 || count > 2_048) {
-        return unavailableSection("Your open Relay summary exceeded its bounded canonical corpus.");
-      }
-    } while (cursor !== undefined);
-    return { availability: "available", count };
+    return {
+      availability: "available",
+      observedAt,
+      items: page.items.map(projectRelaySummary),
+      deterministicRevision: page.deterministicRevision,
+      diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+      diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+    };
   } catch {
-    return unavailableSection("Your open Relay handoffs could not be read safely.");
+    return { availability: "unavailable", observedAt, reason: "Relay handoffs could not be read safely." };
   }
+}
+
+function projectOverviewRelays(
+  identity: OverviewIdentityRead,
+  corpus: OverviewRelayCorpus,
+  observedAt: string,
+): OverviewFocusRelaySource {
+  if (corpus.availability === "unavailable") return corpus;
+  if (identity.availability === "unavailable" || identity.current.actor.kind !== "member") {
+    return {
+      availability: "unavailable",
+      observedAt,
+      reason: "Select an active Member to see your personal Relay handoffs.",
+    };
+  }
+  const memberId = identity.current.actor.memberId;
+  const readyToTake = corpus.items.filter((relay) => (
+    relay.state === "published"
+    && relay.recipients.some((recipient) => (
+      recipient.kind === "member" && recipient.memberId === memberId
+    ))
+  ));
+  const inYourHands = corpus.items.filter((relay) => (
+    relay.state === "acknowledged"
+    && relay.acknowledgedBy?.kind === "member"
+    && relay.acknowledgedBy.memberId === memberId
+  ));
+  return {
+    availability: "available",
+    observedAt,
+    readyToTakeCount: readyToTake.length,
+    inYourHandsCount: inYourHands.length,
+    readyToTake: readyToTake.slice(0, 3),
+    inYourHands: inYourHands.slice(0, 3),
+    deterministicRevision: corpus.deterministicRevision,
+    sourceTruncated: false,
+    diagnostics: corpus.diagnostics,
+    diagnosticsTruncated: corpus.diagnosticsTruncated,
+  };
+}
+
+async function readOverviewActivity(
+  timeline: TimelineReader,
+  observedAt: string,
+): Promise<OverviewResponse["activity"]> {
+  try {
+    const page = await timeline.listResolved({ limit: 5 });
+    const projected = projectActivityPage(page);
+    return { availability: "available", observedAt, ...projected };
+  } catch {
+    return {
+      availability: "unavailable",
+      observedAt,
+      reason: "Recent team activity could not be read safely.",
+    };
+  }
+}
+
+function projectActivityPage(page: ResolvedTimelinePage): ActivityResponse {
+  const diagnostics = page.diagnostics.map(projectDiagnostic);
+  return {
+    items: page.items.map(projectTimelineEntry),
+    nextCursor: page.nextCursor,
+    hasMore: page.truncated,
+    sourceTruncated: page.sourceTruncated,
+    deterministicRevision: page.deterministicRevision,
+    diagnostics: diagnostics.slice(0, HUB_LIMITS.maxDiagnosticCount),
+    diagnosticsTruncated: diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+  };
+}
+
+async function readOverviewGraph(
+  graph: HubGraphReadService | undefined,
+  observedAt: string,
+): Promise<OverviewGraphRead> {
+  if (graph === undefined) {
+    return { availability: "unavailable", observedAt, reason: "The Graph adapter is not connected in this build." };
+  }
+  try {
+    const status = await graph.inspectStatus();
+    const component = projectGraphHealthStatus(status, null);
+    if (component.graph === undefined) throw new Error("Missing Graph health details.");
+    const { activeJobId: _activeJobId, ...details } = component.graph;
+    void _activeJobId;
+    return {
+      availability: "available",
+      observedAt: status.observedAt,
+      status: status.status === "fresh" && status.parseHealth.failed === 0
+        ? "healthy"
+        : "degraded",
+      summary: component.summary,
+      diagnostics: component.diagnostics,
+      diagnosticsTruncated: status.diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+      repairJobKind: component.graph.recommendedJobKind,
+      details,
+    };
+  } catch {
+    return {
+      availability: "unavailable",
+      observedAt,
+      reason: "Graph status could not be observed against a stable local snapshot.",
+    };
+  }
+}
+
+async function readOverviewWiki(
+  wiki: HubWikiReadService | undefined,
+  observedAt: string,
+): Promise<OverviewWikiRead> {
+  if (wiki === undefined) {
+    return { availability: "unavailable", observedAt, reason: "The Wiki adapter is not connected in this build." };
+  }
+  try {
+    const status = await wiki.inspectIndex();
+    const component = projectWikiHealthStatus(status, null);
+    if (component.wiki === undefined) throw new Error("Missing Wiki health details.");
+    const { activeJobId: _activeJobId, ...details } = component.wiki;
+    void _activeJobId;
+    return {
+      availability: "available",
+      observedAt: status.observedAt,
+      status: status.state === "fresh" ? "healthy" : "degraded",
+      summary: component.summary,
+      diagnostics: component.diagnostics,
+      diagnosticsTruncated: status.diagnostics.length > HUB_LIMITS.maxDiagnosticCount,
+      repairJobKind: component.wiki.recommendedJobKind,
+      details,
+    };
+  } catch {
+    return {
+      availability: "unavailable",
+      observedAt,
+      reason: "Wiki status could not be observed against a stable local snapshot.",
+    };
+  }
+}
+
+function readOverviewJobs(jobs: HubJobReader, observedAt: string): OverviewJobsRead {
+  try {
+    const page = jobs.list({ limit: 100 });
+    if (page.nextCursor !== undefined && page.nextCursor !== null) {
+      return {
+        availability: "unavailable",
+        observedAt,
+        reason: "Local operations exceeded the bounded first-page summary.",
+      };
+    }
+    return { availability: "available", observedAt, items: [...page.items].sort(compareJobsNewest) };
+  } catch {
+    return { availability: "unavailable", observedAt, reason: "Local operations could not be read safely." };
+  }
+}
+
+function compareJobsNewest(left: HubJobSnapshot, right: HubJobSnapshot): number {
+  const time = Date.parse(right.createdAt) - Date.parse(left.createdAt);
+  return time === 0 ? right.id.localeCompare(left.id) : time;
+}
+
+function jobIsNewer(left: HubJobSnapshot, right: HubJobSnapshot): boolean {
+  return compareJobsNewest(left, right) < 0;
+}
+
+const OVERVIEW_FAILURE_RELEVANCE_MS = 7 * 24 * 60 * 60 * 1_000;
+
+function jobFailureIsRecent(job: HubJobSnapshot, observedAt: string): boolean {
+  const occurredAt = Date.parse(job.finishedAt ?? job.createdAt);
+  const age = Date.parse(observedAt) - occurredAt;
+  return age <= OVERVIEW_FAILURE_RELEVANCE_MS;
+}
+
+function projectHomeResponse(input: {
+  observedAt: string;
+  scaffoldId: string;
+  projectRoot: string;
+  repository: RepoState;
+  identity: OverviewIdentityRead;
+  inbox: OverviewFocusInboxSource;
+  relays: OverviewRelayCorpus;
+  jobs: OverviewJobsRead;
+}): HomeResponse {
+  const relayFocus = projectOverviewRelays(input.identity, input.relays, input.observedAt);
+  return {
+    observedAt: input.observedAt,
+    repository: {
+      scaffoldId: input.scaffoldId,
+      name: basename(input.projectRoot),
+      branch: input.repository.branch,
+      head: input.repository.head,
+      dirty: input.repository.dirty,
+    },
+    actor: projectHomeActor(input.identity),
+    attention: {
+      inbox: input.inbox.availability === "available"
+        ? { availability: "available", teamReviewCount: input.inbox.teamReviewCount }
+        : { availability: "unavailable", reason: input.inbox.reason },
+      relays: relayFocus.availability === "available"
+        ? {
+            availability: "available",
+            readyToTakeCount: relayFocus.readyToTakeCount,
+            inYourHandsCount: relayFocus.inYourHandsCount,
+          }
+        : { availability: "unavailable", reason: relayFocus.reason },
+    },
+    jobs: input.jobs.availability === "available"
+      ? {
+          availability: "available",
+          activeCount: input.jobs.items.filter(
+            (job) => job.state === "queued" || job.state === "running",
+          ).length,
+        }
+      : { availability: "unavailable", reason: input.jobs.reason },
+  };
+}
+
+function projectHomeActor(identity: OverviewIdentityRead): HubActor {
+  if (identity.availability === "unavailable") return { kind: "unknown" };
+  const actor = identity.current.actor;
+  if (actor.kind !== "member") return actor;
+  return {
+    kind: "member",
+    memberId: actor.memberId,
+    // Current resolution normally carries the canonical display name. The ID
+    // remains a truthful bounded fallback for older/custom service adapters.
+    displayName: actor.displayName ?? actor.memberId,
+  };
+}
+
+function projectOverviewFocus(
+  identity: OverviewIdentityRead,
+  inbox: OverviewFocusInboxSource,
+  relays: OverviewRelayCorpus,
+  observedAt: string,
+): OverviewResponse["focus"] {
+  const focusIdentity = identity.availability === "available"
+    ? {
+        availability: "available" as const,
+        observedAt,
+        requiresAttention: identity.current.actor.kind !== "member"
+          || identity.current.diagnostics.some((diagnostic) => [
+            "ACTOR_MEMBER_MISSING",
+            "ACTOR_MEMBER_INACTIVE",
+            "ACTOR_ALIAS_AMBIGUOUS",
+            "GIT_IDENTITY_UNAVAILABLE",
+            "GIT_IDENTITY_INVALID",
+          ].includes(diagnostic.code)),
+      }
+    : identity;
+  const relayFocus = projectOverviewRelays(identity, relays, observedAt);
+  if (
+    focusIdentity.availability === "unavailable"
+    && inbox.availability === "unavailable"
+    && relayFocus.availability === "unavailable"
+  ) {
+    return {
+      availability: "unavailable",
+      observedAt,
+      reason: "Personal focus sources could not be read safely.",
+    };
+  }
+  return {
+    availability: "available",
+    observedAt,
+    identity: focusIdentity,
+    inbox,
+    relays: relayFocus,
+  };
+}
+
+function projectOverviewContext(
+  graph: OverviewGraphRead,
+  wiki: OverviewWikiRead,
+  observedAt: string,
+): OverviewResponse["context"] {
+  if (graph.availability === "unavailable" && wiki.availability === "unavailable") {
+    return {
+      availability: "unavailable",
+      observedAt,
+      reason: "Graph and Wiki context readiness could not be observed safely.",
+    };
+  }
+  return { availability: "available", observedAt, graph, wiki };
+}
+
+function projectOverviewOperation(
+  jobs: OverviewJobsRead,
+  observedAt: string,
+): OverviewResponse["operation"] {
+  if (jobs.availability === "unavailable") return jobs;
+  const active = jobs.items.find((job) => job.state === "queued" || job.state === "running") ?? null;
+  const latestRelevantFailure = jobs.items.find((candidate) => (
+    (candidate.state === "failed" || candidate.state === "interrupted")
+    && jobFailureIsRecent(candidate, observedAt)
+    && !jobs.items.some((job) => (
+      job.kind === candidate.kind
+      && job.state === "succeeded"
+      && jobIsNewer(job, candidate)
+    ))
+  )) ?? null;
+  return { availability: "available", observedAt, active, latestRelevantFailure };
 }
 
 function unavailableWorkstreams(): HubHttpError {
@@ -3673,19 +4044,5 @@ function unavailableSearch(reason: string): SearchResponse["groups"]["wiki"] {
     revision: null,
     code: "CAPABILITY_UNAVAILABLE",
     detail: reason,
-  };
-}
-
-function jobAttention(job: HubJobSnapshot): HomeResponse["attention"][number] {
-  const failed = job.state === "failed";
-  return {
-    id: job.id,
-    kind: "job",
-    title: failed ? "A local operation failed" : "A local operation was interrupted",
-    summary: failed
-      ? job.problem?.detail ?? "Open Jobs to review the failure."
-      : "Open Jobs to review the interrupted operation.",
-    tone: failed ? "critical" : "warning",
-    route: "/jobs",
   };
 }

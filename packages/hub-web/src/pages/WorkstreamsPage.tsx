@@ -484,6 +484,7 @@ export function WorkstreamsPage() {
       ...(affected === null ? [] : [queryClient.invalidateQueries({ queryKey: ["workstream", affected.id] })]),
       queryClient.invalidateQueries({ queryKey: ["activity"] }),
       queryClient.invalidateQueries({ queryKey: ["home"] }),
+      queryClient.invalidateQueries({ queryKey: ["overview"] }),
     ]);
     if (affected) setSelectedId(affected.id);
     setStatus("Canonical Workstream change applied with one immutable Activity event.");

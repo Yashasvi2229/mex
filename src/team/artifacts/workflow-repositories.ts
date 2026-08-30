@@ -105,11 +105,20 @@ export type InboxProposalRepositoryCreateInput<TPayload> = Omit<
   "id" | "state" | "reviewer" | "reviewRationale" | "reviewedAt"
 > & { id?: string };
 export type InboxProposalRepositoryUpdateInput<TPayload> = Omit<InboxProposalArtifactInput<TPayload>, "id">;
-export type RelayRepositoryCreateInput = Omit<
-  RelayArtifactInput,
+type RelayRepositoryCreateInputFor<TInput extends RelayArtifactInput> = Omit<
+  TInput,
   "id" | "entityRevision" | "state" | "acknowledgedBy" | "acknowledgedAt" | "closedBy" | "closedAt"
 > & { id?: string };
-export type RelayRepositoryUpdateInput = Omit<RelayArtifactInput, "id" | "entityRevision">;
+export type RelayRepositoryCreateInput = RelayArtifactInput extends infer TInput
+  ? TInput extends RelayArtifactInput
+    ? RelayRepositoryCreateInputFor<TInput>
+    : never
+  : never;
+export type RelayRepositoryUpdateInput = RelayArtifactInput extends infer TInput
+  ? TInput extends RelayArtifactInput
+    ? Omit<TInput, "id" | "entityRevision">
+    : never
+  : never;
 export type PlaybookRepositoryCreateInput = Omit<PlaybookArtifactInput, "id" | "entityRevision" | "state"> & { id?: string };
 export type PlaybookRepositoryUpdateInput = Omit<PlaybookArtifactInput, "id" | "entityRevision">;
 export type PlaybookRunRepositoryCreateInput = Omit<PlaybookRunArtifactInput, "id" | "entityRevision" | "state"> & { id?: string };
@@ -586,12 +595,24 @@ const relayCodec: RepositoryCodec<Relay, RelayArtifactInput, RelayRepositoryCrea
   idOf: (artifact) => artifact.ref.id, revisionOf: (artifact) => artifact.revision, sourcePathOf: (artifact) => artifact.sourcePath,
   stateOf: (artifact) => artifact.state,
   states: ["published", "acknowledged", "closed"], archivedState: null,
-  createInput: (input, id) => ({ ...input, id, entityRevision: 1, state: "published" }),
-  updateInput: (input, id, current) => ({ ...input, id, entityRevision: current.entityRevision + 1 }),
+  createInput: (input, id) => ({
+    ...input,
+    id,
+    entityRevision: 1,
+    state: "published",
+  }) as RelayArtifactInput,
+  updateInput: (input, id, current) => ({
+    ...input,
+    id,
+    entityRevision: current.entityRevision + 1,
+  }) as RelayArtifactInput,
   assertTransition: (current, candidate) => {
     assertStateTransition(current.state, candidate.state, RELAY_TRANSITIONS, "relay");
-    if (JSON.stringify(current.sender) !== JSON.stringify(candidate.sender) || JSON.stringify(current.workstream) !== JSON.stringify(candidate.workstream)) {
-      invalidUpdate("Relay sender and workstream are immutable.");
+    if (
+      current.schemaVersion !== candidate.schemaVersion
+      || JSON.stringify(current.sender) !== JSON.stringify(candidate.sender)
+    ) {
+      invalidUpdate("Relay schema, sender, and publication context are immutable.");
     }
     if (JSON.stringify(relayContent(current)) !== JSON.stringify(relayContent(candidate))) {
       invalidUpdate("Published relay content is immutable; only acknowledgement and close authority may change.");

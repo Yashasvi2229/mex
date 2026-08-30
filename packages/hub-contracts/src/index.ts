@@ -1,4 +1,19 @@
 import { z } from "zod";
+import {
+  GraphSymbolIdSchema,
+  InboxProposalIdSchema,
+  RelayIdSchema,
+  TeamMemberIdSchema,
+  WikiEntityIdSchema,
+} from "./ids.js";
+
+export {
+  GraphSymbolIdSchema,
+  InboxProposalIdSchema,
+  RelayIdSchema,
+  TeamMemberIdSchema,
+  WikiEntityIdSchema,
+} from "./ids.js";
 
 export const HUB_API_VERSION = "v1" as const;
 
@@ -81,6 +96,11 @@ const scaffoldId = z.string().min(1).max(512)
 const hubJobId = z.string()
   .regex(/^job_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Hub job ID.");
 const revision = z.string().regex(/^[a-f0-9]{64}$/, "Invalid SHA-256 revision.");
+
+/** Shared primitives for route-private contract entry points. */
+export const HubIsoTimestampSchema = isoTimestamp;
+export const HubBoundedReasonSchema = boundedReason;
+export const HubRevisionSchema = revision;
 const utf8Text = (maximum: number, minimum = 1) => z.string().min(minimum).max(maximum).refine(
   (value) => new TextEncoder().encode(value).byteLength <= maximum,
   `Text exceeds the ${maximum}-byte display limit.`,
@@ -248,22 +268,44 @@ export const HubAttentionItemSchema = z.object({
   route: z.string().startsWith("/").max(2_048),
 }).strict();
 
+const homeUnavailable = z.object({
+  availability: z.literal("unavailable"),
+  reason: boundedReason,
+}).strict();
+
+const homeAvailable = <Shape extends z.ZodRawShape>(shape: Shape) => (
+  z.discriminatedUnion("availability", [
+    z.object({ availability: z.literal("available"), ...shape }).strict(),
+    homeUnavailable,
+  ])
+);
+
+export const HomeInboxAttentionSchema = homeAvailable({
+  teamReviewCount: z.number().int().nonnegative(),
+});
+
+export const HomeRelayAttentionSchema = homeAvailable({
+  readyToTakeCount: z.number().int().nonnegative(),
+  inYourHandsCount: z.number().int().nonnegative(),
+});
+
+export const HomeJobsSummarySchema = homeAvailable({
+  activeCount: z.number().int().nonnegative(),
+});
+
+/** Lightweight shell projection used by HubLayout on non-Overview routes. */
 export const HomeResponseSchema = z.object({
   observedAt: isoTimestamp,
   repository: HubRepositoryContextSchema,
   actor: HubActorSchema,
-  sections: z.object({
-    workstreams: HubSectionSummarySchema,
-    relays: HubSectionSummarySchema,
-    inbox: HubSectionSummarySchema,
-    activity: HubSectionSummarySchema,
+  attention: z.object({
+    inbox: HomeInboxAttentionSchema,
+    relays: HomeRelayAttentionSchema,
   }).strict(),
-  activeJobs: z.number().int().nonnegative(),
-  attention: z.array(HubAttentionItemSchema).max(100),
+  jobs: HomeJobsSummarySchema,
 }).strict();
 
-const teamMemberId = z.string()
-  .regex(/^member_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid member ID.");
+const teamMemberId = TeamMemberIdSchema;
 const teamEventId = z.string()
   .regex(/^event_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Activity event ID.");
 const teamWorkstreamId = z.string()
@@ -296,7 +338,6 @@ const teamRepositoryPath = utf8Text(4_096).refine((value) => {
   );
 }, "Path must be a safe repository-relative POSIX path.");
 
-export const TeamMemberIdSchema = teamMemberId;
 export const TeamWorkstreamIdSchema = teamWorkstreamId;
 
 export const TeamGitAliasSchema = z.object({
@@ -749,8 +790,15 @@ export const TeamOperationPreviewResponseSchema = z.object({
 
 export const TeamOperationApplyRequestSchema = TeamOperationPreviewResponseSchema;
 
-export const TeamActivityEventSchema = z.object({
-  schemaVersion: z.literal(1),
+const TeamPersistedActivityOriginSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("workflow"),
+    operation: teamActivityAction,
+  }).strict(),
+  z.object({ kind: z.literal("custom") }).strict(),
+]);
+
+const teamActivityEventFields = {
   id: teamEventId,
   timestamp: isoTimestamp,
   actor: TeamActorRefSchema,
@@ -758,7 +806,17 @@ export const TeamActivityEventSchema = z.object({
   subjects: z.array(TeamActivitySubjectInputSchema).max(64),
   workstream: teamWorkstreamRef.nullable(),
   repoState: teamRepositoryState,
-}).strict();
+} as const;
+
+export const TeamActivityEventSchema = z.union([z.object({
+  schemaVersion: z.literal(1),
+  ...teamActivityEventFields,
+}).strict(), z.object({
+  schemaVersion: z.literal(2),
+  ...teamActivityEventFields,
+  origin: TeamPersistedActivityOriginSchema,
+  label: teamText(512).optional(),
+}).strict()]);
 
 export const TeamOperationApplyResponseSchema = z.object({
   operationId: teamOperationId,
@@ -792,8 +850,6 @@ export const InboxDraftIdSchema = z.string().min(1).refine(
     && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value),
   "Invalid Inbox draft ID.",
 );
-export const InboxProposalIdSchema = z.string()
-  .regex(/^proposal_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Inbox proposal ID.");
 const inboxSpecEntityId = z.string()
   .regex(/^mx_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Spec entity ID.");
 
@@ -1312,8 +1368,6 @@ export const InboxOperationApplyResponseSchema = z.object({
 const relayContracts = /* @__PURE__ */ (() => {
 const RelayStateSchema = z.enum(["published", "acknowledged", "closed"]);
 const RelayPerspectiveSchema = z.enum(["mine", "sent", "all"]);
-const RelayIdSchema = z.string()
-  .regex(/^relay_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Relay ID.");
 const RelayDraftIdSchema = z.string().min(1).refine(
   (value) => new TextEncoder().encode(value).byteLength <= 128
     && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value),
@@ -1383,11 +1437,6 @@ const relayDecisionSet = z.array(relayEntityRef).max(64).refine(
   (values) => new Set(values.map((value) => `${value.kind}\0${value.id}`)).size === values.length,
   "Relay decisions must be unique by kind and ID.",
 );
-const relayWorkstreamRef = z.object({
-  id: teamWorkstreamId,
-  kind: z.literal("workstream"),
-  title: relaySingleLineText(512).optional(),
-}).strict();
 const relayRecordedWorkstreamRef = z.object({
   id: relaySingleLineText(256),
   kind: z.literal("workstream"),
@@ -1467,6 +1516,22 @@ const RelayEvidenceRefSchema = z.discriminatedUnion("kind", [
   }).strict(),
   z.object({ kind: z.literal("manual"), note: relaySingleLineText(4 * 1024) }).strict(),
 ]);
+const relayEvidenceList = z.array(RelayEvidenceRefSchema).max(65).superRefine(
+  (values, context) => {
+    if (values.length <= 64) return;
+    const first = values[0];
+    if (
+      first?.kind !== "entity"
+      || first.entity.kind !== "workstream"
+      || !teamWorkstreamId.safeParse(first.entity.id).success
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A 65th Relay evidence entry is reserved for translated legacy Workstream evidence.",
+      });
+    }
+  },
+);
 const relayRecordedEvidenceRef = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("entity"), entity: relayEntityRef }).strict(),
   z.object({ kind: z.literal("code"), code: relayRecordedCodeRef }).strict(),
@@ -1491,21 +1556,30 @@ const relayRecordedEvidenceRef = z.discriminatedUnion("kind", [
   }).strict(),
   z.object({ kind: z.literal("manual"), note: relaySingleLineText(4 * 1024) }).strict(),
 ]);
+const relayRecordedEvidenceList = z.array(relayRecordedEvidenceRef).max(65);
 
-const RelayDraftInputSchema = z.object({
+const relayDraftInputObject = z.object({
   recipients: relayMemberSet,
-  workstream: relayWorkstreamRef,
   summary: relaySingleLineText(8 * 1024).refine((value) => value.length > 0, "Relay summary is required."),
-  completed: relayTextList,
-  inProgress: relayTextList,
-  decisions: relayDecisionSet,
-  blockers: relayTextList,
-  unresolvedQuestions: relayTextList,
-  changedFiles: relayPathSet,
-  code: relayCodeSet,
-  evidence: z.array(RelayEvidenceRefSchema).max(64),
-  nextActions: relayTextList,
-}).strict().superRefine((value, context) => {
+  completed: relayTextList.default([]),
+  inProgress: relayTextList.default([]),
+  decisions: relayDecisionSet.default([]),
+  blockers: relayTextList.default([]),
+  unresolvedQuestions: relayTextList.default([]),
+  changedFiles: relayPathSet.default([]),
+  code: relayCodeSet.default([]),
+  evidence: relayEvidenceList.default([]),
+  nextActions: relayTextList.default([]),
+}).strict();
+
+const RelayDraftInputSchema = relayDraftInputObject.superRefine((value, context) => {
+  if (value.evidence.length > 64) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidence"],
+      message: "Caller-authored Relay drafts accept at most 64 evidence entries.",
+    });
+  }
   if (jsonByteLength(value) > HUB_LIMITS.maxMutationBodyBytes) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "The Relay draft input exceeds 64 KiB." });
   }
@@ -1517,15 +1591,17 @@ const RelayDraftSummarySchema = z.object({
   updatedAt: isoTimestamp,
   summary: relaySingleLineText(8 * 1024),
   recipients: relayMemberSet,
-  workstream: relayWorkstreamRef,
 }).strict();
 
 const RelayDraftDetailSchema = RelayDraftSummarySchema.extend({
-  input: RelayDraftInputSchema,
+  // Stored legacy drafts can grow slightly when sparse defaults are expanded
+  // and Workstream is projected into reserved evidence. Reads stay field-
+  // bounded; only caller-authored mutation input retains the 64 KiB ceiling.
+  input: relayDraftInputObject,
 }).strict();
 
 const relayDetailObject = z.object({
-  schemaVersion: z.union([z.literal(1), z.literal(2)]),
+  schemaVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   ref: z.object({
     id: RelayIdSchema,
     kind: z.literal("relay"),
@@ -1536,7 +1612,7 @@ const relayDetailObject = z.object({
   state: RelayStateSchema,
   sender: relayRecordedActorRef,
   recipients: relayRecordedRecipientSet,
-  workstream: relayRecordedWorkstreamRef,
+  workstream: relayRecordedWorkstreamRef.nullable(),
   summary: relaySingleLineText(8 * 1024),
   completed: relayTextList,
   inProgress: relayTextList,
@@ -1545,11 +1621,12 @@ const relayDetailObject = z.object({
   unresolvedQuestions: relayTextList,
   changedFiles: relayRecordedPathSet,
   code: relayRecordedCodeSet,
-  evidence: z.array(relayRecordedEvidenceRef).max(64),
+  evidence: relayRecordedEvidenceList,
   nextActions: relayTextList,
   diagnostics: z.array(HubDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
   diagnosticsTruncated: z.boolean(),
   publishedAt: isoTimestamp.nullable(),
+  publishedRepoState: teamRepositoryState.nullable(),
   acknowledgedBy: relayRecordedActorRef.nullable(),
   acknowledgedAt: isoTimestamp.nullable(),
   closedBy: relayRecordedActorRef.nullable(),
@@ -1558,14 +1635,15 @@ const relayDetailObject = z.object({
 
 function validateRelayLifecycle(
   value: {
-    schemaVersion: 1 | 2;
+    schemaVersion: 1 | 2 | 3;
     ref: { id: string };
     sourcePath: string;
     state: "published" | "acknowledged" | "closed";
     publishedAt: string | null;
+    publishedRepoState: z.infer<typeof teamRepositoryState> | null;
     sender: z.infer<typeof relayRecordedActorRef>;
     recipients: readonly z.infer<typeof relayRecordedActorRef>[];
-    workstream: z.infer<typeof relayRecordedWorkstreamRef>;
+    workstream: z.infer<typeof relayRecordedWorkstreamRef> | null;
     changedFiles?: readonly string[];
     code?: readonly z.infer<typeof relayRecordedCodeRef>[];
     evidence?: readonly z.infer<typeof relayRecordedEvidenceRef>[];
@@ -1579,13 +1657,20 @@ function validateRelayLifecycle(
   if (value.sourcePath !== `.mex/relays/${value.ref.id}.md`) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["sourcePath"], message: "Relay source path must match its ID." });
   }
-  if ((value.schemaVersion === 1) !== (value.publishedAt === null)) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ["publishedAt"], message: "Only legacy schema-v1 Relays may omit publication time." });
-  }
-  if (value.schemaVersion === 2) {
-    if (!teamWorkstreamId.safeParse(value.workstream.id).success) {
+  if (value.schemaVersion === 1) {
+    if (value.publishedAt !== null || value.publishedRepoState !== null || value.workstream === null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Schema-v1 Relays require a Workstream and omit publication time and repository state." });
+    }
+  } else if (value.schemaVersion === 2) {
+    if (value.publishedAt === null || value.publishedRepoState !== null || value.workstream === null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Schema-v2 Relays require publication time and a Workstream, without publication repository state." });
+    } else if (!teamWorkstreamId.safeParse(value.workstream.id).success) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["workstream", "id"], message: "Schema-v2 Relays require a canonical Workstream ID." });
     }
+  } else if (value.publishedAt === null || value.publishedRepoState === null || value.workstream !== null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Schema-v3 Relays require publication time and repository state, without a Workstream." });
+  }
+  if (value.schemaVersion === 2 || value.schemaVersion === 3) {
     const v2MemberIds = value.recipients.flatMap((recipient) => recipient.kind === "member" ? [recipient.memberId] : []);
     if (value.recipients.length > 32
       || v2MemberIds.length !== value.recipients.length
@@ -1607,7 +1692,18 @@ function validateRelayLifecycle(
       }),
     ];
     if (recordedPaths.some((path) => !teamRepositoryPath.safeParse(path).success)) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["changedFiles"], message: "Schema-v2 Relays require canonical repository paths." });
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["changedFiles"], message: "Current Relay schemas require canonical repository paths." });
+    }
+  }
+  if ((value.evidence?.length ?? 0) > 64) {
+    const first = value.evidence?.[0];
+    if (
+      value.schemaVersion !== 3
+      || first?.kind !== "entity"
+      || first.entity.kind !== "workstream"
+      || !teamWorkstreamId.safeParse(first.entity.id).success
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["evidence"], message: "Only schema-v3 translated drafts may use the reserved legacy Workstream evidence slot." });
     }
   }
   const acknowledged = value.acknowledgedBy !== null && value.acknowledgedAt !== null;
@@ -1651,6 +1747,7 @@ const RelaySummarySchema = relayDetailObject.pick({
   workstream: true,
   summary: true,
   publishedAt: true,
+  publishedRepoState: true,
   acknowledgedBy: true,
   acknowledgedAt: true,
   closedBy: true,
@@ -1721,7 +1818,7 @@ const relayAction = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("relay.draft.save"),
     draftId: RelayDraftIdSchema.optional(),
-    draft: RelayDraftInputSchema,
+    draft: relayDraftInputObject,
   }).strict(),
   z.object({ kind: z.literal("relay.draft.delete"), draftId: RelayDraftIdSchema }).strict(),
   z.object({ kind: z.literal("relay.publish"), draftId: RelayDraftIdSchema }).strict(),
@@ -1732,7 +1829,7 @@ const relayAction = z.discriminatedUnion("kind", [
 const RelayOperationPreviewRequestSchema = z.object({
   operationId: teamOperationId,
   action: relayAction,
-  expectedRevisions: z.array(relayCommandExpectation).max(34),
+  expectedRevisions: z.array(relayCommandExpectation).max(33),
 }).strict().superRefine((value, context) => {
   const targets = value.expectedRevisions.map((item) => item.target.kind === "local"
     ? `local:${item.target.id}`
@@ -1744,6 +1841,13 @@ const RelayOperationPreviewRequestSchema = z.object({
     ? `local:${value.action.draftId}`
     : null;
   if (value.action.kind === "relay.draft.save") {
+    if (value.action.draft.evidence.length > 64 && value.action.draftId === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["action", "draft", "evidence"],
+        message: "A new Relay draft accepts at most 64 caller-authored evidence entries.",
+      });
+    }
     if ((localTarget === null && targets.length !== 0)
       || (localTarget !== null && (targets.length !== 1 || targets[0] !== localTarget))) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedRevisions"], message: "Relay draft save requires only its exact local revision." });
@@ -1754,14 +1858,20 @@ const RelayOperationPreviewRequestSchema = z.object({
     }
   } else if (value.action.kind === "relay.publish") {
     const localTargets = targets.filter((target) => target === localTarget);
-    const workstreamTargets = targets.filter((target) => /^artifact:\.mex\/workstreams\/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/.test(target));
     const memberTargets = targets.filter((target) => /^artifact:\.mex\/team\/members\/member_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/.test(target));
+    const legacyWorkstreamTargets = targets.filter((target) =>
+      /^artifact:\.mex\/workstreams\/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/.test(target));
     if (localTargets.length !== 1
-      || workstreamTargets.length !== 1
       || memberTargets.length < 1
       || memberTargets.length > 32
-      || targets.length !== localTargets.length + workstreamTargets.length + memberTargets.length) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedRevisions"], message: "Relay publication requires the draft, Workstream, and recipient Member revisions." });
+      || targets.length !== localTargets.length + memberTargets.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["expectedRevisions"],
+        message: legacyWorkstreamTargets.length > 0
+          ? "This pre-v3 Relay publication preview includes a Workstream dependency. Preview again with the current MEX version before applying it."
+          : "Relay publication requires exactly the draft and recipient Member revisions.",
+      });
     }
   } else {
     const relayPath = `artifact:.mex/relays/${value.action.relayId}.md`;
@@ -1844,10 +1954,67 @@ const RelayOperationPreviewResponseSchema = z.object({
   }
 });
 
-const RelayOperationApplyRequestSchema = RelayOperationPreviewResponseSchema;
+const relayLegacyPublishRequest = z.object({
+  operationId: teamOperationId,
+  action: z.object({
+    kind: z.literal("relay.publish"),
+    draftId: RelayDraftIdSchema,
+  }).strict(),
+  expectedRevisions: z.array(relayCommandExpectation).max(34),
+}).strict().superRefine((value, context) => {
+  const draftTarget = `local:${value.action.draftId}`;
+  const targets = value.expectedRevisions.map((item) => item.target.kind === "local"
+    ? `local:${item.target.id}`
+    : `artifact:${item.target.path}`);
+  const draftCount = targets.filter((target) => target === draftTarget).length;
+  const workstreamCount = targets.filter((target) =>
+    /^artifact:\.mex\/workstreams\/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/.test(target)).length;
+  const memberCount = targets.filter((target) =>
+    /^artifact:\.mex\/team\/members\/member_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/.test(target)).length;
+  if (
+    new Set(targets).size !== targets.length
+    || draftCount !== 1
+    || workstreamCount !== 1
+    || memberCount < 1
+    || memberCount > 32
+    || targets.length !== draftCount + workstreamCount + memberCount
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["expectedRevisions"],
+      message: "A legacy Relay apply requires exactly its draft, Workstream, and recipient Member revisions.",
+    });
+  }
+  if (jsonByteLength(value) > HUB_LIMITS.maxMutationBodyBytes) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "The Relay command exceeds 64 KiB." });
+  }
+});
 
-const relayActivityEventSchema = z.object({
+const relayLegacyPublishEnvelope = z.object({
   schemaVersion: z.literal(1),
+  request: relayLegacyPublishRequest,
+  preview: relayPublicPreview,
+  receipt: RelayOperationReceiptSchema,
+}).strict().superRefine((value, context) => {
+  const purposes = value.receipt.purposeIds.map(({ purpose }) => purpose);
+  if (purposes.length !== 2 || purposes[0] !== "activity" || purposes[1] !== "relay") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["receipt", "purposeIds"],
+      message: "A legacy Relay publication receipt requires Activity and Relay purpose IDs.",
+    });
+  }
+  if (jsonByteLength(value) > HUB_LIMITS.maxMutationBodyBytes) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "The Relay preview exceeds 64 KiB." });
+  }
+});
+
+const RelayOperationApplyRequestSchema = z.union([
+  RelayOperationPreviewResponseSchema,
+  relayLegacyPublishEnvelope,
+]);
+
+const relayActivityEventFields = {
   id: teamEventId,
   timestamp: isoTimestamp,
   actor: relayServiceActorRef,
@@ -1855,7 +2022,16 @@ const relayActivityEventSchema = z.object({
   subjects: z.array(TeamActivitySubjectInputSchema).max(64),
   workstream: teamWorkstreamRef.nullable(),
   repoState: teamRepositoryState,
-}).strict();
+} as const;
+const relayActivityEventSchema = z.union([z.object({
+  schemaVersion: z.literal(1),
+  ...relayActivityEventFields,
+}).strict(), z.object({
+  schemaVersion: z.literal(2),
+  ...relayActivityEventFields,
+  origin: TeamPersistedActivityOriginSchema,
+  label: teamText(512).optional(),
+}).strict()]);
 
 const RelayOperationApplyResponseSchema = z.object({
   operationId: teamOperationId,
@@ -1871,7 +2047,6 @@ const RelayOperationApplyResponseSchema = z.object({
 return {
   RelayStateSchema,
   RelayPerspectiveSchema,
-  RelayIdSchema,
   RelayDraftIdSchema,
   RelayEvidenceRefSchema,
   RelayDraftInputSchema,
@@ -1895,7 +2070,6 @@ return {
 export const {
   RelayStateSchema,
   RelayPerspectiveSchema,
-  RelayIdSchema,
   RelayDraftIdSchema,
   RelayEvidenceRefSchema,
   RelayDraftInputSchema,
@@ -1915,9 +2089,6 @@ export const {
   RelayOperationApplyResponseSchema,
 } = relayContracts;
 
-export const GraphSymbolIdSchema = z.string().min(1).max(128)
-  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, "Graph symbol ID contains unsafe characters.");
-
 export const GraphSymbolSchema = z.object({
   id: GraphSymbolIdSchema,
   symbolKind: utf8Text(128),
@@ -1930,9 +2101,6 @@ export const GraphSymbolSchema = z.object({
   signature: utf8Text(2_048).optional(),
   route: z.string().startsWith("/code/symbols/").max(2_048),
 }).strict();
-
-export const WikiEntityIdSchema = z.string()
-  .regex(/^mx_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Wiki entity ID.");
 
 export const WikiLifecycleStateSchema = z.enum([
   "in_flight",
@@ -2694,6 +2862,15 @@ export const ActivityDiagnosticSchema = z.object({
   path: activityDisplayPath.optional(),
 }).strict();
 
+export const ActivityRecordOriginSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("workflow"),
+    operation: teamActivityAction,
+  }).strict(),
+  z.object({ kind: z.literal("custom") }).strict(),
+  z.object({ kind: z.literal("unknown") }).strict(),
+]);
+
 const activityItemBase = {
   timestamp: isoTimestamp,
   action: utf8Text(128),
@@ -2710,6 +2887,8 @@ export const CanonicalActivityItemSchema = z.object({
   recordedActor: ActivityActorSchema,
   effectiveActor: ActivityActorSchema,
   actorDiagnostics: z.array(ActivityDiagnosticSchema).max(2),
+  recordOrigin: ActivityRecordOriginSchema,
+  label: teamText(512).nullable(),
   workstream: ActivityEntityRefSchema.nullable(),
   repository: ActivityRepositorySnapshotSchema,
   revision,
@@ -2965,6 +3144,9 @@ export type CapabilityStatus = z.infer<typeof CapabilityStatusSchema>;
 export type HubCapabilities = z.infer<typeof HubCapabilitiesSchema>;
 export type HubActor = z.infer<typeof HubActorSchema>;
 export type HomeResponse = z.infer<typeof HomeResponseSchema>;
+export type HomeInboxAttention = z.infer<typeof HomeInboxAttentionSchema>;
+export type HomeRelayAttention = z.infer<typeof HomeRelayAttentionSchema>;
+export type HomeJobsSummary = z.infer<typeof HomeJobsSummarySchema>;
 export type TeamMemberId = z.infer<typeof TeamMemberIdSchema>;
 export type TeamGitAlias = z.infer<typeof TeamGitAliasSchema>;
 export type TeamMember = z.infer<typeof TeamMemberSchema>;
@@ -3082,6 +3264,7 @@ export type ActivityEntityRef = z.infer<typeof ActivityEntityRefSchema>;
 export type ActivitySubject = z.infer<typeof ActivitySubjectSchema>;
 export type ActivityRepositorySnapshot = z.infer<typeof ActivityRepositorySnapshotSchema>;
 export type ActivityDiagnostic = z.infer<typeof ActivityDiagnosticSchema>;
+export type ActivityRecordOrigin = z.infer<typeof ActivityRecordOriginSchema>;
 export type CanonicalActivityItem = z.infer<typeof CanonicalActivityItemSchema>;
 export type LegacyActivityItem = z.infer<typeof LegacyActivityItemSchema>;
 export type ActivityItem = z.infer<typeof ActivityItemSchema>;
@@ -3096,6 +3279,19 @@ export type HubJobState = z.infer<typeof HubJobStateSchema>;
 export type HubJobPhase = z.infer<typeof HubJobPhaseSchema>;
 export type HubJobProgress = z.infer<typeof HubJobProgressSchema>;
 export type HubJobSnapshot = z.infer<typeof HubJobSnapshotSchema>;
+export type {
+  OverviewActivityPanel,
+  OverviewContextPanel,
+  OverviewFocusIdentitySource,
+  OverviewFocusInboxSource,
+  OverviewFocusPanel,
+  OverviewFocusRelaySource,
+  OverviewGraphHealthDetails,
+  OverviewIdentityPanel,
+  OverviewOperationPanel,
+  OverviewResponse,
+  OverviewWikiHealthDetails,
+} from "./overview.js";
 export type JobPageRequest = z.infer<typeof JobPageRequestSchema>;
 export type JobPageResponse = z.infer<typeof JobPageResponseSchema>;
 export type JobStartRequest = z.infer<typeof JobStartRequestSchema>;

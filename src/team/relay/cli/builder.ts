@@ -51,7 +51,10 @@ export function buildRelayCommand(options: RelayCommandBuilderOptions): Command 
     .description("List bounded canonical Relays")
     .option("--perspective <perspective>", "Filter by all, mine, or sent")
     .option("--state <state>", "Filter by Relay lifecycle state; repeatable", collect)
-    .option("--workstream <workstream-id>", "Filter by one canonical Workstream")
+    .option(
+      "--workstream <workstream-id>",
+      "Filter legacy schema-v1/v2 Relays by their recorded Workstream",
+    )
     .option("--cursor <cursor>", "Continue a bounded revision-bound page")
     .option("--limit <n>", "Maximum results (1-100)")
     .option("--json", "Emit the schema v1 Team envelope")

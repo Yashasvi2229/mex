@@ -35,7 +35,12 @@ const initialDynamicImports = new Set(
   [...initialChunks].flatMap((key) => manifest[key]?.dynamicImports ?? []),
 );
 const workbenchEntries = lazyWorkbenchSources.map((source) => {
-  const key = Object.keys(manifest).find((candidate) => candidate === source || manifest[candidate].src === source);
+  const expectedName = source.slice(source.lastIndexOf("/") + 1, source.lastIndexOf("."));
+  const key = Object.keys(manifest).find((candidate) => (
+    candidate === source
+    || manifest[candidate].src === source
+    || manifest[candidate].name === expectedName
+  ));
   if (!key) throw new Error(`The production Hub manifest has no route chunk for ${source}.`);
   if (!manifest[key].isDynamicEntry || !initialDynamicImports.has(key)) {
     throw new Error(`The production Hub route ${source} is not loaded through a lazy workbench boundary.`);
@@ -55,15 +60,38 @@ for (const entry of workbenchEntries) {
     throw new Error(`The production Hub Home workbench eagerly imports ${entry.source}.`);
   }
 }
+const overviewRuntimeKey = Object.keys(manifest).find((candidate) => {
+  const record = manifest[candidate] ?? {};
+  return record.name === "overview" || [candidate, record.src].some((value) => (
+    typeof value === "string" && /(?:^|\/)hub-contracts\/dist\/overview\.js$/u.test(value)
+  ));
+});
+if (!overviewRuntimeKey || !manifest[overviewRuntimeKey].isDynamicEntry) {
+  throw new Error("The production Hub manifest has no lazy Overview aggregate validator.");
+}
+if (initialChunks.has(overviewRuntimeKey)) {
+  throw new Error("The Overview aggregate validator leaked into the application shell.");
+}
 const relayEntry = workbenchEntries.find((entry) => entry.source === "src/pages/RelayPage.tsx");
+const relayComposerKey = Object.keys(manifest).find((candidate) => (
+  candidate === "src/pages/RelayDraftComposer.tsx"
+  || manifest[candidate].src === "src/pages/RelayDraftComposer.tsx"
+));
 const relayRuntimeKey = Object.keys(manifest).find((candidate) => {
   const record = manifest[candidate] ?? {};
-  return [candidate, record.src].some((value) => (
+  return record.name === "relay-client" || [candidate, record.src].some((value) => (
     typeof value === "string" && /(?:^|\/)src\/api\/relay-client\.tsx?$/u.test(value)
   ));
 });
-if (!relayEntry || !relayRuntimeKey) {
-  throw new Error("The production Hub manifest has no private Relay runtime chunk.");
+if (!relayEntry || !relayRuntimeKey || !relayComposerKey) {
+  throw new Error("The production Hub manifest has no private Relay runtime or lazy composer chunk.");
+}
+if (
+  !manifest[relayComposerKey].isDynamicEntry
+  || !(manifest[relayEntry.key].dynamicImports ?? []).includes(relayComposerKey)
+  || staticImportClosure(relayEntry.key).has(relayComposerKey)
+) {
+  throw new Error("The Relay draft composer is not isolated behind its open-on-demand boundary.");
 }
 if (!(manifest[relayEntry.key].imports ?? []).includes(relayRuntimeKey)) {
   throw new Error("The Relay workbench does not directly own its strict runtime contract and transport chunk.");
@@ -72,19 +100,44 @@ if (initialChunks.has(relayRuntimeKey) || homeChunks.has(relayRuntimeKey)) {
   throw new Error("The strict Relay runtime contracts or transport leaked into the application shell or Home workbench.");
 }
 const activityEntry = workbenchEntries.find((entry) => entry.source === "src/pages/ActivityPage.tsx");
-const activityRecorderKey = Object.keys(manifest).find((candidate) => (
-  candidate === "src/pages/ActivityRecordDialog.tsx"
-  || manifest[candidate].src === "src/pages/ActivityRecordDialog.tsx"
+const activityContextKey = Object.keys(manifest).find((candidate) => (
+  candidate === "src/pages/ActivityEntryContext.tsx"
+  || manifest[candidate].src === "src/pages/ActivityEntryContext.tsx"
 ));
-if (!activityEntry || !activityRecorderKey) {
-  throw new Error("The production Hub manifest has no lazy Activity recorder chunk.");
+if (!activityEntry || !activityContextKey) {
+  throw new Error("The production Hub manifest has no expansion-only Activity context chunk.");
 }
 if (
-  !manifest[activityRecorderKey].isDynamicEntry
-  || !(manifest[activityEntry.key].dynamicImports ?? []).includes(activityRecorderKey)
-  || staticImportClosure(activityEntry.key).has(activityRecorderKey)
+  !manifest[activityContextKey].isDynamicEntry
+  || !(manifest[activityEntry.key].dynamicImports ?? []).includes(activityContextKey)
+  || staticImportClosure(activityEntry.key).has(activityContextKey)
 ) {
-  throw new Error("The production Hub Activity recorder is not isolated behind its open-on-demand boundary.");
+  throw new Error("Detailed Activity context is not isolated behind its explicit expansion boundary.");
+}
+const membersEntry = workbenchEntries.find((entry) => entry.source === "src/pages/MembersPage.tsx");
+const membersMutationKey = Object.keys(manifest).find((candidate) => (
+  candidate === "src/pages/MembersMutationDialogs.tsx"
+  || manifest[candidate].src === "src/pages/MembersMutationDialogs.tsx"
+));
+if (!membersEntry || !membersMutationKey) {
+  throw new Error("The production Hub manifest has no open-on-demand Members mutation chunk.");
+}
+if (
+  !manifest[membersMutationKey].isDynamicEntry
+  || !(manifest[membersEntry.key].dynamicImports ?? []).includes(membersMutationKey)
+  || staticImportClosure(membersEntry.key).has(membersMutationKey)
+) {
+  throw new Error("Members mutation dialogs are not isolated behind their explicit review boundary.");
+}
+if (initialChunks.has(membersMutationKey) || homeChunks.has(membersMutationKey)) {
+  throw new Error("Members mutation dialogs leaked into the application shell or Home workbench.");
+}
+if (Object.entries(manifest).some(([key, record]) => (
+  [key, record?.src, record?.name].some((value) => (
+    typeof value === "string" && /(?:^|\/)ActivityRecordDialog(?:\.tsx)?$/u.test(value)
+  ))
+))) {
+  throw new Error("The read-only production Activity workbench still contains a browser recorder chunk.");
 }
 for (const key of homeChunks) {
   const record = manifest[key] ?? {};
@@ -99,7 +152,7 @@ const forbiddenFixtureData = [
   "Three knowledge pages lost grounding",
   "scf_mex",
   "event_01K36WVM6H7JK8M9NPQRSTVVWX",
-  "Keep activity immutable and preserve legacy history",
+  "Keep activity immutable and preserve Project notes",
   "Project Hub read boundaries",
   "mx_01K36WVM6H7JK8M9NPQRSTVVWX",
   "member_01K36WVM6H7JK8M9NPQRSTVVWX",

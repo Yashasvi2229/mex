@@ -29,7 +29,9 @@ export type TeamRelayScenario =
   | "populated"
   | "uninitialized-local"
   | "no-current-member"
+  | "legacy-local-draft"
   | "legacy-v1"
+  | "legacy-v2"
   | "query";
 
 export interface TeamRelaySnapshot {
@@ -58,6 +60,10 @@ export interface TeamRelayContractHarness {
     populatedRelay: TeamRelayDetail | null;
   };
   makeDraftCommand(operationId: string): Promise<TeamRelayCommand>;
+  preparePreV3PublishEnvelope(
+    operationId: string,
+    journalIntent: boolean,
+  ): Promise<TeamRelayPreviewEnvelope>;
   commandFor(
     kind: "relay.publish" | "relay.acknowledge" | "relay.close",
     target: TeamRelayDraftDetail | TeamRelayDetail,
@@ -72,6 +78,7 @@ export interface TeamRelayContractHarness {
   armBeforeCanonicalCrash(): Promise<void>;
   armBeforeCanonicalRecipientDeactivation(): Promise<void>;
   setNow(now: string): void;
+  setRepositoryState(state: RepoState): void;
   mutateRepositoryAuthority(): void;
   mutateDraftToMissingRecipient(draftId: string): Promise<void>;
   deleteMember(
@@ -85,7 +92,6 @@ export interface TeamRelayContractHarness {
     member: "sender" | "recipient" | "alternate-recipient",
     displayName: string,
   ): Promise<void>;
-  setWorkstreamStates(states: readonly ("active" | "blocked" | "done" | "archived")[]): Promise<void>;
   holdCompetingWorkflowLease(): Promise<void>;
   releaseCompetingWorkflowLease(): Promise<void>;
   installEscapingAncestor(
@@ -93,6 +99,11 @@ export interface TeamRelayContractHarness {
   ): Promise<void>;
   swapProjectRoot(): Promise<void>;
   inspectJournalRows(): Promise<readonly string[]>;
+  inspectStoredDraft(id: string): Promise<{
+    payload: unknown;
+    revision: Revision;
+    updatedAt: string;
+  } | null>;
   snapshot(): Promise<TeamRelaySnapshot>;
   close(): Promise<void>;
 }
@@ -117,6 +128,71 @@ export function defineTeamRelayHandoffContract(
         await expect(harness.port.listRelayDrafts()).resolves.toMatchObject({ items: [] });
         await expect(harness.port.listRelays()).resolves.toMatchObject({ items: [] });
         expect(await harness.snapshot()).toEqual(before);
+      });
+    });
+
+    it("translates a legacy Workstream draft on reads without rewriting SQLite identity", async () => {
+      await withHarness(factory, "legacy-local-draft", async (harness) => {
+        const draft = requirePopulatedDraft(harness);
+        const storedBefore = await harness.inspectStoredDraft(draft.id);
+        expect(storedBefore).toMatchObject({
+          revision: draft.revision,
+          updatedAt: draft.updatedAt,
+          payload: {
+            workstream: expect.objectContaining({ kind: "workstream" }),
+          },
+        });
+        const beforeReads = await harness.snapshot();
+
+        const detail = await harness.port.getRelayDraft(draft.id);
+        const page = await harness.port.listRelayDrafts();
+        expect(detail).toMatchObject({
+          revision: storedBefore!.revision,
+          updatedAt: storedBefore!.updatedAt,
+          input: {
+            evidence: [
+              expect.objectContaining({
+                kind: "entity",
+                entity: expect.objectContaining({ kind: "workstream" }),
+              }),
+              expect.objectContaining({ kind: "manual" }),
+            ],
+          },
+        });
+        expect(detail?.input).not.toHaveProperty("workstream");
+        expect(page.items).toEqual([
+          expect.objectContaining({
+            id: draft.id,
+            revision: storedBefore!.revision,
+            updatedAt: storedBefore!.updatedAt,
+          }),
+        ]);
+        expect(await harness.inspectStoredDraft(draft.id)).toEqual(storedBefore);
+        expect(await harness.snapshot()).toEqual(beforeReads);
+
+        const saved = await harness.port.applyRelay(
+          await harness.port.previewRelay({
+            operationId: "relay_contract_explicit_legacy_draft_save",
+            action: {
+              kind: "relay.draft.save",
+              draftId: draft.id,
+              draft: detail!.input,
+            },
+            expectedRevisions: [{
+              target: {
+                kind: "local",
+                namespace: "relay-draft",
+                id: draft.id,
+              },
+              revision: draft.revision,
+            }],
+          }),
+        );
+        expect(saved.localChanges).toHaveLength(1);
+        const storedAfter = await harness.inspectStoredDraft(draft.id);
+        expect(storedAfter?.payload).not.toHaveProperty("workstream");
+        expect(storedAfter?.revision).not.toBe(storedBefore!.revision);
+        expect(storedAfter?.updatedAt).not.toBe(storedBefore!.updatedAt);
       });
     });
 
@@ -290,7 +366,7 @@ export function defineTeamRelayHandoffContract(
       });
     });
 
-    it("publishes, first-claims, and closes with exact activity cardinality", async () => {
+    it("publishes standalone provenance, then preserves it while lifecycle Activity records action-time state", async () => {
       await withHarness(factory, "populated", async (harness) => {
         const draft = harness.oracle.populatedDraft;
         if (draft === null) throw new Error("Relay fixture has no draft.");
@@ -303,24 +379,40 @@ export function defineTeamRelayHandoffContract(
         expect(published.relays).toHaveLength(1);
         expect(published.events).toHaveLength(1);
         expect(published.relays[0]?.publishedAt).toBe(harness.oracle.now);
+        expect(published.relays[0]?.schemaVersion).toBe(3);
+        expect(published.relays[0]?.workstream).toBeNull();
+        expect(published.relays[0]?.publishedRepoState)
+          .toEqual(publish.receipt.authority.repoState);
         expect(publish.receipt.purposeIds.find((item) => item.purpose === "relay")?.id)
           .toBe(published.relays[0]!.ref.id);
         expect(publish.receipt.purposeIds.find((item) => item.purpose === "activity")?.id)
           .toBe(published.events[0]!.id);
         expect(published.events[0]).toMatchObject({
+          schemaVersion: 2,
           action: "relay.published",
+          origin: { kind: "workflow", operation: "relay.publish" },
+          label: draft.input.summary,
           timestamp: harness.oracle.now,
           actor: harness.oracle.sender,
           subjects: [{
             kind: "entity",
             entity: published.relays[0]!.ref,
           }],
-          workstream: published.relays[0]!.workstream,
+          repoState: publish.receipt.authority.repoState,
         });
+        expect(published.events[0]).not.toHaveProperty("workstream");
 
         const recipientPort = await harness.selectActor("recipient");
         const relay = published.relays[0]!;
         const immutableContent = immutableRelayContent(relay);
+        const acknowledgeRepoState: RepoState = {
+          branch: "relay/claim",
+          head: "8".repeat(40),
+          dirty: true,
+          observedAt: "2026-08-29T06:31:00.000Z",
+        };
+        harness.setNow(acknowledgeRepoState.observedAt);
+        harness.setRepositoryState(acknowledgeRepoState);
         const acknowledge = await recipientPort.previewRelay(
           await harness.commandFor(
             "relay.acknowledge",
@@ -336,13 +428,27 @@ export function defineTeamRelayHandoffContract(
         expect(acknowledge.receipt.purposeIds[0]!.id)
           .toBe(acknowledged.events[0]!.id);
         expect(acknowledged.events[0]).toMatchObject({
+          schemaVersion: 2,
           action: "relay.acknowledged",
-          timestamp: harness.oracle.now,
+          origin: { kind: "workflow", operation: "relay.acknowledge" },
+          label: draft.input.summary,
+          timestamp: acknowledgeRepoState.observedAt,
           actor: harness.oracle.recipient,
           subjects: [{ kind: "entity", entity: relay.ref }],
-          workstream: relay.workstream,
+          repoState: acknowledgeRepoState,
         });
+        expect(acknowledged.events[0]).not.toHaveProperty("workstream");
+        expect(acknowledged.relays[0]!.publishedRepoState)
+          .toEqual(publish.receipt.authority.repoState);
 
+        const closeRepoState: RepoState = {
+          branch: null,
+          head: null,
+          dirty: false,
+          observedAt: "2026-08-29T06:32:00.000Z",
+        };
+        harness.setNow(closeRepoState.observedAt);
+        harness.setRepositoryState(closeRepoState);
         const close = await recipientPort.previewRelay(
           await harness.commandFor(
             "relay.close",
@@ -355,12 +461,18 @@ export function defineTeamRelayHandoffContract(
         expect(closed.events).toHaveLength(1);
         expect(close.receipt.purposeIds[0]!.id).toBe(closed.events[0]!.id);
         expect(closed.events[0]).toMatchObject({
+          schemaVersion: 2,
           action: "relay.closed",
-          timestamp: harness.oracle.now,
+          origin: { kind: "workflow", operation: "relay.close" },
+          label: draft.input.summary,
+          timestamp: closeRepoState.observedAt,
           actor: harness.oracle.recipient,
           subjects: [{ kind: "entity", entity: relay.ref }],
-          workstream: relay.workstream,
+          repoState: closeRepoState,
         });
+        expect(closed.events[0]).not.toHaveProperty("workstream");
+        expect(closed.relays[0]!.publishedRepoState)
+          .toEqual(publish.receipt.authority.repoState);
         expect(closed.relays[0]!.publishedAt! <= closed.relays[0]!.acknowledgedAt!)
           .toBe(true);
         expect(closed.relays[0]!.acknowledgedAt! <= closed.relays[0]!.closedAt!)
@@ -380,6 +492,107 @@ export function defineTeamRelayHandoffContract(
       });
     });
 
+    it("permits dirty publication and signs one honest bounded provenance warning", async () => {
+      await withHarness(factory, "populated", async (harness) => {
+        const draft = requirePopulatedDraft(harness);
+        const dirtyRepoState: RepoState = {
+          branch: "codex/dirty-handoff",
+          head: "7".repeat(40),
+          dirty: true,
+          observedAt: "2026-08-29T06:35:00.000Z",
+        };
+        harness.setNow(dirtyRepoState.observedAt);
+        harness.setRepositoryState(dirtyRepoState);
+        const preview = await harness.port.previewRelay(
+          await harness.commandFor(
+            "relay.publish",
+            draft,
+            "relay_contract_dirty_publish",
+          ),
+        );
+        expect(preview.receipt.authority.repoState).toEqual(dirtyRepoState);
+        expect(preview.preview.valid).toBe(true);
+        expect(preview.preview.diagnostics).toEqual([
+          expect.objectContaining({
+            severity: "warning",
+            message: expect.stringMatching(/local changes existed.*paths, diff, or contents/iu),
+          }),
+        ]);
+
+        const applied = await harness.port.applyRelay(preview);
+        expect(applied.relays[0]).toMatchObject({
+          schemaVersion: 3,
+          workstream: null,
+          publishedRepoState: dirtyRepoState,
+        });
+        expect(applied.events[0]).toMatchObject({
+          action: "relay.published",
+          repoState: dirtyRepoState,
+        });
+        expect(applied.events[0]).not.toHaveProperty("workstream");
+      });
+    });
+
+    it("invalidates publication when branch, HEAD, or clean/dirty state drifts", async () => {
+      for (const [label, mutate] of [
+        ["branch", (state: RepoState): RepoState => ({ ...state, branch: "other/branch" })],
+        ["head", (state: RepoState): RepoState => ({ ...state, head: "6".repeat(40) })],
+        ["dirty", (state: RepoState): RepoState => ({ ...state, dirty: !state.dirty })],
+      ] as const) {
+        await withHarness(factory, "populated", async (harness) => {
+          const draft = requirePopulatedDraft(harness);
+          const envelope = await harness.port.previewRelay(
+            await harness.commandFor(
+              "relay.publish",
+              draft,
+              `relay_contract_${label}_drift`,
+            ),
+          );
+          harness.setRepositoryState(mutate(envelope.receipt.authority.repoState));
+          const drifted = await harness.snapshot();
+          await expectProblemCode(
+            harness.port.applyRelay(envelope),
+            ["REVISION_CONFLICT"],
+          );
+          expect(await harness.snapshot()).toEqual(drifted);
+          expectNoRelayPublication(drifted, draft.id);
+        });
+      }
+    });
+
+    it("records detached and null-HEAD publication authority without fabricating Git state", async () => {
+      for (const [label, repoState] of [
+        ["detached", {
+          branch: null,
+          head: "5".repeat(40),
+          dirty: false,
+          observedAt: "2026-08-29T06:36:00.000Z",
+        }],
+        ["null-head", {
+          branch: "main",
+          head: null,
+          dirty: false,
+          observedAt: "2026-08-29T06:37:00.000Z",
+        }],
+      ] as const satisfies readonly (readonly [string, RepoState])[]) {
+        await withHarness(factory, "populated", async (harness) => {
+          harness.setNow(repoState.observedAt);
+          harness.setRepositoryState(repoState);
+          const draft = requirePopulatedDraft(harness);
+          const envelope = await harness.port.previewRelay(
+            await harness.commandFor(
+              "relay.publish",
+              draft,
+              `relay_contract_${label}_publication`,
+            ),
+          );
+          const applied = await harness.port.applyRelay(envelope);
+          expect(applied.relays[0]?.publishedRepoState).toEqual(repoState);
+          expect(applied.events[0]?.repoState).toEqual(repoState);
+        });
+      }
+    });
+
     it("requires current Member authority for personal views and canonical actions", async () => {
       await withHarness(factory, "no-current-member", async ({ port }) => {
         await expect(port.listRelays({ perspective: "mine" })).rejects.toMatchObject({
@@ -393,7 +606,7 @@ export function defineTeamRelayHandoffContract(
       });
     });
 
-    it("filters before pagination, sorts v2 before legacy, and isolates bound cursors", async () => {
+    it("filters before pagination, sorts timestamped Relays before v1, and isolates bound cursors", async () => {
       await withHarness(factory, "query", async (harness) => {
         const all = await harness.port.listRelays({ perspective: "all" });
         expect(all.items.map((relay) => relay.summary)).toEqual([
@@ -404,6 +617,18 @@ export function defineTeamRelayHandoffContract(
         expect(all.diagnostics.filter(
           (diagnostic) => diagnostic.code === "RELAY_LEGACY_PUBLICATION_TIME",
         )).toHaveLength(1);
+        const legacyWorkstream = all.items.find(
+          (relay) => relay.workstream !== null,
+        )?.workstream;
+        if (legacyWorkstream === null || legacyWorkstream === undefined) {
+          throw new Error("Expected one Workstream-bearing legacy Relay.");
+        }
+        expect((await harness.port.listRelays({
+          perspective: "all",
+          workstreamId: legacyWorkstream.id,
+        })).items.map((relay) => relay.summary)).toEqual([
+          "Legacy self handoff",
+        ]);
         const sent = await harness.port.listRelays({ perspective: "sent" });
         expect(sent.items.map((relay) => relay.summary)).toEqual([
           "Published to recipient",
@@ -414,6 +639,14 @@ export function defineTeamRelayHandoffContract(
           "Claimed by sender",
           "Legacy self handoff",
         ]);
+        const senderMineFirst = await harness.port.listRelays({
+          perspective: "mine",
+          limit: 1,
+        });
+        expect(senderMineFirst.items.map((relay) => relay.summary)).toEqual([
+          "Claimed by sender",
+        ]);
+        expect(senderMineFirst.nextCursor).not.toBeNull();
 
         const first = await harness.port.listRelays({
           perspective: "all",
@@ -441,11 +674,18 @@ export function defineTeamRelayHandoffContract(
         }), ["REVISION_CONFLICT"]);
 
         const recipient = await harness.selectActor("recipient");
-        await expectProblemCode(recipient.listRelays({
+        expect((await recipient.listRelays({
           perspective: "all",
           states: ["published"],
           limit: 1,
           cursor: first.nextCursor!,
+        })).items.map((relay) => relay.summary)).toEqual([
+          "Legacy self handoff",
+        ]);
+        await expectProblemCode(recipient.listRelays({
+          perspective: "mine",
+          limit: 1,
+          cursor: senderMineFirst.nextCursor!,
         }), ["REVISION_CONFLICT"]);
         expect((await recipient.listRelays({ perspective: "mine" })).items
           .map((relay) => relay.summary)).toEqual(["Published to recipient"]);
@@ -718,6 +958,122 @@ export function defineTeamRelayHandoffContract(
       });
     });
 
+    it("keeps legacy v2 Workstream association while preserving its schema through Take and Close", async () => {
+      await withHarness(factory, "legacy-v2", async (harness) => {
+        const legacy = harness.oracle.populatedRelay;
+        if (legacy === null) throw new Error("Expected legacy schema-v2 Relay.");
+        expect(legacy).toMatchObject({
+          schemaVersion: 2,
+          publishedRepoState: null,
+        });
+        expect(legacy.workstream).not.toBeNull();
+        const immutable = immutableRelayContent(legacy);
+
+        const recipient = await harness.selectActor("recipient");
+        const acknowledged = await recipient.applyRelay(
+          await recipient.previewRelay(
+            await harness.commandFor(
+              "relay.acknowledge",
+              legacy,
+              "relay_contract_legacy_v2_acknowledge",
+            ),
+          ),
+        );
+        expect(acknowledged.relays[0]).toMatchObject({
+          schemaVersion: 2,
+          publishedRepoState: null,
+          workstream: legacy.workstream,
+        });
+        expect(acknowledged.events[0]).toMatchObject({
+          action: "relay.acknowledged",
+          workstream: legacy.workstream,
+        });
+
+        const closed = await recipient.applyRelay(
+          await recipient.previewRelay(
+            await harness.commandFor(
+              "relay.close",
+              acknowledged.relays[0]!,
+              "relay_contract_legacy_v2_close",
+            ),
+          ),
+        );
+        expect(closed.relays[0]).toMatchObject({
+          schemaVersion: 2,
+          publishedRepoState: null,
+          workstream: legacy.workstream,
+        });
+        expect(closed.events[0]).toMatchObject({
+          action: "relay.closed",
+          workstream: legacy.workstream,
+        });
+        expect(immutableRelayContent(closed.relays[0]!)).toEqual(immutable);
+      });
+    });
+
+    it("rejects an unjournaled pre-v3 signed Publish preview with actionable re-preview guidance", async () => {
+      await withHarness(factory, "populated", async (harness) => {
+        const envelope = await harness.preparePreV3PublishEnvelope(
+          "relay_contract_pre_v3_unjournaled",
+          false,
+        );
+        const before = await harness.snapshot();
+        await expect((await harness.restart()).applyRelay(envelope)).rejects
+          .toMatchObject({
+            problem: {
+              code: "REVISION_CONFLICT",
+              detail: expect.stringMatching(/preview.*again/iu),
+            },
+          });
+        expect(await harness.snapshot()).toEqual(before);
+      });
+    });
+
+    it("recovers journaled pre-v3 Publish intent as exact v2 Relay and Workstream Activity", async () => {
+      await withHarness(factory, "populated", async (harness) => {
+        const envelope = await harness.preparePreV3PublishEnvelope(
+          "relay_contract_pre_v3_journaled",
+          true,
+        );
+        const relayChange = envelope.preview.changes.find((change) =>
+          change.path.startsWith(".mex/relays/"));
+        const activityChange = envelope.preview.changes.find((change) =>
+          change.path.startsWith(".mex/events/activity/"));
+        const recovered = await (await harness.restart()).applyRelay(envelope);
+        expect(recovered).toMatchObject({
+          idempotentReplay: false,
+          relays: [{
+            schemaVersion: 2,
+            publishedRepoState: null,
+            workstream: expect.objectContaining({ kind: "workstream" }),
+            evidence: [{ kind: "manual", note: "Consumer contract fixture" }],
+          }],
+          events: [{
+            action: "relay.published",
+            workstream: expect.objectContaining({ kind: "workstream" }),
+          }],
+        });
+        expect(recovered.relays[0]?.revision).toBe(relayChange?.afterRevision);
+        expect(recovered.events[0]?.revision).toBe(activityChange?.afterRevision);
+        expect(recovered.relays[0]?.publishedRepoState).toBeNull();
+        await expect(harness.port.getRelayDraft(requirePopulatedDraft(harness).id))
+          .resolves.toBeNull();
+        const afterRecovery = await harness.snapshot();
+        expect(afterRecovery.relayIds).toHaveLength(1);
+        expect(afterRecovery.activityIds).toHaveLength(1);
+
+        await harness.removeSigner();
+        const replayBaseline = await harness.snapshot();
+        const replay = await (await harness.restart()).applyRelay(envelope);
+        expect(replay).toMatchObject({
+          idempotentReplay: true,
+          relays: [{ schemaVersion: 2 }],
+          events: [{ action: "relay.published" }],
+        });
+        expect(await harness.snapshot()).toEqual(replayBaseline);
+      });
+    });
+
     it("rejects envelopes after signer loss before journal intent", async () => {
       await withHarness(factory, "populated", async (harness) => {
         const draft = harness.oracle.populatedDraft;
@@ -919,25 +1275,6 @@ export function defineTeamRelayHandoffContract(
           await harness.commandFor(
             "relay.publish",
             draft,
-            "relay_contract_stale_workstream",
-          ),
-        );
-        await harness.setWorkstreamStates(["archived"]);
-        const drifted = await harness.snapshot();
-        await expectProblemCode(
-          (await harness.restart()).applyRelay(envelope),
-          ["REVISION_CONFLICT"],
-        );
-        expect(await harness.snapshot()).toEqual(drifted);
-        expectNoRelayPublication(drifted, draft.id);
-      });
-
-      await withHarness(factory, "populated", async (harness) => {
-        const draft = requirePopulatedDraft(harness);
-        const envelope = await harness.port.previewRelay(
-          await harness.commandFor(
-            "relay.publish",
-            draft,
             "relay_contract_stale_draft_payload",
           ),
         );
@@ -1046,7 +1383,7 @@ export function defineTeamRelayHandoffContract(
       });
     });
 
-    it("requires exactly the draft, Workstream, and recipient revision set", async () => {
+    it("requires exactly the draft and unique recipient revision set", async () => {
       await withHarness(factory, "populated", async (harness) => {
         const draft = requirePopulatedDraft(harness);
         const valid = await harness.commandFor(
@@ -1063,7 +1400,14 @@ export function defineTeamRelayHandoffContract(
             target: { kind: "artifact" as const, path: ".mex/unrelated.md" as never },
             revision: "a".repeat(64) as Revision,
           }],
-          [...valid.expectedRevisions, valid.expectedRevisions[2]!],
+          [...valid.expectedRevisions, {
+            target: {
+              kind: "artifact" as const,
+              path: ".mex/workstreams/ws_01ARZ3NDEKTSV4RRFFQ69G5FAV.md" as never,
+            },
+            revision: "a".repeat(64) as Revision,
+          }],
+          [...valid.expectedRevisions, valid.expectedRevisions[1]!],
           valid.expectedRevisions.map((expectation, index) => index === 1
             ? { ...expectation, semanticRevision: 1 }
             : expectation),
@@ -1158,48 +1502,6 @@ export function defineTeamRelayHandoffContract(
         ), ["NOT_FOUND"]);
         expect(await harness.snapshot()).toEqual(before);
       });
-    });
-
-    it("accepts planned, active, and blocked Workstreams but rejects done or archived", async () => {
-      for (const [label, transitions] of [
-        ["planned", []],
-        ["active", ["active"]],
-        ["blocked", ["active", "blocked"]],
-      ] as const) {
-        await withHarness(factory, "populated", async (harness) => {
-          await harness.setWorkstreamStates(transitions);
-          const currentDraft = await harness.port.getRelayDraft(requirePopulatedDraft(harness).id);
-          if (currentDraft === null) throw new Error("Expected Relay draft.");
-          await expect(harness.port.applyRelay(
-            await harness.port.previewRelay(
-              await harness.commandFor(
-                "relay.publish",
-                currentDraft,
-                `relay_contract_workstream_${label}`,
-              ),
-            ),
-          )).resolves.toMatchObject({ relays: [{ state: "published" }] });
-        });
-      }
-      for (const [label, transitions] of [
-        ["done", ["active", "done"]],
-        ["archived", ["archived"]],
-      ] as const) {
-        await withHarness(factory, "populated", async (harness) => {
-          await harness.setWorkstreamStates(transitions);
-          const currentDraft = await harness.port.getRelayDraft(requirePopulatedDraft(harness).id);
-          if (currentDraft === null) throw new Error("Expected Relay draft.");
-          const before = await harness.snapshot();
-          await expectProblemCode(harness.port.previewRelay(
-            await harness.commandFor(
-              "relay.publish",
-              currentDraft,
-              `relay_contract_workstream_${label}`,
-            ),
-          ), ["VALIDATION_FAILED"]);
-          expect(await harness.snapshot()).toEqual(before);
-        });
-      }
     });
 
     it("serializes Relay writers with the repository Team workflow lease", async () => {
@@ -1445,6 +1747,7 @@ function immutableRelayContent(relay: TeamRelayDetail) {
     workstream: relay.workstream,
     summary: relay.summary,
     publishedAt: relay.publishedAt,
+    publishedRepoState: relay.publishedRepoState,
     completed: relay.completed,
     inProgress: relay.inProgress,
     decisions: relay.decisions,

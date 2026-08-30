@@ -1,40 +1,47 @@
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowRight,
+  Activity,
   CheckCircle2,
   ChevronRight,
   CircleDot,
-  FileDiff,
+  Clock3,
   FilePenLine,
   GitBranch,
+  GitCommitHorizontal,
   Handshake,
+  Inbox,
+  MoreHorizontal,
   Plus,
+  RefreshCw,
   Send,
   ShieldCheck,
-  Trash2,
   TriangleAlert,
   UserCheck,
   X,
 } from "lucide-react";
 import {
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type ChangeEvent,
   type MouseEvent,
+  type ReactNode,
 } from "react";
 import { flushSync } from "react-dom";
-import { useOutletContext } from "react-router-dom";
+import { Link, useOutletContext, useSearchParams } from "react-router-dom";
+import { RelayDraftIdSchema, RelayIdSchema } from "@mex/hub-contracts/relay";
+import { HubApiError } from "../api/client";
 import { useHubApi } from "../api/context";
 import { strictRelayPreviewEnvelope } from "../api/relay-client";
+import type { RelayReviewSource } from "./RelayMutationDialog";
 import type {
   CapabilitiesResponse,
+  CapabilityStatus,
   RelayDetail,
   RelayDraftDetail,
-  RelayDraftInput,
   RelayDraftSummary,
-  RelayEvidenceRef,
   RelayListRequest,
   RelayOperationApplyResponse,
   RelayOperationPreviewRequest,
@@ -43,22 +50,12 @@ import type {
   RelaySummary,
   TeamActorRef,
   TeamMember,
-  TeamWorkstream,
   Tone,
 } from "../api/types";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogMedia,
-  AlertDialogTitle,
-} from "../components/primitives/alert-dialog";
+import type { InboxOverflowAction } from "./InboxOverflowMenu";
 import { Badge } from "../components/primitives/badge";
-import { Button } from "../components/primitives/button";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../components/primitives/alert";
+import { Button, buttonVariants } from "../components/primitives/button";
 import {
   Card,
   CardAction,
@@ -68,31 +65,28 @@ import {
   CardTitle,
 } from "../components/primitives/card";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "../components/primitives/dialog";
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../components/primitives/empty";
 import {
-  Field,
-  FieldDescription,
-  FieldError,
-  FieldGroup,
-  FieldLabel,
-  FieldLegend,
-  FieldSet,
-} from "../components/primitives/field";
-import { Input } from "../components/primitives/input";
-import { NativeSelect, NativeSelectOption } from "../components/primitives/native-select";
-import { Separator } from "../components/primitives/separator";
-import { Tabs, TabsList, TabsTrigger } from "../components/primitives/tabs";
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemGroup,
+  ItemMedia,
+  ItemTitle,
+} from "../components/primitives/item";
+import { Skeleton } from "../components/primitives/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/primitives/tabs";
 import {
   ErrorState,
   formatDate,
   PageHeader,
-  sentenceCase,
   StatePanel,
   StatusPill,
 } from "../components/ui";
@@ -101,28 +95,15 @@ import styles from "../styles/relay.module.css";
 
 const PAGE_SIZE = 25;
 const OPEN_STATES: readonly RelayState[] = ["published", "acknowledged"];
+const RelayOverflowMenu = lazy(() => import("./InboxOverflowMenu"));
+const RelayDraftComposer = lazy(() => import("./RelayDraftComposer"));
+const RelayDetailSections = lazy(() => import("./RelayDetailSections"));
+const RelayMutationDialog = lazy(() => import("./RelayMutationDialog"));
 
-type Selection = { kind: "draft"; id: string } | { kind: "relay"; id: string };
-type ReviewSnapshot =
-  | { kind: "draft"; input: RelayDraftInput }
-  | { kind: "relay"; relay: RelayDetail };
-type ReviewSource =
-  | { kind: "save"; request: RelayOperationPreviewRequest; snapshot: ReviewSnapshot }
-  | { kind: "delete"; request: RelayOperationPreviewRequest; snapshot: ReviewSnapshot }
-  | { kind: "publish"; request: RelayOperationPreviewRequest; snapshot: ReviewSnapshot }
-  | { kind: "acknowledge"; request: RelayOperationPreviewRequest; snapshot: ReviewSnapshot }
-  | { kind: "close"; request: RelayOperationPreviewRequest; snapshot: ReviewSnapshot };
-type ReferenceRow = { kind: string; value: string; title: string };
-type CodeRow = { kind: "file" | "symbol"; value: string; fingerprint: string };
-type EvidenceRow = {
-  kind: "entity" | "code" | "file" | "commit" | "external" | "manual";
-  value: string;
-  label: string;
-  detail: string;
-};
+type RelayView = "mine" | "sent" | "all" | "drafts";
+type RelayLifecycleView = "open" | "closed";
+type RelayGitNotice = "publish" | "acknowledge" | "close";
 type PreviewAcceptance = "accepted" | "stale" | "mismatched";
-
-const PREVIEW_IDENTITY_ERROR = "The signed Relay preview did not exactly match the submitted request. Prepare a fresh preview before applying.";
 
 function canonicalRequestJson(value: unknown): string {
   if (value === null) return "null";
@@ -182,17 +163,10 @@ function operationId(label: string): string {
   return `hub_relay_${label}_${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
-function draftInputFromEnvelope(envelope: RelayOperationPreviewResponse): RelayDraftInput {
-  if (envelope.request.action.kind !== "relay.draft.save") {
-    throw new Error("The draft review envelope does not contain a draft save action.");
-  }
-  return envelope.request.action.draft;
-}
-
 function actorLabel(actor: TeamActorRef | null | undefined): string {
-  if (actor?.kind === "member") return actor.displayName ?? actor.memberId;
+  if (actor?.kind === "member") return actor.displayName ?? "Team member";
   if (actor?.kind === "git") return actor.name ?? actor.email ?? "Git identity";
-  return "Unknown actor";
+  return "Unknown identity";
 }
 
 function relayTone(state: RelayState): Tone {
@@ -201,10 +175,78 @@ function relayTone(state: RelayState): Tone {
   return "success";
 }
 
-function viewRequest(view: "mine" | "sent" | "all" | "closed"): Omit<RelayListRequest, "cursor" | "limit"> {
-  if (view === "closed") return { perspective: "all", states: ["closed"] };
-  if (view === "sent") return { perspective: "sent" };
-  return { perspective: view, states: [...OPEN_STATES] };
+function viewRequest(
+  view: Exclude<RelayView, "drafts">,
+  lifecycle: RelayLifecycleView,
+): Omit<RelayListRequest, "cursor" | "limit"> {
+  return {
+    perspective: view,
+    states: lifecycle === "open" ? [...OPEN_STATES] : ["closed"],
+  };
+}
+
+function relayViewParam(value: string | null): RelayView | null {
+  return value === "mine" || value === "sent" || value === "all" || value === "drafts"
+    ? value
+    : null;
+}
+
+function relayLifecycleParam(value: string | null): RelayLifecycleView {
+  return value === "closed" ? "closed" : "open";
+}
+
+function relayMatchesView(
+  relay: RelayDetail,
+  view: Exclude<RelayView, "drafts">,
+  lifecycle: RelayLifecycleView,
+  currentMemberId: string | null,
+): boolean {
+  const lifecycleMatches = lifecycle === "open"
+    ? relay.state === "published" || relay.state === "acknowledged"
+    : relay.state === "closed";
+  if (!lifecycleMatches) return false;
+  if (view === "all") return true;
+  if (currentMemberId === null) return false;
+  if (view === "sent") {
+    return relay.sender.kind === "member" && relay.sender.memberId === currentMemberId;
+  }
+  return relay.state === "published"
+    ? relay.recipients.some((recipient) => (
+        recipient.kind === "member" && recipient.memberId === currentMemberId
+      ))
+    : relay.acknowledgedBy?.kind === "member"
+      && relay.acknowledgedBy.memberId === currentMemberId;
+}
+
+function relayStateLabel(
+  relay: RelaySummary | RelayDetail,
+  view: Exclude<RelayView, "drafts">,
+  currentMemberId: string | null,
+): string {
+  if (relay.state === "closed") return "Closed";
+  if (relay.state === "published") return view === "mine" ? "Ready to take" : "Waiting for pickup";
+  if (view === "mine" && relay.acknowledgedBy?.kind === "member"
+    && relay.acknowledgedBy.memberId === currentMemberId) {
+    return "In your hands";
+  }
+  return `Taken by ${actorLabel(relay.acknowledgedBy)}`;
+}
+
+function relayRelevantTime(relay: RelaySummary | RelayDetail): string | null {
+  const value = relay.state === "closed"
+    ? relay.closedAt
+    : relay.state === "acknowledged"
+      ? relay.acknowledgedAt
+      : relay.publishedAt;
+  return value === null ? null : formatDate(value);
+}
+
+function relayRepositoryLabel(relay: RelaySummary | RelayDetail): string | null {
+  const state = relay.publishedRepoState;
+  if (state === null) return null;
+  const branch = state.branch ?? "Detached HEAD";
+  const head = state.head === null ? "No committed HEAD" : state.head.slice(0, 8);
+  return `${branch} · ${head}`;
 }
 
 function artifactExpectation(path: string, revision: string) {
@@ -218,593 +260,9 @@ function draftExpectation(draft: RelayDraftDetail) {
   };
 }
 
-function StringRows({
-  id,
-  label,
-  values,
-  onChange,
-}: {
-  id: string;
-  label: string;
-  values: string[];
-  onChange(values: string[]): void;
-}) {
-  return (
-    <FieldSet className={styles.fieldSet}>
-      <FieldLegend>{label}</FieldLegend>
-      <div className={styles.repeatableRows}>
-        {values.map((value, index) => (
-          <div className={styles.repeatableRow} key={`${id}-${index}`}>
-            <Input
-              aria-label={`${label} ${index + 1}`}
-              id={`${id}-${index}`}
-              onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? event.target.value : item))}
-              value={value}
-            />
-            <Button
-              aria-label={`Remove ${label} ${index + 1}`}
-              onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}
-              size="icon-sm"
-              type="button"
-              variant="ghost"
-            >
-              <X aria-hidden="true" />
-            </Button>
-          </div>
-        ))}
-        <Button onClick={() => onChange([...values, ""])} size="sm" type="button" variant="outline">
-          <Plus data-icon="inline-start" aria-hidden="true" /> Add {label.toLowerCase()}
-        </Button>
-      </div>
-    </FieldSet>
-  );
-}
-
-function ReferenceRows({ values, onChange }: { values: ReferenceRow[]; onChange(values: ReferenceRow[]): void }) {
-  return (
-    <FieldSet className={styles.fieldSet}>
-      <FieldLegend>Decision references</FieldLegend>
-      <FieldDescription>Optional canonical entity references; their current Wiki state is not consulted.</FieldDescription>
-      <div className={styles.repeatableRows}>
-        {values.map((row, index) => (
-          <div className={styles.referenceRow} key={`decision-${index}`}>
-            <Input aria-label={`Decision kind ${index + 1}`} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, kind: event.target.value } : item))} placeholder="decision" value={row.kind} />
-            <Input aria-label={`Decision ID ${index + 1}`} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, value: event.target.value } : item))} placeholder="entity ID" value={row.value} />
-            <Input aria-label={`Decision title ${index + 1}`} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item))} placeholder="Title (optional)" value={row.title} />
-            <Button aria-label={`Remove decision ${index + 1}`} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))} size="icon-sm" type="button" variant="ghost"><X aria-hidden="true" /></Button>
-          </div>
-        ))}
-        <Button onClick={() => onChange([...values, { kind: "decision", value: "", title: "" }])} size="sm" type="button" variant="outline"><Plus data-icon="inline-start" /> Add decision</Button>
-      </div>
-    </FieldSet>
-  );
-}
-
-function CodeRows({ values, onChange }: { values: CodeRow[]; onChange(values: CodeRow[]): void }) {
-  return (
-    <FieldSet className={styles.fieldSet}>
-      <FieldLegend>Code references</FieldLegend>
-      <div className={styles.repeatableRows}>
-        {values.map((row, index) => (
-          <div className={styles.referenceRow} key={`code-${index}`}>
-            <NativeSelect aria-label={`Code type ${index + 1}`} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, kind: event.target.value as CodeRow["kind"] } : item))} value={row.kind}>
-              <NativeSelectOption value="file">File</NativeSelectOption>
-              <NativeSelectOption value="symbol">Symbol</NativeSelectOption>
-            </NativeSelect>
-            <Input aria-label={`Code reference ${index + 1}`} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, value: event.target.value } : item))} placeholder={row.kind === "file" ? "src/path.ts" : "Symbol.name"} value={row.value} />
-            <Input aria-label={`Code fingerprint ${index + 1}`} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, fingerprint: event.target.value } : item))} placeholder="Fingerprint (optional)" value={row.fingerprint} />
-            <Button aria-label={`Remove code reference ${index + 1}`} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))} size="icon-sm" type="button" variant="ghost"><X aria-hidden="true" /></Button>
-          </div>
-        ))}
-        <Button onClick={() => onChange([...values, { kind: "file", value: "", fingerprint: "" }])} size="sm" type="button" variant="outline"><Plus data-icon="inline-start" /> Add code reference</Button>
-      </div>
-    </FieldSet>
-  );
-}
-
-function EvidenceRows({ values, onChange }: { values: EvidenceRow[]; onChange(values: EvidenceRow[]): void }) {
-  return (
-    <FieldSet className={styles.fieldSet}>
-      <FieldLegend>Evidence</FieldLegend>
-      <div className={styles.repeatableRows}>
-        {values.map((row, index) => (
-          <div className={styles.referenceRow} key={`evidence-${index}`}>
-            <NativeSelect aria-label={`Evidence type ${index + 1}`} onChange={(event) => {
-              const kind = event.target.value as EvidenceRow["kind"];
-              onChange(values.map((item, itemIndex) => itemIndex === index
-                ? {
-                    ...item,
-                    kind,
-                    detail: kind === "code"
-                      ? (item.detail === "symbol" ? "symbol" : "file")
-                      : kind === "entity" ? item.detail : "",
-                  }
-                : item));
-            }} value={row.kind}>
-              <NativeSelectOption value="entity">Entity</NativeSelectOption>
-              <NativeSelectOption value="code">Code</NativeSelectOption>
-              <NativeSelectOption value="file">File</NativeSelectOption>
-              <NativeSelectOption value="commit">Commit</NativeSelectOption>
-              <NativeSelectOption value="external">External URL</NativeSelectOption>
-              <NativeSelectOption value="manual">Manual note</NativeSelectOption>
-            </NativeSelect>
-            {row.kind === "code" ? (
-              <NativeSelect aria-label={`Evidence code type ${index + 1}`} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, detail: event.target.value } : item))} value={row.detail || "file"}>
-                <NativeSelectOption value="file">File</NativeSelectOption>
-                <NativeSelectOption value="symbol">Symbol</NativeSelectOption>
-              </NativeSelect>
-            ) : (
-              <Input aria-label={`Evidence entity kind ${index + 1}`} disabled={row.kind !== "entity"} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, detail: event.target.value } : item))} placeholder="Entity kind" value={row.detail} />
-            )}
-            <Input aria-label={`Evidence value ${index + 1}`} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, value: event.target.value } : item))} placeholder={row.kind === "external" ? "https://…" : row.kind === "file" || (row.kind === "code" && row.detail === "file") ? "path/to/file" : row.kind === "commit" ? "Git hash" : row.kind === "manual" ? "Evidence note" : "Reference ID"} value={row.value} />
-            <Input aria-label={`Evidence label ${index + 1}`} disabled={row.kind !== "external" && row.kind !== "entity" && row.kind !== "code"} onChange={(event) => onChange(values.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} placeholder={row.kind === "code" ? "Fingerprint (optional)" : "Label (optional)"} value={row.label} />
-            <Button aria-label={`Remove evidence ${index + 1}`} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))} size="icon-sm" type="button" variant="ghost"><X aria-hidden="true" /></Button>
-          </div>
-        ))}
-        <Button onClick={() => onChange([...values, { kind: "file", value: "", label: "", detail: "" }])} size="sm" type="button" variant="outline"><Plus data-icon="inline-start" /> Add evidence</Button>
-      </div>
-    </FieldSet>
-  );
-}
-
-function referenceLabel(reference: RelayDraftInput["decisions"][number]): string {
-  return `${reference.kind} · ${reference.title ?? reference.id} · ${reference.id}`;
-}
-
-function codeLabel(reference: RelayDraftInput["code"][number]): string {
-  const target = reference.kind === "file" ? reference.path : reference.symbolId;
-  return `${reference.kind} · ${target}${reference.fingerprint ? ` · ${reference.fingerprint}` : ""}`;
-}
-
-function evidenceLabel(reference: RelayEvidenceRef): string {
-  if (reference.kind === "entity") return `entity · ${referenceLabel(reference.entity)}`;
-  if (reference.kind === "code") return `code · ${codeLabel(reference.code)}`;
-  if (reference.kind === "file") return `file · ${reference.path}`;
-  if (reference.kind === "commit") return `commit · ${reference.hash}`;
-  if (reference.kind === "external") return `external · ${reference.label ?? reference.uri} · ${reference.uri}`;
-  return `manual · ${reference.note}`;
-}
-
-function SnapshotList({ title, items }: { title: string; items: readonly string[] }) {
-  return (
-    <section>
-      <h4>{title}</h4>
-      {items.length ? <ul>{items.map((item, index) => <li key={`${title}-${index}`}>{item}</li>)}</ul> : <p>None recorded.</p>}
-    </section>
-  );
-}
-
-function HandoffSnapshot({
-  snapshot,
-  proposedSender,
-}: {
-  snapshot: ReviewSnapshot;
-  proposedSender?: TeamActorRef;
-}) {
-  const relay = snapshot.kind === "relay" ? snapshot.relay : null;
-  const input = snapshot.kind === "relay" ? snapshot.relay : snapshot.input;
-  const sender = relay?.sender ?? proposedSender;
-  return (
-    <section className={styles.snapshot} aria-labelledby="relay-snapshot-heading">
-      <div className={styles.snapshotHeader}>
-        <div><p>Immutable proposal fields</p><h3 id="relay-snapshot-heading">Full handoff snapshot</h3></div>
-        {relay ? <StatusPill tone={relayTone(relay.state)}>{sentenceCase(relay.state)}</StatusPill> : <StatusPill>Draft</StatusPill>}
-      </div>
-      <dl className={styles.authorityGrid}>
-        {sender ? <div><dt>Sender</dt><dd>{actorLabel(sender)}</dd></div> : null}
-        <div><dt>Recipients</dt><dd>{input.recipients.map(actorLabel).join(", ")}</dd></div>
-        <div><dt>Workstream</dt><dd>{input.workstream.title ?? input.workstream.id}</dd></div>
-        {relay ? <div><dt>Published</dt><dd>{relay.publishedAt ? formatDate(relay.publishedAt) : "Legacy timestamp unavailable"}</dd></div> : null}
-        {relay ? <div><dt>Acknowledged</dt><dd>{relay.acknowledgedAt ? `${actorLabel(relay.acknowledgedBy)} · ${formatDate(relay.acknowledgedAt)}` : "Not acknowledged"}</dd></div> : null}
-        {relay ? <div><dt>Closed</dt><dd>{relay.closedAt ? `${actorLabel(relay.closedBy)} · ${formatDate(relay.closedAt)}` : "Open"}</dd></div> : null}
-      </dl>
-      {relay ? <RelayWarnings diagnostics={relay.diagnostics} truncated={relay.diagnosticsTruncated} /> : null}
-      <div className={styles.snapshotSummary}><span>Summary</span><strong>{input.summary}</strong></div>
-      <div className={styles.snapshotGrid}>
-        <SnapshotList items={input.completed} title="Completed" />
-        <SnapshotList items={input.inProgress} title="In progress" />
-        <SnapshotList items={input.blockers} title="Blockers" />
-        <SnapshotList items={input.unresolvedQuestions} title="Unresolved questions" />
-        <SnapshotList items={input.nextActions} title="Next actions" />
-        <SnapshotList items={input.changedFiles} title="Changed files" />
-        <SnapshotList items={input.decisions.map(referenceLabel)} title="Decisions" />
-        <SnapshotList items={input.code.map(codeLabel)} title="Code" />
-        <SnapshotList items={input.evidence.map(evidenceLabel)} title="Evidence" />
-      </div>
-    </section>
-  );
-}
-
-function PreviewDocket({
-  envelope,
-  snapshot,
-}: {
-  envelope: RelayOperationPreviewResponse;
-  snapshot: ReviewSnapshot;
-}) {
-  return (
-    <section className={styles.previewDocket} aria-labelledby="relay-preview-heading">
-      <div className={styles.previewHeading}>
-        <div><p>Signed review envelope</p><h3 id="relay-preview-heading">Exact handoff docket</h3></div>
-        <StatusPill tone={envelope.preview.valid ? "success" : "danger"}>{envelope.preview.valid ? "Ready" : "Invalid"}</StatusPill>
-      </div>
-      <dl className={styles.authorityGrid}>
-        <div><dt>Operation</dt><dd>{envelope.request.action.kind}</dd></div>
-        <div><dt>Actor</dt><dd>{actorLabel(envelope.receipt.authority.actor)}</dd></div>
-        <div><dt>Captured</dt><dd>{formatDate(envelope.receipt.authority.occurredAt)}</dd></div>
-        <div><dt>Branch</dt><dd>{envelope.receipt.authority.repoState.branch ?? "Detached HEAD"}</dd></div>
-        <div><dt>HEAD</dt><dd><code>{envelope.receipt.authority.repoState.head ?? "Unborn HEAD"}</code></dd></div>
-        <div><dt>Worktree</dt><dd>{envelope.receipt.authority.repoState.dirty ? "Dirty" : "Clean"}</dd></div>
-        <div><dt>Scope</dt><dd>{sentenceCase(envelope.preview.scope)}</dd></div>
-      </dl>
-      <div className={styles.digest}><span>Preview digest</span><code>{envelope.receipt.previewRevision}</code></div>
-      <div className={styles.purposeList} aria-label="Generated IDs">
-        {envelope.receipt.purposeIds.map((purpose) => <Badge key={`${purpose.purpose}:${purpose.id}`} variant="outline">{purpose.purpose} · {purpose.id}</Badge>)}
-      </div>
-      <HandoffSnapshot
-        proposedSender={envelope.request.action.kind === "relay.publish" ? envelope.receipt.authority.actor : undefined}
-        snapshot={snapshot}
-      />
-      {envelope.preview.changes.map((change) => (
-        <article className={styles.diff} key={`${change.kind}:${change.path}`}>
-          <header><FileDiff aria-hidden="true" /><strong>{change.path}</strong><StatusPill>{change.kind}</StatusPill></header>
-          <pre aria-label={`Exact diff for ${change.path}`}><code>{change.diff}</code></pre>
-        </article>
-      ))}
-      {envelope.preview.localChanges.map((change) => (
-        <p className={styles.localChange} key={change.id}><FilePenLine aria-hidden="true" /><span><strong>Checkout-local</strong>{change.summary}</span></p>
-      ))}
-      <p className={styles.boundNote}><ShieldCheck aria-hidden="true" /> Apply accepts only this complete envelope; no field is reconstructed in the browser.</p>
-    </section>
-  );
-}
-
-function ReviewDialog({
-  source,
-  finalFocus,
-  onClose,
-  onApplied,
-}: {
-  source: ReviewSource;
-  finalFocus(): HTMLElement | null;
-  onClose(): void;
-  onApplied(result: RelayOperationApplyResponse): Promise<void>;
-}) {
-  const api = useHubApi();
-  const [envelope, setEnvelope] = useState<RelayOperationPreviewResponse | null>(null);
-  const [identityError, setIdentityError] = useState<Error | null>(null);
-  const generation = useRef(0);
-  const preview = useMutation({ mutationFn: (request: RelayOperationPreviewRequest) => api.previewRelayOperation(request) });
-  const apply = useMutation({ mutationFn: (request: RelayOperationPreviewResponse) => api.applyRelayOperation(request) });
-
-  const requestPreview = () => {
-    const current = ++generation.current;
-    setEnvelope(null);
-    setIdentityError(null);
-    preview.mutate(source.request, {
-      onSuccess: (result) => {
-        const acceptance = previewAcceptance(generation.current, current, source.request, result);
-        if (acceptance === "accepted") setEnvelope(result);
-        if (acceptance === "mismatched") setIdentityError(new Error(PREVIEW_IDENTITY_ERROR));
-      },
-    });
-  };
-
-  useEffect(() => {
-    requestPreview();
-    return () => { generation.current += 1; };
-  // The source is immutable for one mounted review dialog.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const close = () => {
-    onClose();
-    queueMicrotask(() => finalFocus()?.focus({ preventScroll: true }));
-  };
-  const applyEnvelope = () => {
-    if (!envelope) return;
-    apply.mutate(envelope, {
-      onSuccess: (result) => void onApplied(result).then(close),
-    });
-  };
-
-  return (
-    <AlertDialog open onOpenChange={(open) => { if (!open && !apply.isPending) close(); }}>
-      <AlertDialogContent className={styles.reviewDialog}>
-        <AlertDialogHeader>
-          <AlertDialogMedia><Handshake aria-hidden="true" /></AlertDialogMedia>
-          <AlertDialogTitle>Review the exact Relay operation</AlertDialogTitle>
-          <AlertDialogDescription>Authority and repository state are service-owned. Applying sends these signed bytes back unchanged.</AlertDialogDescription>
-        </AlertDialogHeader>
-        {preview.isPending ? <StatePanel compact state="loading" title="Preparing signed preview" detail="Rechecking the bounded Relay intent." /> : null}
-        {preview.isError ? <ErrorState error={preview.error} retry={requestPreview} /> : null}
-        {identityError ? (
-          <StatePanel
-            action={<Button onClick={requestPreview} size="sm" type="button" variant="outline">Try again</Button>}
-            compact
-            detail={PREVIEW_IDENTITY_ERROR}
-            state="error"
-            title="The signed Relay preview did not match"
-          />
-        ) : null}
-        {envelope ? <PreviewDocket envelope={envelope} snapshot={source.snapshot} /> : null}
-        {apply.isError ? <ErrorState error={apply.error} /> : null}
-        <AlertDialogFooter>
-          <AlertDialogCancel disabled={apply.isPending}>Keep reviewing</AlertDialogCancel>
-          <AlertDialogAction disabled={!envelope?.preview.valid || apply.isPending} onClick={applyEnvelope}>
-            {apply.isPending ? "Applying…" : "Apply exact preview"}
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  );
-}
-
-function evidenceToRows(evidence: readonly RelayEvidenceRef[]): EvidenceRow[] {
-  const rows: EvidenceRow[] = [];
-  for (const item of evidence) {
-    if (item.kind === "entity") rows.push({ kind: "entity", value: item.entity.id, label: item.entity.title ?? "", detail: item.entity.kind });
-    if (item.kind === "code") rows.push({ kind: "code", value: item.code.kind === "file" ? item.code.path : item.code.symbolId, label: item.code.fingerprint ?? "", detail: item.code.kind });
-    if (item.kind === "file") rows.push({ kind: "file", value: item.path, label: "", detail: "" });
-    if (item.kind === "commit") rows.push({ kind: "commit", value: item.hash, label: "", detail: "" });
-    if (item.kind === "external") rows.push({ kind: "external", value: item.uri, label: item.label ?? "", detail: "" });
-    if (item.kind === "manual") rows.push({ kind: "manual", value: item.note, label: "", detail: "" });
-  }
-  return rows;
-}
-
-function DraftComposer({
-  draft,
-  members,
-  workstreams,
-  finalFocus,
-  onClose,
-  onApplied,
-}: {
-  draft: RelayDraftDetail | null;
-  members: readonly TeamMember[];
-  workstreams: readonly TeamWorkstream[];
-  finalFocus(): HTMLElement | null;
-  onClose(): void;
-  onApplied(result: RelayOperationApplyResponse): Promise<void>;
-}) {
-  const api = useHubApi();
-  const draftWorkstreamKnown = draft !== null
-    && workstreams.some((item) => item.id === draft.input.workstream.id);
-  const [recipients, setRecipients] = useState<string[]>(draft?.input.recipients.map((item) => item.memberId) ?? []);
-  const [manualWorkstream, setManualWorkstream] = useState(
-    workstreams.length === 0 || (draft !== null && !draftWorkstreamKnown),
-  );
-  const [workstreamId, setWorkstreamId] = useState(
-    draft?.input.workstream.id ?? workstreams[0]?.id ?? "",
-  );
-  const [workstreamTitle, setWorkstreamTitle] = useState(draft?.input.workstream.title ?? "");
-  const [summary, setSummary] = useState(draft?.input.summary ?? "");
-  const [completed, setCompleted] = useState<string[]>(draft?.input.completed ? [...draft.input.completed] : []);
-  const [inProgress, setInProgress] = useState<string[]>(draft?.input.inProgress ? [...draft.input.inProgress] : []);
-  const [blockers, setBlockers] = useState<string[]>(draft?.input.blockers ? [...draft.input.blockers] : []);
-  const [questions, setQuestions] = useState<string[]>(draft?.input.unresolvedQuestions ? [...draft.input.unresolvedQuestions] : []);
-  const [files, setFiles] = useState<string[]>(draft?.input.changedFiles ? [...draft.input.changedFiles] : []);
-  const [nextActions, setNextActions] = useState<string[]>(draft?.input.nextActions ? [...draft.input.nextActions] : []);
-  const [decisions, setDecisions] = useState<ReferenceRow[]>(draft?.input.decisions.map((item) => ({ kind: item.kind, value: item.id, title: item.title ?? "" })) ?? []);
-  const [code, setCode] = useState<CodeRow[]>(draft?.input.code.map((item) => ({ kind: item.kind, value: item.kind === "file" ? item.path : item.symbolId, fingerprint: item.fingerprint ?? "" })) ?? []);
-  const [evidence, setEvidence] = useState<EvidenceRow[]>(draft ? evidenceToRows(draft.input.evidence) : []);
-  const recipientChoices = useMemo(() => {
-    const choices = new Map<string, { memberId: string; displayName?: string }>();
-    for (const member of members) choices.set(member.id, { memberId: member.id, displayName: member.displayName });
-    for (const recipient of draft?.input.recipients ?? []) {
-      if (!choices.has(recipient.memberId)) choices.set(recipient.memberId, recipient);
-    }
-    return [...choices.values()];
-  }, [draft?.input.recipients, members]);
-  const [envelope, setEnvelope] = useState<RelayOperationPreviewResponse | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const generation = useRef(0);
-  const preview = useMutation({ mutationFn: ({ request }: { request: RelayOperationPreviewRequest; generation: number }) => api.previewRelayOperation(request) });
-  const apply = useMutation({ mutationFn: (request: RelayOperationPreviewResponse) => api.applyRelayOperation(request) });
-
-  const invalidate = () => {
-    generation.current += 1;
-    setEnvelope(null);
-    setConfirmOpen(false);
-  };
-  const change = <T,>(setter: (value: T) => void) => (value: T) => { invalidate(); setter(value); };
-  const selectRecipients = (event: ChangeEvent<HTMLSelectElement>) => {
-    invalidate();
-    setRecipients([...event.target.selectedOptions].map((option) => option.value).slice(0, 32));
-  };
-  const buildInput = (): RelayDraftInput | null => {
-    const recipientRefs = recipients.map((id) => recipientChoices.find((recipient) => recipient.memberId === id)).filter((recipient): recipient is { memberId: string; displayName?: string } => recipient !== undefined).map((recipient) => ({ kind: "member" as const, ...recipient }));
-    const workstream = workstreams.find((item) => item.id === workstreamId);
-    const clean = (values: string[]) => values.map((value) => value.trim()).filter(Boolean);
-    const manualWorkstreamValid = /^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(workstreamId);
-    const invalidEvidence = evidence.some((row) => row.value.trim() && (
-      (row.kind === "entity" && !row.detail.trim())
-      || (row.kind === "code" && row.detail !== "file" && row.detail !== "symbol")
-    ));
-    if (
-      !summary.trim()
-      || recipientRefs.length !== recipients.length
-      || recipientRefs.length === 0
-      || (manualWorkstream ? !manualWorkstreamValid : !workstream)
-      || invalidEvidence
-    ) {
-      setError("Choose active recipient Members, a valid structural Workstream reference, a summary, and complete evidence fields.");
-      return null;
-    }
-    setError(null);
-    return {
-      recipients: recipientRefs,
-      workstream: manualWorkstream
-        ? { kind: "workstream", id: workstreamId, ...(workstreamTitle.trim() ? { title: workstreamTitle.trim() } : {}) }
-        : { kind: "workstream", id: workstream!.id, title: workstream!.title },
-      summary: summary.trim(),
-      completed: clean(completed),
-      inProgress: clean(inProgress),
-      decisions: decisions.filter((row) => row.kind.trim() && row.value.trim()).map((row) => ({ id: row.value.trim(), kind: row.kind.trim(), ...(row.title.trim() ? { title: row.title.trim() } : {}) })),
-      blockers: clean(blockers),
-      unresolvedQuestions: clean(questions),
-      changedFiles: clean(files),
-      code: code.filter((row) => row.value.trim()).map((row) => row.kind === "file" ? { kind: "file" as const, path: row.value.trim(), ...(row.fingerprint.trim() ? { fingerprint: row.fingerprint.trim() } : {}) } : { kind: "symbol" as const, symbolId: row.value.trim(), ...(row.fingerprint.trim() ? { fingerprint: row.fingerprint.trim() } : {}) }),
-      evidence: evidence.filter((row) => row.value.trim()).map((row) => {
-        if (row.kind === "entity") {
-          return { kind: "entity" as const, entity: { id: row.value.trim(), kind: row.detail.trim(), ...(row.label.trim() ? { title: row.label.trim() } : {}) } };
-        }
-        if (row.kind === "code") {
-          return row.detail === "symbol"
-            ? { kind: "code" as const, code: { kind: "symbol" as const, symbolId: row.value.trim(), ...(row.label.trim() ? { fingerprint: row.label.trim() } : {}) } }
-            : { kind: "code" as const, code: { kind: "file" as const, path: row.value.trim(), ...(row.label.trim() ? { fingerprint: row.label.trim() } : {}) } };
-        }
-        if (row.kind === "file") return { kind: "file" as const, path: row.value.trim() };
-        if (row.kind === "commit") return { kind: "commit" as const, hash: row.value.trim() };
-        if (row.kind === "external") return { kind: "external" as const, uri: row.value.trim(), ...(row.label.trim() ? { label: row.label.trim() } : {}) };
-        return { kind: "manual" as const, note: row.value.trim() };
-      }),
-      nextActions: clean(nextActions),
-    };
-  };
-  const review = () => {
-    const input = buildInput();
-    if (!input) return;
-    const current = ++generation.current;
-    const request: RelayOperationPreviewRequest = {
-      operationId: operationId("draft_save"),
-      action: { kind: "relay.draft.save", ...(draft ? { draftId: draft.id } : {}), draft: input },
-      expectedRevisions: draft ? [draftExpectation(draft)] : [],
-    };
-    preview.mutate({ request, generation: current }, {
-      onSuccess: (result) => {
-        const acceptance = previewAcceptance(generation.current, current, request, result);
-        if (acceptance === "accepted") { setEnvelope(result); setConfirmOpen(true); }
-        if (acceptance === "mismatched") setError(PREVIEW_IDENTITY_ERROR);
-      },
-    });
-  };
-  const close = () => {
-    onClose();
-    queueMicrotask(() => finalFocus()?.focus({ preventScroll: true }));
-  };
-  const applyEnvelope = () => {
-    if (!envelope) return;
-    apply.mutate(envelope, { onSuccess: (result) => void onApplied(result).then(close) });
-  };
-
-  return (
-    <Dialog open onOpenChange={(open) => { if (!open && !apply.isPending) close(); }}>
-      <DialogContent className={styles.composerDialog}>
-        <DialogHeader>
-          <DialogTitle>{draft ? "Edit local Relay draft" : "Compose a local Relay draft"}</DialogTitle>
-          <DialogDescription>Structure the baton locally. Member and Workstream eligibility is enforced again only when publishing.</DialogDescription>
-        </DialogHeader>
-        <div className={styles.composerScroll}>
-          <FieldGroup className={styles.fieldGroup}>
-            <Field data-invalid={recipients.length === 0 || undefined}>
-              <FieldLabel htmlFor="relay-recipients">Recipients</FieldLabel>
-              <NativeSelect id="relay-recipients" multiple onChange={selectRecipients} size="default" value={recipients}>
-                {recipientChoices.map((recipient) => <NativeSelectOption key={recipient.memberId} value={recipient.memberId}>{recipient.displayName ?? recipient.memberId}</NativeSelectOption>)}
-              </NativeSelect>
-              <FieldDescription>Select 1–32 Member references. Publication verifies that every recipient is currently active.</FieldDescription>
-            </Field>
-            <Field>
-              <FieldLabel htmlFor="relay-workstream">Workstream</FieldLabel>
-              <NativeSelect id="relay-workstream" onChange={(event) => {
-                invalidate();
-                const value = event.target.value;
-                setManualWorkstream(value === "__manual__");
-                if (value !== "__manual__") {
-                  setWorkstreamId(value);
-                  setWorkstreamTitle(workstreams.find((item) => item.id === value)?.title ?? "");
-                } else if (workstreamId === workstreams[0]?.id) {
-                  setWorkstreamId("");
-                  setWorkstreamTitle("");
-                }
-              }} value={manualWorkstream ? "__manual__" : workstreamId}>
-                {workstreams.map((workstream) => <NativeSelectOption key={workstream.id} value={workstream.id}>{workstream.title} · {sentenceCase(workstream.state)}</NativeSelectOption>)}
-                <NativeSelectOption value="__manual__">Enter a structural Workstream reference</NativeSelectOption>
-              </NativeSelect>
-              <FieldDescription>Drafts may retain an offline structural reference; publication verifies current eligibility.</FieldDescription>
-            </Field>
-            {manualWorkstream ? (
-              <div className={styles.referenceRow}>
-                <Input aria-label="Workstream ID" onChange={(event) => change(setWorkstreamId)(event.target.value)} placeholder="ws_…" value={workstreamId} />
-                <Input aria-label="Workstream title" onChange={(event) => change(setWorkstreamTitle)(event.target.value)} placeholder="Title (optional)" value={workstreamTitle} />
-              </div>
-            ) : null}
-            <Field data-invalid={!summary.trim() || undefined}>
-              <FieldLabel htmlFor="relay-summary">Summary</FieldLabel>
-              <Input aria-invalid={!summary.trim()} id="relay-summary" maxLength={8192} onChange={(event) => change(setSummary)(event.target.value)} placeholder="What should the next person understand first?" value={summary} />
-            </Field>
-          </FieldGroup>
-          <Separator />
-          <div className={styles.structuredGrid}>
-            <StringRows id="relay-completed" label="Completed" onChange={change(setCompleted)} values={completed} />
-            <StringRows id="relay-progress" label="In progress" onChange={change(setInProgress)} values={inProgress} />
-            <StringRows id="relay-blockers" label="Blockers" onChange={change(setBlockers)} values={blockers} />
-            <StringRows id="relay-questions" label="Unresolved questions" onChange={change(setQuestions)} values={questions} />
-            <StringRows id="relay-files" label="Changed files" onChange={change(setFiles)} values={files} />
-            <StringRows id="relay-actions" label="Next actions" onChange={change(setNextActions)} values={nextActions} />
-          </div>
-          <ReferenceRows onChange={change(setDecisions)} values={decisions} />
-          <CodeRows onChange={change(setCode)} values={code} />
-          <EvidenceRows onChange={change(setEvidence)} values={evidence} />
-          {error ? <FieldError>{error}</FieldError> : null}
-          {preview.isError ? <ErrorState error={preview.error} /> : null}
-        </div>
-        <DialogFooter>
-          <Button disabled={preview.isPending || apply.isPending} onClick={close} type="button" variant="outline">Cancel</Button>
-          <Button disabled={preview.isPending || recipientChoices.length === 0} onClick={review} type="button">
-            {preview.isPending ? "Preparing…" : "Review local change"}<ArrowRight data-icon="inline-end" />
-          </Button>
-        </DialogFooter>
-        {confirmOpen && envelope ? (
-          <AlertDialog open onOpenChange={(open) => setConfirmOpen(open)}>
-            <AlertDialogContent className={styles.reviewDialog}>
-              <AlertDialogHeader>
-                <AlertDialogMedia><FilePenLine aria-hidden="true" /></AlertDialogMedia>
-                <AlertDialogTitle>Apply this exact local draft preview?</AlertDialogTitle>
-                <AlertDialogDescription>Any composer edit invalidates this envelope and requires a fresh preview.</AlertDialogDescription>
-              </AlertDialogHeader>
-              <PreviewDocket
-                envelope={envelope}
-                snapshot={{
-                  kind: "draft",
-                  input: draftInputFromEnvelope(envelope),
-                }}
-              />
-              {apply.isError ? <ErrorState error={apply.error} /> : null}
-              <AlertDialogFooter>
-                <AlertDialogCancel disabled={apply.isPending}>Keep editing</AlertDialogCancel>
-                <AlertDialogAction disabled={apply.isPending || !envelope.preview.valid} onClick={applyEnvelope}>{apply.isPending ? "Applying…" : "Save exact draft"}</AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        ) : null}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function DetailSections({ relay }: { relay: RelayDetail }) {
-  const groups: Array<[string, readonly string[]]> = [
-    ["Completed", relay.completed],
-    ["In progress", relay.inProgress],
-    ["Blockers", relay.blockers],
-    ["Unresolved questions", relay.unresolvedQuestions],
-    ["Next actions", relay.nextActions],
-  ];
-  return (
-    <div className={styles.detailSections}>
-      <RelayWarnings diagnostics={relay.diagnostics} truncated={relay.diagnosticsTruncated} />
-      {groups.map(([label, items]) => (
-        <section key={label}><h3>{label}</h3>{items.length ? <ul>{items.map((item, index) => <li key={`${label}-${index}`}>{item}</li>)}</ul> : <p>None recorded.</p>}</section>
-      ))}
-      <section><h3>Changed files</h3>{relay.changedFiles.length ? <ul>{relay.changedFiles.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : <p>None recorded.</p>}</section>
-      <section><h3>Decisions</h3>{relay.decisions.length ? <ul>{relay.decisions.map((item, index) => <li key={`decision-${index}`}>{referenceLabel(item)}</li>)}</ul> : <p>None recorded.</p>}</section>
-      <section><h3>Code</h3>{relay.code.length ? <ul>{relay.code.map((item, index) => <li key={`code-${index}`}>{codeLabel(item)}</li>)}</ul> : <p>None recorded.</p>}</section>
-      <section><h3>Evidence</h3>{relay.evidence.length ? <ul>{relay.evidence.map((item, index) => <li key={`evidence-${index}`}>{evidenceLabel(item)}</li>)}</ul> : <p>None recorded.</p>}</section>
-    </div>
-  );
+function isNotFound(error: unknown): boolean {
+  return error instanceof HubApiError
+    && (error.problem.status === 404 || error.problem.code === "NOT_FOUND");
 }
 
 function RelayWarnings({
@@ -821,7 +279,7 @@ function RelayWarnings({
   ).values()];
   if (uniqueDiagnostics.length === 0 && !truncated && !sourceTruncated) return null;
   return (
-    <aside className={styles.warning} role="status">
+    <div className={styles.warning} role="status">
       <TriangleAlert aria-hidden="true" />
       <div>
         <strong>Relay compatibility warning</strong>
@@ -831,35 +289,408 @@ function RelayWarnings({
         {truncated ? <p>Additional bounded Relay diagnostics were omitted.</p> : null}
         {sourceTruncated ? <p>Relay results were bounded because the canonical source exceeded its safe read limit.</p> : null}
       </div>
-    </aside>
+    </div>
+  );
+}
+
+function RelayQueueSkeleton({ rows = 4 }: { rows?: number }) {
+  return (
+    <div className={styles.queueSkeleton} aria-label="Loading handoffs">
+      {Array.from({ length: rows }, (_, index) => (
+        <div key={index}>
+          <Skeleton className={styles.skeletonIcon} />
+          <span>
+            <Skeleton className={styles.skeletonTitle} />
+            <Skeleton className={styles.skeletonMeta} />
+            <Skeleton className={styles.skeletonMetaShort} />
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+interface RelayQueueGroup {
+  key: string;
+  title: string;
+  rows: RelaySummary[];
+}
+
+function relayQueueGroups(
+  rows: RelaySummary[],
+  view: Exclude<RelayView, "drafts">,
+  lifecycle: RelayLifecycleView,
+): RelayQueueGroup[] {
+  if (view === "mine" && lifecycle === "open") {
+    return [
+      { key: "ready", title: "Ready to take", rows: rows.filter((relay) => relay.state === "published") },
+      { key: "claimed", title: "In your hands", rows: rows.filter((relay) => relay.state === "acknowledged") },
+    ].filter((group) => group.rows.length > 0);
+  }
+  return [{
+    key: `${view}-${lifecycle}`,
+    title: view === "sent" ? "Sent handoffs" : view === "all" ? "Team handoffs" : "Your handoffs",
+    rows,
+  }];
+}
+
+function relayQueueDescription(
+  relay: RelaySummary,
+  view: Exclude<RelayView, "drafts">,
+): string {
+  if (view === "mine") return `From ${actorLabel(relay.sender)}`;
+  if (view === "sent") {
+    return relay.state === "published"
+      ? `For ${relay.recipients.map(actorLabel).join(", ")}`
+      : `Claimed by ${actorLabel(relay.acknowledgedBy)}`;
+  }
+  return relay.state === "published"
+    ? `From ${actorLabel(relay.sender)}`
+    : `Claimed by ${actorLabel(relay.acknowledgedBy)}`;
+}
+
+function RelayQueue({
+  currentMemberId,
+  error,
+  hasNextPage,
+  isFetchingNextPage,
+  isPending,
+  lifecycle,
+  onLoadMore,
+  onSelect,
+  rows,
+  selectedId,
+  sourceBounded,
+  view,
+}: {
+  currentMemberId: string | null;
+  error: unknown;
+  hasNextPage: boolean;
+  isFetchingNextPage: boolean;
+  isPending: boolean;
+  lifecycle: RelayLifecycleView;
+  onLoadMore(): void;
+  onSelect(id: string): void;
+  rows: RelaySummary[];
+  selectedId: string | null;
+  sourceBounded: boolean;
+  view: Exclude<RelayView, "drafts">;
+}) {
+  const groups = relayQueueGroups(rows, view, lifecycle);
+  const emptyTitle = view === "mine"
+    ? lifecycle === "open" ? "No handoffs need your attention" : "No closed handoffs for you"
+    : view === "sent"
+      ? lifecycle === "open" ? "No sent handoffs are open" : "No sent handoffs are closed"
+      : lifecycle === "open" ? "No open team handoffs" : "No closed team handoffs";
+  return (
+    <Card className={styles.queuePane} role="region" aria-labelledby="relay-queue-heading">
+      <CardHeader className={styles.queuePaneHeader}>
+        <div>
+          <CardTitle><h2 id="relay-queue-heading">Handoffs</h2></CardTitle>
+          <CardDescription>Select a handoff to continue with its context and next steps.</CardDescription>
+        </div>
+      </CardHeader>
+      <CardContent className={styles.queuePaneContent}>
+        {isPending ? (
+          <RelayQueueSkeleton />
+        ) : error && rows.length === 0 ? (
+          <ErrorState error={error} />
+        ) : rows.length === 0 ? (
+          <Empty className={styles.emptyQueue}>
+            <EmptyHeader>
+              <EmptyMedia variant="icon"><Inbox aria-hidden="true" /></EmptyMedia>
+              <EmptyTitle>{emptyTitle}</EmptyTitle>
+              <EmptyDescription>{lifecycle === "open" ? "There is nothing in this handoff queue right now." : "Closed handoffs will appear here when available."}</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        ) : (
+          <>
+            {groups.map((group) => (
+              <section className={styles.queueGroup} aria-labelledby={`relay-group-${group.key}`} key={group.key}>
+                <h3 id={`relay-group-${group.key}`}>{group.title}</h3>
+                <ItemGroup className={styles.queueItems}>
+                  {group.rows.map((relay) => {
+                    const time = relayRelevantTime(relay);
+                    return (
+                      <div key={relay.ref.id} role="listitem">
+                        <Item
+                          aria-current={selectedId === relay.ref.id ? "true" : undefined}
+                          className={styles.queueItem}
+                          data-relay-id={relay.ref.id}
+                          data-selected={selectedId === relay.ref.id ? "true" : undefined}
+                          onClick={() => onSelect(relay.ref.id)}
+                          render={<button type="button" />}
+                          size="sm"
+                          variant="default"
+                        >
+                          <ItemMedia className={styles.queueItemIcon} variant="icon"><Handshake aria-hidden="true" /></ItemMedia>
+                          <ItemContent>
+                            <ItemTitle>{relay.summary}</ItemTitle>
+                            <ItemDescription>
+                              {relayQueueDescription(relay, view)}{time ? ` · ${time}` : ""}
+                              {relayRepositoryLabel(relay) ? ` · ${relayRepositoryLabel(relay)}` : ""}
+                            </ItemDescription>
+                          </ItemContent>
+                          <ItemActions>
+                            <Badge className={styles.queueStateBadge} variant={relay.state === "closed" ? "outline" : "secondary"}>
+                              {relayStateLabel(relay, view, currentMemberId)}
+                            </Badge>
+                            <ChevronRight aria-hidden="true" />
+                          </ItemActions>
+                        </Item>
+                      </div>
+                    );
+                  })}
+                </ItemGroup>
+              </section>
+            ))}
+            {error ? <div className={styles.paginationError}><ErrorState error={error} /></div> : null}
+            {hasNextPage ? (
+              <Button disabled={isFetchingNextPage} onClick={onLoadMore} size="sm" type="button" variant="outline">
+                {isFetchingNextPage ? "Loading…" : "Load more"}
+              </Button>
+            ) : sourceBounded ? <p className={styles.boundNote}>The bounded handoff list limit was reached.</p> : null}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DraftOverflowActions({
+  capability,
+  onDelete,
+}: {
+  capability: CapabilityStatus;
+  onDelete(trigger: HTMLButtonElement): void;
+}) {
+  const [activated, setActivated] = useState(false);
+  const [focusFirstItem, setFocusFirstItem] = useState(false);
+  const triggerContent: ReactNode = <><MoreHorizontal data-icon="inline-start" /> More</>;
+  const actions: InboxOverflowAction[] = [{
+    capability,
+    label: "Delete draft",
+    onSelect: onDelete,
+    variant: "destructive",
+  }];
+  if (!activated) {
+    return (
+      <Button
+        aria-haspopup="menu"
+        aria-label="More draft actions"
+        onClick={(event) => {
+          setFocusFirstItem(event.detail === 0);
+          setActivated(true);
+        }}
+        size="sm"
+        type="button"
+        variant="outline"
+      >
+        {triggerContent}
+      </Button>
+    );
+  }
+  return (
+    <Suspense fallback={<Button aria-label="More draft actions" disabled size="sm" type="button" variant="outline">{triggerContent}</Button>}>
+      <RelayOverflowMenu
+        actions={actions}
+        ariaLabel="More draft actions"
+        focusFirstItem={focusFirstItem}
+        groupLabel="Draft actions"
+        triggerContent={triggerContent}
+      />
+    </Suspense>
+  );
+}
+
+function RelayDraftQueue({
+  canCreate,
+  createUnavailableReason,
+  error,
+  hasNextPage,
+  isFetchingNextPage,
+  isPending,
+  onCreate,
+  onLoadMore,
+  onSelect,
+  rows,
+  selectedId,
+  sourceBounded,
+}: {
+  canCreate: boolean;
+  createUnavailableReason?: string;
+  error: unknown;
+  hasNextPage: boolean;
+  isFetchingNextPage: boolean;
+  isPending: boolean;
+  onCreate(event: MouseEvent<HTMLButtonElement>): void;
+  onLoadMore(): void;
+  onSelect(id: string): void;
+  rows: RelayDraftSummary[];
+  selectedId: string | null;
+  sourceBounded: boolean;
+}) {
+  return (
+    <Card className={styles.queuePane} role="region" aria-labelledby="relay-draft-queue-heading">
+      <CardHeader className={styles.queuePaneHeader}>
+        <div>
+          <CardTitle><h2 id="relay-draft-queue-heading">On this device</h2></CardTitle>
+          <CardDescription>Private handoff drafts in this checkout.</CardDescription>
+        </div>
+        {rows.length > 0 || isPending || error !== null ? (
+          <CardAction>
+            <Button disabled={!canCreate} onClick={onCreate} size="sm" type="button" variant="ghost">
+              <Plus data-icon="inline-start" /> Create manually
+            </Button>
+          </CardAction>
+        ) : null}
+      </CardHeader>
+      <CardContent className={styles.queuePaneContent}>
+        {!canCreate && createUnavailableReason ? <p className={styles.recovery} role="status">{createUnavailableReason}</p> : null}
+        {isPending ? (
+          <RelayQueueSkeleton rows={3} />
+        ) : error && rows.length === 0 ? (
+          <ErrorState error={error} />
+        ) : rows.length === 0 ? (
+          <Empty className={styles.emptyQueue}>
+            <EmptyHeader>
+              <EmptyMedia variant="icon"><FilePenLine aria-hidden="true" /></EmptyMedia>
+              <EmptyTitle>No handoff drafts on this device</EmptyTitle>
+              <EmptyDescription>Your coding agent can prepare a structured Relay when you pause or hand work to a teammate.</EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
+              <Button disabled={!canCreate} onClick={onCreate} size="sm" type="button" variant="ghost">
+                <Plus data-icon="inline-start" /> Create manually
+              </Button>
+            </EmptyContent>
+          </Empty>
+        ) : (
+          <>
+            <ItemGroup className={styles.queueItems}>
+              {rows.map((draft) => (
+                <div key={draft.id} role="listitem">
+                  <Item
+                    aria-current={selectedId === draft.id ? "true" : undefined}
+                    className={styles.queueItem}
+                    data-relay-draft-id={draft.id}
+                    data-selected={selectedId === draft.id ? "true" : undefined}
+                    onClick={() => onSelect(draft.id)}
+                    render={<button type="button" />}
+                    size="sm"
+                    variant="default"
+                  >
+                    <ItemMedia className={styles.queueItemIcon} variant="icon"><FilePenLine aria-hidden="true" /></ItemMedia>
+                    <ItemContent>
+                      <ItemTitle>{draft.summary}</ItemTitle>
+                      <ItemDescription>Private draft · {formatDate(draft.updatedAt)}</ItemDescription>
+                    </ItemContent>
+                    <ItemActions><ChevronRight aria-hidden="true" /></ItemActions>
+                  </Item>
+                </div>
+              ))}
+            </ItemGroup>
+            {error ? <div className={styles.paginationError}><ErrorState error={error} /></div> : null}
+            {hasNextPage ? (
+              <Button disabled={isFetchingNextPage} onClick={onLoadMore} size="sm" type="button" variant="outline">
+                {isFetchingNextPage ? "Loading…" : "Load more"}
+              </Button>
+            ) : sourceBounded ? <p className={styles.boundNote}>The bounded draft list limit was reached.</p> : null}
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
 export function RelayPage() {
   const api = useHubApi();
   const queryClient = useQueryClient();
-  const { capabilities } = useOutletContext<{ capabilities?: CapabilitiesResponse }>();
-  const [view, setView] = useState<"mine" | "sent" | "all" | "closed">("mine");
-  const [selection, setSelection] = useState<Selection | null>(null);
+  const { capabilities } = useOutletContext<{
+    capabilities?: CapabilitiesResponse;
+  }>();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [composer, setComposer] = useState<RelayDraftDetail | null | undefined>(undefined);
-  const [review, setReview] = useState<ReviewSource | null>(null);
+  const [review, setReview] = useState<RelayReviewSource | null>(null);
+  const [preparingPublish, setPreparingPublish] = useState<string | null>(null);
   const [status, setStatus] = useState("");
+  const [gitNotice, setGitNotice] = useState<RelayGitNotice | null>(null);
+  const [selectionNotice, setSelectionNotice] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const [selectNextAfterClose, setSelectNextAfterClose] = useState(false);
   const trigger = useRef<HTMLButtonElement | null>(null);
   const statusRef = useRef<HTMLDivElement>(null);
+  const gitNoticeRef = useRef<HTMLDivElement>(null);
+  const refreshRef = useRef<HTMLButtonElement>(null);
   const readAvailable = capabilities?.relays.read.availability === "available";
   const canDraft = capabilities?.relays.draftMutation.availability === "available";
   const lifecycleAvailable = capabilities?.relays.lifecycleMutation.availability === "available";
 
   const actor = useQuery({ queryKey: ["actor", "current"], queryFn: () => api.getCurrentActor(), enabled: readAvailable, retry: false });
+  const trustedActor = actor.isError ? undefined : actor.data;
+  const currentMemberId = trustedActor?.actor.kind === "member" ? trustedActor.actor.memberId : null;
+  const currentMemberActive = currentMemberId !== null;
+  const viewParam = searchParams.get("view");
+  const explicitView = relayViewParam(viewParam);
+  const viewReady = explicitView !== null || !actor.isPending;
+  const view: RelayView = explicitView ?? (currentMemberActive ? "mine" : "all");
+  const visibleView: RelayView = viewReady ? view : "mine";
+  const lifecycle = relayLifecycleParam(searchParams.get("state"));
+  const canonicalView = view === "drafts" ? null : view;
+  const relayParam = canonicalView === null ? null : searchParams.get("relay");
+  const draftParam = view === "drafts" ? searchParams.get("draft") : null;
+  const parsedRelay = relayParam === null ? null : RelayIdSchema.safeParse(relayParam);
+  const parsedDraft = draftParam === null ? null : RelayDraftIdSchema.safeParse(draftParam);
+  const relayId = parsedRelay?.success ? parsedRelay.data : null;
+  const draftId = parsedDraft?.success ? parsedDraft.data : null;
+  const invalidRelaySelection = relayParam !== null && parsedRelay?.success === false;
+  const invalidDraftSelection = draftParam !== null && parsedDraft?.success === false;
+  const searchKey = searchParams.toString();
+
+  useEffect(() => {
+    if (!readAvailable || actor.isPending) return;
+    const invalidView = viewParam !== null && explicitView === null;
+    const missingView = viewParam === null;
+    const invalidState = canonicalView !== null
+      && searchParams.get("state") !== null
+      && searchParams.get("state") !== "open"
+      && searchParams.get("state") !== "closed";
+    const missingState = canonicalView !== null && searchParams.get("state") === null;
+    const crossModeParams = view === "drafts"
+      ? searchParams.has("state") || searchParams.has("relay")
+      : searchParams.has("draft");
+    if (!invalidView && !missingView && !invalidState && !missingState && !crossModeParams) return;
+    const next = new URLSearchParams(searchKey);
+    next.set("view", view);
+    if (view === "drafts") {
+      next.delete("state");
+      next.delete("relay");
+    } else {
+      next.set("state", lifecycle);
+      next.delete("draft");
+    }
+    setSearchParams(next, { replace: true });
+  }, [
+    actor.isPending,
+    canonicalView,
+    explicitView,
+    lifecycle,
+    readAvailable,
+    searchKey,
+    searchParams,
+    setSearchParams,
+    view,
+    viewParam,
+  ]);
+
   const members = useInfiniteQuery({
     queryKey: ["members", "relay", "active"],
     queryFn: ({ pageParam }) => api.getMembers({ active: true, limit: 100, ...(pageParam ? { cursor: pageParam } : {}) }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage, pages) => boundedNextCursor(lastPage.nextCursor, pages.length),
-    enabled: readAvailable,
+    enabled: Boolean(readAvailable && composer !== undefined),
     retry: false,
   });
-  const workstreams = useQuery({ queryKey: ["workstreams", "relay", "eligible"], queryFn: () => api.getWorkstreams({ includeArchived: false, limit: 100 }), enabled: readAvailable, retry: false });
   const memberPageCount = members.data?.pages.length ?? 0;
   useEffect(() => {
     if (members.hasNextPage && !members.isFetchingNextPage && memberPageCount < MAX_WORKBENCH_PAGES) {
@@ -871,31 +702,26 @@ export function RelayPage() {
     for (const page of members.data?.pages ?? []) for (const member of page.items) items.set(member.id, member);
     return [...items.values()];
   }, [members.data?.pages]);
-  const eligibleWorkstreams = (workstreams.data?.items ?? []).filter((item) => item.state === "planned" || item.state === "active" || item.state === "blocked");
-  const currentMemberId = actor.data?.actor.kind === "member" ? actor.data.actor.memberId : null;
-  const currentMember = useQuery({
-    queryKey: ["member", "relay-authority", currentMemberId],
-    queryFn: () => api.getMember(currentMemberId!),
-    enabled: Boolean(readAvailable && currentMemberId),
-    retry: false,
-  });
-  const currentMemberActive = currentMember.data?.active === true;
-
   const drafts = useInfiniteQuery({
     queryKey: ["relays", "drafts"],
     queryFn: ({ pageParam }) => api.getRelayDrafts({ limit: PAGE_SIZE, ...(pageParam ? { cursor: pageParam } : {}) }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage, pages) => boundedNextCursor(lastPage.nextCursor, pages.length),
-    enabled: readAvailable,
+    enabled: Boolean(readAvailable && viewReady && view === "drafts"),
     retry: false,
   });
-  const request = viewRequest(view);
+  const request = viewRequest(canonicalView ?? "all", lifecycle);
   const relays = useInfiniteQuery({
-    queryKey: ["relays", "canonical", request.perspective, request.states, currentMemberId],
+    queryKey: ["relays", "canonical", request.perspective, lifecycle, currentMemberId],
     queryFn: ({ pageParam }) => api.getRelays({ ...request, limit: PAGE_SIZE, ...(pageParam ? { cursor: pageParam } : {}) }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage, pages) => boundedNextCursor(lastPage.nextCursor, pages.length),
-    enabled: Boolean(readAvailable && ((view !== "mine" && view !== "sent") || currentMemberActive)),
+    enabled: Boolean(
+      readAvailable
+      && viewReady
+      && canonicalView !== null
+      && (canonicalView === "all" || currentMemberActive),
+    ),
     retry: false,
   });
   const draftRows = useMemo(() => {
@@ -908,158 +734,586 @@ export function RelayPage() {
     for (const page of relays.data?.pages ?? []) for (const item of page.items) rows.set(item.ref.id, item);
     return [...rows.values()];
   }, [relays.data?.pages]);
-  const activeSelection = selection ?? (relayRows[0] ? { kind: "relay" as const, id: relayRows[0].ref.id } : draftRows[0] ? { kind: "draft" as const, id: draftRows[0].id } : null);
-  const draftId = activeSelection?.kind === "draft" ? activeSelection.id : null;
-  const relayId = activeSelection?.kind === "relay" ? activeSelection.id : null;
-  const draftDetail = useQuery({ queryKey: ["relays", "draft", draftId], queryFn: () => api.getRelayDraft(draftId!), enabled: Boolean(readAvailable && draftId), retry: false });
-  const relayDetail = useQuery({ queryKey: ["relays", "relay", relayId], queryFn: () => api.getRelay(relayId!), enabled: Boolean(readAvailable && relayId), retry: false });
-  const selectedDraft = draftDetail.data;
-  const publishDependencies = useQuery({
-    queryKey: ["relays", "publish-dependencies", selectedDraft?.id, selectedDraft?.revision],
-    queryFn: async () => {
-      const draft = selectedDraft!;
-      const [workstream, ...recipients] = await Promise.all([
-        api.getWorkstream(draft.input.workstream.id),
-        ...draft.input.recipients.map((recipient) => api.getMember(recipient.memberId)),
-      ]);
-      return { workstream, recipients };
-    },
-    enabled: Boolean(readAvailable && selectedDraft),
+  useEffect(() => {
+    if (!selectNextAfterClose || canonicalView === null || lifecycle !== "open" || relays.isPending || relays.isFetching) return;
+    const next = new URLSearchParams(searchKey);
+    next.set("view", canonicalView);
+    next.set("state", lifecycle);
+    if (relays.isError) {
+      next.delete("relay");
+      setSelectionNotice("The open handoff queue could not be refreshed. Try again before choosing what to open next.");
+    } else if (relayRows[0]) next.set("relay", relayRows[0].ref.id);
+    else next.delete("relay");
+    next.delete("draft");
+    setSelectNextAfterClose(false);
+    setSearchParams(next, { replace: true });
+  }, [canonicalView, lifecycle, relayRows, relays.isError, relays.isFetching, relays.isPending, searchKey, selectNextAfterClose, setSearchParams]);
+
+  const draftDetail = useQuery({
+    queryKey: ["relays", "draft", draftId],
+    queryFn: () => api.getRelayDraft(draftId!),
+    enabled: Boolean(readAvailable && view === "drafts" && draftId),
+    retry: false,
+  });
+  const relayDetail = useQuery({
+    queryKey: ["relays", "relay", relayId],
+    queryFn: () => api.getRelay(relayId!),
+    enabled: Boolean(readAvailable && canonicalView !== null && relayId),
     retry: false,
   });
   const selectedRelay = relayDetail.data;
   const senderMemberId = selectedRelay?.sender.kind === "member" ? selectedRelay.sender.memberId : null;
   const ownerMemberId = selectedRelay?.acknowledgedBy?.kind === "member" ? selectedRelay.acknowledgedBy.memberId : null;
+  const currentIsSender = currentMemberId !== null && senderMemberId === currentMemberId;
+  const currentIsClaimant = currentMemberId !== null && ownerMemberId === currentMemberId;
+  const currentCanCloseByRole = currentIsSender || currentIsClaimant;
   const lifecycleDependencies = useQuery({
     queryKey: ["relays", "lifecycle-principals", selectedRelay?.ref.id, selectedRelay?.revision, senderMemberId, ownerMemberId],
     queryFn: async () => {
       const ids = [...new Set([senderMemberId, ownerMemberId].filter((id): id is string => id !== null))];
       return Promise.all(ids.map((id) => api.getMember(id)));
     },
-    enabled: Boolean(readAvailable && selectedRelay && senderMemberId && (selectedRelay.state === "published" || ownerMemberId)),
+    enabled: Boolean(
+      readAvailable
+      && lifecycleAvailable
+      && selectedRelay?.state === "acknowledged"
+      && senderMemberId
+      && ownerMemberId
+      && currentCanCloseByRole,
+    ),
     retry: false,
   });
 
-  const remember = (event: MouseEvent<HTMLButtonElement>) => { trigger.current = event.currentTarget; };
-  const openComposer = (draft: RelayDraftDetail | null, event: MouseEvent<HTMLButtonElement>) => { remember(event); setComposer(draft); };
-  const startReview = (source: ReviewSource, event: MouseEvent<HTMLButtonElement>) => { remember(event); setReview(source); };
+  const relaySelectionMismatch = Boolean(
+    relayDetail.data
+    && canonicalView !== null
+    && (canonicalView === "all" || !actor.isPending)
+    && !relayMatchesView(relayDetail.data, canonicalView, lifecycle, currentMemberId),
+  );
+
+  const clearSelection = (replace = true) => {
+    const next = new URLSearchParams(searchParams);
+    if (view === "drafts") next.delete("draft");
+    else next.delete("relay");
+    setSearchParams(next, { replace });
+  };
+  const selectView = (nextValue: string) => {
+    const nextView = relayViewParam(nextValue);
+    if (nextView === null) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("view", nextView);
+    next.delete("relay");
+    next.delete("draft");
+    if (nextView === "drafts") next.delete("state");
+    else next.set("state", lifecycle);
+    setSelectionNotice("");
+    setSearchParams(next);
+  };
+  const selectLifecycle = (nextLifecycle: RelayLifecycleView) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("view", canonicalView ?? "all");
+    next.set("state", nextLifecycle);
+    next.delete("relay");
+    next.delete("draft");
+    setSelectionNotice("");
+    setSearchParams(next);
+  };
+  const selectRelay = (id: string) => {
+    if (canonicalView === null) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("view", canonicalView);
+    next.set("state", lifecycle);
+    next.set("relay", id);
+    next.delete("draft");
+    setSelectionNotice("");
+    setSearchParams(next);
+  };
+  const selectDraft = (id: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("view", "drafts");
+    next.set("draft", id);
+    next.delete("relay");
+    next.delete("state");
+    setSelectionNotice("");
+    setSearchParams(next);
+  };
+  const refreshRelays = async () => {
+    setRefreshing(true);
+    setSelectionNotice("");
+    try {
+      await Promise.all([
+        queryClient.resetQueries({ queryKey: ["relays"] }),
+        queryClient.invalidateQueries({ queryKey: ["actor", "current"] }),
+        queryClient.invalidateQueries({ queryKey: ["member"] }),
+        queryClient.invalidateQueries({ queryKey: ["members"] }),
+        queryClient.invalidateQueries({ queryKey: ["relays", "lifecycle-principals"] }),
+        queryClient.invalidateQueries({ queryKey: ["home"] }),
+        queryClient.invalidateQueries({ queryKey: ["overview"] }),
+      ]);
+      setRefreshGeneration((generation) => generation + 1);
+      setStatus("Relays refreshed.");
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (refreshGeneration === 0) return;
+    const disappeared = view === "drafts"
+      ? draftId !== null && isNotFound(draftDetail.error)
+      : relayId !== null && (isNotFound(relayDetail.error) || relaySelectionMismatch);
+    if (!disappeared) return;
+    const next = new URLSearchParams(searchKey);
+    next.delete(view === "drafts" ? "draft" : "relay");
+    setSearchParams(next, { replace: true });
+    setSelectionNotice(view === "drafts"
+      ? "That handoff draft is no longer on this device. Choose another draft."
+      : "That handoff is no longer in this queue. Choose another handoff.");
+  }, [
+    draftDetail.error,
+    draftId,
+    refreshGeneration,
+    relayDetail.error,
+    relayId,
+    relaySelectionMismatch,
+    searchKey,
+    setSearchParams,
+    view,
+  ]);
+
+  const rememberTrigger = (element: HTMLButtonElement) => { trigger.current = element; };
+  const openComposer = (draft: RelayDraftDetail | null, event: MouseEvent<HTMLButtonElement>) => { rememberTrigger(event.currentTarget); setComposer(draft); };
+  const startReview = (source: RelayReviewSource, element: HTMLButtonElement) => { rememberTrigger(element); setReview(source); };
   const onApplied = async (result: RelayOperationApplyResponse) => {
-    setSelection(null);
+    const appliedKind = review?.kind ?? "save";
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["relays"] }),
       queryClient.invalidateQueries({ queryKey: ["home"] }),
+      queryClient.invalidateQueries({ queryKey: ["overview"] }),
       queryClient.invalidateQueries({ queryKey: ["activity"] }),
     ]);
-    flushSync(() => setStatus(result.changes.length && result.localChanges.length ? "Relay published and its local draft was removed." : result.changes.length ? "Canonical Relay lifecycle updated." : "Local Relay draft updated."));
-    queueMicrotask(() => statusRef.current?.focus({ preventScroll: true }));
-  };
-  const publish = (draft: RelayDraftDetail, event: MouseEvent<HTMLButtonElement>) => {
-    const dependencies = publishDependencies.data;
-    if (dependencies === undefined) {
-      flushSync(() => setStatus("Relay dependencies are still being verified. Review publication after verification completes."));
-      queueMicrotask(() => statusRef.current?.focus({ preventScroll: true }));
-      return;
+    const next = new URLSearchParams(searchParams);
+    if (appliedKind === "publish") {
+      const publishedId = result.relays[0]?.ref.id;
+      next.set("view", "sent");
+      next.set("state", "open");
+      next.delete("draft");
+      if (publishedId) next.set("relay", publishedId);
+      else next.delete("relay");
+    } else if (appliedKind === "acknowledge") {
+      const claimedId = result.relays[0]?.ref.id ?? relayId;
+      next.set("view", "mine");
+      next.set("state", "open");
+      next.delete("draft");
+      if (claimedId) next.set("relay", claimedId);
+    } else if (appliedKind === "close") {
+      next.set("view", canonicalView ?? "mine");
+      next.set("state", "open");
+      next.delete("relay");
+      next.delete("draft");
+      setSelectNextAfterClose(true);
+    } else if (appliedKind === "delete") {
+      next.delete("draft");
     }
-    startReview({
-      kind: "publish",
-      snapshot: { kind: "draft", input: draft.input },
-      request: {
-        operationId: operationId("publish"),
-        action: { kind: "relay.publish", draftId: draft.id },
-        expectedRevisions: [
-          draftExpectation(draft),
-          artifactExpectation(dependencies.workstream.sourcePath, dependencies.workstream.revision),
-          ...dependencies.recipients.map((member) => artifactExpectation(member.sourcePath, member.revision)),
-        ],
-      },
-    }, event);
+    setSearchParams(next, { replace: true });
+    const canonicalNotice = appliedKind === "publish" || appliedKind === "acknowledge" || appliedKind === "close"
+      ? appliedKind
+      : null;
+    flushSync(() => {
+      setGitNotice(canonicalNotice);
+      setStatus(canonicalNotice ? "" : appliedKind === "delete" ? "Local handoff draft deleted." : "Local handoff draft updated.");
+    });
+    queueMicrotask(() => (canonicalNotice ? gitNoticeRef.current : statusRef.current)?.focus({ preventScroll: true }));
   };
-  const draftAction = (draft: RelayDraftDetail, kind: "delete" | "publish", event: MouseEvent<HTMLButtonElement>) => {
-    if (kind === "publish") { publish(draft, event); return; }
-    startReview({ kind, snapshot: { kind: "draft", input: draft.input }, request: { operationId: operationId("draft_delete"), action: { kind: "relay.draft.delete", draftId: draft.id }, expectedRevisions: [draftExpectation(draft)] } }, event);
+  const publish = async (draft: RelayDraftDetail, event: MouseEvent<HTMLButtonElement>) => {
+    const element = event.currentTarget;
+    rememberTrigger(element);
+    setPreparingPublish(draft.id);
+    setStatus("");
+    setGitNotice(null);
+    try {
+      const recipientIds = [...new Set(draft.input.recipients.map((recipient) => recipient.memberId))];
+      const recipients = await Promise.all(recipientIds.map((memberId) => queryClient.fetchQuery({
+          queryKey: ["member", memberId],
+          queryFn: () => api.getMember(memberId),
+        })));
+      const inactiveRecipient = recipients.find((member) => !member.active);
+      if (inactiveRecipient) {
+        throw new Error(`${inactiveRecipient.displayName ?? "A recorded recipient"} is not an active team Member. Edit the draft before publishing.`);
+      }
+      startReview({
+        kind: "publish",
+        snapshot: { kind: "draft", input: draft.input },
+        request: {
+          operationId: operationId("publish"),
+          action: { kind: "relay.publish", draftId: draft.id },
+          expectedRevisions: [
+            draftExpectation(draft),
+            ...recipients.map((member) => artifactExpectation(member.sourcePath, member.revision)),
+          ],
+        },
+      }, element);
+    } catch (error) {
+      const message = error instanceof Error && error.message.includes("is not an active team Member")
+        ? error.message
+        : "A recipient could not be verified. Refresh or edit the draft before publishing.";
+      flushSync(() => setStatus(message));
+      queueMicrotask(() => statusRef.current?.focus({ preventScroll: true }));
+    } finally {
+      setPreparingPublish(null);
+    }
+  };
+  const deleteDraft = (draft: RelayDraftDetail, element: HTMLButtonElement) => {
+    startReview({ kind: "delete", snapshot: { kind: "draft", input: draft.input }, request: { operationId: operationId("draft_delete"), action: { kind: "relay.draft.delete", draftId: draft.id }, expectedRevisions: [draftExpectation(draft)] } }, element);
   };
   const relayAction = (relay: RelayDetail, kind: "acknowledge" | "close", event: MouseEvent<HTMLButtonElement>) => {
-    startReview({ kind, snapshot: { kind: "relay", relay }, request: { operationId: operationId(kind), action: { kind: kind === "acknowledge" ? "relay.acknowledge" : "relay.close", relayId: relay.ref.id }, expectedRevisions: [artifactExpectation(relay.sourcePath, relay.revision)] } }, event);
+    startReview({ kind, snapshot: { kind: "relay", relay }, request: { operationId: operationId(kind), action: { kind: kind === "acknowledge" ? "relay.acknowledge" : "relay.close", relayId: relay.ref.id }, expectedRevisions: [artifactExpectation(relay.sourcePath, relay.revision)] } }, event.currentTarget);
   };
 
   const senderActive = senderMemberId !== null && lifecycleDependencies.data?.some((member) => member.id === senderMemberId && member.active) === true;
   const ownerActive = ownerMemberId !== null && lifecycleDependencies.data?.some((member) => member.id === ownerMemberId && member.active) === true;
-  const canAcknowledge = Boolean(lifecycleAvailable && selectedRelay?.state === "published" && currentMemberActive && selectedRelay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === currentMemberId));
-  const canClose = Boolean(lifecycleAvailable && selectedRelay?.state === "acknowledged" && currentMemberActive && senderActive && ownerActive && ((selectedRelay.sender.kind === "member" && selectedRelay.sender.memberId === currentMemberId) || (selectedRelay.acknowledgedBy?.kind === "member" && selectedRelay.acknowledgedBy.memberId === currentMemberId)));
+  const eligibleToTake = Boolean(
+    selectedRelay?.state === "published"
+    && currentMemberActive
+    && selectedRelay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === currentMemberId),
+  );
+  const canAcknowledge = lifecycleAvailable && eligibleToTake;
+  const canClose = Boolean(
+    lifecycleAvailable
+    && selectedRelay?.state === "acknowledged"
+    && currentMemberActive
+    && currentCanCloseByRole
+    && senderActive
+    && ownerActive,
+  );
+  const lifecycleUnavailableReason = capabilities?.relays.lifecycleMutation.availability === "unavailable"
+    ? capabilities.relays.lifecycleMutation.reason
+    : null;
+  const closeUnavailableReason = selectedRelay?.state !== "acknowledged"
+    ? null
+    : !lifecycleAvailable
+      ? lifecycleUnavailableReason ?? "Closing handoffs is unavailable in this Hub process."
+      : !currentMemberActive
+      ? "Select an active team identity to close this handoff."
+      : !currentCanCloseByRole
+        ? "Only the sender or claimant can close this handoff."
+        : senderMemberId === null || ownerMemberId === null
+          ? "This legacy handoff does not record both roles as team Members, so it remains read-only."
+          : lifecycleDependencies.isPending
+            ? "Checking that the sender and claimant are still active team Members."
+            : lifecycleDependencies.isError
+              ? "The sender or claimant could not be checked. Refresh before trying to close this handoff."
+              : !senderActive
+                ? `${actorLabel(selectedRelay.sender)} is no longer an active team Member, so this handoff cannot be closed.`
+                : !ownerActive
+                  ? `${actorLabel(selectedRelay.acknowledgedBy)} is no longer an active team Member, so this handoff cannot be closed.`
+                  : lifecycleUnavailableReason;
 
   const publishAvailable = capabilities?.relays.publish.availability === "available";
-  const selectedDraftWorkstreamEligible = publishDependencies.data !== undefined
-    && (publishDependencies.data.workstream.state === "planned"
-      || publishDependencies.data.workstream.state === "active"
-      || publishDependencies.data.workstream.state === "blocked");
-  const selectedDraftRecipientsEligible = publishDependencies.data !== undefined
-    && publishDependencies.data.recipients.length === selectedDraft?.input.recipients.length
-    && publishDependencies.data.recipients.every((member) => member.active);
-  const draftPublishReady = Boolean(
-    currentMemberActive
-    && publishAvailable
-    && selectedDraftWorkstreamEligible
-    && selectedDraftRecipientsEligible,
-  );
+  const draftPublishReady = Boolean(currentMemberActive && publishAvailable);
   const draftPublishRecovery = !currentMemberActive
     ? "Select an active current Member before publishing."
-    : publishDependencies.isPending
-      ? "Verifying the exact Workstream and recipient Member revisions."
-      : publishDependencies.isError
-        ? "A recorded Workstream or recipient Member could not be resolved. Edit the draft before publishing."
-        : !selectedDraftRecipientsEligible
-          ? "Reactivate or replace every recorded recipient before publishing."
-          : !selectedDraftWorkstreamEligible
-            ? "Choose a Workstream in Planned, Active, or Blocked before publishing."
-            : !publishAvailable
-              ? "Relay publication is unavailable in this Hub process."
-              : null;
+    : !publishAvailable
+      ? capabilities?.relays.publish.reason ?? "Relay publication is unavailable in this Hub process."
+      : null;
+  const draftMutationCapability: CapabilityStatus = capabilities?.relays.draftMutation ?? {
+    availability: "unavailable",
+    reason: "Local Relay draft changes are unavailable in this Hub process.",
+  };
+
+  const draftDetailState = invalidDraftSelection ? (
+    <div className={styles.recoverableState}>
+      <StatePanel compact state="empty" title="This draft link is invalid" detail="Return to the list and choose a handoff draft on this device." />
+      <Button onClick={() => clearSelection()} size="sm" type="button" variant="outline">Return to drafts</Button>
+    </div>
+  ) : draftId === null ? (
+    <StatePanel compact state="empty" title="Choose a handoff draft" detail="Select a private draft to review its content." />
+  ) : draftDetail.isPending ? (
+    <StatePanel compact state="loading" title="Opening handoff draft" detail="Loading its content only after selection." />
+  ) : draftDetail.isError ? (
+    <div className={styles.recoverableState}>
+      <ErrorState error={draftDetail.error} retry={() => void draftDetail.refetch()} />
+      <Button onClick={() => clearSelection()} size="sm" type="button" variant="outline">Return to drafts</Button>
+    </div>
+  ) : (
+    <>
+      <CardHeader className={styles.detailHeader}>
+        <div>
+          <CardDescription>Private handoff draft</CardDescription>
+          <CardTitle><h2>{draftDetail.data.summary}</h2></CardTitle>
+        </div>
+        <CardAction><Badge variant="secondary">On this device</Badge></CardAction>
+      </CardHeader>
+      <CardContent className={styles.detailContent}>
+        <dl className={styles.humanMeta}>
+          <div><dt>Recipients</dt><dd>{draftDetail.data.recipients.map(actorLabel).join(", ")}</dd></div>
+          <div><dt>Updated</dt><dd>{formatDate(draftDetail.data.updatedAt)}</dd></div>
+        </dl>
+        <div className={styles.actions} role="group" aria-label="Draft actions">
+          <Button disabled={!draftPublishReady || preparingPublish === draftDetail.data.id} onClick={(event) => void publish(draftDetail.data, event)} size="sm">
+            <Send data-icon="inline-start" /> {preparingPublish === draftDetail.data.id ? "Checking…" : "Publish handoff"}
+          </Button>
+          <Button disabled={!canDraft} onClick={(event) => openComposer(draftDetail.data, event)} size="sm" variant="outline"><FilePenLine data-icon="inline-start" /> Edit wording</Button>
+          <DraftOverflowActions capability={draftMutationCapability} onDelete={(element) => deleteDraft(draftDetail.data, element)} />
+        </div>
+        {draftPublishRecovery ? <p className={styles.recovery} role="status">{draftPublishRecovery}</p> : null}
+        {!canDraft ? <p className={styles.recovery} role="status">{draftMutationCapability.availability === "unavailable" ? draftMutationCapability.reason : "Local draft changes are unavailable."}</p> : null}
+        <Suspense fallback={<StatePanel compact state="loading" title="Opening handoff details" detail="Preparing the selected local draft." />}>
+          <RelayDetailSections detail={{ kind: "draft", draft: draftDetail.data }} />
+        </Suspense>
+      </CardContent>
+    </>
+  );
+
+  const canonicalDetailState = invalidRelaySelection ? (
+    <div className={styles.recoverableState}>
+      <StatePanel compact state="empty" title="This handoff link is invalid" detail="Return to the queue and choose an available handoff." />
+      <Button onClick={() => clearSelection()} size="sm" type="button" variant="outline">Return to queue</Button>
+    </div>
+  ) : relayId === null ? (
+    <StatePanel compact state="empty" title="Choose a handoff" detail="Select an item from the queue to see its progress and next steps." />
+  ) : relayDetail.isPending ? (
+    <StatePanel compact state="loading" title="Opening handoff" detail="Loading its full context only after selection." />
+  ) : relayDetail.isError ? (
+    <div className={styles.recoverableState}>
+      <ErrorState error={relayDetail.error} retry={() => void relayDetail.refetch()} />
+      <Button onClick={() => clearSelection()} size="sm" type="button" variant="outline">Return to queue</Button>
+    </div>
+  ) : relaySelectionMismatch ? (
+    <div className={styles.recoverableState}>
+      <StatePanel compact state="empty" title="This handoff is not available in this view" detail="Its perspective or lifecycle state does not match the current queue." />
+      <Button onClick={() => clearSelection()} size="sm" type="button" variant="outline">Return to handoffs</Button>
+    </div>
+  ) : (
+    <>
+      <CardHeader className={styles.detailHeader}>
+        <div>
+          <CardDescription>Team handoff</CardDescription>
+          <CardTitle><h2>{relayDetail.data.summary}</h2></CardTitle>
+        </div>
+        <CardAction><Badge variant={relayDetail.data.state === "closed" ? "outline" : "secondary"}>{relayStateLabel(relayDetail.data, canonicalView ?? "all", currentMemberId)}</Badge></CardAction>
+      </CardHeader>
+      <CardContent className={styles.detailContent}>
+        <dl className={styles.humanMeta}>
+          <div><dt>Sender</dt><dd>{actorLabel(relayDetail.data.sender)}</dd></div>
+          <div><dt>Recipients</dt><dd>{relayDetail.data.recipients.map(actorLabel).join(", ")}</dd></div>
+          {relayDetail.data.acknowledgedBy ? <div><dt>Claimant</dt><dd>{actorLabel(relayDetail.data.acknowledgedBy)}</dd></div> : null}
+          {relayRelevantTime(relayDetail.data) ? <div><dt>{relayDetail.data.state === "closed" ? "Closed" : relayDetail.data.state === "acknowledged" ? "Taken" : "Published"}</dt><dd>{relayRelevantTime(relayDetail.data)}</dd></div> : null}
+        </dl>
+        {relayDetail.data.state === "published" ? (
+          eligibleToTake ? (
+            <div className={styles.actionPanel}>
+              <div className={styles.actions} role="group" aria-label="Handoff actions">
+                <Button disabled={!canAcknowledge} onClick={(event) => relayAction(relayDetail.data, "acknowledge", event)} size="sm"><UserCheck data-icon="inline-start" /> Take handoff</Button>
+              </div>
+              {!lifecycleAvailable ? <p className={styles.recovery} role="status">{lifecycleUnavailableReason ?? "Taking handoffs is unavailable in this Hub process."}</p> : null}
+            </div>
+          ) : (
+            <div className={styles.actionExplanation}>
+              <UserCheck aria-hidden="true" />
+              <div>
+                <strong>This handoff is addressed to {relayDetail.data.recipients.map(actorLabel).join(", ")}.</strong>
+                <p>A listed recipient can take it after MEX resolves them to an active team identity. The first synchronized claim records one sole claimant.</p>
+                {!currentMemberActive ? <Link to="/members">Open Members to choose your identity</Link> : null}
+              </div>
+            </div>
+          )
+        ) : relayDetail.data.state === "acknowledged" ? (
+          <div className={styles.actionPanel}>
+            <div className={styles.claimedState}>
+              <UserCheck aria-hidden="true" />
+              <p><strong>{currentIsClaimant ? "In your hands" : `Taken by ${actorLabel(relayDetail.data.acknowledgedBy)}`}</strong><span>This handoff has one claimant and cannot be unclaimed or reassigned.</span></p>
+            </div>
+            {currentCanCloseByRole ? (
+              <div className={styles.actions} role="group" aria-label="Handoff actions">
+                <Button disabled={!canClose} onClick={(event) => relayAction(relayDetail.data, "close", event)} size="sm"><CheckCircle2 data-icon="inline-start" /> Close handoff</Button>
+              </div>
+            ) : null}
+            {closeUnavailableReason ? <p className={styles.recovery} role="status">{closeUnavailableReason}</p> : null}
+          </div>
+        ) : (
+          <p className={styles.terminal}><ShieldCheck aria-hidden="true" /><span><strong>Immutable closed handoff.</strong> No further Relay actions are available.</span></p>
+        )}
+        <Suspense fallback={<StatePanel compact state="loading" title="Opening handoff details" detail="Preparing the selected handoff." />}>
+          <RelayDetailSections
+            detail={{ kind: "relay", relay: relayDetail.data }}
+            warnings={<RelayWarnings diagnostics={relayDetail.data.diagnostics} truncated={relayDetail.data.diagnosticsTruncated} />}
+          />
+        </Suspense>
+      </CardContent>
+    </>
+  );
+  const gitNoticeCopy = gitNotice === "publish"
+    ? { title: "Handoff created", description: "Handoff created in your working tree. Commit and push it so teammates can receive it." }
+    : gitNotice === "acknowledge"
+      ? { title: "Handoff claimed", description: "Handoff claimed in your working tree. Commit and push so the team can see that you took it." }
+      : gitNotice === "close"
+        ? { title: "Handoff closed", description: "Handoff closed in your working tree. Commit and push to share the final state." }
+        : null;
 
   return (
     <div className={styles.page} data-relay-workbench={readAvailable ? "ready" : "unavailable"}>
-      <PageHeader eyebrow="Team handoffs" title="Relays" description="Pass a precise repository baton, let one recipient claim it, and close it with immutable evidence." actions={canDraft ? <Button disabled={activeMembers.length === 0} onClick={(event) => openComposer(null, event)}><Plus data-icon="inline-start" /> New local draft</Button> : undefined} />
-      <div className={styles.liveStatus} aria-live="polite" ref={statusRef} role="status" tabIndex={-1}>{status}</div>
-      {capabilities === undefined ? <StatePanel state="loading" title="Checking Relay capability" detail="Confirming the private handoff service connection." /> : !readAvailable ? <StatePanel state="unavailable" title="Relays are unavailable" detail={capabilities.relays.read.reason ?? "Relay reads are not connected in this Hub process."} /> : (
-        <div className={styles.workbench}>
-          <aside aria-label="Relay draft navigation" className={styles.rail}>
-            <Card className={styles.queueCard} role="region" aria-labelledby="relay-drafts-heading">
-              <CardHeader className={styles.cardHeader}><div><CardDescription>Checkout-local</CardDescription><CardTitle><h2 id="relay-drafts-heading">Draft rail</h2></CardTitle></div><CardAction><Badge variant="outline">{draftRows.length}</Badge></CardAction></CardHeader>
-              <CardContent className={styles.queueContent}>
-                <RelayWarnings
-                  diagnostics={(drafts.data?.pages ?? []).flatMap((page) => page.diagnostics)}
-                  sourceTruncated={(drafts.data?.pages ?? []).some((page) => page.sourceTruncated)}
-                  truncated={(drafts.data?.pages ?? []).some((page) => page.diagnosticsTruncated)}
+      <PageHeader
+        title="Relays"
+        description="Continue work with the progress, decisions, and next steps your teammate left."
+        actions={(
+          <Button disabled={!readAvailable || refreshing} onClick={() => void refreshRelays()} ref={refreshRef} size="sm" type="button" variant="outline">
+            <RefreshCw className={refreshing ? styles.refreshingIcon : undefined} data-icon="inline-start" />
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </Button>
+        )}
+      />
+      {status ? <div className={styles.statusBanner} aria-live="polite" ref={statusRef} role="status" tabIndex={-1}><CheckCircle2 aria-hidden="true" /> {status}</div> : <div className={styles.liveStatus} aria-live="polite" role="status" />}
+      {gitNoticeCopy ? (
+        <Alert className={styles.gitTruthAlert} ref={gitNoticeRef} tabIndex={-1}>
+          <GitCommitHorizontal aria-hidden="true" />
+          <AlertTitle>{gitNoticeCopy.title}</AlertTitle>
+          <AlertDescription>{gitNoticeCopy.description}</AlertDescription>
+          <AlertAction>
+            {gitNotice === "close" ? (
+              <>
+                <Button onClick={() => selectLifecycle("closed")} size="sm" type="button" variant="outline">View closed</Button>
+                <Link className={buttonVariants({ size: "sm", variant: "ghost" })} to="/activity"><Activity data-icon="inline-start" /> Activity</Link>
+              </>
+            ) : null}
+            <Button
+              aria-label="Dismiss Git notice"
+              onClick={() => {
+                setGitNotice(null);
+                queueMicrotask(() => refreshRef.current?.focus({ preventScroll: true }));
+              }}
+              size="icon-sm"
+              type="button"
+              variant="ghost"
+            >
+              <X aria-hidden="true" />
+            </Button>
+          </AlertAction>
+        </Alert>
+      ) : null}
+      {selectionNotice ? <div className={styles.selectionNotice} role="status">{selectionNotice}</div> : null}
+      {capabilities === undefined ? (
+        <StatePanel state="loading" title="Checking Relay capability" detail="Confirming which handoff reads and actions are available." />
+      ) : !readAvailable ? (
+        <StatePanel state="unavailable" title="Relays are unavailable" detail={capabilities.relays.read.reason ?? "Relay reads are not connected in this Hub process."} />
+      ) : (
+        <>
+          {trustedActor?.diagnostics.length || trustedActor?.diagnosticsTruncated || actor.isError || (!actor.isPending && !currentMemberActive) ? (
+            <div className={styles.identityNotice} role="status">
+              <TriangleAlert aria-hidden="true" />
+              <div>
+                <strong>Check your team identity</strong>
+                {trustedActor?.diagnostics.map((diagnostic) => <p key={`${diagnostic.code}:${diagnostic.message}`}>{diagnostic.message}</p>)}
+                {trustedActor?.diagnosticsTruncated ? <p>Additional identity diagnostics were omitted because the safe response limit was reached.</p> : null}
+                {actor.isError ? <p>Your current team identity could not be read. Team handoffs and local drafts remain available.</p> : null}
+                {!actor.isError && !currentMemberActive ? <p>Select an active team identity to enable personal handoffs and actions. Team handoffs and local drafts remain available.</p> : null}
+                <Link className={buttonVariants({ size: "sm", variant: "outline" })} to="/members">Open Members</Link>
+              </div>
+            </div>
+          ) : null}
+          <Tabs className={styles.modeTabs} onValueChange={selectView} value={visibleView}>
+            <div className={styles.viewControls}>
+              <TabsList aria-label="Relay views" className={styles.modeTabList} variant="line">
+                <TabsTrigger value="mine">For you</TabsTrigger>
+                <TabsTrigger value="sent">Sent</TabsTrigger>
+                <TabsTrigger value="all">Team</TabsTrigger>
+                <TabsTrigger value="drafts">Drafts on this device</TabsTrigger>
+              </TabsList>
+              {canonicalView !== null ? (
+                <div aria-label="Relay state" className={styles.stateControl} role="group">
+                  <Button aria-pressed={lifecycle === "open"} onClick={() => selectLifecycle("open")} size="sm" type="button" variant={lifecycle === "open" ? "secondary" : "outline"}>Open</Button>
+                  <Button aria-pressed={lifecycle === "closed"} onClick={() => selectLifecycle("closed")} size="sm" type="button" variant={lifecycle === "closed" ? "secondary" : "outline"}>Closed</Button>
+                </div>
+              ) : null}
+            </div>
+            {(["mine", "sent", "all"] as const).map((perspective) => (
+              <TabsContent className={styles.modePanel} key={perspective} value={perspective}>
+                {!viewReady || ((perspective === "mine" || perspective === "sent") && actor.isPending) ? (
+                  <StatePanel state="loading" title="Finding your handoffs" detail="Resolving the current team identity before opening the default queue." />
+                ) : (perspective === "mine" || perspective === "sent") && !currentMemberActive ? (
+                  <div className={styles.identityRequired}>
+                    <StatePanel compact state="unavailable" title="Select an active team identity" detail="Personal handoffs and actions become available when MEX can resolve you to an active Member. Team handoffs and local drafts remain readable." />
+                    <Link className={buttonVariants({ size: "sm", variant: "outline" })} to="/members">Open Members</Link>
+                  </div>
+                ) : (
+                  <>
+                    <RelayWarnings
+                      diagnostics={(relays.data?.pages ?? []).flatMap((page) => page.diagnostics)}
+                      sourceTruncated={(relays.data?.pages ?? []).some((page) => page.sourceTruncated)}
+                      truncated={(relays.data?.pages ?? []).some((page) => page.diagnosticsTruncated)}
+                    />
+                    <div className={styles.workbench}>
+                      <RelayQueue
+                        currentMemberId={currentMemberId}
+                        error={relays.isError ? relays.error : null}
+                        hasNextPage={Boolean(relays.hasNextPage)}
+                        isFetchingNextPage={relays.isFetchingNextPage}
+                        isPending={relays.isPending}
+                        lifecycle={lifecycle}
+                        onLoadMore={() => void relays.fetchNextPage()}
+                        onSelect={selectRelay}
+                        rows={relayRows}
+                        selectedId={relayId}
+                        sourceBounded={Boolean(relays.data && (relays.data.pages.length >= MAX_WORKBENCH_PAGES || relays.data.pages.some((page) => page.sourceTruncated)))}
+                        view={perspective}
+                      />
+                      <Card className={styles.detailCard} role="region" aria-label="Selected handoff detail">{canonicalDetailState}</Card>
+                    </div>
+                  </>
+                )}
+              </TabsContent>
+            ))}
+            <TabsContent className={styles.modePanel} value="drafts">
+              <RelayWarnings
+                diagnostics={(drafts.data?.pages ?? []).flatMap((page) => page.diagnostics)}
+                sourceTruncated={(drafts.data?.pages ?? []).some((page) => page.sourceTruncated)}
+                truncated={(drafts.data?.pages ?? []).some((page) => page.diagnosticsTruncated)}
+              />
+              <div className={styles.workbench}>
+                <RelayDraftQueue
+                  canCreate={canDraft}
+                  createUnavailableReason={draftMutationCapability.availability === "unavailable" ? draftMutationCapability.reason : undefined}
+                  error={drafts.isError ? drafts.error : null}
+                  hasNextPage={Boolean(drafts.hasNextPage)}
+                  isFetchingNextPage={drafts.isFetchingNextPage}
+                  isPending={drafts.isPending}
+                  onCreate={(event) => openComposer(null, event)}
+                  onLoadMore={() => void drafts.fetchNextPage()}
+                  onSelect={selectDraft}
+                  rows={draftRows}
+                  selectedId={draftId}
+                  sourceBounded={Boolean(drafts.data && (drafts.data.pages.length >= MAX_WORKBENCH_PAGES || drafts.data.pages.some((page) => page.sourceTruncated)))}
                 />
-                {drafts.isPending ? <StatePanel compact state="loading" title="Reading local drafts" detail="Loading one bounded page." /> : drafts.isError ? <ErrorState error={drafts.error} retry={() => void drafts.refetch()} /> : draftRows.length === 0 ? <StatePanel compact state="empty" title="No local drafts" detail="Compose a structured baton before publishing." /> : <ul className={styles.queueList}>{draftRows.map((draft) => <li key={draft.id}><button aria-current={draftId === draft.id ? "true" : undefined} data-relay-draft-id={draft.id} onClick={() => setSelection({ kind: "draft", id: draft.id })} type="button"><FilePenLine aria-hidden="true" /><span><strong>{draft.summary}</strong><small>{draft.recipients.length} recipient{draft.recipients.length === 1 ? "" : "s"} · {formatDate(draft.updatedAt)}</small></span><ChevronRight aria-hidden="true" /></button></li>)}</ul>}
-                {drafts.hasNextPage ? <Button disabled={drafts.isFetchingNextPage} onClick={() => void drafts.fetchNextPage()} size="sm" variant="outline">{drafts.isFetchingNextPage ? "Loading…" : "Load more drafts"}</Button> : drafts.data && drafts.data.pages.length >= MAX_WORKBENCH_PAGES ? <p className={styles.boundNote}>Draft page limit reached.</p> : null}
-              </CardContent>
-            </Card>
-          </aside>
-          <section className={styles.desk}>
-            <Card className={styles.queueCard} role="region" aria-labelledby="relay-queue-heading">
-              <CardHeader className={styles.queueHeader}><div><CardDescription>Canonical handoff queue</CardDescription><CardTitle><h2 id="relay-queue-heading">Relay desk</h2></CardTitle></div><CardAction><StatusPill>{relayRows.length} loaded</StatusPill></CardAction></CardHeader>
-              <CardContent className={styles.canonicalContent}>
-                <RelayWarnings
-                  diagnostics={(relays.data?.pages ?? []).flatMap((page) => page.diagnostics)}
-                  sourceTruncated={(relays.data?.pages ?? []).some((page) => page.sourceTruncated)}
-                  truncated={(relays.data?.pages ?? []).some((page) => page.diagnosticsTruncated)}
-                />
-                <Tabs onValueChange={(value) => { setView(value as typeof view); setSelection(null); }} value={view}>
-                  <TabsList aria-label="Relay views" variant="line"><TabsTrigger disabled={!currentMemberActive} value="mine">My open</TabsTrigger><TabsTrigger disabled={!currentMemberActive} value="sent">Sent</TabsTrigger><TabsTrigger value="all">All open</TabsTrigger><TabsTrigger value="closed">Closed</TabsTrigger></TabsList>
-                </Tabs>
-                {(view === "mine" || view === "sent") && !currentMemberActive ? <StatePanel compact state="unavailable" title="Select an active Member" detail="My open and Sent are available only when the current Git identity resolves to an active canonical Member." /> : relays.isPending ? <StatePanel compact state="loading" title="Reading Relay queue" detail="Loading one bounded canonical page." /> : relays.isError ? <ErrorState error={relays.error} retry={() => void relays.refetch()} /> : relayRows.length === 0 ? <StatePanel compact state="empty" title="No Relays in this view" detail="The bounded canonical queue is clear." /> : <ul className={styles.relayList}>{relayRows.map((relay) => <li key={relay.ref.id}><button aria-current={relayId === relay.ref.id ? "true" : undefined} data-relay-id={relay.ref.id} onClick={() => setSelection({ kind: "relay", id: relay.ref.id })} type="button"><span className={styles.stateGlyph}><CircleDot aria-hidden="true" /></span><span><strong>{relay.summary}</strong><small>{actorLabel(relay.sender)} → {relay.recipients.map(actorLabel).join(", ")}</small></span><StatusPill tone={relayTone(relay.state)}>{sentenceCase(relay.state)}</StatusPill><ChevronRight aria-hidden="true" /></button></li>)}</ul>}
-                {relays.hasNextPage ? <Button disabled={relays.isFetchingNextPage} onClick={() => void relays.fetchNextPage()} size="sm" variant="outline">{relays.isFetchingNextPage ? "Loading…" : "Load more Relays"}</Button> : null}
-              </CardContent>
-            </Card>
-            <Card className={styles.detailCard} role="region" aria-label="Selected Relay detail">
-              {!activeSelection ? <StatePanel compact state="empty" title="No handoff selected" detail="Choose a draft or canonical Relay to inspect its full docket." /> : activeSelection.kind === "draft" ? draftDetail.isPending ? <StatePanel compact state="loading" title="Reading draft" detail="Loading checkout-local detail on selection." /> : draftDetail.isError ? <ErrorState error={draftDetail.error} retry={() => void draftDetail.refetch()} /> : <><CardHeader className={styles.detailHeader}><div><CardDescription>Private Relay draft</CardDescription><CardTitle><h2>{draftDetail.data.summary}</h2></CardTitle><code>{draftDetail.data.id}</code></div><CardAction><StatusPill>Local</StatusPill></CardAction></CardHeader><CardContent className={styles.detailContent}><dl className={styles.meta}><div><dt>Recipients</dt><dd>{draftDetail.data.recipients.map(actorLabel).join(", ")}</dd></div><div><dt>Workstream</dt><dd>{draftDetail.data.workstream.title ?? draftDetail.data.workstream.id}</dd></div><div><dt>Revision</dt><dd><code>{draftDetail.data.revision.slice(0, 12)}</code></dd></div></dl><div className={styles.actions}><Button disabled={!canDraft} onClick={(event) => openComposer(draftDetail.data, event)} size="sm" variant="outline"><FilePenLine data-icon="inline-start" /> Edit</Button><Button disabled={!draftPublishReady} onClick={(event) => draftAction(draftDetail.data, "publish", event)} size="sm"><Send data-icon="inline-start" /> Review &amp; publish</Button><Button disabled={!canDraft} onClick={(event) => draftAction(draftDetail.data, "delete", event)} size="sm" variant="destructive"><Trash2 data-icon="inline-start" /> Delete</Button></div>{draftPublishRecovery ? <p className={styles.recovery} role="status">{draftPublishRecovery}</p> : null}<p className={styles.boundNote}>Publication rechecks the draft, Workstream, all recipient Members, and current authority under the workflow lease.</p></CardContent></> : relayDetail.isPending ? <StatePanel compact state="loading" title="Reading Relay" detail="Loading the immutable handoff body on selection." /> : relayDetail.isError ? <ErrorState error={relayDetail.error} retry={() => void relayDetail.refetch()} /> : <><CardHeader className={styles.detailHeader}><div><CardDescription>Canonical Relay</CardDescription><CardTitle><h2>{relayDetail.data.summary}</h2></CardTitle><code>{relayDetail.data.ref.id}</code></div><CardAction><StatusPill tone={relayTone(relayDetail.data.state)}>{sentenceCase(relayDetail.data.state)}</StatusPill></CardAction></CardHeader><CardContent className={styles.detailContent}><dl className={styles.meta}><div><dt>Sender</dt><dd>{actorLabel(relayDetail.data.sender)}</dd></div><div><dt>Recipients</dt><dd>{relayDetail.data.recipients.map(actorLabel).join(", ")}</dd></div><div><dt>Workstream</dt><dd>{relayDetail.data.workstream.title ?? relayDetail.data.workstream.id}</dd></div><div><dt>Published</dt><dd>{relayDetail.data.publishedAt ? formatDate(relayDetail.data.publishedAt) : "Legacy timestamp unavailable"}</dd></div><div><dt>Claimed by</dt><dd>{relayDetail.data.acknowledgedBy ? actorLabel(relayDetail.data.acknowledgedBy) : "Unclaimed"}</dd></div><div><dt>Acknowledged at</dt><dd>{relayDetail.data.acknowledgedAt ? formatDate(relayDetail.data.acknowledgedAt) : "Not acknowledged"}</dd></div><div><dt>Closed by</dt><dd>{relayDetail.data.closedBy ? actorLabel(relayDetail.data.closedBy) : "Open"}</dd></div><div><dt>Closed at</dt><dd>{relayDetail.data.closedAt ? formatDate(relayDetail.data.closedAt) : "Open"}</dd></div></dl>{relayDetail.data.state !== "closed" ? <div className={styles.actions}>{canAcknowledge ? <Button onClick={(event) => relayAction(relayDetail.data, "acknowledge", event)} size="sm"><UserCheck data-icon="inline-start" /> Claim handoff</Button> : null}{canClose ? <Button onClick={(event) => relayAction(relayDetail.data, "close", event)} size="sm"><CheckCircle2 data-icon="inline-start" /> Close Relay</Button> : null}</div> : <p className={styles.terminal}><ShieldCheck aria-hidden="true" /><span><strong>Immutable closed handoff.</strong> No further Relay actions are available.</span></p>}{!currentMemberActive && relayDetail.data.state !== "closed" ? <p className={styles.recovery} role="status">Select an active current Member to claim or close this Relay.</p> : null}{currentMemberActive && !lifecycleAvailable && relayDetail.data.state !== "closed" ? <p className={styles.recovery} role="status">{capabilities?.relays.lifecycleMutation.reason ?? "Relay lifecycle actions are unavailable in this Hub process."}</p> : null}<DetailSections relay={relayDetail.data} /></CardContent></>}
-            </Card>
-          </section>
-        </div>
+                <Card className={styles.detailCard} role="region" aria-label="Selected handoff draft detail">{draftDetailState}</Card>
+              </div>
+            </TabsContent>
+          </Tabs>
+        </>
       )}
-      <aside aria-label="Relay delivery boundary" className={styles.boundary}><GitBranch aria-hidden="true" /><p><strong>Repository baton, not background delivery.</strong> Details load only after selection; nothing polls, spawns an agent, or sends data outside this Hub.</p></aside>
-      {composer !== undefined ? <DraftComposer draft={composer} finalFocus={() => trigger.current} members={activeMembers} onApplied={onApplied} onClose={() => setComposer(undefined)} workstreams={eligibleWorkstreams} /> : null}
-      {review ? <ReviewDialog finalFocus={() => trigger.current} onApplied={onApplied} onClose={() => setReview(null)} source={review} /> : null}
+      {composer !== undefined ? (
+        <Suspense fallback={null}>
+          <RelayDraftComposer
+            draft={composer}
+            finalFocus={() => trigger.current}
+            members={activeMembers}
+            membersError={members.isError ? members.error : undefined}
+            onApplied={onApplied}
+            onClose={() => setComposer(undefined)}
+            onRetryMembers={() => void members.refetch()}
+          />
+        </Suspense>
+      ) : null}
+      {review ? (
+        <Suspense fallback={null}>
+          <RelayMutationDialog
+            acceptPreview={previewAcceptance}
+            finalFocus={() => trigger.current}
+            onApplied={onApplied}
+            onClose={() => setReview(null)}
+            source={review}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

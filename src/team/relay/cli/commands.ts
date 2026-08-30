@@ -300,7 +300,7 @@ function renderDraftList(
 ): void {
   if (page.items.length === 0) io.write("No local Relay drafts found.");
   for (const draft of page.items) {
-    io.write(`${draft.id}\t${draft.workstream.id}\t${draft.recipients.length}\t${draft.summary}`);
+    io.write(`${draft.id}\t${draft.recipients.length} recipient${draft.recipients.length === 1 ? "" : "s"}\t${draft.summary}`);
   }
   renderContinuation(page, io);
 }
@@ -311,7 +311,6 @@ function renderDraft(
   io: TeamCommandIo,
 ): void {
   io.write(`${draft.summary} (${draft.id})`);
-  io.write(`Workstream: ${draft.workstream.id}`);
   io.write(`Recipients: ${draft.recipients.map((recipient) => recipient.memberId).join(", ")}`);
   io.write(`Revision: ${draft.revision}`);
   io.write(`Updated: ${draft.updatedAt}`);
@@ -324,7 +323,14 @@ function renderRelayList(
 ): void {
   if (page.items.length === 0) io.write("No canonical Relays found.");
   for (const relay of page.items) {
-    io.write(`${relay.ref.id}\t${relay.state}\t${relay.workstream.id}\t${relay.summary}`);
+    const context = relayPublicationContext(relay);
+    io.write([
+      relay.ref.id,
+      relay.state,
+      ...(relay.workstream === null ? [] : [`Workstream ${relay.workstream.id}`]),
+      ...(context === null ? [] : [context]),
+      relay.summary,
+    ].join("\t"));
   }
   renderContinuation(page, io);
 }
@@ -336,9 +342,24 @@ function renderRelay(
 ): void {
   io.write(`${relay.summary} (${relay.ref.id})`);
   io.write(`State: ${relay.state}`);
-  io.write(`Workstream: ${relay.workstream.id}`);
+  if (relay.workstream !== null) io.write(`Workstream: ${relay.workstream.id}`);
   io.write(`Published: ${relay.publishedAt ?? "legacy timestamp unavailable"}`);
+  const publicationContext = relayPublicationContext(relay);
+  if (publicationContext !== null) {
+    io.write(`Publication repository: ${publicationContext}`);
+    io.write(`Repository observed: ${relay.publishedRepoState!.observedAt}`);
+  }
   io.write(`Revision: ${relay.revision}`);
+}
+
+function relayPublicationContext(
+  relay: Pick<TeamRelaySummary, "publishedRepoState">,
+): string | null {
+  const state = relay.publishedRepoState;
+  if (state === null) return null;
+  const branch = state.branch ?? "Detached HEAD";
+  const head = state.head === null ? "No committed HEAD" : state.head.slice(0, 8);
+  return `${branch} @ ${head} (${state.dirty ? "local changes present" : "clean working tree"})`;
 }
 
 function renderPreview(

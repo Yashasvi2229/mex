@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,6 +12,9 @@ import type {
 import type { RepoState } from "../../contracts/shared.js";
 import { MexPortError } from "../../contracts/shared.js";
 import { generateArtifactId } from "../../artifacts/ulid.js";
+import { serializeActivityArtifact } from "../../artifacts/codecs.js";
+import { revisionOf } from "../../artifacts/revision.js";
+import type { ActivityEventV1 } from "../../contracts/workflow.js";
 import { ActivityRepository, TimelineReader } from "../repository.js";
 
 const roots: string[] = [];
@@ -38,6 +41,10 @@ describe("ActivityRepository", () => {
     }, firstId);
 
     expect(preview.event.id).toBe(firstId);
+    expect(preview.event).toMatchObject({
+      schemaVersion: 2,
+      origin: { kind: "custom" },
+    });
     expect((await repository.applyCreate(preview, preview.previewRevision)).id).toBe(firstId);
     const generated = await repository.previewCreate({
       actor: { kind: "unknown" },
@@ -60,11 +67,17 @@ describe("ActivityRepository", () => {
       actor: { kind: "member", memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
       action: "workstream.created",
       subjects: [{ kind: "entity", entity: { id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV", kind: "workstream" } }],
-    }, authority);
+    }, authority, undefined, {
+      origin: { kind: "workflow", operation: "workstream.create" },
+      label: "Activity workbench",
+    });
 
     expect(preview.event).toMatchObject({
       timestamp: authority.timestamp,
       repoState: authority.repoState,
+      schemaVersion: 2,
+      origin: { kind: "workflow", operation: "workstream.create" },
+      label: "Activity workbench",
     });
     git.state = { ...git.state, head: "2".repeat(40) };
     await expect(repository.applyCreate(preview, preview.previewRevision)).rejects.toMatchObject({
@@ -83,6 +96,11 @@ describe("ActivityRepository", () => {
       action: "member.updated",
       subjects: [{ kind: "file", path: "src/index.ts" }],
       metadata: { reason: "ownership changed" },
+    });
+
+    expect(preview.event).toMatchObject({
+      schemaVersion: 2,
+      origin: { kind: "custom" },
     });
 
     expect(existsSync(join(root, ".mex/events/activity"))).toBe(false);
@@ -162,6 +180,32 @@ describe("ActivityRepository", () => {
       .resolves.toEqual(recovered);
     await expect(repository.recoverJournaledCreate(preview.event, "f".repeat(64)))
       .rejects.toThrowError(MexPortError);
+  });
+
+  it("reads and recovers schema-v1 Activity without rewriting or migrating its bytes", async () => {
+    const root = temporaryRoot();
+    const repository = fixedRepository(root, fakeGit(), secondId);
+    const event: ActivityEventV1 = {
+      schemaVersion: 1,
+      id: firstId,
+      timestamp,
+      actor: { kind: "unknown" },
+      action: "relay.closed",
+      subjects: [],
+      repoState: fakeGit().state,
+    };
+    const bytes = serializeActivityArtifact(event);
+    const stored = await repository.recoverJournaledCreate(event, revisionOf(bytes));
+    const path = join(root, ...stored.sourcePath.split("/"));
+    const before = {
+      bytes: readFileSync(path, "utf8"),
+      mtimeMs: statSync(path).mtimeMs,
+    };
+
+    expect(repository.get(firstId)).toMatchObject({ schemaVersion: 1 });
+    expect(repository.list().items).toHaveLength(1);
+    expect({ bytes: readFileSync(path, "utf8"), mtimeMs: statSync(path).mtimeMs })
+      .toEqual(before);
   });
 
   it("binds the canonical project root before a caller symlink can be swapped", async () => {

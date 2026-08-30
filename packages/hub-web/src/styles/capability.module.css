@@ -5,25 +5,9 @@
 }
 
 .headerStatus {
-  gap: 7px;
   color: var(--muted-foreground);
   font-size: 10px;
   font-weight: 500;
-}
-
-.statusDot {
-  width: 6px;
-  height: 6px;
-  background: var(--warning);
-  border-radius: 50%;
-}
-
-.headerStatus[data-state="checking"] .statusDot {
-  background: var(--muted-foreground);
-}
-
-.headerStatus[data-state="connected"] .statusDot {
-  background: var(--success);
 }
 
 .boundaryCard {
@@ -55,18 +39,6 @@
   border: 1px solid var(--warning-border);
 }
 
-.capabilityIcon[data-state="checking"] {
-  color: var(--muted-foreground);
-  background: var(--muted);
-  border-color: var(--border);
-}
-
-.capabilityIcon[data-state="connected"] {
-  color: var(--success);
-  background: var(--success-soft);
-  border-color: var(--success-border);
-}
-
 .capabilityIcon svg {
   width: 19px;
   height: 19px;
@@ -89,19 +61,6 @@
   max-width: 620px;
   font-size: 12px;
   line-height: 1.55;
-}
-
-.boundaryMeta {
-  max-width: none;
-  flex-direction: row;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 6px;
-}
-
-.boundaryMeta code {
-  font-family: var(--font-mono);
-  font-size: 9px;
 }
 
 @media (max-width: 1080px) {

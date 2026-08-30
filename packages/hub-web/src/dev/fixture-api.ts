@@ -1,4 +1,4 @@
-import type { HubApi, JobSubscription } from "../api/client";
+import type { FixtureApiOptions, HubApi, JobSubscription } from "../api/client";
 import type {
   ActivityItem,
   ActivityRequest,
@@ -34,6 +34,7 @@ import type {
   RelayOperationPreviewResponse,
   JobsResponse,
   JobSummary,
+  OverviewResponse,
   SearchRequest,
   SearchResponse,
   SessionResponse,
@@ -264,22 +265,36 @@ const activityItems: ActivityItem[] = [
     source: "activity",
     id: "event_01K36WVM6H7JK8M9NPQRSTVVWX",
     timestamp: timestamp(7),
-    action: "hub.activity_view_connected",
+    action: "inbox.published",
+    recordOrigin: { kind: "workflow", operation: "inbox.publish" },
+    label: "Keep approval consequences explicit",
     subjects: [
-      { kind: "entity", entity: { id: "project_hub", entityKind: "workstream", title: "Project Hub" } },
-      { kind: "file", path: "packages/hub-web/src/pages/ActivityPage.tsx" },
-      { kind: "symbol", symbolId: "ActivityPage" },
-      { kind: "commit", hash: "aeaf0ab" },
+      {
+        kind: "entity",
+        entity: {
+          id: "proposal_01000000000000000000001721",
+          entityKind: "proposal",
+          title: "Keep approval consequences explicit",
+        },
+      },
     ],
-    subjectCount: 4,
+    subjectCount: 1,
     subjectsTruncated: false,
     sourcePath: ".mex/events/activity/2026-08/event_01K36WVM6H7JK8M9NPQRSTVVWX.md",
-    recordedActor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
-    effectiveActor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
+    recordedActor: {
+      kind: "member",
+      memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX",
+      displayName: "Ada Lovelace",
+    },
+    effectiveActor: {
+      kind: "member",
+      memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX",
+      displayName: "Ada Lovelace",
+    },
     actorDiagnostics: [],
-    workstream: { id: "project_hub", entityKind: "workstream", title: "Project Hub" },
+    workstream: null,
     repository: {
-      branch: "feat/hub-activity-timeline",
+      branch: "codex/hub-ux",
       head: "aeaf0ab0022ac5d704404585d981b4da5f2c1cbf",
       dirty: true,
       observedAt: timestamp(7),
@@ -290,24 +305,36 @@ const activityItems: ActivityItem[] = [
     source: "activity",
     id: "event_01K36R3X4A5BC6DE7FGHJKMNPQ",
     timestamp: timestamp(38),
-    action: "team.member_alias_updated",
+    action: "relay.acknowledged",
+    recordOrigin: { kind: "workflow", operation: "relay.acknowledge" },
+    label: "Carry the release evidence through the final cross-platform gate.",
     subjects: [
-      { kind: "entity", entity: { id: "member_daksh", entityKind: "member", title: "Daksh" } },
-      { kind: "file", path: ".mex/team/members/member_daksh.md" },
+      {
+        kind: "entity",
+        entity: {
+          id: "relay_01000000000000000000000001",
+          entityKind: "relay",
+          title: "Carry the release evidence through the final cross-platform gate.",
+        },
+      },
     ],
-    subjectCount: 2,
+    subjectCount: 1,
     subjectsTruncated: false,
     sourcePath: ".mex/events/activity/2026-08/event_01K36R3X4A5BC6DE7FGHJKMNPQ.md",
-    recordedActor: { kind: "git", name: "Daksh Jaitly", email: "daksh@example.test" },
-    effectiveActor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
-    actorDiagnostics: [{
-      code: "ACTOR_ALIAS_REMAPPED",
-      severity: "info",
-      message: "The recorded Git identity currently resolves to member Daksh.",
-    }],
+    recordedActor: {
+      kind: "member",
+      memberId: "member_01K36R3X4A5BC6DE7FGHJKMNPQ",
+      displayName: "Grace Hopper",
+    },
+    effectiveActor: {
+      kind: "member",
+      memberId: "member_01K36R3X4A5BC6DE7FGHJKMNPQ",
+      displayName: "Grace Hopper",
+    },
+    actorDiagnostics: [],
     workstream: null,
     repository: {
-      branch: "feat/hub-activity-timeline",
+      branch: "codex/hub-ux",
       head: "aeaf0ab0022ac5d704404585d981b4da5f2c1cbf",
       dirty: false,
       observedAt: timestamp(38),
@@ -333,25 +360,40 @@ const activityItems: ActivityItem[] = [
     repository: null,
     revision: null,
     sourceLine: 18,
-    message: "Keep activity immutable and preserve legacy history as a read-only projection.",
+    message: "Keep activity immutable and preserve Project notes as a read-only projection.",
     messageTruncated: false,
   },
   {
     source: "activity",
     id: "event_01K35Z2A3B4C5D6E7FGHJKMNPQ",
     timestamp: timestamp(1_510),
-    action: "graph.refresh_requested",
+    action: "member.updated",
+    recordOrigin: { kind: "workflow", operation: "member.update" },
+    label: "Daksh Jaitly",
     subjects: [
-      { kind: "symbol", symbolId: "GitCliAdapter.repositoryState" },
-      { kind: "file", path: "src/team/git/adapter.ts" },
-      { kind: "commit", hash: "6484dd0" },
+      {
+        kind: "entity",
+        entity: {
+          id: "member_01K35Z2A3B4C5D6E7FGHJKMNPQ",
+          entityKind: "member",
+          title: "Daksh Jaitly",
+        },
+      },
     ],
-    subjectCount: 3,
+    subjectCount: 1,
     subjectsTruncated: false,
     sourcePath: ".mex/events/activity/2026-08/event_01K35Z2A3B4C5D6E7FGHJKMNPQ.md",
-    recordedActor: { kind: "git", name: "MEX Maintainer", email: "maintainer@example.test" },
-    effectiveActor: { kind: "git", name: "MEX Maintainer", email: "maintainer@example.test" },
-    actorDiagnostics: [],
+    recordedActor: { kind: "git", name: "Daksh Jaitly", email: "daksh@example.test" },
+    effectiveActor: {
+      kind: "member",
+      memberId: "member_01K35Z2A3B4C5D6E7FGHJKMNPQ",
+      displayName: "Daksh Jaitly",
+    },
+    actorDiagnostics: [{
+      code: "ACTOR_ALIAS_REMAPPED",
+      severity: "info",
+      message: "The recorded Git identity currently resolves to member Daksh Jaitly.",
+    }],
     workstream: null,
     repository: {
       branch: null,
@@ -365,11 +407,39 @@ const activityItems: ActivityItem[] = [
     source: "activity",
     id: "event_01K34P2A3B4C5D6E7FGHJKMNPQ",
     timestamp: timestamp(2_930),
+    action: "relay.closed",
+    recordOrigin: { kind: "custom" },
+    label: "Imported closure note",
+    subjects: [
+      { kind: "file", path: "docs/handovers/imported-closure.md" },
+      { kind: "commit", hash: "6484dd0" },
+    ],
+    subjectCount: 2,
+    subjectsTruncated: false,
+    sourcePath: ".mex/events/activity/2026-08/event_01K34P2A3B4C5D6E7FGHJKMNPQ.md",
+    recordedActor: { kind: "git", name: "MEX Maintainer", email: "maintainer@example.test" },
+    effectiveActor: { kind: "git", name: "MEX Maintainer", email: "maintainer@example.test" },
+    actorDiagnostics: [],
+    workstream: null,
+    repository: {
+      branch: null,
+      head: "6484dd00022ac5d704404585d981b4da5f2c1cbf",
+      dirty: false,
+      observedAt: timestamp(2_930),
+    },
+    revision: revision("5"),
+  },
+  {
+    source: "activity",
+    id: "event_01K34P2A3B4C5D6E7FGHJKMNPR",
+    timestamp: timestamp(3_100),
     action: "repository.initialized",
+    recordOrigin: { kind: "unknown" },
+    label: null,
     subjects: [],
     subjectCount: 0,
     subjectsTruncated: false,
-    sourcePath: ".mex/events/activity/2026-08/event_01K34P2A3B4C5D6E7FGHJKMNPQ.md",
+    sourcePath: ".mex/events/activity/2026-08/event_01K34P2A3B4C5D6E7FGHJKMNPR.md",
     recordedActor: { kind: "unknown" },
     effectiveActor: { kind: "unknown" },
     actorDiagnostics: [],
@@ -378,9 +448,9 @@ const activityItems: ActivityItem[] = [
       branch: "feat/wiki-port-contract-lock",
       head: null,
       dirty: false,
-      observedAt: timestamp(2_930),
+      observedAt: timestamp(3_100),
     },
-    revision: revision("5"),
+    revision: revision("7"),
   },
   {
     source: "legacy",
@@ -449,23 +519,16 @@ const home: HomeResponse = {
   repository: {
     scaffoldId: "scf_mex",
     name: "mex",
-    branch: "feat/project-hub-foundation",
-    head: "6484dd00022ac5d704404585d981b4da5f2c1cbf",
+    branch: "codex/hub-ux",
+    head: "aeaf0ab0022ac5d704404585d981b4da5f2c1cbf",
     dirty: true,
   },
-  actor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
-  sections: {
-    workstreams: { availability: "available", count: fixtureWorkstreams.length },
-    relays: { availability: "available", count: 1 },
-    inbox: { availability: "unavailable", count: null, reason: "Inbox workflows are not part of this read-only slice." },
-    activity: { availability: "available", count: 4 },
+  actor: { kind: "member", memberId: fixtureMemberIds[0], displayName: fixtureMembers[0].displayName },
+  attention: {
+    inbox: { availability: "available", teamReviewCount: 3 },
+    relays: { availability: "available", readyToTakeCount: 1, inYourHandsCount: 1 },
   },
-  activeJobs: 1,
-  attention: [
-    { id: "attention_graph", kind: "job", title: "Graph refresh is in progress", summary: "Extraction is processing generation 14.", route: `/jobs?job=${jobs[0].id}`, tone: "neutral" },
-    { id: "attention_graph_freshness", kind: "health", title: "The code graph is behind this branch", summary: "Seven repository changes are outside the last trustworthy graph snapshot.", route: "/health", tone: "warning" },
-    { id: "attention_activity", kind: "activity", title: "Repository activity is available", summary: "Immutable canonical and legacy history can be reviewed without changing the project.", route: "/activity", tone: "neutral" },
-  ],
+  jobs: { availability: "available", activeCount: 1 },
 };
 
 const health: HealthResponse = {
@@ -487,7 +550,7 @@ const health: HealthResponse = {
         indexedAt: timestamp(190),
         indexedBranch: "feat/project-hub-foundation",
         indexedHead: "6484dd00022ac5d704404585d981b4da5f2c1cbf",
-        currentBranch: "feat/hub-graph-integration",
+        currentBranch: "codex/hub-ux",
         currentHead: "aeaf0ab0022ac5d704404585d981b4da5f2c1cbf",
         schemaVersion: 3,
         extractorVersion: "0.7.2",
@@ -543,6 +606,318 @@ const health: HealthResponse = {
   ],
 };
 
+type OverviewVariant = NonNullable<FixtureApiOptions["overviewFixture"]>;
+type HealthComponent = HealthResponse["components"][number];
+
+function fixtureHealthComponent(id: "graph" | "wiki"): HealthComponent {
+  const component = health.components.find((candidate) => candidate.id === id);
+  if (component === undefined) throw new Error(`Missing fixture ${id} health component.`);
+  return structuredClone(component);
+}
+
+function freshGraphComponent(activeJobId: string | null = null): HealthComponent {
+  const component = fixtureHealthComponent("graph");
+  component.status = "healthy";
+  component.summary = "The code Graph matches the current repository snapshot.";
+  component.diagnostics = [];
+  delete component.repairJobKind;
+  component.graph = {
+    ...component.graph!,
+    indexStatus: "fresh",
+    indexedAt: timestamp(61),
+    lastSuccessfulIndexAt: timestamp(61),
+    indexedBranch: home.repository.branch,
+    indexedHead: home.repository.head,
+    currentBranch: home.repository.branch,
+    currentHead: home.repository.head,
+    parseHealth: {
+      total: 183,
+      ok: 183,
+      partial: 0,
+      failed: 0,
+      failedPaths: [],
+      failedPathsTruncated: false,
+    },
+    changes: {
+      total: 0,
+      added: [],
+      modified: [],
+      deleted: [],
+      truncated: false,
+      branchChanged: false,
+      manifestChanged: false,
+      configChanged: false,
+      grammarChanged: false,
+    },
+    recommendedJobKind: null,
+    activeJobId,
+  };
+  return component;
+}
+
+function staleGraphComponent(activeJobId: string | null = null): HealthComponent {
+  const component = fixtureHealthComponent("graph");
+  component.graph = { ...component.graph!, activeJobId };
+  return component;
+}
+
+function degradedGraphComponent(): HealthComponent {
+  const component = freshGraphComponent();
+  component.status = "degraded";
+  component.summary = "The indexed snapshot is usable, but some source files parsed only partially or failed.";
+  component.diagnostics = [{
+    code: "GRAPH_PARSE_DEGRADED",
+    severity: "warning",
+    message: "Five indexed sources did not parse completely.",
+  }];
+  component.repairJobKind = "graph_rebuild";
+  component.graph = {
+    ...component.graph!,
+    indexStatus: "degraded",
+    parseHealth: {
+      total: 183,
+      ok: 178,
+      partial: 4,
+      failed: 1,
+      failedPaths: ["src/legacy/parser.ts"],
+      failedPathsTruncated: false,
+    },
+    recommendedJobKind: "graph_rebuild",
+  };
+  return component;
+}
+
+function missingGraphComponent(): HealthComponent {
+  const component = freshGraphComponent();
+  component.status = "degraded";
+  component.summary = "No trustworthy code Graph index exists yet.";
+  component.diagnostics = [{
+    code: "GRAPH_INDEX_MISSING",
+    severity: "warning",
+    message: "Build the code Graph before using indexed code context.",
+  }];
+  component.repairJobKind = "graph_rebuild";
+  component.graph = {
+    ...component.graph!,
+    indexStatus: "missing",
+    lastSuccessfulIndexAt: null,
+    indexedAt: null,
+    indexedBranch: null,
+    indexedHead: null,
+    schemaVersion: null,
+    extractorVersion: null,
+    grammarVersion: null,
+    parseHealth: {
+      total: 0,
+      ok: 0,
+      partial: 0,
+      failed: 0,
+      failedPaths: [],
+      failedPathsTruncated: false,
+    },
+    changes: {
+      total: 0,
+      added: [],
+      modified: [],
+      deleted: [],
+      truncated: false,
+      branchChanged: false,
+      manifestChanged: false,
+      configChanged: false,
+      grammarChanged: false,
+    },
+    recommendedJobKind: "graph_rebuild",
+    activeJobId: null,
+  };
+  return component;
+}
+
+function freshWikiComponent(activeJobId: string | null = null): HealthComponent {
+  const component = fixtureHealthComponent("wiki");
+  component.wiki = { ...component.wiki!, activeJobId };
+  return component;
+}
+
+function missingWikiComponent(): HealthComponent {
+  const component = freshWikiComponent();
+  component.status = "degraded";
+  component.summary = "No trustworthy Knowledge index exists yet.";
+  component.diagnostics = [{
+    code: "WIKI_INDEX_MISSING",
+    severity: "warning",
+    message: "Build the Knowledge index before using indexed project memory.",
+  }];
+  component.repairJobKind = "wiki_rebuild";
+  component.wiki = {
+    ...component.wiki!,
+    indexStatus: "missing",
+    indexedAt: null,
+    schemaVersion: null,
+    indexedRevision: null,
+    recommendedJobKind: "wiki_rebuild",
+    activeJobId: null,
+  };
+  return component;
+}
+
+function unavailableHealthComponent(id: "graph" | "wiki"): HealthComponent {
+  return {
+    id,
+    label: id === "graph" ? "Code graph" : "Project Wiki",
+    status: "unavailable",
+    summary: id === "graph"
+      ? "Code Graph health could not be read."
+      : "Knowledge index health could not be read.",
+    diagnostics: [{
+      code: id === "graph" ? "GRAPH_HEALTH_UNAVAILABLE" : "WIKI_HEALTH_UNAVAILABLE",
+      severity: "error",
+      message: "The local health source is unavailable.",
+    }],
+  };
+}
+
+function overviewContext(variant: OverviewVariant): OverviewResponse["context"] {
+  if (variant === "unavailable") {
+    return {
+      availability: "unavailable",
+      observedAt: timestamp(0),
+      reason: "Graph and Knowledge health are unavailable in this Hub process.",
+    };
+  }
+  if (variant === "indexes-missing") {
+    return {
+      availability: "available",
+      observedAt: timestamp(0),
+      graph: overviewGraphSource(missingGraphComponent()),
+      wiki: overviewWikiSource(missingWikiComponent()),
+    };
+  }
+  if (variant === "indexes-stale") {
+    return {
+      availability: "available",
+      observedAt: timestamp(0),
+      graph: overviewGraphSource(staleGraphComponent()),
+      wiki: overviewWikiSource(freshWikiComponent()),
+    };
+  }
+  if (variant === "indexes-degraded") {
+    return {
+      availability: "available",
+      observedAt: timestamp(0),
+      graph: overviewGraphSource(degradedGraphComponent()),
+      wiki: overviewWikiSource(freshWikiComponent()),
+    };
+  }
+  if (variant === "partial") {
+    return {
+      availability: "available",
+      observedAt: timestamp(0),
+      graph: {
+        availability: "unavailable",
+        observedAt: timestamp(0),
+        reason: unavailableHealthComponent("graph").summary,
+      },
+      wiki: overviewWikiSource(freshWikiComponent()),
+    };
+  }
+  if (variant === "established") {
+    return {
+      availability: "available",
+      observedAt: timestamp(0),
+      graph: overviewGraphSource(staleGraphComponent(jobs[0].id)),
+      wiki: overviewWikiSource(freshWikiComponent()),
+    };
+  }
+  const activeJobId = variant === "job-determinate" ? jobs[0].id : null;
+  const wikiJobId = variant === "job-indeterminate" ? "job_01K39WVM6H7JK8M9NPQRSTVVWX" : null;
+  return {
+    availability: "available",
+    observedAt: timestamp(0),
+    graph: overviewGraphSource(freshGraphComponent(activeJobId)),
+    wiki: overviewWikiSource(freshWikiComponent(wikiJobId)),
+  };
+}
+
+function overviewGraphSource(
+  component: HealthComponent,
+): Extract<OverviewResponse["context"], { availability: "available" }>["graph"] {
+  if (component.graph === undefined) throw new Error("Fixture graph details are required.");
+  if (component.status === "unavailable") {
+    throw new Error("An unavailable graph component must use the Overview unavailable-source branch.");
+  }
+  const { activeJobId: _activeJobId, ...details } = component.graph;
+  return {
+    availability: "available",
+    observedAt: component.graph.observedAt,
+    status: component.status,
+    summary: component.summary,
+    diagnostics: structuredClone(component.diagnostics),
+    diagnosticsTruncated: false,
+    repairJobKind: component.repairJobKind === "graph_refresh" || component.repairJobKind === "graph_rebuild"
+      ? component.repairJobKind
+      : null,
+    details,
+  };
+}
+
+function overviewWikiSource(
+  component: HealthComponent,
+): Extract<OverviewResponse["context"], { availability: "available" }>["wiki"] {
+  if (component.wiki === undefined) throw new Error("Fixture Wiki details are required.");
+  if (component.status === "unavailable") {
+    throw new Error("An unavailable Wiki component must use the Overview unavailable-source branch.");
+  }
+  const { activeJobId: _activeJobId, ...details } = component.wiki;
+  return {
+    availability: "available",
+    observedAt: component.wiki.observedAt,
+    status: component.status,
+    summary: component.summary,
+    diagnostics: structuredClone(component.diagnostics),
+    diagnosticsTruncated: false,
+    repairJobKind: component.repairJobKind === "wiki_refresh" || component.repairJobKind === "wiki_rebuild"
+      ? component.repairJobKind
+      : null,
+    details,
+  };
+}
+
+const indeterminateJob: JobSummary = {
+  id: "job_01K39WVM6H7JK8M9NPQRSTVVWX",
+  scaffoldId: "scf_mex",
+  kind: "wiki_refresh",
+  generation: 9,
+  phase: "discover",
+  progress: { completed: 37 },
+  state: "running",
+  cancelRequested: false,
+  createdAt: timestamp(5),
+  startedAt: timestamp(4),
+  revision: revision("e"),
+};
+
+const relevantFailedJob: JobSummary = {
+  id: "job_01K39R3X4A5BC6DE7FGHJKMNPQ",
+  scaffoldId: "scf_mex",
+  kind: "graph_refresh",
+  generation: 15,
+  phase: "failed",
+  progress: { completed: 176, total: 183 },
+  state: "failed",
+  cancelRequested: false,
+  createdAt: timestamp(6),
+  startedAt: timestamp(5),
+  finishedAt: timestamp(2),
+  problem: {
+    type: "about:blank",
+    code: "JOB_FAILED",
+    status: 500,
+    title: "Graph refresh failed",
+    detail: "The previous trustworthy Graph index was preserved.",
+  },
+  revision: revision("f"),
+};
+
 const graphRevision = revision("7");
 const wikiRevision = revision("6");
 const wikiIds = {
@@ -550,6 +925,7 @@ const wikiIds = {
   graph: "mx_01K36R3X4A5BC6DE7FGHJKMNPQ",
   activity: "mx_01K35Z2A3B4C5D6E7FGHJKMNPQ",
 } as const;
+const fixtureInboxSpecId = "mx_01000000000000000000000001";
 
 const wikiEntities: WikiEntitySummary[] = [
   {
@@ -605,11 +981,35 @@ const wikiEntities: WikiEntitySummary[] = [
   },
 ];
 
+const detailOnlyWikiEntities = new Map<string, WikiEntitySummary>([[
+  fixtureInboxSpecId,
+  {
+    id: fixtureInboxSpecId,
+    kind: "spec",
+    title: "Human-team memory release",
+    summary: "The reviewed Spec for Git-authoritative team memory and the Hub surfaces that explain it.",
+    lifecycleState: "in_flight",
+    groundingHealth: "fresh",
+    topics: [wikiIds.hub],
+    topicsTruncated: false,
+    sourceTypes: ["manual", "file"],
+    sourceTypesTruncated: false,
+    location: { path: `.mex/specs/${fixtureInboxSpecId}.md`, startLine: 1, endLine: 72 },
+    version: { semanticRevision: 4, contentHash: revision("3") },
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    route: `/knowledge/${fixtureInboxSpecId}`,
+  },
+]]);
+
 function wikiDetail(id: string): WikiEntityDetailResponse {
-  const entity = wikiEntities.find((item) => item.id === id) ?? wikiEntities[0];
+  const entity = wikiEntities.find((item) => item.id === id) ?? detailOnlyWikiEntities.get(id);
+  if (entity === undefined) throw new Error("Fixture Wiki entity not found.");
   const grounded = entity.id === wikiIds.hub;
   const body = entity.id === wikiIds.hub
     ? "# Project Hub read boundaries\n\nThe Hub is a local, read-only projection of canonical project state.\n\nEvery indexed response belongs to one stable revision. Pagination never combines revisions, and maintenance runs only after an explicit user action."
+    : entity.id === fixtureInboxSpecId
+      ? "# Human-team memory release\n\nThe release gate records bounded evidence before a durable team-memory change is accepted.\n\nReview remains explicit, and Git distribution remains a separate human action."
     : `# ${entity.title}\n\n${entity.summary ?? "No additional narrative is recorded."}`;
   return {
     indexedRevision: wikiRevision,
@@ -954,8 +1354,14 @@ function fixtureOperationId(prefix: "event" | "member" | "ws", sequence: number)
 
 const fixtureInboxDraftId = "inbox_00000000000000000000000000000001";
 const fixtureInboxProposalId = "proposal_01000000000000000000001720";
-const fixtureInboxSpecId = "mx_01000000000000000000000001";
+const fixtureInboxOwnProposalId = "proposal_01000000000000000000001721";
+const fixtureInboxStaleProposalId = "proposal_01000000000000000000001722";
 const fixtureInboxCreatedSpecId = "mx_02000000000000000000000001";
+const fixtureInboxTeammateActor = {
+  kind: "member" as const,
+  memberId: fixtureMemberIds[1],
+  displayName: fixtureMembers[1].displayName,
+};
 
 const fixtureInboxDrafts: InboxDraftDetail[] = [{
   id: fixtureInboxDraftId,
@@ -963,170 +1369,579 @@ const fixtureInboxDrafts: InboxDraftDetail[] = [{
   updatedAt: timestamp(16),
   changeKind: "spec.create",
   entityKind: "requirement",
-  title: "Release benchmark local draft Requirement",
-  rationaleExcerpt: "Keep the release evidence reviewable before it enters canonical history.",
+  title: "Keep Inbox review focused on meaningful changes",
+  rationaleExcerpt: "An agent prepared this private draft so a human can review the durable intent before publication.",
   input: {
     change: {
       kind: "spec.create",
       entityKind: "requirement",
-      title: "Release benchmark local draft Requirement",
-      summary: "A bounded release benchmark requirement ready for team review.",
-      body: "The release benchmark must retain exact local evidence.\n\nReviewers can inspect the proposed bytes before publishing.",
+      title: "Keep Inbox review focused on meaningful changes",
+      summary: "Reviewers see the proposed Spec meaning before implementation metadata.",
+      body: "Inbox must help a reviewer understand what will change, why it matters, and what evidence supports it before approval.\n\nExact revisions and machine identifiers remain available for audit without controlling the reading experience.",
+      status: "in_flight",
+      topics: [fixtureInboxSpecId],
+      relation: {
+        type: "derived_from",
+        target: {
+          id: fixtureInboxSpecId,
+          kind: "spec",
+          title: "Human-team memory release",
+        },
+      },
+    },
+    rationale: "An agent prepared this private draft so a human can review the durable intent before publication.",
+    evidence: [
+      {
+        kind: "entity",
+        entity: {
+          id: fixtureInboxSpecId,
+          kind: "spec",
+          title: "Human-team memory release",
+        },
+      },
+      { kind: "code", code: { kind: "symbol", symbolId: "sym.createHubServer" } },
+      { kind: "file", path: "packages/hub-web/src/pages/InboxPage.tsx" },
+      { kind: "commit", hash: "cbc42c867dbd4ad675c8353e9921d5c653508c58" },
+      {
+        kind: "external",
+        uri: "https://www.w3.org/WAI/ARIA/apg/patterns/dialog-modal/",
+        label: "Accessible dialog guidance",
+      },
+      { kind: "manual", note: "Prepared from a checkout-local review of the existing Inbox workbench." },
+    ],
+    targetRevisions: [{
+      target: { kind: "entity", id: fixtureInboxSpecId },
+      revision: revision("3"),
+      semanticRevision: 4,
+    }],
+  },
+}];
+
+const fixtureInboxProposals: InboxProposalDetail[] = [
+  {
+    schemaVersion: 1,
+    ref: {
+      id: fixtureInboxProposalId,
+      kind: "proposal",
+      title: "Clarify release evidence review",
+    },
+    sourcePath: `.mex/inbox/${fixtureInboxProposalId}.md`,
+    revision: revision("2"),
+    state: "pending",
+    author: fixtureInboxTeammateActor,
+    changeKind: "spec.update",
+    entityKind: "spec",
+    title: "Clarify release evidence review",
+    rationaleExcerpt: "Clarify the exact evidence boundary for the release gate.",
+    change: {
+      kind: "spec.update",
+      target: {
+        id: fixtureInboxSpecId,
+        kind: "spec",
+        title: "Human-team memory release",
+      },
+      patch: {
+        body: "The release gate records exact, bounded evidence before approval.\n\nPrivate proposal prose remains outside durable Specs until approval.",
+        summary: "Require exact evidence review before release approval.",
+      },
+    },
+    rationale: "Clarify the exact evidence boundary for the release gate.",
+    evidence: [
+      { kind: "file", path: "scripts/release-benchmark/run.mjs" },
+      { kind: "manual", note: "Grace reviewed the release evidence boundary with the team." },
+    ],
+    targetRevisions: [{
+      target: { kind: "entity", id: fixtureInboxSpecId },
+      revision: revision("3"),
+      semanticRevision: 4,
+    }],
+  },
+  {
+    schemaVersion: 1,
+    ref: {
+      id: fixtureInboxOwnProposalId,
+      kind: "proposal",
+      title: "Keep approval consequences explicit",
+    },
+    sourcePath: `.mex/inbox/${fixtureInboxOwnProposalId}.md`,
+    revision: revision("5"),
+    state: "pending",
+    author: fixtureWorkstreamActor,
+    changeKind: "spec.create",
+    entityKind: "constraint",
+    title: "Keep approval consequences explicit",
+    rationaleExcerpt: "Reviewers should know which working-tree artifacts an approval writes.",
+    change: {
+      kind: "spec.create",
+      entityKind: "constraint",
+      title: "Keep approval consequences explicit",
+      summary: "Approval copy names the Spec, proposal, and Activity effects.",
+      body: "Every approval confirmation must explain the durable Spec change, proposal transition, and Activity record before apply.",
       status: "in_flight",
     },
-    rationale: "Keep the release evidence reviewable before it enters canonical history.",
-    evidence: [{ kind: "manual", note: "Collected from the Checkpoint E release review." }],
+    rationale: "Reviewers should know which working-tree artifacts an approval writes.",
+    evidence: [{ kind: "manual", note: "Prepared while reviewing the current actor's Hub workflow." }],
     targetRevisions: [],
   },
-}];
-
-const fixtureInboxProposals: InboxProposalDetail[] = [{
-  schemaVersion: 1,
-  ref: {
-    id: fixtureInboxProposalId,
-    kind: "proposal",
-    title: "Release benchmark pending Spec update",
-  },
-  sourcePath: `.mex/inbox/${fixtureInboxProposalId}.md`,
-  revision: revision("2"),
-  state: "pending",
-  author: fixtureWorkstreamActor,
-  changeKind: "spec.update",
-  entityKind: "spec",
-  title: "Release benchmark pending Spec update",
-  rationaleExcerpt: "Clarify the exact evidence boundary for the release gate.",
-  change: {
-    kind: "spec.update",
-    target: {
-      id: fixtureInboxSpecId,
-      kind: "spec",
-      title: "Human-team memory release",
+  {
+    schemaVersion: 1,
+    ref: {
+      id: fixtureInboxStaleProposalId,
+      kind: "proposal",
+      title: "Refresh the stale review boundary",
     },
-    patch: {
-      body: "The release gate records exact, bounded evidence before approval.\n\nPrivate proposal prose remains outside canonical Specs until approval.",
-      summary: "Require exact evidence review before release approval.",
+    sourcePath: `.mex/inbox/${fixtureInboxStaleProposalId}.md`,
+    revision: revision("6"),
+    state: "stale",
+    author: fixtureInboxTeammateActor,
+    changeKind: "spec.update",
+    entityKind: "spec",
+    title: "Refresh the stale review boundary",
+    rationaleExcerpt: "The referenced Spec content changed after this proposal was published.",
+    change: {
+      kind: "spec.update",
+      target: {
+        id: fixtureInboxSpecId,
+        kind: "spec",
+        title: "Human-team memory release",
+      },
+      patch: {
+        title: "Human-team memory review release",
+      },
     },
+    rationale: "Make the review boundary unmistakable, once the dependency is refreshed.",
+    evidence: [{ kind: "commit", hash: "d34db33fd34db33fd34db33fd34db33fd34db33f" }],
+    targetRevisions: [{
+      target: { kind: "entity", id: fixtureInboxSpecId },
+      revision: revision("8"),
+      semanticRevision: 3,
+    }],
   },
-  rationale: "Clarify the exact evidence boundary for the release gate.",
-  evidence: [{ kind: "file", path: "scripts/release-benchmark/run.mjs" }],
-  targetRevisions: [{
-    target: { kind: "entity", id: fixtureInboxSpecId },
-    revision: revision("3"),
-    semanticRevision: 4,
-  }],
-}];
+];
 
 const fixtureRelayDraftId = "relay-draft-01";
-const fixtureRelayId = "relay_01000000000000000000000001";
-const fixtureRelayDrafts: RelayDraftDetail[] = [{
-  id: fixtureRelayDraftId,
-  revision: revision("7"),
-  updatedAt: timestamp(11),
-  summary: "Carry the release evidence through the final cross-platform gate.",
-  recipients: [{
-    kind: "member",
-    memberId: fixtureMemberIds[1],
-    displayName: fixtureMembers[1].displayName,
-  }],
-  workstream: {
-    kind: "workstream",
-    id: fixtureWorkstreamIds[0],
-    title: fixtureWorkstreams[0].title,
+const fixtureSparseRelayDraftId = "relay-draft-02";
+const fixtureRelayIds = {
+  ready: "relay_01000000000000000000000001",
+  claimed: "relay_01000000000000000000000002",
+  sentWaiting: "relay_01000000000000000000000003",
+  sentTaken: "relay_01000000000000000000000004",
+  closed: "relay_01000000000000000000000005",
+  legacy: "relay_01000000000000000000000006",
+  legacyV2: "relay_01000000000000000000000007",
+} as const;
+const fixtureMissingMemberId = "member_01K39WVM6H7JK8M9NPQRSTVVWX";
+const fixtureLegacyRelayWarning = "One or more legacy schema-v1 Relays have no canonical publication timestamp.";
+const fixtureDirtyRelayPublicationWarning = "MEX recorded that local changes existed when this Relay was published; it did not record their paths, diff, or contents.";
+const fixtureCurrentMemberActor = {
+  kind: "member" as const,
+  memberId: fixtureMemberIds[0],
+  displayName: fixtureMembers[0].displayName,
+};
+const fixtureTeammateMemberActor = {
+  kind: "member" as const,
+  memberId: fixtureMemberIds[1],
+  displayName: fixtureMembers[1].displayName,
+};
+const fixtureRelayRepoStates = {
+  clean: {
+    branch: "codex/hub-ux",
+    head: "1a2b3c4d5e6f78900123456789abcdef01234567",
+    dirty: false,
+    observedAt: timestamp(70),
   },
-  input: {
-    recipients: [{
-      kind: "member",
-      memberId: fixtureMemberIds[1],
-      displayName: fixtureMembers[1].displayName,
-    }],
-    workstream: {
-      kind: "workstream",
-      id: fixtureWorkstreamIds[0],
-      title: fixtureWorkstreams[0].title,
-    },
+  dirty: {
+    branch: "feature/relay-accessibility",
+    head: "23456789abcdef0123456789abcdef0123456789",
+    dirty: true,
+    observedAt: timestamp(55),
+  },
+  detached: {
+    branch: null,
+    head: "3456789abcdef0123456789abcdef0123456789a",
+    dirty: false,
+    observedAt: timestamp(90),
+  },
+  nullHead: {
+    branch: "feature/unborn-relay",
+    head: null,
+    dirty: false,
+    observedAt: timestamp(180),
+  },
+} satisfies Record<string, NonNullable<RelayDetail["publishedRepoState"]>>;
+
+const fixtureRelayDrafts: RelayDraftDetail[] = [
+  {
+    id: fixtureRelayDraftId,
+    revision: revision("7"),
+    updatedAt: timestamp(11),
     summary: "Carry the release evidence through the final cross-platform gate.",
-    completed: ["The deterministic benchmark fixture is stable."],
-    inProgress: ["Collect the final pinned runner evidence."],
+    recipients: [fixtureTeammateMemberActor],
+    input: {
+      recipients: [fixtureTeammateMemberActor],
+      summary: "Carry the release evidence through the final cross-platform gate.",
+      completed: ["The deterministic benchmark fixture is stable."],
+      inProgress: ["Collect the final pinned runner evidence."],
+      decisions: [{
+        id: fixtureInboxSpecId,
+        kind: "spec",
+        title: "Human-team memory release",
+      }],
+      blockers: ["Windows packed-install evidence is not yet recorded."],
+      unresolvedQuestions: ["Does the Windows packed-install run retain the same digest?"],
+      changedFiles: ["scripts/release-benchmark/run.mjs"],
+      code: [
+        { kind: "symbol", symbolId: "sym.createHubServer", fingerprint: revision("1") },
+        { kind: "file", path: "scripts/release-benchmark/run.mjs", fingerprint: revision("2") },
+      ],
+      evidence: [
+        {
+          kind: "entity",
+          entity: {
+            kind: "workstream",
+            id: fixtureWorkstreamIds[0],
+            title: fixtureWorkstreams[0].title,
+          },
+        },
+        { kind: "entity", entity: { id: fixtureInboxSpecId, kind: "spec", title: "Human-team memory release" } },
+        { kind: "code", code: { kind: "symbol", symbolId: "sym.createHubServer", fingerprint: revision("1") } },
+        { kind: "file", path: "scripts/release-benchmark/run.mjs" },
+        { kind: "commit", hash: "d34db33fd34db33fd34db33fd34db33fd34db33f" },
+        { kind: "external", uri: "https://nodejs.org/en/download", label: "Node.js release matrix" },
+        { kind: "manual", note: "Translated from a pre-v3 checkout-local Relay draft." },
+      ],
+      nextActions: ["Run the cross-platform storage matrix."],
+    },
+  },
+  {
+    id: fixtureSparseRelayDraftId,
+    revision: revision("6"),
+    updatedAt: timestamp(12),
+    summary: "Hand off the standalone Relay follow-up.",
+    recipients: [fixtureTeammateMemberActor],
+    input: {
+      recipients: [fixtureTeammateMemberActor],
+      summary: "Hand off the standalone Relay follow-up.",
+      completed: [],
+      inProgress: [],
+      decisions: [],
+      blockers: [],
+      unresolvedQuestions: [],
+      changedFiles: [],
+      code: [],
+      evidence: [],
+      nextActions: [],
+    },
+  },
+];
+
+const fixtureRelays: RelayDetail[] = [
+  {
+    schemaVersion: 3,
+    ref: { kind: "relay", id: fixtureRelayIds.ready },
+    sourcePath: `.mex/relays/${fixtureRelayIds.ready}.md`,
+    revision: revision("8"),
+    state: "published",
+    sender: fixtureTeammateMemberActor,
+    recipients: [fixtureCurrentMemberActor],
+    workstream: null,
+    summary: "Release evidence is ready for the final cross-platform gate.",
+    completed: ["Linux Node 22 characterization is captured."],
+    inProgress: ["Cross-platform storage portability is awaiting claim."],
+    decisions: [{ id: fixtureInboxSpecId, kind: "spec", title: "Human-team memory release" }],
+    blockers: ["The Windows packed-install run still needs pinned evidence."],
+    unresolvedQuestions: ["Does the Windows run retain the same archive digest?"],
+    changedFiles: ["scripts/release-benchmark/run.mjs"],
+    code: [
+      { kind: "symbol", symbolId: "sym.createHubServer", fingerprint: revision("1") },
+      { kind: "file", path: "scripts/release-benchmark/run.mjs" },
+    ],
+    evidence: [
+      { kind: "entity", entity: { id: fixtureInboxSpecId, kind: "spec", title: "Human-team memory release" } },
+      { kind: "code", code: { kind: "symbol", symbolId: "sym.createHubServer" } },
+      { kind: "file", path: "scripts/release-benchmark/run.mjs" },
+      { kind: "commit", hash: "d34db33fd34db33fd34db33fd34db33fd34db33f" },
+      { kind: "external", uri: "https://nodejs.org/en/download", label: "Node.js release matrix" },
+      { kind: "manual", note: "Exact fixture evidence for Relay UI validation." },
+    ],
+    nextActions: ["Take the handoff and run the remaining matrix."],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    publishedAt: timestamp(70),
+    publishedRepoState: fixtureRelayRepoStates.clean,
+    acknowledgedBy: null,
+    acknowledgedAt: null,
+    closedBy: null,
+    closedAt: null,
+  },
+  {
+    schemaVersion: 3,
+    ref: { kind: "relay", id: fixtureRelayIds.claimed },
+    sourcePath: `.mex/relays/${fixtureRelayIds.claimed}.md`,
+    revision: revision("9"),
+    state: "acknowledged",
+    sender: fixtureTeammateMemberActor,
+    recipients: [fixtureCurrentMemberActor],
+    workstream: null,
+    summary: "Finish the keyboard and screen-reader pass for the Hub review surfaces.",
+    completed: ["Route focus and skip-link behavior are covered by unit tests."],
+    inProgress: ["The two supported desktop viewports still need a final keyboard pass."],
     decisions: [],
     blockers: [],
-    unresolvedQuestions: ["Does the Windows packed-install run retain the same digest?"],
-    changedFiles: ["scripts/release-benchmark/run.mjs"],
-    code: [{ kind: "file", path: "scripts/release-benchmark/run.mjs" }],
-    evidence: [{ kind: "manual", note: "Prepared in the Relay fixture workbench." }],
-    nextActions: ["Run the cross-platform storage matrix."],
+    unresolvedQuestions: ["Should the queue announce its new selection through the existing live region?"],
+    changedFiles: ["packages/hub-web/src/pages/InboxPage.tsx"],
+    code: [{ kind: "file", path: "packages/hub-web/src/pages/InboxPage.tsx" }],
+    evidence: [{ kind: "manual", note: "The focused accessibility tests pass in both themes." }],
+    nextActions: ["Verify keyboard selection at 1024×768 and 1440×900."],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    publishedAt: timestamp(55),
+    publishedRepoState: fixtureRelayRepoStates.dirty,
+    acknowledgedBy: fixtureCurrentMemberActor,
+    acknowledgedAt: timestamp(24),
+    closedBy: null,
+    closedAt: null,
   },
-}];
+  {
+    schemaVersion: 3,
+    ref: { kind: "relay", id: fixtureRelayIds.sentWaiting },
+    sourcePath: `.mex/relays/${fixtureRelayIds.sentWaiting}.md`,
+    revision: revision("a"),
+    state: "published",
+    sender: fixtureCurrentMemberActor,
+    recipients: [fixtureTeammateMemberActor],
+    workstream: null,
+    summary: "Run the final Relay contract regression suite against the merged branch.",
+    completed: ["The local fixture matrix is deterministic."],
+    inProgress: [],
+    decisions: [],
+    blockers: [],
+    unresolvedQuestions: [],
+    changedFiles: [],
+    code: [],
+    evidence: [{ kind: "manual", note: "All focused contract tests pass locally." }],
+    nextActions: ["Take the handoff after pulling the latest integration branch."],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    publishedAt: timestamp(90),
+    publishedRepoState: fixtureRelayRepoStates.detached,
+    acknowledgedBy: null,
+    acknowledgedAt: null,
+    closedBy: null,
+    closedAt: null,
+  },
+  {
+    schemaVersion: 3,
+    ref: { kind: "relay", id: fixtureRelayIds.sentTaken },
+    sourcePath: `.mex/relays/${fixtureRelayIds.sentTaken}.md`,
+    revision: revision("b"),
+    state: "acknowledged",
+    sender: fixtureCurrentMemberActor,
+    recipients: [fixtureTeammateMemberActor],
+    workstream: null,
+    summary: "Grace is carrying the final performance evidence into release review.",
+    completed: ["Route budgets are recorded at the checkpoint SHA."],
+    inProgress: ["Grace is comparing the production chunks with the pinned budget."],
+    decisions: [],
+    blockers: [],
+    unresolvedQuestions: [],
+    changedFiles: ["packages/hub-web/scripts/assert-route-budgets.mjs"],
+    code: [{ kind: "file", path: "packages/hub-web/scripts/assert-route-budgets.mjs" }],
+    evidence: [{ kind: "manual", note: "The release benchmark log is attached to the checkpoint evidence." }],
+    nextActions: ["Close the handoff after the production build is recorded."],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    publishedAt: timestamp(180),
+    publishedRepoState: fixtureRelayRepoStates.nullHead,
+    acknowledgedBy: fixtureTeammateMemberActor,
+    acknowledgedAt: timestamp(130),
+    closedBy: null,
+    closedAt: null,
+  },
+  {
+    schemaVersion: 3,
+    ref: { kind: "relay", id: fixtureRelayIds.closed },
+    sourcePath: `.mex/relays/${fixtureRelayIds.closed}.md`,
+    revision: revision("c"),
+    state: "closed",
+    sender: fixtureCurrentMemberActor,
+    recipients: [fixtureTeammateMemberActor],
+    workstream: null,
+    summary: "The Sidebar verification handoff no longer needs team attention.",
+    completed: ["Keyboard, overflow, routing, and visual checks are recorded."],
+    inProgress: [],
+    decisions: [],
+    blockers: [],
+    unresolvedQuestions: [],
+    changedFiles: ["packages/hub-web/src/app/HubSidebar.tsx"],
+    code: [{ kind: "file", path: "packages/hub-web/src/app/HubSidebar.tsx" }],
+    evidence: [{ kind: "manual", note: "The sender closed this handoff after the verification pass." }],
+    nextActions: [],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    publishedAt: timestamp(420),
+    publishedRepoState: fixtureRelayRepoStates.clean,
+    acknowledgedBy: fixtureTeammateMemberActor,
+    acknowledgedAt: timestamp(330),
+    closedBy: fixtureCurrentMemberActor,
+    closedAt: timestamp(210),
+  },
+];
 
-const fixtureRelays: RelayDetail[] = [{
-  schemaVersion: 2,
-  ref: { kind: "relay", id: fixtureRelayId, title: "Release evidence handoff" },
-  sourcePath: `.mex/relays/${fixtureRelayId}.md`,
-  revision: revision("8"),
+const fixtureLegacyRelay: RelayDetail = {
+  schemaVersion: 1,
+  ref: { kind: "relay", id: fixtureRelayIds.legacy },
+  sourcePath: `.mex/relays/${fixtureRelayIds.legacy}.md`,
+  revision: revision("e"),
   state: "published",
-  sender: {
-    kind: "member",
-    memberId: fixtureMemberIds[1],
-    displayName: fixtureMembers[1].displayName,
-  },
-  recipients: [{
-    kind: "member",
-    memberId: fixtureMemberIds[0],
-    displayName: fixtureMembers[0].displayName,
-  }],
-  workstream: {
-    kind: "workstream",
-    id: fixtureWorkstreamIds[0],
-    title: fixtureWorkstreams[0].title,
-  },
-  summary: "Release evidence is ready for the final cross-platform gate.",
-  completed: ["Linux Node 22 characterization is captured."],
-  inProgress: ["Cross-platform storage portability is awaiting claim."],
+  sender: { kind: "git", name: "Grace", email: "grace@example.test" },
+  recipients: [fixtureCurrentMemberActor],
+  workstream: { kind: "workstream", id: "historical-release", title: "Historical release" },
+  summary: "Review a legacy handoff whose original publication time was not recorded.",
+  completed: ["The original release notes were recovered."],
+  inProgress: [],
   decisions: [],
   blockers: [],
   unresolvedQuestions: [],
-  changedFiles: ["scripts/release-benchmark/run.mjs"],
-  code: [{ kind: "file", path: "scripts/release-benchmark/run.mjs" }],
-  evidence: [{ kind: "manual", note: "Exact fixture evidence for Relay UI validation." }],
-  nextActions: ["Claim the handoff and run the remaining matrix."],
-  diagnostics: [],
+  changedFiles: ["docs/releases/legacy-handoff.md"],
+  code: [],
+  evidence: [{ kind: "manual", note: "Imported from a schema-v1 Relay document." }],
+  nextActions: ["Review the legacy warning before acting on this handoff."],
+  diagnostics: [{
+    code: "RELAY_LEGACY_PUBLICATION_TIME",
+    severity: "warning",
+    message: fixtureLegacyRelayWarning,
+  }],
   diagnosticsTruncated: false,
-  publishedAt: timestamp(7),
+  publishedAt: null,
+  publishedRepoState: null,
   acknowledgedBy: null,
   acknowledgedAt: null,
   closedBy: null,
   closedAt: null,
-}];
+};
+
+const fixtureLegacyRelayV2: RelayDetail = {
+  schemaVersion: 2,
+  ref: { kind: "relay", id: fixtureRelayIds.legacyV2 },
+  sourcePath: `.mex/relays/${fixtureRelayIds.legacyV2}.md`,
+  revision: revision("f"),
+  state: "published",
+  sender: fixtureTeammateMemberActor,
+  recipients: [fixtureCurrentMemberActor],
+  workstream: {
+    kind: "workstream",
+    id: fixtureWorkstreamIds[0],
+    title: fixtureWorkstreams[0].title,
+  },
+  summary: "Review a timestamped legacy handoff with recorded Workstream context.",
+  completed: ["The publication time and Workstream were preserved exactly."],
+  inProgress: [],
+  decisions: [],
+  blockers: [],
+  unresolvedQuestions: [],
+  changedFiles: ["docs/design/relay-handoff-contract.md"],
+  code: [],
+  evidence: [{ kind: "manual", note: "Imported from a schema-v2 Relay document." }],
+  nextActions: ["Use the Workstream only as legacy related context."],
+  diagnostics: [],
+  diagnosticsTruncated: false,
+  publishedAt: timestamp(150),
+  publishedRepoState: null,
+  acknowledgedBy: null,
+  acknowledgedAt: null,
+  closedBy: null,
+  closedAt: null,
+};
+
+type FixtureGitIdentity = { name: string | null; email: string | null };
+
+const fixtureAdaGitIdentity: FixtureGitIdentity = {
+  name: "Ada",
+  email: "ada@example.test",
+};
 
 function fixtureCurrentActor(
   members: readonly TeamMember[],
   selection: TeamCurrentActorResponse["selection"],
+  gitIdentity: FixtureGitIdentity | null,
 ): TeamCurrentActorResponse {
-  if (selection === null) return {
-    actor: { kind: "git", name: "Ada", email: "ada@example.test" },
-    source: "git-fallback",
-    selection: null,
-    diagnostics: [],
-    diagnosticsTruncated: false,
-  };
-  const candidate = members.find((member) => member.id === selection.memberId) ?? null;
-  if (candidate?.active !== true) return {
-    actor: { kind: "git", name: "Ada", email: "ada@example.test" },
-    source: "git-fallback",
-    selection,
-    diagnostics: [{
-      code: candidate === null ? "ACTOR_MEMBER_MISSING" : "ACTOR_MEMBER_INACTIVE",
-      severity: "warning",
-      message: candidate === null
-        ? "The referenced member no longer exists."
-        : "The referenced member is currently inactive.",
-    }],
-    diagnosticsTruncated: false,
-  };
+  const candidate = selection === null
+    ? null
+    : members.find((member) => member.id === selection.memberId) ?? null;
+  if (candidate?.active === true) {
+    return {
+      actor: { kind: "member", memberId: candidate.id, displayName: candidate.displayName },
+      source: "configured-member",
+      selection,
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    };
+  }
+
+  const selectionDiagnostic: TeamCurrentActorResponse["diagnostics"][number] | null = selection === null
+    ? null
+    : candidate === null
+      ? {
+          code: "ACTOR_MEMBER_MISSING",
+          severity: "warning",
+          message: "The referenced member no longer exists.",
+        }
+      : {
+          code: "ACTOR_MEMBER_INACTIVE",
+          severity: "warning",
+          message: "The referenced member is currently inactive.",
+          path: candidate.sourcePath,
+        };
+  if (gitIdentity === null) {
+    return {
+      actor: { kind: "unknown" },
+      source: "unknown",
+      selection,
+      diagnostics: [
+        ...(selectionDiagnostic === null ? [] : [selectionDiagnostic]),
+        {
+          code: "GIT_IDENTITY_UNAVAILABLE",
+          severity: "warning",
+          message: "Git identity could not be inspected safely.",
+        },
+      ],
+      diagnosticsTruncated: false,
+    };
+  }
+
+  const normalizedName = gitIdentity.name?.trim().normalize("NFC") ?? null;
+  const normalizedEmail = gitIdentity.email?.trim().normalize("NFC").toLowerCase() ?? null;
+  const matchingMembers = members.filter((member) => member.active && member.gitAliases.some((alias) => (
+    (normalizedEmail !== null && alias.email?.trim().normalize("NFC").toLowerCase() === normalizedEmail)
+    || (normalizedName !== null && alias.name?.trim().normalize("NFC") === normalizedName)
+  )));
+  const resolutionDiagnostic: TeamCurrentActorResponse["diagnostics"][number] | null = matchingMembers.length > 1
+    ? {
+        code: "ACTOR_ALIAS_AMBIGUOUS",
+        severity: "warning",
+        message: "The recorded Git identity matches multiple active members and was not remapped.",
+      }
+    : null;
+  const diagnostics = [
+    ...(selectionDiagnostic === null ? [] : [selectionDiagnostic]),
+    ...(resolutionDiagnostic === null ? [] : [resolutionDiagnostic]),
+  ];
+  if (matchingMembers.length === 1) {
+    const member = matchingMembers[0]!;
+    return {
+      actor: { kind: "member", memberId: member.id, displayName: member.displayName },
+      source: "git-alias",
+      selection,
+      diagnostics,
+      diagnosticsTruncated: false,
+    };
+  }
   return {
-    actor: { kind: "member", memberId: candidate.id, displayName: candidate.displayName },
-    source: "configured-member",
+    actor: { kind: "git", ...gitIdentity },
+    source: "git-fallback",
     selection,
-    diagnostics: [],
+    diagnostics,
     diagnosticsTruncated: false,
   };
 }
@@ -1162,6 +1977,10 @@ function fixtureTimelineEvent(event: TeamActivityEvent): ActivityItem {
     id: event.id,
     timestamp: event.timestamp,
     action: event.action,
+    recordOrigin: event.schemaVersion === 1
+      ? { kind: "unknown" }
+      : structuredClone(event.origin),
+    label: event.schemaVersion === 1 ? null : event.label ?? null,
     subjects,
     subjectCount: subjects.length,
     subjectsTruncated: false,
@@ -1179,67 +1998,437 @@ function fixtureTimelineEvent(event: TeamActivityEvent): ActivityItem {
   };
 }
 
+type OverviewFocusAvailable = Extract<OverviewResponse["focus"], { availability: "available" }>;
+type OverviewInboxItem = Extract<OverviewFocusAvailable["inbox"], { availability: "available" }>["items"][number];
+type OverviewRelayItem = Extract<OverviewFocusAvailable["relays"], { availability: "available" }>["readyToTake"][number];
+
+function fixtureInboxProposalSummary(proposal: InboxProposalDetail): OverviewInboxItem {
+  const {
+    change: _change,
+    rationale: _rationale,
+    evidence: _evidence,
+    targetRevisions: _targetRevisions,
+    reviewRationale: _reviewRationale,
+    ...summary
+  } = proposal;
+  return structuredClone(summary);
+}
+
+function fixtureRelaySummary(relay: RelayDetail): OverviewRelayItem {
+  const {
+    completed: _completed,
+    inProgress: _inProgress,
+    decisions: _decisions,
+    blockers: _blockers,
+    unresolvedQuestions: _unresolvedQuestions,
+    changedFiles: _changedFiles,
+    code: _code,
+    evidence: _evidence,
+    nextActions: _nextActions,
+    diagnostics: _diagnostics,
+    diagnosticsTruncated: _diagnosticsTruncated,
+    ...summary
+  } = relay;
+  return structuredClone(summary);
+}
+
 class FixtureHubApi implements HubApi {
   readonly #jobs = structuredClone(jobs);
-  readonly #members = structuredClone(fixtureMembers);
+  readonly #members: TeamMember[];
   readonly #workstreams = structuredClone(fixtureWorkstreams);
-  readonly #inboxDrafts = structuredClone(fixtureInboxDrafts);
-  readonly #inboxProposals = structuredClone(fixtureInboxProposals);
-  readonly #relayDrafts = structuredClone(fixtureRelayDrafts);
-  readonly #relays = structuredClone(fixtureRelays);
-  readonly #activityItems = structuredClone(activityItems);
-  #selection: TeamCurrentActorResponse["selection"] = {
-    memberId: fixtureMemberIds[0],
-    updatedAt: timestamp(12),
-    revision: revision("d"),
-  };
+  readonly #inboxFixture: FixtureApiOptions["inboxFixture"];
+  readonly #relayFixture: FixtureApiOptions["relayFixture"];
+  readonly #activityFixture: FixtureApiOptions["activityFixture"];
+  readonly #memberFixture: NonNullable<FixtureApiOptions["memberFixture"]>;
+  readonly #overviewFixture: OverviewVariant;
+  readonly #gitIdentity: FixtureGitIdentity | null;
+  readonly #inboxDrafts: InboxDraftDetail[];
+  readonly #inboxProposals: InboxProposalDetail[];
+  readonly #relayDrafts: RelayDraftDetail[];
+  readonly #relays: RelayDetail[];
+  readonly #activityItems: ActivityItem[];
+  #selection: TeamCurrentActorResponse["selection"];
   #previewSequence = 0;
 
-  bootstrap() { return Promise.resolve({ expiresAt: session.expiresAt }); }
-  getSession() { return Promise.resolve(session); }
-  getCapabilities() { return Promise.resolve(capabilities); }
-  getHome() {
-    const actor = fixtureCurrentActor(this.#members, this.#selection).actor;
-    return Promise.resolve({
+  constructor(options: FixtureApiOptions = {}) {
+    this.#inboxFixture = options.inboxFixture;
+    this.#relayFixture = options.relayFixture;
+    this.#activityFixture = options.activityFixture;
+    this.#overviewFixture = options.overviewFixture ?? "established";
+    this.#memberFixture = options.memberFixture
+      ?? (options.overviewFixture === "identity-unresolved"
+        ? "unknown"
+        : options.inboxFixture === "unknown"
+        ? "unknown"
+        : options.relayFixture === "missing"
+          ? "stale"
+          : "configured");
+    this.#members = structuredClone(fixtureMembers);
+    this.#gitIdentity = this.#memberFixture === "unknown"
+      ? null
+      : this.#memberFixture === "git-fallback"
+        ? { name: "MEX Contributor", email: "contributor@example.test" }
+        : this.#memberFixture === "ambiguous"
+          ? { name: "Grace", email: "ada@example.test" }
+          : fixtureAdaGitIdentity;
+    this.#selection = this.#memberFixture === "configured" || this.#memberFixture === "partial"
+      ? {
+          memberId: fixtureMemberIds[0],
+          updatedAt: timestamp(12),
+          revision: revision("d"),
+        }
+      : this.#memberFixture === "stale"
+        ? {
+            memberId: fixtureMissingMemberId,
+            updatedAt: timestamp(12),
+            revision: revision("d"),
+          }
+        : this.#memberFixture === "inactive"
+          ? {
+              memberId: fixtureMemberIds[2],
+              updatedAt: timestamp(12),
+              revision: revision("d"),
+            }
+          : null;
+    this.#inboxDrafts = structuredClone(
+      options.inboxFixture === "empty" ? [] : fixtureInboxDrafts,
+    );
+    this.#inboxProposals = structuredClone(
+      options.inboxFixture === "empty" ? [] : fixtureInboxProposals,
+    );
+    this.#relayDrafts = structuredClone(
+      options.relayFixture === "empty" ? [] : fixtureRelayDrafts,
+    );
+    this.#relays = structuredClone(
+      options.relayFixture === "empty"
+        ? []
+        : options.relayFixture === "closed"
+          ? fixtureRelays.filter((relay) => relay.state === "closed")
+          : options.relayFixture === "legacy"
+            ? [fixtureLegacyRelayV2, fixtureLegacyRelay]
+            : fixtureRelays,
+    );
+    this.#activityItems = structuredClone(
+      options.activityFixture === "empty"
+        ? []
+        : options.activityFixture === "legacy"
+          ? activityItems.filter((item) => item.source === "legacy")
+          : activityItems,
+    );
+  }
+
+  #currentActor(): TeamCurrentActorResponse {
+    return fixtureCurrentActor(this.#members, this.#selection, this.#gitIdentity);
+  }
+
+  #homeForCurrent(current: TeamCurrentActorResponse): HomeResponse {
+    const actor = current.actor;
+    const teamReviewCount = this.#inboxProposals.filter((item) => (
+      item.state === "pending" || item.state === "stale"
+    )).length;
+    const readyToTakeCount = actor.kind !== "member" ? null : this.#relays.filter((relay) => (
+      relay.state === "published"
+      && relay.recipients.some((recipient) => (
+        recipient.kind === "member" && recipient.memberId === actor.memberId
+      ))
+    )).length;
+    const inYourHandsCount = actor.kind !== "member" ? null : this.#relays.filter((relay) => (
+      relay.state === "acknowledged"
+      && relay.acknowledgedBy?.kind === "member"
+      && relay.acknowledgedBy.memberId === actor.memberId
+    )).length;
+    return {
       ...home,
       actor: actor.kind === "member"
         ? { ...actor, displayName: actor.displayName ?? actor.memberId }
         : actor,
-      sections: {
-        ...home.sections,
-        workstreams: {
-          availability: "available" as const,
-          count: this.#workstreams.filter((item) => item.state !== "archived").length,
+      attention: {
+        inbox: {
+          availability: "available",
+          teamReviewCount,
         },
         relays: actor.kind !== "member"
-          ? { availability: "unavailable" as const, count: null, reason: "Select an active Member to see your open Relay handoffs." }
+          ? {
+              availability: "unavailable",
+              reason: "Select an active Member to see your personal Relay handoffs.",
+            }
           : {
-              availability: "available" as const,
-              count: this.#relays.filter((relay) => (
-                (relay.state === "published" && relay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === actor.memberId))
-                || (relay.state === "acknowledged" && relay.acknowledgedBy?.kind === "member" && relay.acknowledgedBy.memberId === actor.memberId)
-              )).length,
+              availability: "available",
+              readyToTakeCount: readyToTakeCount!,
+              inYourHandsCount: inYourHandsCount!,
             },
-        inbox: {
-          availability: "available" as const,
-          count: this.#inboxProposals.filter((item) => (
-            item.state === "pending" || item.state === "stale"
-          )).length,
-        },
-        activity: {
-          availability: "available" as const,
-          count: this.#activityItems.filter((item) => item.source === "activity").length,
-        },
       },
-    });
+      jobs: {
+        availability: "available",
+        activeCount: this.#jobs.filter((job) => job.state === "queued" || job.state === "running").length,
+      },
+    };
+  }
+
+  bootstrap() { return Promise.resolve({ expiresAt: session.expiresAt }); }
+  getSession() { return Promise.resolve(session); }
+  getCapabilities() {
+    const projected = structuredClone(capabilities);
+    if (this.#inboxFixture === "partial") {
+      projected.inbox = {
+        ...projected.inbox,
+        proposalMutation: unavailable("Inbox proposal writes are not connected in this Hub process."),
+        specApproval: unavailable("Inbox Spec approval requires exact Wiki planning and apply."),
+      };
+    }
+    if (this.#relayFixture === "partial") {
+      projected.relays = {
+        ...projected.relays,
+        publish: unavailable("Relay publication is not connected in this Hub process."),
+        lifecycleMutation: unavailable("Relay lifecycle writes are not connected in this Hub process."),
+      };
+    }
+    if (this.#memberFixture === "partial") {
+      projected.members = {
+        ...projected.members,
+        canonicalMutation: unavailable("Canonical Member writes are not connected in this Hub process."),
+      };
+    }
+    return Promise.resolve(projected);
+  }
+  getHome(): Promise<HomeResponse> {
+    return Promise.resolve(this.#homeForCurrent(this.#currentActor()));
+  }
+  async getOverview(): Promise<OverviewResponse> {
+    const current = this.#currentActor();
+    const baseShell = this.#homeForCurrent(current);
+    const variant = this.#overviewFixture;
+    let inbox: HomeResponse["attention"]["inbox"] = baseShell.attention.inbox;
+    let relays: HomeResponse["attention"]["relays"] = baseShell.attention.relays;
+    let jobsProjection: HomeResponse["jobs"] = baseShell.jobs;
+
+    if (variant === "caught-up"
+      || variant === "indexes-stale"
+      || variant === "indexes-degraded"
+      || variant === "indexes-missing"
+      || variant === "job-determinate"
+      || variant === "job-indeterminate"
+      || variant === "failure") {
+      inbox = { availability: "available", teamReviewCount: 0 };
+      relays = { availability: "available", readyToTakeCount: 0, inYourHandsCount: 0 };
+    } else if (variant === "pending-review") {
+      inbox = { availability: "available", teamReviewCount: 3 };
+      relays = { availability: "available", readyToTakeCount: 0, inYourHandsCount: 0 };
+    } else if (variant === "relay-ready") {
+      inbox = { availability: "available", teamReviewCount: 0 };
+      relays = { availability: "available", readyToTakeCount: 1, inYourHandsCount: 0 };
+    } else if (variant === "relay-in-hand") {
+      inbox = { availability: "available", teamReviewCount: 0 };
+      relays = { availability: "available", readyToTakeCount: 0, inYourHandsCount: 1 };
+    } else if (variant === "identity-unresolved") {
+      inbox = { availability: "available", teamReviewCount: 0 };
+      relays = {
+        availability: "unavailable",
+        reason: "Select an active Member to see your personal Relay handoffs.",
+      };
+    } else if (variant === "partial") {
+      inbox = { availability: "available", teamReviewCount: 2 };
+      relays = {
+        availability: "unavailable",
+        reason: "Relay attention could not be read from the bounded source.",
+      };
+    } else if (variant === "unavailable") {
+      inbox = {
+        availability: "unavailable",
+        reason: "Inbox attention could not be read from the bounded source.",
+      };
+      relays = {
+        availability: "unavailable",
+        reason: "Relay attention could not be read from the bounded source.",
+      };
+    }
+
+    if (variant === "job-determinate" || variant === "job-indeterminate" || variant === "established") {
+      jobsProjection = { availability: "available", activeCount: 1 };
+    } else if (variant === "unavailable") {
+      jobsProjection = {
+        availability: "unavailable",
+        reason: "Job state is unavailable in this Hub process.",
+      };
+    } else {
+      jobsProjection = { availability: "available", activeCount: 0 };
+    }
+
+    const shell: HomeResponse = {
+      ...baseShell,
+      attention: { inbox, relays },
+      jobs: jobsProjection,
+    };
+    const currentMemberId = current.actor.kind === "member" ? current.actor.memberId : null;
+    const identityNeedsAttention = current.actor.kind !== "member"
+      || current.diagnostics.some((diagnostic) => (
+        diagnostic.code === "ACTOR_MEMBER_MISSING"
+        || diagnostic.code === "ACTOR_MEMBER_INACTIVE"
+        || diagnostic.code === "ACTOR_ALIAS_AMBIGUOUS"
+      ));
+    const identity: OverviewResponse["identity"] = variant === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: "Current team identity could not be resolved in this Hub process.",
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          current: structuredClone(current),
+        };
+    const focusIdentity: OverviewFocusAvailable["identity"] = variant === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: "Current team identity could not be resolved in this Hub process.",
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          requiresAttention: identityNeedsAttention,
+        };
+    const proposalItems = this.#inboxProposals
+      .filter((proposal) => proposal.state === "pending" || proposal.state === "stale")
+      .slice(0, 3)
+      .map(fixtureInboxProposalSummary);
+    const readyRelayItems = currentMemberId === null ? [] : this.#relays
+      .filter((relay) => (
+        relay.state === "published"
+        && relay.recipients.some((recipient) => (
+          recipient.kind === "member" && recipient.memberId === currentMemberId
+        ))
+      ))
+      .slice(0, 3)
+      .map(fixtureRelaySummary);
+    const inHandRelayItems = currentMemberId === null ? [] : this.#relays
+      .filter((relay) => (
+        relay.state === "acknowledged"
+        && relay.acknowledgedBy?.kind === "member"
+        && relay.acknowledgedBy.memberId === currentMemberId
+      ))
+      .slice(0, 3)
+      .map(fixtureRelaySummary);
+    const focusInbox: OverviewFocusAvailable["inbox"] = inbox.availability === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: inbox.reason,
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          teamReviewCount: inbox.teamReviewCount,
+          items: inbox.teamReviewCount === 0
+            ? []
+            : proposalItems.slice(0, inbox.teamReviewCount),
+          deterministicRevision: revision("5"),
+          sourceTruncated: false,
+          diagnostics: [],
+          diagnosticsTruncated: false,
+        };
+    const focusRelays: OverviewFocusAvailable["relays"] = relays.availability === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: relays.reason,
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          readyToTakeCount: relays.readyToTakeCount,
+          inYourHandsCount: relays.inYourHandsCount,
+          readyToTake: relays.readyToTakeCount === 0
+            ? []
+            : readyRelayItems.slice(0, relays.readyToTakeCount),
+          inYourHands: relays.inYourHandsCount === 0
+            ? []
+            : inHandRelayItems.slice(0, relays.inYourHandsCount),
+          deterministicRevision: revision("b"),
+          sourceTruncated: false,
+          diagnostics: [],
+          diagnosticsTruncated: false,
+        };
+    const focus: OverviewResponse["focus"] = focusIdentity.availability === "unavailable"
+      && focusInbox.availability === "unavailable"
+      && focusRelays.availability === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: "Identity, Inbox, and Relay attention are unavailable in this Hub process.",
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          identity: focusIdentity,
+          inbox: focusInbox,
+          relays: focusRelays,
+        };
+    const activityPreview = variant === "indexes-missing"
+      ? []
+      : this.#activityItems.slice(0, 5);
+    const activity: OverviewResponse["activity"] = variant === "partial" || variant === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: "Recent team Activity could not be read from the bounded source.",
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          items: structuredClone(activityPreview),
+          nextCursor: activityPreview.length < this.#activityItems.length
+            ? `fixture_${activityPreview.length}`
+            : null,
+          hasMore: activityPreview.length < this.#activityItems.length,
+          sourceTruncated: this.#activityFixture === "partial",
+          deterministicRevision: revision("7"),
+          diagnostics: this.#activityFixture === "empty" || this.#activityFixture === "legacy"
+            ? []
+            : [{
+                code: "LEGACY_ACTIVITY_MALFORMED",
+                severity: "warning",
+                message: "One malformed project-note row was excluded while valid history was retained.",
+                path: ".mex/events/decisions.jsonl",
+              }],
+          diagnosticsTruncated: this.#activityFixture === "partial",
+        };
+    const operation: OverviewResponse["operation"] = variant === "unavailable"
+      ? {
+          availability: "unavailable",
+          observedAt: timestamp(0),
+          reason: "Job state is unavailable in this Hub process.",
+        }
+      : {
+          availability: "available",
+          observedAt: timestamp(0),
+          active: variant === "established" || variant === "job-determinate"
+            ? structuredClone(this.#jobs.find((job) => job.state === "running") ?? jobs[0])
+            : variant === "job-indeterminate"
+              ? structuredClone(indeterminateJob)
+              : null,
+          latestRelevantFailure: variant === "failure" ? structuredClone(relevantFailedJob) : null,
+        };
+
+    return {
+      observedAt: timestamp(0),
+      shell,
+      identity,
+      focus,
+      activity,
+      context: overviewContext(variant),
+      operation,
+    };
   }
   getMembers(request: TeamMemberListRequest): Promise<TeamMemberListResponse> {
     const filtered = this.#members.filter((member) => (
       request.active === undefined || member.active === request.active
     ));
-    const offset = request.cursor === "fixture_members_2" ? 2 : 0;
+    const parsedOffset = request.cursor?.match(/^fixture_members_(\d+)$/)?.[1];
+    const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
     const items = filtered.slice(offset, offset + request.limit);
-    const nextCursor = offset + items.length < filtered.length ? "fixture_members_2" : null;
+    const nextOffset = offset + items.length;
+    const nextCursor = nextOffset < filtered.length ? `fixture_members_${nextOffset}` : null;
     return Promise.resolve({
       items: structuredClone(items),
       nextCursor,
@@ -1257,7 +2446,7 @@ class FixtureHubApi implements HubApi {
       : Promise.resolve(structuredClone(member));
   }
   getCurrentActor(): Promise<TeamCurrentActorResponse> {
-    return Promise.resolve(fixtureCurrentActor(this.#members, this.#selection));
+    return Promise.resolve(structuredClone(this.#currentActor()));
   }
   getWorkstreams(request: TeamWorkstreamListRequest): Promise<TeamWorkstreamListResponse> {
     const filtered = this.#workstreams.filter((workstream) => (
@@ -1288,10 +2477,13 @@ class FixtureHubApi implements HubApi {
   getRelayDrafts(request: RelayDraftListRequest): Promise<RelayDraftListResponse> {
     const parsedOffset = request.cursor?.match(/^fixture_relay_drafts_(\d+)$/)?.[1];
     const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
-    const details = this.#relayDrafts.slice(offset, offset + request.limit);
+    const orderedDrafts = [...this.#relayDrafts].sort((left, right) => (
+      right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id)
+    ));
+    const details = orderedDrafts.slice(offset, offset + request.limit);
     const items = details.map(({ input: _input, ...summary }) => summary);
     const nextOffset = offset + items.length;
-    const nextCursor = nextOffset < this.#relayDrafts.length ? `fixture_relay_drafts_${nextOffset}` : null;
+    const nextCursor = nextOffset < orderedDrafts.length ? `fixture_relay_drafts_${nextOffset}` : null;
     return Promise.resolve({
       items: structuredClone(items),
       nextCursor,
@@ -1309,13 +2501,13 @@ class FixtureHubApi implements HubApi {
       : Promise.resolve(structuredClone(draft));
   }
   getRelays(request: RelayListRequest): Promise<RelayListResponse> {
-    const current = fixtureCurrentActor(this.#members, this.#selection).actor;
+    const current = this.#currentActor().actor;
     if ((request.perspective === "mine" || request.perspective === "sent") && current.kind !== "member") {
       return Promise.reject(new Error("Select an active Member to use this Relay perspective."));
     }
     const filtered = this.#relays.filter((relay) => {
       if (request.states !== undefined && !request.states.includes(relay.state)) return false;
-      if (request.workstreamId !== undefined && relay.workstream.id !== request.workstreamId) return false;
+      if (request.workstreamId !== undefined && relay.workstream?.id !== request.workstreamId) return false;
       if (request.perspective === "all") return true;
       if (current.kind !== "member") return false;
       if (request.perspective === "sent") {
@@ -1324,6 +2516,11 @@ class FixtureHubApi implements HubApi {
       return relay.state === "published"
         ? relay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === current.memberId)
         : relay.acknowledgedBy?.kind === "member" && relay.acknowledgedBy.memberId === current.memberId;
+    }).sort((left, right) => {
+      if (left.publishedAt === null && right.publishedAt !== null) return 1;
+      if (left.publishedAt !== null && right.publishedAt === null) return -1;
+      const publishedOrder = right.publishedAt?.localeCompare(left.publishedAt ?? "") ?? 0;
+      return publishedOrder || right.ref.id.localeCompare(left.ref.id);
     });
     const parsedOffset = request.cursor?.match(/^fixture_relays_(\d+)$/)?.[1];
     const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
@@ -1350,7 +2547,9 @@ class FixtureHubApi implements HubApi {
       truncated: nextCursor !== null,
       sourceTruncated: false,
       deterministicRevision: revision("b"),
-      diagnostics: [],
+      diagnostics: filtered.some((relay) => relay.schemaVersion === 1)
+        ? structuredClone(fixtureLegacyRelay.diagnostics)
+        : [],
       diagnosticsTruncated: false,
     });
   }
@@ -1436,12 +2635,18 @@ class FixtureHubApi implements HubApi {
         scope: action.kind === "relay.draft.save" || action.kind === "relay.draft.delete" ? "local" : action.kind === "relay.publish" ? "mixed" : "canonical",
         changes,
         localChanges,
-        diagnostics: [],
+        diagnostics: action.kind === "relay.publish" && home.repository.dirty
+          ? [{
+              code: "RELAY_DIRTY_PUBLICATION_STATE",
+              severity: "warning",
+              message: fixtureDirtyRelayPublicationWarning,
+            }]
+          : [],
       },
       receipt: {
         schemaVersion: 1,
         authority: {
-          actor: fixtureCurrentActor(this.#members, this.#selection).actor,
+          actor: this.#currentActor().actor,
           occurredAt: timestamp(0),
           repoState: { branch: home.repository.branch, head: home.repository.head, dirty: home.repository.dirty, observedAt: timestamp(0) },
         },
@@ -1466,7 +2671,6 @@ class FixtureHubApi implements HubApi {
           updatedAt: envelope.receipt.authority.occurredAt,
           summary: action.draft.summary,
           recipients: structuredClone(action.draft.recipients),
-          workstream: structuredClone(action.draft.workstream),
           input: structuredClone(action.draft),
         };
         const index = this.#relayDrafts.findIndex((candidate) => candidate.id === id);
@@ -1481,14 +2685,16 @@ class FixtureHubApi implements HubApi {
       const id = envelope.receipt.purposeIds.find((item) => item.purpose === "relay")?.id;
       if (draft !== undefined && id !== undefined) {
         const next: RelayDetail = {
-          schemaVersion: 2,
+          schemaVersion: 3,
           ref: { kind: "relay", id },
           sourcePath: `.mex/relays/${id}.md`,
           revision: envelope.preview.changes[0]?.afterRevision ?? revision("d"),
           state: "published",
           sender: structuredClone(envelope.receipt.authority.actor),
           ...structuredClone(draft.input),
+          workstream: null,
           publishedAt: envelope.receipt.authority.occurredAt,
+          publishedRepoState: structuredClone(envelope.receipt.authority.repoState),
           acknowledgedBy: null,
           acknowledgedAt: null,
           closedBy: null,
@@ -1525,11 +2731,13 @@ class FixtureHubApi implements HubApi {
     }
     const eventId = envelope.receipt.purposeIds.find((item) => item.purpose === "activity")?.id;
     const events: TeamActivityEvent[] = eventId === undefined ? [] : [{
-      schemaVersion: 1,
+      schemaVersion: 2,
       id: eventId,
       timestamp: envelope.receipt.authority.occurredAt,
       actor: structuredClone(envelope.receipt.authority.actor),
       action: action.kind === "relay.publish" ? "relay.published" : action.kind === "relay.acknowledge" ? "relay.acknowledged" : "relay.closed",
+      origin: { kind: "workflow", operation: action.kind },
+      ...(relays[0]?.summary === undefined ? {} : { label: relays[0].summary }),
       subjects: relays[0] ? [{ kind: "entity", entity: { ...relays[0].ref } }] : [],
       workstream: relays[0]?.workstream ?? null,
       repoState: structuredClone(envelope.receipt.authority.repoState),
@@ -1746,7 +2954,7 @@ class FixtureHubApi implements HubApi {
       receipt: {
         schemaVersion: 1,
         authority: {
-          actor: fixtureCurrentActor(this.#members, this.#selection).actor,
+          actor: this.#currentActor().actor,
           occurredAt: timestamp(0),
           repoState: {
             branch: home.repository.branch,
@@ -1901,11 +3109,13 @@ class FixtureHubApi implements HubApi {
             : [];
       if (actionName !== null) {
         event = {
-          schemaVersion: 1,
+          schemaVersion: 2,
           id: activityId,
           timestamp: envelope.receipt.authority.occurredAt,
           actor: envelope.receipt.authority.actor,
           action: actionName,
+          origin: { kind: "workflow", operation: action.kind },
+          ...(proposals[0]?.title === undefined ? {} : { label: proposals[0].title }),
           subjects: [...subjectProposal, ...approvalTarget],
           workstream: null,
           repoState: envelope.receipt.authority.repoState,
@@ -2016,7 +3226,7 @@ class FixtureHubApi implements HubApi {
       receipt: {
         schemaVersion: 1,
         authority: {
-          actor: fixtureCurrentActor(this.#members, this.#selection).actor,
+          actor: this.#currentActor().actor,
           occurredAt: timestamp(0),
           repoState: {
             branch: home.repository.branch,
@@ -2142,11 +3352,23 @@ class FixtureHubApi implements HubApi {
         }]
       );
       event = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         id: eventPurpose.id,
         timestamp: envelope.receipt.authority.occurredAt,
         actor: envelope.receipt.authority.actor,
         action: eventAction,
+        origin: direct === null
+          ? { kind: "workflow", operation: action.kind }
+          : { kind: "custom" },
+        ...(
+          direct !== null
+            ? {}
+            : eventMember !== null
+              ? { label: eventMember.displayName }
+              : workstream !== null
+                ? { label: workstream.title }
+                : {}
+        ),
         subjects: eventSubjects,
         workstream: direct?.workstream ?? (workstream === null
           ? null
@@ -2179,19 +3401,24 @@ class FixtureHubApi implements HubApi {
     const items = filtered.slice(offset, offset + pageSize);
     const nextOffset = offset + items.length;
     const nextCursor = nextOffset < filtered.length ? `fixture_${nextOffset}` : null;
+    const includeLegacyDiagnostic = request.source !== "activity"
+      && this.#activityFixture !== "empty"
+      && this.#activityFixture !== "legacy";
     return Promise.resolve({
       items,
       nextCursor,
       hasMore: nextCursor !== null,
-      sourceTruncated: false,
+      sourceTruncated: this.#activityFixture === "partial",
       deterministicRevision: revision(request.source === "legacy" ? "8" : request.source === "activity" ? "9" : "7"),
-      diagnostics: [{
-        code: "LEGACY_ACTIVITY_MALFORMED",
-        severity: "warning",
-        message: "One malformed legacy row was excluded while valid history was retained.",
-        path: ".mex/events/decisions.jsonl",
-      }],
-      diagnosticsTruncated: false,
+      diagnostics: includeLegacyDiagnostic
+        ? [{
+            code: "LEGACY_ACTIVITY_MALFORMED",
+            severity: "warning",
+            message: "One malformed legacy row was excluded while valid history was retained.",
+            path: ".mex/events/decisions.jsonl",
+          }]
+        : [],
+      diagnosticsTruncated: this.#activityFixture === "partial",
     });
   }
   search(request: SearchRequest) { return Promise.resolve(searchResponse(request)); }
@@ -2249,7 +3476,13 @@ class FixtureHubApi implements HubApi {
       truncated: hasMore,
     });
   }
-  getWikiEntity(id: string) { return Promise.resolve(wikiDetail(id)); }
+  getWikiEntity(id: string): Promise<WikiEntityDetailResponse> {
+    try {
+      return Promise.resolve(wikiDetail(id));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
   getWikiRelations(id: string, _request: WikiRelationsRequest) { return Promise.resolve(wikiRelations(id)); }
   getWikiBacklinks(id: string, _request: WikiBacklinksRequest) { return Promise.resolve(wikiBacklinks(id)); }
   getCodeKnowledge(id: string, _request: CodeKnowledgeRequest): Promise<CodeKnowledgeResponse> {
@@ -2288,6 +3521,6 @@ class FixtureHubApi implements HubApi {
   subscribeToJob(): JobSubscription { return { close() {} }; }
 }
 
-export function createFixtureApi(): HubApi {
-  return new FixtureHubApi();
+export function createFixtureApi(options: FixtureApiOptions = {}): HubApi {
+  return new FixtureHubApi(options);
 }

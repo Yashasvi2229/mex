@@ -260,6 +260,10 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | `mex activity record` | Preview an append-only canonical Activity record |
 | `mex workstream list\|show --json` | Read bounded canonical Workstreams |
 | `mex workstream create\|update\|archive` | Preview a Workstream change; apply only an approved preview envelope |
+| `mex relay contract --json` | Resolve the bounded Relay command, request, and preview contract |
+| `mex relay draft list\|show\|save\|delete` | Read or preview changes to checkout-local handoff drafts |
+| `mex relay list\|show --json` | Read bounded canonical handoffs; the Workstream filter matches legacy Relays only |
+| `mex relay publish\|acknowledge\|close` | Preview a standalone handoff lifecycle action; apply only its exact approved envelope |
 | `mex spec list\|show --json` | Read root Specs and their explicit Wiki hierarchy without maintaining indexes |
 | `mex setup` | Create and populate the living wiki |
 | `mex check` | Check wiki health and calculate a drift score |
@@ -290,10 +294,12 @@ to request a specific loopback port.
 
 The Hub displays repository context, locally persisted job history, canonical
 members and Workstreams, read-only Specs, the effective checkout actor, and the
-Activity timeline. The Members workbench uses explicit preview/review/apply for
-canonical identity changes and keeps member selection local. Activity remains
-immutable and adds only an append-only reviewed record flow; the service
-captures actor, timestamp, branch, HEAD, and dirty state. The Workstreams
+read-only Activity timeline. The Members workbench uses explicit
+preview/review/apply for canonical identity changes and keeps member selection
+local. Activity presents immutable MEX records alongside Project
+notes without exposing a manual recorder in the browser. New records retain a
+service-owned workflow/custom origin and an optional human label; older records
+remain byte-preserving and display an unknown origin. The Workstreams
 workbench uses the same exact preview/apply boundary for create, update, and
 one-way archive operations; every successful canonical change emits one
 Activity event. Specs are a fresh-index, read-only view of canonical Wiki Spec
@@ -307,6 +313,14 @@ through explicit groundings. Wiki Health offers explicit refresh/rebuild jobs
 only when a stable status makes them safe. Reads never maintain either index
 automatically, rankings remain domain-local, and the packaged UI never
 substitutes development fixtures for project data.
+
+Relays are standalone repository-native handoffs. A new handoff needs recipients
+and a summary, not a Workstream. Publication records the observed branch, exact
+HEAD, clean/dirty flag, and observation time without staging, committing,
+pushing, pulling, or capturing dirty source contents. Existing schema-v1/v2
+Relays keep their recorded Workstream and remain actionable. Before a repository
+starts publishing strict schema-v3 Relays, every teammate must update MEX;
+older binaries cannot parse the new format.
 
 ## Existing mex projects
 

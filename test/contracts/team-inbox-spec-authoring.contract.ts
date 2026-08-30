@@ -1668,12 +1668,29 @@ function expectCanonicalActivity(
   const event = result.events[0]!;
   expect(event.id).toBe(purposeId(envelope, "activity"));
   expect(event.action).toBe(action);
+  expect(event).toMatchObject({
+    schemaVersion: 2,
+    origin: { kind: "workflow", operation: inboxOperationForAction(action) },
+    label: expect.any(String),
+  });
   const actual = event.subjects.map((subject) => {
     expect(subject.kind).toBe("entity");
     if (subject.kind !== "entity") throw new Error("Expected only entity subjects.");
     return { id: subject.entity.id, kind: subject.entity.kind };
   }).sort(compareRefs);
   expect(actual).toEqual(expected.map(({ id, kind }) => ({ id, kind })).sort(compareRefs));
+}
+
+function inboxOperationForAction(action: string): string {
+  switch (action) {
+    case "inbox.published": return "inbox.publish";
+    case "inbox.approved": return "inbox.approve";
+    case "inbox.rejected": return "inbox.reject";
+    case "inbox.withdrawn": return "inbox.withdraw";
+    case "inbox.marked-stale": return "inbox.mark-stale";
+    case "inbox.repaired": return "inbox.repair";
+    default: throw new Error(`Unexpected Inbox Activity action ${action}.`);
+  }
 }
 
 function compareRefs(

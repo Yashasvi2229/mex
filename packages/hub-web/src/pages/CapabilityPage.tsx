@@ -1,15 +1,11 @@
 import type { LucideIcon } from "lucide-react";
 import {
   ArrowLeft,
-  BookOpenText,
-  Code2,
   GitPullRequestArrow,
-  Inbox,
+  History,
   ListChecks,
-  Send,
 } from "lucide-react";
-import { Link, useLocation, useOutletContext } from "react-router-dom";
-import type { CapabilitiesResponse, CapabilityName, CapabilityStatus } from "../api/types";
+import { Link, useLocation } from "react-router-dom";
 import { PageHeader } from "../components/ui";
 import { Badge } from "../components/primitives/badge";
 import { buttonVariants } from "../components/primitives/button";
@@ -26,84 +22,27 @@ import { cn } from "../lib/utils";
 import capabilityStyles from "../styles/capability.module.css";
 import notFoundStyles from "../styles/not-found.module.css";
 
-interface CapabilityPageDefinition {
+interface RoadmapPageDefinition {
   title: string;
-  capability: CapabilityName;
   icon: LucideIcon;
-  connectedCopy: string;
-  unavailableCopy: string;
-  structuralUnavailable?: boolean;
+  description: string;
 }
 
-export const capabilityPages: Record<string, CapabilityPageDefinition> = {
-  knowledge: {
-    title: "Knowledge", capability: "wiki", icon: BookOpenText,
-    connectedCopy: "Knowledge browsing is unavailable.",
-    unavailableCopy: "Knowledge is unavailable.",
-  },
-  code: {
-    title: "Code", capability: "graph", icon: Code2,
-    connectedCopy: "Code browsing is unavailable.",
-    unavailableCopy: "Code is unavailable.",
-  },
+export const roadmapPages = {
   playbooks: {
-    title: "Playbooks", capability: "wiki", icon: ListChecks,
-    connectedCopy: "Playbooks are unavailable.",
-    unavailableCopy: "Playbooks are unavailable.",
-    structuralUnavailable: true,
+    title: "Playbooks",
+    icon: ListChecks,
+    description: "Reusable team workflows are planned but are not available in this release.",
   },
-  inbox: {
-    title: "Inbox", capability: "inbox", icon: Inbox,
-    connectedCopy: "Inbox is unavailable.",
-    unavailableCopy: "Inbox is unavailable.",
+  "catch-up": {
+    title: "Catch Up",
+    icon: History,
+    description: "A personalized summary of project changes and team activity is planned but is not available in this release.",
   },
-  relays: {
-    title: "Relays", capability: "relays", icon: Send,
-    connectedCopy: "Relays are unavailable.",
-    unavailableCopy: "Relays are unavailable.",
-  },
-};
+} satisfies Record<string, RoadmapPageDefinition>;
 
-function capabilityStatus(capabilities: CapabilitiesResponse | undefined, name: CapabilityName): CapabilityStatus | undefined {
-  if (!capabilities) return undefined;
-  if (name === "graph") return capabilities.graph.read;
-  if (name === "wiki") return capabilities.wiki.read;
-  if (name === "jobs") return capabilities.jobs;
-  if (name === "activity") return capabilities.activity;
-  if (name === "members") return capabilities.members.read;
-  if (name === "workstreams") return capabilities.workstreams.read;
-  if (name === "specs") return capabilities.specs.read;
-  if (name === "inbox") return capabilities.inbox.read;
-  if (name === "relays") return capabilities.relays.read;
-  return undefined;
-}
-
-export function CapabilityPage({ page }: { page: keyof typeof capabilityPages }) {
-  const definition = capabilityPages[page];
-  const { capabilities } = useOutletContext<{ capabilities?: CapabilitiesResponse }>();
-  const capability = capabilityStatus(capabilities, definition.capability);
-  const checking = capabilities === undefined;
-  const dependencyAvailable = !definition.structuralUnavailable
-    && !checking
-    && capability?.availability === "available";
-  const state = checking ? "checking" : dependencyAvailable ? "connected" : "unavailable";
-  const stateLabel = checking ? "Checking" : dependencyAvailable ? "Dependency connected" : "Unavailable";
-  const boundaryTitle = checking
-    ? `Checking ${definition.title.toLowerCase()} availability`
-    : dependencyAvailable
-      ? definition.connectedCopy
-      : definition.unavailableCopy;
-  const boundaryReason = checking
-    ? "Checking the local capability manifest."
-    : dependencyAvailable
-      ? "This surface is not mounted."
-      : definition.structuralUnavailable
-        ? "This read-only checkpoint does not mount this product surface."
-        : definition.capability === "wiki"
-        ? "Wiki is not connected."
-        : definition.capability === "inbox"
-          ? "Inbox features are not connected."
-          : "The code graph is not connected.";
+export function RoadmapPage({ page }: { page: keyof typeof roadmapPages }) {
+  const definition = roadmapPages[page];
   const Icon = definition.icon;
 
   return (
@@ -111,34 +50,30 @@ export function CapabilityPage({ page }: { page: keyof typeof capabilityPages })
       <PageHeader
         title={definition.title}
         actions={(
-          <Badge className={capabilityStyles.headerStatus} data-state={state} role="status" variant="outline">
-            <span className={capabilityStyles.statusDot} aria-hidden="true" />
-            {stateLabel}
-          </Badge>
+          <Badge className={capabilityStyles.headerStatus} role="status" variant="secondary">Soon</Badge>
         )}
       />
 
-      <Card className={capabilityStyles.boundaryCard} size="sm" aria-labelledby="capability-boundary-title">
+      <Card className={capabilityStyles.boundaryCard} size="sm" aria-labelledby="roadmap-boundary-title">
         <CardContent className={capabilityStyles.boundaryContent}>
           <Empty className={capabilityStyles.boundaryEmpty}>
-            <EmptyMedia className={capabilityStyles.capabilityIcon} data-state={state} variant="icon">
+            <EmptyMedia className={capabilityStyles.capabilityIcon} variant="icon">
               <Icon aria-hidden="true" />
             </EmptyMedia>
             <EmptyHeader className={capabilityStyles.boundaryHeader}>
-              <EmptyTitle id="capability-boundary-title" role="heading" aria-level={2}>{boundaryTitle}</EmptyTitle>
-              <EmptyDescription>{boundaryReason}</EmptyDescription>
+              <EmptyTitle id="roadmap-boundary-title" role="heading" aria-level={2}>
+                {definition.title} is coming soon
+              </EmptyTitle>
+              <EmptyDescription>{definition.description}</EmptyDescription>
             </EmptyHeader>
-            <EmptyContent className={capabilityStyles.boundaryMeta}>
-              <Badge variant="outline"><code>{definition.capability}</code></Badge>
-              <Badge variant="outline">Read only</Badge>
-              <Badge variant="outline">No data requested</Badge>
-            </EmptyContent>
           </Empty>
         </CardContent>
       </Card>
     </div>
   );
 }
+
+export const CapabilityPage = RoadmapPage;
 
 export function NotFoundPage() {
   const location = useLocation();
