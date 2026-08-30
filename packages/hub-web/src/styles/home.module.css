@@ -56,27 +56,10 @@
   --card-spacing: 18px;
   min-width: 0;
   border-radius: 14px;
-  box-shadow: 0 12px 34px color-mix(in oklch, black 18%, transparent);
 }
 
 .focusCard {
-  position: relative;
-  overflow: hidden;
-  background:
-    linear-gradient(112deg, color-mix(in oklch, var(--primary) 8%, transparent), transparent 38%),
-    var(--card);
-}
-
-.focusCard::before {
-  position: absolute;
-  z-index: 1;
-  top: 0;
-  right: 20px;
-  left: 20px;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, var(--primary) 24%, var(--primary) 76%, transparent);
-  content: "";
-  opacity: 0.88;
+  background: var(--card);
 }
 
 .panelHeader {
@@ -130,17 +113,6 @@
   background: var(--warning-soft);
 }
 
-.panelEyebrow {
-  margin: 0 0 6px;
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  font-weight: 620;
-  letter-spacing: 0.08em;
-  line-height: 1.2;
-  text-transform: uppercase;
-}
-
 .focusContent,
 .activityContent,
 .readinessContent,
@@ -160,8 +132,8 @@
   gap: 16px;
   min-width: 0;
   padding: 18px;
-  background: color-mix(in oklch, var(--surface-subtle) 82%, var(--primary-soft));
-  border: 1px solid color-mix(in oklch, var(--primary) 22%, var(--border));
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
   border-radius: 12px;
 }
 
@@ -170,9 +142,9 @@
   width: 42px;
   height: 42px;
   flex: 0 0 auto;
-  color: var(--primary);
-  background: var(--primary-soft);
-  border: 1px solid color-mix(in oklch, var(--primary) 25%, transparent);
+  color: var(--foreground);
+  background: var(--card);
+  border: 1px solid var(--border);
   border-radius: 11px;
   place-items: center;
 }
@@ -188,18 +160,9 @@
   gap: 4px;
 }
 
-.focalCopy p,
 .focalCopy h3,
 .focalCopy span {
   margin: 0;
-}
-
-.focalCopy p {
-  color: var(--primary);
-  font-size: 11.5px;
-  font-weight: 650;
-  letter-spacing: 0.045em;
-  text-transform: uppercase;
 }
 
 .focalCopy h3 {
@@ -219,8 +182,8 @@
 
 .focusEmpty {
   min-height: 190px;
-  background: color-mix(in oklch, var(--success-soft) 50%, transparent);
-  border: 1px dashed var(--success-border);
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
 }
 
 .focusEmpty [data-slot="empty-icon"] {
@@ -406,9 +369,7 @@
 }
 
 .readinessCard {
-  background:
-    linear-gradient(180deg, color-mix(in oklch, var(--foreground) 1.5%, transparent), transparent 32%),
-    var(--card);
+  background: var(--card);
 }
 
 .readinessContent {
@@ -423,11 +384,7 @@
   gap: 0;
   min-width: 0;
   padding: 18px;
-  background-color: color-mix(in oklch, var(--surface-subtle) 90%, black);
-  background-image:
-    linear-gradient(color-mix(in oklch, var(--border) 45%, transparent) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in oklch, var(--border) 45%, transparent) 1px, transparent 1px);
-  background-size: 20px 20px;
+  background: var(--surface-subtle);
   border: 1px solid var(--border);
   border-radius: 12px;
 }
@@ -442,7 +399,6 @@
   background: color-mix(in oklch, var(--card) 94%, transparent);
   border: 1px solid var(--border-strong);
   border-radius: 10px;
-  box-shadow: 0 8px 20px color-mix(in oklch, black 18%, transparent);
 }
 
 .readinessNode > span {
@@ -693,7 +649,7 @@
 .operationCard {
   grid-column: 1 / -1;
   border-color: var(--warning-border);
-  background: linear-gradient(90deg, var(--warning-soft), transparent 38%), var(--card);
+  background: var(--card);
 }
 
 .operationContent {

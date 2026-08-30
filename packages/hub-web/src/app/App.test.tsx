@@ -22,7 +22,7 @@ function renderRoute(route: string, api: HubApi = createFixtureApi()) {
   );
 }
 
-const fixtureOverviewHeading = "Your project context needs attention";
+const fixtureOverviewHeading = "Overview";
 
 describe("Project Hub routes", () => {
   it.each([
@@ -429,7 +429,7 @@ describe("Project Hub routes", () => {
 
   it("links Overview focus, team memory, context, and active operation to exact supported routes", async () => {
     renderRoute("/");
-    const focus = await screen.findByRole("region", { name: "Your focus" });
+    const focus = await screen.findByRole("region", { name: "Attention" });
     expect(within(focus).getByRole("button", { name: "Open Inbox" })).toHaveAttribute(
       "href",
       "/inbox?view=review&proposal=proposal_01000000000000000000001720",

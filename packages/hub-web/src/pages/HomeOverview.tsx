@@ -35,7 +35,6 @@ import {
   Card,
   CardAction,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "../components/primitives/card";
@@ -87,9 +86,8 @@ type ReadinessState = "ready" | "preparing" | "attention";
 
 interface FocusItemView {
   id: string;
-  eyebrow: string;
   title: string;
-  description: string;
+  description?: string;
   action: string;
   route: string;
   icon: LucideIcon;
@@ -98,7 +96,6 @@ interface FocusItemView {
 interface ReadinessView {
   state: ReadinessState;
   label: string;
-  description: string;
 }
 
 const REFRESH_QUERY_KEYS = [
@@ -121,21 +118,10 @@ function HomeHeader({
   onRefresh: () => void;
   refreshing: boolean;
 }) {
-  const readiness = data ? contextReadiness(data.context) : null;
-  const title = readiness?.state === "ready"
-    ? "Your project context is ready"
-    : readiness?.state === "preparing"
-      ? "MEX is preparing project context"
-      : readiness?.state === "attention"
-        ? "Your project context needs attention"
-        : "Reading your project memory";
   return (
     <PageHeader
-      eyebrow="Project memory · MEX"
-      title={title}
-      description={data
-        ? `See what needs you, what changed, and whether MEX’s local project context is ready. Last checked ${formatDate(data.observedAt)}.`
-        : "See what needs you, what changed, and whether MEX’s local project context is ready."}
+      title="Overview"
+      description={data ? `Last checked ${formatDate(data.observedAt)}` : undefined}
       actions={(
         <Button disabled={refreshing} onClick={onRefresh} size="sm" type="button" variant="outline">
           <RefreshCw
@@ -230,14 +216,12 @@ function contextReadiness(context: OverviewResponse["context"]): ReadinessView {
     return {
       state: "attention",
       label: "Needs attention",
-      description: "MEX could not read local project context coherently.",
     };
   }
   if (context.graph.availability === "unavailable" || context.wiki.availability === "unavailable") {
     return {
       state: "attention",
       label: "Needs attention",
-      description: "One local context index is unavailable.",
     };
   }
   const graphStatus = context.graph.details.indexStatus;
@@ -246,7 +230,6 @@ function contextReadiness(context: OverviewResponse["context"]): ReadinessView {
     return {
       state: "preparing",
       label: "Preparing",
-      description: "One or more local context indexes still need their first build.",
     };
   }
   if (
@@ -257,13 +240,11 @@ function contextReadiness(context: OverviewResponse["context"]): ReadinessView {
     return {
       state: "ready",
       label: "Ready",
-      description: "Knowledge and code context match the current repository observation.",
     };
   }
   return {
     state: "attention",
     label: "Needs attention",
-    description: "Local project context is stale, degraded, or contains parse failures.",
   };
 }
 
@@ -278,7 +259,6 @@ function buildFocusItems(data: OverviewResponse): FocusItemView[] {
   ) {
     items.push({
       id: "identity",
-      eyebrow: "Team identity",
       title: "Resolve who you’re working as",
       description: actorAttentionDescription(data),
       action: "Review identity",
@@ -290,9 +270,7 @@ function buildFocusItems(data: OverviewResponse): FocusItemView[] {
     const count = focus.inbox.teamReviewCount;
     items.push({
       id: "inbox",
-      eyebrow: "Spec review",
       title: count === 1 ? "Review one proposed Spec change" : `Review ${count} proposed Spec changes`,
-      description: "These proposals are waiting in the team review queue before they become durable project memory.",
       action: "Open Inbox",
       route: proposalRoute(focus.inbox),
       icon: Inbox,
@@ -302,9 +280,7 @@ function buildFocusItems(data: OverviewResponse): FocusItemView[] {
     const count = focus.relays.readyToTakeCount;
     items.push({
       id: "relay-ready",
-      eyebrow: "Handoff ready",
       title: count === 1 ? "Take the handoff waiting for you" : `Choose from ${count} handoffs ready for you`,
-      description: "Continue with the progress, decisions, and next steps a teammate left behind.",
       action: "Open handoff",
       route: relayRoute(focus.relays, "ready"),
       icon: RadioTower,
@@ -314,9 +290,7 @@ function buildFocusItems(data: OverviewResponse): FocusItemView[] {
     const count = focus.relays.inYourHandsCount;
     items.push({
       id: "relay-claimed",
-      eyebrow: "In your hands",
       title: count === 1 ? "Continue the handoff you took" : `Continue ${count} handoffs in your hands`,
-      description: "These handoffs stay open until the sender or claimant closes them.",
       action: "Continue handoff",
       route: relayRoute(focus.relays, "claimed"),
       icon: RadioTower,
@@ -327,9 +301,7 @@ function buildFocusItems(data: OverviewResponse): FocusItemView[] {
   if (readiness.state !== "ready") {
     items.push({
       id: "context",
-      eyebrow: "Project context",
       title: readiness.state === "preparing" ? "Prepare local project context" : "Review local context health",
-      description: readiness.description,
       action: "Open Health",
       route: "/health",
       icon: Wrench,
@@ -340,7 +312,6 @@ function buildFocusItems(data: OverviewResponse): FocusItemView[] {
     const failure = data.operation.latestRelevantFailure;
     items.push({
       id: `failure-${failure.id}`,
-      eyebrow: "Operation failed",
       title: `Review the failed ${sentenceCase(failure.kind)}`,
       description: failure.problem?.detail ?? failure.summary ?? "The latest local context operation needs review.",
       action: "View operation",
@@ -354,7 +325,7 @@ function buildFocusItems(data: OverviewResponse): FocusItemView[] {
 function focusWarnings(data: OverviewResponse): Array<{ label: string; reason: string }> {
   const warnings: Array<{ label: string; reason: string }> = [];
   if (data.focus.availability === "unavailable") {
-    warnings.push({ label: "Your focus", reason: data.focus.reason });
+    warnings.push({ label: "Attention", reason: data.focus.reason });
     if (data.operation.availability === "unavailable") {
       warnings.push({ label: "Local operations", reason: data.operation.reason });
     }
@@ -378,7 +349,7 @@ function focusWarnings(data: OverviewResponse): Array<{ label: string; reason: s
 function FocusTechnicalDetails({ data }: { data: OverviewResponse }) {
   const focus = data.focus.availability === "available" ? data.focus : null;
   return (
-    <TechnicalDisclosure label="Your focus">
+    <TechnicalDisclosure label="Attention">
       <dl className={homeStyles.technicalFacts}>
         <div><dt>Focus observed</dt><dd>{data.focus.observedAt}</dd></div>
         {data.identity.availability === "available" ? (
@@ -485,22 +456,15 @@ function FocusCard({ data, onRetry }: { data: OverviewResponse; onRetry: () => v
   return (
     <Card className={homeStyles.focusCard} role="region" aria-labelledby="overview-focus-heading">
       <CardHeader className={homeStyles.panelHeader}>
-        <div>
-          <p className={homeStyles.panelEyebrow}>Your next move</p>
-          <CardTitle><h2 id="overview-focus-heading">Your focus</h2></CardTitle>
-        </div>
-        <CardAction>
-          <Badge variant={primary ? "secondary" : "outline"}>{primary ? "Ready to act" : "Clear"}</Badge>
-        </CardAction>
+        <CardTitle><h2 id="overview-focus-heading">Attention</h2></CardTitle>
       </CardHeader>
       <CardContent className={homeStyles.focusContent}>
         {primary && PrimaryIcon ? (
           <div className={homeStyles.focalAction}>
             <span className={homeStyles.focalIcon}><PrimaryIcon aria-hidden="true" /></span>
             <div className={homeStyles.focalCopy}>
-              <p>{primary.eyebrow}</p>
               <h3>{primary.title}</h3>
-              <span>{primary.description}</span>
+              {primary.description ? <span>{primary.description}</span> : null}
             </div>
             <Button nativeButton={false} render={<Link to={primary.route} />} size="sm">
               {primary.action}
@@ -512,7 +476,6 @@ function FocusCard({ data, onRetry }: { data: OverviewResponse; onRetry: () => v
             <EmptyMedia variant="icon"><CheckCircle2 aria-hidden="true" /></EmptyMedia>
             <EmptyHeader>
               <EmptyTitle>You’re caught up</EmptyTitle>
-              <EmptyDescription>No reviews, handoffs, or local context issues currently need your attention.</EmptyDescription>
             </EmptyHeader>
             <EmptyContent>
               <Button nativeButton={false} render={<Link to="/search" />} size="sm" variant="outline">
@@ -535,7 +498,7 @@ function FocusCard({ data, onRetry }: { data: OverviewResponse; onRetry: () => v
                       <ItemMedia variant="icon"><Icon aria-hidden="true" /></ItemMedia>
                       <ItemContent>
                         <ItemTitle>{item.title}</ItemTitle>
-                        <ItemDescription>{item.description}</ItemDescription>
+                        {item.description ? <ItemDescription>{item.description}</ItemDescription> : null}
                       </ItemContent>
                       <ItemActions><ArrowRight aria-hidden="true" /></ItemActions>
                     </Item>
@@ -600,9 +563,7 @@ function LatestActivityCard({ activity, onRetry }: { activity: OverviewResponse[
     <Card className={homeStyles.activityCard} role="region" aria-labelledby="overview-activity-heading">
       <CardHeader className={homeStyles.panelHeader}>
         <div>
-          <p className={homeStyles.panelEyebrow}>Shared through Git</p>
           <CardTitle><h2 id="overview-activity-heading">Latest team memory</h2></CardTitle>
-          <CardDescription>Recent durable changes and project notes recorded by MEX.</CardDescription>
         </div>
         <CardAction>
           <Button nativeButton={false} render={<Link to="/activity" />} size="sm" variant="ghost">
@@ -750,9 +711,7 @@ function ContextReadinessCard({
     <Card className={homeStyles.readinessCard} role="region" aria-labelledby="overview-readiness-heading">
       <CardHeader className={homeStyles.panelHeader}>
         <div>
-          <p className={homeStyles.panelEyebrow}>Local understanding</p>
           <CardTitle><h2 id="overview-readiness-heading">Context readiness</h2></CardTitle>
-          <CardDescription>{readiness.description}</CardDescription>
         </div>
         <CardAction>
           <Badge data-readiness={readiness.state} variant="outline">
@@ -919,7 +878,6 @@ function OperationCard({ operation }: { operation: OverviewResponse["operation"]
     <Card className={homeStyles.operationCard} role="region" aria-labelledby="overview-operation-heading">
       <CardHeader className={homeStyles.panelHeader}>
         <div>
-          <p className={homeStyles.panelEyebrow}>Local operation</p>
           <CardTitle><h2 id="overview-operation-heading">{isActive ? "Active operation" : "Operation needs attention"}</h2></CardTitle>
         </div>
         {job ? <CardAction><StatusPill tone={stateTone(job.state)}>{sentenceCase(job.state)}</StatusPill></CardAction> : null}
@@ -933,9 +891,9 @@ function OperationCard({ operation }: { operation: OverviewResponse["operation"]
                 : <AlertTriangle aria-hidden="true" />}</span>
               <div>
                 <h3>{sentenceCase(job.kind)}</h3>
-                <p>{job.summary ?? (isActive
-                  ? `MEX is currently in the ${sentenceCase(job.phase).toLowerCase()} phase.`
-                  : `The latest ${sentenceCase(job.kind).toLowerCase()} did not finish successfully.`)}</p>
+                {job.summary || !isActive ? (
+                  <p>{job.summary ?? `The latest ${sentenceCase(job.kind).toLowerCase()} did not finish successfully.`}</p>
+                ) : null}
               </div>
             </div>
             <Progress value={percent}>
@@ -983,7 +941,7 @@ function OverviewLoading({ onRefresh }: { onRefresh: () => void }) {
       <p className="sr-only" role="status">Loading project overview</p>
       <div className={homeStyles.atlasGrid}>
         <div className={homeStyles.primaryColumn}>
-          <PanelSkeleton label="Your focus" />
+          <PanelSkeleton label="Attention" />
           <PanelSkeleton label="Context readiness" />
           <PanelSkeleton compact label="Active operation" />
         </div>

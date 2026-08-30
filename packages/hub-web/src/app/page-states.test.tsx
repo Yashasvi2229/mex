@@ -53,7 +53,7 @@ describe("Home states", () => {
     renderRoute("/", apiWith({ getOverview: () => pending<OverviewResponse>() }));
 
     expect(await screen.findByText("Loading project overview")).toBeVisible();
-    expect(screen.getByLabelText("Loading Your focus")).toBeVisible();
+    expect(screen.getByLabelText("Loading Attention")).toBeVisible();
     expect(screen.getByLabelText("Loading Latest team memory")).toBeVisible();
     expect(screen.getByLabelText("Loading Context readiness")).toBeVisible();
   });
@@ -61,8 +61,8 @@ describe("Home states", () => {
   it("renders established focus, semantic team memory, stale context, and an exact active operation", async () => {
     renderRoute("/", createFixtureApi({ overviewFixture: "established" }));
 
-    expect(await screen.findByRole("heading", { name: "Your project context needs attention" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Your focus" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Review 3 proposed Spec changes" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Attention" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Open Inbox" })).toHaveAttribute(
       "href",
       "/inbox?view=review&proposal=proposal_01000000000000000000001720",
@@ -159,7 +159,7 @@ describe("Home states", () => {
     expect(screen.getByText(activityDiagnostic.code)).toBeVisible();
     expect(screen.getByText("Source truncated").nextElementSibling).toHaveTextContent("Yes");
 
-    await user.click(screen.getByRole("button", { name: "View technical details for Your focus" }));
+    await user.click(screen.getByRole("button", { name: "View technical details for Attention" }));
     expect(screen.getByText("RELAY_LEGACY_PUBLICATION_TIME")).toBeVisible();
     expect(screen.getByText("Relay diagnostics truncated").nextElementSibling).toHaveTextContent("Yes");
     expect(screen.getByText("INBOX_SOURCE_TRUNCATED")).toBeVisible();
@@ -195,8 +195,8 @@ describe("Home states", () => {
   it("renders the caught-up state without permanent job furniture", async () => {
     renderRoute("/", createFixtureApi({ overviewFixture: "caught-up" }));
 
-    expect(await screen.findByRole("heading", { name: "Your project context is ready" })).toBeVisible();
-    expect(screen.getByText("You’re caught up")).toBeVisible();
+    expect(await screen.findByText("You’re caught up")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Browse project memory" })).toHaveAttribute("href", "/search");
     expect(screen.getAllByText("Fresh", { selector: "dd" })).toHaveLength(2);
     expect(screen.getAllByText("Fresh", { selector: "strong" })).toHaveLength(2);
@@ -207,8 +207,8 @@ describe("Home states", () => {
   it("renders first-run missing indexes as preparation rather than empty metrics", async () => {
     renderRoute("/", createFixtureApi({ overviewFixture: "indexes-missing" }));
 
-    expect(await screen.findByRole("heading", { name: "MEX is preparing project context" })).toBeVisible();
-    expect(screen.getByText("Prepare local project context")).toBeVisible();
+    expect(await screen.findByText("Prepare local project context")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Open full Health details" })).toHaveAttribute("href", "/health");
     expect(screen.getByText("No team memory yet")).toBeVisible();
   });

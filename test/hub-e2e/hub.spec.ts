@@ -60,9 +60,9 @@ test.describe("populated development fixture", () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/?fixture=populated&overviewFixture=established");
     await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Your project context needs attention", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
 
-    const focus = page.getByRole("region", { name: "Your focus" });
+    const focus = page.getByRole("region", { name: "Attention", exact: true });
     await expect(focus.getByRole("heading", { name: "Review 3 proposed Spec changes" })).toBeVisible();
     await expect(focus.getByRole("button", { name: "Open Inbox" })).toHaveAttribute(
       "href",
@@ -91,35 +91,35 @@ test.describe("populated development fixture", () => {
   test("keeps Overview focus priorities and exact destinations honest", async ({ page }) => {
     await page.goto("/?fixture=populated&overviewFixture=pending-review");
     await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
-    await expect(page.getByRole("region", { name: "Your focus" }).getByRole("button", { name: "Open Inbox" })).toHaveAttribute(
+    await expect(page.getByRole("region", { name: "Attention", exact: true }).getByRole("button", { name: "Open Inbox" })).toHaveAttribute(
       "href",
       "/inbox?view=review&proposal=proposal_01000000000000000000001720",
     );
 
     await page.goto("/?fixture=populated&overviewFixture=relay-ready");
     await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
-    await expect(page.getByRole("region", { name: "Your focus" }).getByRole("button", { name: "Open handoff" })).toHaveAttribute(
+    await expect(page.getByRole("region", { name: "Attention", exact: true }).getByRole("button", { name: "Open handoff" })).toHaveAttribute(
       "href",
       `/relays?view=mine&state=open&relay=${readyRelayId}`,
     );
 
     await page.goto("/?fixture=populated&overviewFixture=relay-in-hand");
     await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
-    await expect(page.getByRole("region", { name: "Your focus" }).getByRole("button", { name: "Continue handoff" })).toHaveAttribute(
+    await expect(page.getByRole("region", { name: "Attention", exact: true }).getByRole("button", { name: "Continue handoff" })).toHaveAttribute(
       "href",
       `/relays?view=mine&state=open&relay=${claimedRelayId}`,
     );
 
     await page.goto("/?fixture=populated&overviewFixture=identity-unresolved");
     await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
-    const identityFocus = page.getByRole("region", { name: "Your focus" });
+    const identityFocus = page.getByRole("region", { name: "Attention", exact: true });
     await expect(identityFocus.getByRole("heading", { name: "Resolve who you’re working as" })).toBeVisible();
     await expect(identityFocus.getByRole("button", { name: "Review identity" })).toHaveAttribute("href", "/members");
     await expect(identityFocus.getByText("Relay focus unavailable", { exact: true })).toBeVisible();
 
     await page.goto("/?fixture=populated&overviewFixture=failure");
     await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
-    const failureFocus = page.getByRole("region", { name: "Your focus" });
+    const failureFocus = page.getByRole("region", { name: "Attention", exact: true });
     await expect(failureFocus.getByRole("heading", { name: "Review the failed Graph refresh" })).toBeVisible();
     await expect(failureFocus.getByRole("button", { name: "View operation" })).toHaveAttribute(
       "href",
@@ -131,16 +131,16 @@ test.describe("populated development fixture", () => {
   test("distinguishes caught-up, first-index, stale, and degraded context", async ({ page }) => {
     await page.goto("/?fixture=populated&overviewFixture=caught-up");
     await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Your project context is ready" })).toBeVisible();
-    const caughtUp = page.getByRole("region", { name: "Your focus" });
+    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    const caughtUp = page.getByRole("region", { name: "Attention", exact: true });
     await expect(caughtUp.getByText("You’re caught up", { exact: true })).toBeVisible();
     await expect(caughtUp.getByRole("button", { name: "Browse project memory" })).toHaveAttribute("href", "/search");
     await expect(page.getByRole("region", { name: "Active operation" })).toHaveCount(0);
 
     await page.goto("/?fixture=populated&overviewFixture=indexes-missing");
     await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
-    await expect(page.getByRole("heading", { name: "MEX is preparing project context" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Your focus" }).getByRole("heading", { name: "Prepare local project context" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Attention", exact: true }).getByRole("heading", { name: "Prepare local project context" })).toBeVisible();
     await expect(page.getByRole("region", { name: "Context readiness" }).getByText("Preparing", { exact: true })).toBeVisible();
     await expect(page.getByRole("region", { name: "Latest team memory" }).getByText("No team memory yet", { exact: true })).toBeVisible();
 
@@ -179,7 +179,7 @@ test.describe("populated development fixture", () => {
   test("keeps partial Overview panels independently useful and retryable", async ({ page }) => {
     await page.goto("/?fixture=populated&overviewFixture=partial");
     await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
-    const focus = page.getByRole("region", { name: "Your focus" });
+    const focus = page.getByRole("region", { name: "Attention", exact: true });
     await expect(focus.getByRole("heading", { name: "Review 2 proposed Spec changes" })).toBeVisible();
     await expect(focus.getByText("Relay focus unavailable", { exact: true })).toBeVisible();
     await expect(focus.getByRole("button", { name: "Try loading Relay focus again" })).toBeVisible();
@@ -218,7 +218,7 @@ test.describe("populated development fixture", () => {
       await page.setViewportSize({ width, height: width === 1440 ? 900 : 768 });
       await page.goto("/?fixture=populated&overviewFixture=established");
       await expect(page.locator('[data-overview-workbench="ready"]')).toBeVisible();
-      const focus = await page.getByRole("region", { name: "Your focus" }).boundingBox();
+      const focus = await page.getByRole("region", { name: "Attention", exact: true }).boundingBox();
       const activity = await page.getByRole("region", { name: "Latest team memory" }).boundingBox();
       expect(focus).not.toBeNull();
       expect(activity).not.toBeNull();
