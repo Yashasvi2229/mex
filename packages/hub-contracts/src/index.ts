@@ -1383,11 +1383,6 @@ const relayDecisionSet = z.array(relayEntityRef).max(64).refine(
   (values) => new Set(values.map((value) => `${value.kind}\0${value.id}`)).size === values.length,
   "Relay decisions must be unique by kind and ID.",
 );
-const relayWorkstreamRef = z.object({
-  id: teamWorkstreamId,
-  kind: z.literal("workstream"),
-  title: relaySingleLineText(512).optional(),
-}).strict();
 const relayRecordedWorkstreamRef = z.object({
   id: relaySingleLineText(256),
   kind: z.literal("workstream"),
@@ -1467,6 +1462,22 @@ const RelayEvidenceRefSchema = z.discriminatedUnion("kind", [
   }).strict(),
   z.object({ kind: z.literal("manual"), note: relaySingleLineText(4 * 1024) }).strict(),
 ]);
+const relayEvidenceList = z.array(RelayEvidenceRefSchema).max(65).superRefine(
+  (values, context) => {
+    if (values.length <= 64) return;
+    const first = values[0];
+    if (
+      first?.kind !== "entity"
+      || first.entity.kind !== "workstream"
+      || !teamWorkstreamId.safeParse(first.entity.id).success
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A 65th Relay evidence entry is reserved for translated legacy Workstream evidence.",
+      });
+    }
+  },
+);
 const relayRecordedEvidenceRef = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("entity"), entity: relayEntityRef }).strict(),
   z.object({ kind: z.literal("code"), code: relayRecordedCodeRef }).strict(),
@@ -1491,21 +1502,30 @@ const relayRecordedEvidenceRef = z.discriminatedUnion("kind", [
   }).strict(),
   z.object({ kind: z.literal("manual"), note: relaySingleLineText(4 * 1024) }).strict(),
 ]);
+const relayRecordedEvidenceList = z.array(relayRecordedEvidenceRef).max(65);
 
-const RelayDraftInputSchema = z.object({
+const relayDraftInputObject = z.object({
   recipients: relayMemberSet,
-  workstream: relayWorkstreamRef,
   summary: relaySingleLineText(8 * 1024).refine((value) => value.length > 0, "Relay summary is required."),
-  completed: relayTextList,
-  inProgress: relayTextList,
-  decisions: relayDecisionSet,
-  blockers: relayTextList,
-  unresolvedQuestions: relayTextList,
-  changedFiles: relayPathSet,
-  code: relayCodeSet,
-  evidence: z.array(RelayEvidenceRefSchema).max(64),
-  nextActions: relayTextList,
-}).strict().superRefine((value, context) => {
+  completed: relayTextList.default([]),
+  inProgress: relayTextList.default([]),
+  decisions: relayDecisionSet.default([]),
+  blockers: relayTextList.default([]),
+  unresolvedQuestions: relayTextList.default([]),
+  changedFiles: relayPathSet.default([]),
+  code: relayCodeSet.default([]),
+  evidence: relayEvidenceList.default([]),
+  nextActions: relayTextList.default([]),
+}).strict();
+
+const RelayDraftInputSchema = relayDraftInputObject.superRefine((value, context) => {
+  if (value.evidence.length > 64) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["evidence"],
+      message: "Caller-authored Relay drafts accept at most 64 evidence entries.",
+    });
+  }
   if (jsonByteLength(value) > HUB_LIMITS.maxMutationBodyBytes) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "The Relay draft input exceeds 64 KiB." });
   }
@@ -1517,15 +1537,17 @@ const RelayDraftSummarySchema = z.object({
   updatedAt: isoTimestamp,
   summary: relaySingleLineText(8 * 1024),
   recipients: relayMemberSet,
-  workstream: relayWorkstreamRef,
 }).strict();
 
 const RelayDraftDetailSchema = RelayDraftSummarySchema.extend({
-  input: RelayDraftInputSchema,
+  // Stored legacy drafts can grow slightly when sparse defaults are expanded
+  // and Workstream is projected into reserved evidence. Reads stay field-
+  // bounded; only caller-authored mutation input retains the 64 KiB ceiling.
+  input: relayDraftInputObject,
 }).strict();
 
 const relayDetailObject = z.object({
-  schemaVersion: z.union([z.literal(1), z.literal(2)]),
+  schemaVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   ref: z.object({
     id: RelayIdSchema,
     kind: z.literal("relay"),
@@ -1536,7 +1558,7 @@ const relayDetailObject = z.object({
   state: RelayStateSchema,
   sender: relayRecordedActorRef,
   recipients: relayRecordedRecipientSet,
-  workstream: relayRecordedWorkstreamRef,
+  workstream: relayRecordedWorkstreamRef.nullable(),
   summary: relaySingleLineText(8 * 1024),
   completed: relayTextList,
   inProgress: relayTextList,
@@ -1545,11 +1567,12 @@ const relayDetailObject = z.object({
   unresolvedQuestions: relayTextList,
   changedFiles: relayRecordedPathSet,
   code: relayRecordedCodeSet,
-  evidence: z.array(relayRecordedEvidenceRef).max(64),
+  evidence: relayRecordedEvidenceList,
   nextActions: relayTextList,
   diagnostics: z.array(HubDiagnosticSchema).max(HUB_LIMITS.maxDiagnosticCount),
   diagnosticsTruncated: z.boolean(),
   publishedAt: isoTimestamp.nullable(),
+  publishedRepoState: teamRepositoryState.nullable(),
   acknowledgedBy: relayRecordedActorRef.nullable(),
   acknowledgedAt: isoTimestamp.nullable(),
   closedBy: relayRecordedActorRef.nullable(),
@@ -1558,14 +1581,15 @@ const relayDetailObject = z.object({
 
 function validateRelayLifecycle(
   value: {
-    schemaVersion: 1 | 2;
+    schemaVersion: 1 | 2 | 3;
     ref: { id: string };
     sourcePath: string;
     state: "published" | "acknowledged" | "closed";
     publishedAt: string | null;
+    publishedRepoState: z.infer<typeof teamRepositoryState> | null;
     sender: z.infer<typeof relayRecordedActorRef>;
     recipients: readonly z.infer<typeof relayRecordedActorRef>[];
-    workstream: z.infer<typeof relayRecordedWorkstreamRef>;
+    workstream: z.infer<typeof relayRecordedWorkstreamRef> | null;
     changedFiles?: readonly string[];
     code?: readonly z.infer<typeof relayRecordedCodeRef>[];
     evidence?: readonly z.infer<typeof relayRecordedEvidenceRef>[];
@@ -1579,13 +1603,20 @@ function validateRelayLifecycle(
   if (value.sourcePath !== `.mex/relays/${value.ref.id}.md`) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["sourcePath"], message: "Relay source path must match its ID." });
   }
-  if ((value.schemaVersion === 1) !== (value.publishedAt === null)) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ["publishedAt"], message: "Only legacy schema-v1 Relays may omit publication time." });
-  }
-  if (value.schemaVersion === 2) {
-    if (!teamWorkstreamId.safeParse(value.workstream.id).success) {
+  if (value.schemaVersion === 1) {
+    if (value.publishedAt !== null || value.publishedRepoState !== null || value.workstream === null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Schema-v1 Relays require a Workstream and omit publication time and repository state." });
+    }
+  } else if (value.schemaVersion === 2) {
+    if (value.publishedAt === null || value.publishedRepoState !== null || value.workstream === null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Schema-v2 Relays require publication time and a Workstream, without publication repository state." });
+    } else if (!teamWorkstreamId.safeParse(value.workstream.id).success) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["workstream", "id"], message: "Schema-v2 Relays require a canonical Workstream ID." });
     }
+  } else if (value.publishedAt === null || value.publishedRepoState === null || value.workstream !== null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Schema-v3 Relays require publication time and repository state, without a Workstream." });
+  }
+  if (value.schemaVersion === 2 || value.schemaVersion === 3) {
     const v2MemberIds = value.recipients.flatMap((recipient) => recipient.kind === "member" ? [recipient.memberId] : []);
     if (value.recipients.length > 32
       || v2MemberIds.length !== value.recipients.length
@@ -1607,7 +1638,18 @@ function validateRelayLifecycle(
       }),
     ];
     if (recordedPaths.some((path) => !teamRepositoryPath.safeParse(path).success)) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["changedFiles"], message: "Schema-v2 Relays require canonical repository paths." });
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["changedFiles"], message: "Current Relay schemas require canonical repository paths." });
+    }
+  }
+  if ((value.evidence?.length ?? 0) > 64) {
+    const first = value.evidence?.[0];
+    if (
+      value.schemaVersion !== 3
+      || first?.kind !== "entity"
+      || first.entity.kind !== "workstream"
+      || !teamWorkstreamId.safeParse(first.entity.id).success
+    ) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["evidence"], message: "Only schema-v3 translated drafts may use the reserved legacy Workstream evidence slot." });
     }
   }
   const acknowledged = value.acknowledgedBy !== null && value.acknowledgedAt !== null;
@@ -1651,6 +1693,7 @@ const RelaySummarySchema = relayDetailObject.pick({
   workstream: true,
   summary: true,
   publishedAt: true,
+  publishedRepoState: true,
   acknowledgedBy: true,
   acknowledgedAt: true,
   closedBy: true,
@@ -1721,7 +1764,7 @@ const relayAction = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("relay.draft.save"),
     draftId: RelayDraftIdSchema.optional(),
-    draft: RelayDraftInputSchema,
+    draft: relayDraftInputObject,
   }).strict(),
   z.object({ kind: z.literal("relay.draft.delete"), draftId: RelayDraftIdSchema }).strict(),
   z.object({ kind: z.literal("relay.publish"), draftId: RelayDraftIdSchema }).strict(),
@@ -1732,7 +1775,7 @@ const relayAction = z.discriminatedUnion("kind", [
 const RelayOperationPreviewRequestSchema = z.object({
   operationId: teamOperationId,
   action: relayAction,
-  expectedRevisions: z.array(relayCommandExpectation).max(34),
+  expectedRevisions: z.array(relayCommandExpectation).max(33),
 }).strict().superRefine((value, context) => {
   const targets = value.expectedRevisions.map((item) => item.target.kind === "local"
     ? `local:${item.target.id}`
@@ -1744,6 +1787,13 @@ const RelayOperationPreviewRequestSchema = z.object({
     ? `local:${value.action.draftId}`
     : null;
   if (value.action.kind === "relay.draft.save") {
+    if (value.action.draft.evidence.length > 64 && value.action.draftId === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["action", "draft", "evidence"],
+        message: "A new Relay draft accepts at most 64 caller-authored evidence entries.",
+      });
+    }
     if ((localTarget === null && targets.length !== 0)
       || (localTarget !== null && (targets.length !== 1 || targets[0] !== localTarget))) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedRevisions"], message: "Relay draft save requires only its exact local revision." });
@@ -1754,14 +1804,20 @@ const RelayOperationPreviewRequestSchema = z.object({
     }
   } else if (value.action.kind === "relay.publish") {
     const localTargets = targets.filter((target) => target === localTarget);
-    const workstreamTargets = targets.filter((target) => /^artifact:\.mex\/workstreams\/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/.test(target));
     const memberTargets = targets.filter((target) => /^artifact:\.mex\/team\/members\/member_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/.test(target));
+    const legacyWorkstreamTargets = targets.filter((target) =>
+      /^artifact:\.mex\/workstreams\/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/.test(target));
     if (localTargets.length !== 1
-      || workstreamTargets.length !== 1
       || memberTargets.length < 1
       || memberTargets.length > 32
-      || targets.length !== localTargets.length + workstreamTargets.length + memberTargets.length) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedRevisions"], message: "Relay publication requires the draft, Workstream, and recipient Member revisions." });
+      || targets.length !== localTargets.length + memberTargets.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["expectedRevisions"],
+        message: legacyWorkstreamTargets.length > 0
+          ? "This pre-v3 Relay publication preview includes a Workstream dependency. Preview again with the current MEX version before applying it."
+          : "Relay publication requires exactly the draft and recipient Member revisions.",
+      });
     }
   } else {
     const relayPath = `artifact:.mex/relays/${value.action.relayId}.md`;
@@ -1844,7 +1900,65 @@ const RelayOperationPreviewResponseSchema = z.object({
   }
 });
 
-const RelayOperationApplyRequestSchema = RelayOperationPreviewResponseSchema;
+const relayLegacyPublishRequest = z.object({
+  operationId: teamOperationId,
+  action: z.object({
+    kind: z.literal("relay.publish"),
+    draftId: RelayDraftIdSchema,
+  }).strict(),
+  expectedRevisions: z.array(relayCommandExpectation).max(34),
+}).strict().superRefine((value, context) => {
+  const draftTarget = `local:${value.action.draftId}`;
+  const targets = value.expectedRevisions.map((item) => item.target.kind === "local"
+    ? `local:${item.target.id}`
+    : `artifact:${item.target.path}`);
+  const draftCount = targets.filter((target) => target === draftTarget).length;
+  const workstreamCount = targets.filter((target) =>
+    /^artifact:\.mex\/workstreams\/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/.test(target)).length;
+  const memberCount = targets.filter((target) =>
+    /^artifact:\.mex\/team\/members\/member_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/.test(target)).length;
+  if (
+    new Set(targets).size !== targets.length
+    || draftCount !== 1
+    || workstreamCount !== 1
+    || memberCount < 1
+    || memberCount > 32
+    || targets.length !== draftCount + workstreamCount + memberCount
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["expectedRevisions"],
+      message: "A legacy Relay apply requires exactly its draft, Workstream, and recipient Member revisions.",
+    });
+  }
+  if (jsonByteLength(value) > HUB_LIMITS.maxMutationBodyBytes) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "The Relay command exceeds 64 KiB." });
+  }
+});
+
+const relayLegacyPublishEnvelope = z.object({
+  schemaVersion: z.literal(1),
+  request: relayLegacyPublishRequest,
+  preview: relayPublicPreview,
+  receipt: RelayOperationReceiptSchema,
+}).strict().superRefine((value, context) => {
+  const purposes = value.receipt.purposeIds.map(({ purpose }) => purpose);
+  if (purposes.length !== 2 || purposes[0] !== "activity" || purposes[1] !== "relay") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["receipt", "purposeIds"],
+      message: "A legacy Relay publication receipt requires Activity and Relay purpose IDs.",
+    });
+  }
+  if (jsonByteLength(value) > HUB_LIMITS.maxMutationBodyBytes) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "The Relay preview exceeds 64 KiB." });
+  }
+});
+
+const RelayOperationApplyRequestSchema = z.union([
+  RelayOperationPreviewResponseSchema,
+  relayLegacyPublishEnvelope,
+]);
 
 const relayActivityEventSchema = z.object({
   schemaVersion: z.literal(1),

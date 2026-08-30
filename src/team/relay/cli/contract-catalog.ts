@@ -13,14 +13,13 @@ export const RELAY_CLI_MAX_ENVELOPE_BYTES = 64 * 1024;
 export const RELAY_CLI_MAX_RECIPIENTS = 32;
 
 const MEMBER_ID = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
-const WORKSTREAM_ID = "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const RELAY_ID = "relay_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const REVISION = "a".repeat(64);
 
 const REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   $id: RELAY_REQUEST_SCHEMA_ID,
   $comment:
-    "Runtime additionally requires NFC product text without lone surrogates, UTF-8 byte ceilings, canonical repository paths, WHATWG-valid credential-free HTTP(S) URLs, unique recipient memberIds, canonical set ordering, exact unique expectation coverage, active Members, and an eligible Workstream immediately before publish. Service-issued Git actor fields use their separately declared normalized fallback domain.",
+    "Runtime additionally requires NFC product text without lone surrogates, UTF-8 byte ceilings, canonical repository paths, WHATWG-valid credential-free HTTP(S) URLs, unique recipient memberIds, canonical set ordering, exact unique expectation coverage, and active Members immediately before publish. Sparse standalone drafts are normalized before hashing. A pre-v3 Workstream draft field is accepted only as a read-time migration input and becomes entity evidence. Service-issued Git actor fields use their separately declared normalized fallback domain.",
   $ref: "#/$defs/command",
   $defs: {
     operationId: {
@@ -205,14 +204,57 @@ const REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
       uniqueItems: true,
       items: { $ref: "#/$defs/text4096" },
     },
-    draft: {
+    standaloneDraft: {
       type: "object",
       additionalProperties: false,
-      required: [
-        "recipients", "workstream", "summary", "completed", "inProgress",
-        "decisions", "blockers", "unresolvedQuestions", "changedFiles",
-        "code", "evidence", "nextActions",
-      ],
+      required: ["recipients", "summary"],
+      properties: {
+        recipients: {
+          type: "array",
+          minItems: 1,
+          maxItems: RELAY_CLI_MAX_RECIPIENTS,
+          uniqueItems: true,
+          items: { $ref: "#/$defs/memberRef" },
+        },
+        summary: { $ref: "#/$defs/text8192" },
+        completed: { $ref: "#/$defs/textList" },
+        inProgress: { $ref: "#/$defs/textList" },
+        decisions: {
+          type: "array",
+          maxItems: 64,
+          uniqueItems: true,
+          items: { $ref: "#/$defs/entityRef" },
+        },
+        blockers: { $ref: "#/$defs/textList" },
+        unresolvedQuestions: { $ref: "#/$defs/textList" },
+        changedFiles: {
+          type: "array",
+          maxItems: 64,
+          uniqueItems: true,
+          items: { $ref: "#/$defs/repoPath" },
+        },
+        code: {
+          type: "array",
+          maxItems: 64,
+          uniqueItems: true,
+          items: { $ref: "#/$defs/codeRef" },
+        },
+        evidence: {
+          type: "array",
+          $comment:
+            "The 65th slot is reserved for a normalized pre-v3 Workstream-to-evidence migration. Caller-authored standalone requests remain runtime-limited to 64 entries.",
+          maxItems: 65,
+          items: { $ref: "#/$defs/evidence" },
+        },
+        nextActions: { $ref: "#/$defs/textList" },
+      },
+    },
+    legacyDraft: {
+      $comment:
+        "Read-time compatibility input only. The Workstream reference is translated to entity evidence before hashing or persistence.",
+      type: "object",
+      additionalProperties: false,
+      required: ["recipients", "workstream", "summary"],
       properties: {
         recipients: {
           type: "array",
@@ -253,6 +295,12 @@ const REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
         nextActions: { $ref: "#/$defs/textList" },
       },
     },
+    draft: {
+      oneOf: [
+        { $ref: "#/$defs/standaloneDraft" },
+        { $ref: "#/$defs/legacyDraft" },
+      ],
+    },
     localExpectation: {
       type: "object",
       additionalProperties: false,
@@ -288,21 +336,6 @@ const REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
         revision: { $ref: "#/$defs/revision" },
       },
     },
-    workstreamExpectation: {
-      $ref: "#/$defs/artifactExpectation",
-      type: "object",
-      properties: {
-        target: {
-          type: "object",
-          properties: {
-            path: {
-              type: "string",
-              pattern: "^\\.mex/workstreams/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$",
-            },
-          },
-        },
-      },
-    },
     memberExpectation: {
       $ref: "#/$defs/artifactExpectation",
       type: "object",
@@ -319,15 +352,11 @@ const REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
       },
     },
     publishArtifactExpectation: {
-      oneOf: [
-        { $ref: "#/$defs/workstreamExpectation" },
-        { $ref: "#/$defs/memberExpectation" },
-      ],
+      $ref: "#/$defs/memberExpectation",
     },
     publishExpectation: {
       oneOf: [
         { $ref: "#/$defs/localExpectation" },
-        { $ref: "#/$defs/workstreamExpectation" },
         { $ref: "#/$defs/memberExpectation" },
       ],
     },
@@ -406,7 +435,7 @@ const REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
         },
         expectedRevisions: {
           type: "array",
-          maxItems: 34,
+          maxItems: 33,
           uniqueItems: true,
           items: { $ref: "#/$defs/expectation" },
         },
@@ -456,17 +485,12 @@ const REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
             properties: {
               expectedRevisions: {
                 type: "array",
-                minItems: 3,
-                maxItems: 34,
+                minItems: 2,
+                maxItems: 33,
                 items: { $ref: "#/$defs/publishExpectation" },
                 allOf: [
                   {
                     contains: { $ref: "#/$defs/localExpectation" },
-                    minContains: 1,
-                    maxContains: 1,
-                  },
-                  {
-                    contains: { $ref: "#/$defs/workstreamExpectation" },
                     minContains: 1,
                     maxContains: 1,
                   },
@@ -733,6 +757,81 @@ const PREVIEW_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
         },
       },
     },
+    legacyWorkstreamExpectation: {
+      type: "object",
+      additionalProperties: false,
+      required: ["target", "revision"],
+      properties: {
+        target: {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind", "path"],
+          properties: {
+            kind: { const: "artifact" },
+            path: {
+              type: "string",
+              pattern: "^\\.mex/workstreams/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\\.md$",
+            },
+          },
+        },
+        revision: { $ref: "#/$defs/revision" },
+      },
+    },
+    legacyPublishRequest: {
+      $comment:
+        "Apply-only compatibility for an exact signed pre-v3 publication. New request files use the standalone request schema and cannot include this dependency.",
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "action", "expectedRevisions"],
+      properties: {
+        operationId: {
+          $ref: `${RELAY_REQUEST_SCHEMA_ID}#/$defs/operationId`,
+        },
+        action: {
+          type: "object",
+          additionalProperties: false,
+          required: ["kind", "draftId"],
+          properties: {
+            kind: { const: "relay.publish" },
+            draftId: { $ref: `${RELAY_REQUEST_SCHEMA_ID}#/$defs/localId` },
+          },
+        },
+        expectedRevisions: {
+          type: "array",
+          minItems: 3,
+          maxItems: 34,
+          uniqueItems: true,
+          items: {
+            oneOf: [
+              { $ref: `${RELAY_REQUEST_SCHEMA_ID}#/$defs/localExpectation` },
+              { $ref: `${RELAY_REQUEST_SCHEMA_ID}#/$defs/memberExpectation` },
+              { $ref: "#/$defs/legacyWorkstreamExpectation" },
+            ],
+          },
+          allOf: [
+            {
+              contains: {
+                $ref: `${RELAY_REQUEST_SCHEMA_ID}#/$defs/localExpectation`,
+              },
+              minContains: 1,
+              maxContains: 1,
+            },
+            {
+              contains: { $ref: "#/$defs/legacyWorkstreamExpectation" },
+              minContains: 1,
+              maxContains: 1,
+            },
+            {
+              contains: {
+                $ref: `${RELAY_REQUEST_SCHEMA_ID}#/$defs/memberExpectation`,
+              },
+              minContains: 1,
+              maxContains: 32,
+            },
+          ],
+        },
+      },
+    },
     relayDraftPurpose: {
       type: "object",
       additionalProperties: false,
@@ -819,7 +918,12 @@ const PREVIEW_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
       required: ["schemaVersion", "request", "preview", "receipt"],
       properties: {
         schemaVersion: { const: 1 },
-        request: { $ref: RELAY_REQUEST_SCHEMA_ID },
+        request: {
+          oneOf: [
+            { $ref: RELAY_REQUEST_SCHEMA_ID },
+            { $ref: "#/$defs/legacyPublishRequest" },
+          ],
+        },
         preview: { $ref: "#/$defs/publicPreview" },
         receipt: { $ref: "#/$defs/receipt" },
       },
@@ -965,19 +1069,9 @@ const COMMANDS = Object.freeze({
   ],
 });
 
-const DRAFT = Object.freeze({
+const SPARSE_DRAFT = Object.freeze({
   recipients: [{ kind: "member", memberId: MEMBER_ID }],
-  workstream: { id: WORKSTREAM_ID, kind: "workstream" },
   summary: "Continue the reviewed Relay handoff.",
-  completed: ["Implemented the bounded workflow."],
-  inProgress: ["Verify the integration checks."],
-  decisions: [],
-  blockers: [],
-  unresolvedQuestions: [],
-  changedFiles: ["src/index.ts"],
-  code: [],
-  evidence: [{ kind: "file", path: "src/index.ts" }],
-  nextActions: ["Run the exact-head checks."],
 });
 
 const EXAMPLES = Object.freeze([
@@ -986,7 +1080,29 @@ const EXAMPLES = Object.freeze([
     usage: "mex relay draft save request.json --json",
     request: {
       operationId: "relay-draft-save-example-001",
-      action: { kind: "relay.draft.save", draft: DRAFT },
+      action: { kind: "relay.draft.save", draft: SPARSE_DRAFT },
+      expectedRevisions: [],
+    },
+  },
+  {
+    command: "relay.draft.save",
+    usage: "mex relay draft save request.json --json",
+    request: {
+      operationId: "relay-draft-context-example-001",
+      action: {
+        kind: "relay.draft.save",
+        draft: {
+          ...SPARSE_DRAFT,
+          evidence: [
+            { kind: "commit", hash: "b".repeat(40) },
+            {
+              kind: "external",
+              uri: "https://example.com/review/relay-handoff",
+              label: "Review context",
+            },
+          ],
+        },
+      },
       expectedRevisions: [],
     },
   },
@@ -999,7 +1115,6 @@ const EXAMPLES = Object.freeze([
       expectedRevisions: [
         { target: { kind: "local", namespace: "relay-draft", id: "relay-draft-example" }, revision: REVISION },
         { target: { kind: "artifact", path: `.mex/team/members/${MEMBER_ID}.md` }, revision: REVISION },
-        { target: { kind: "artifact", path: `.mex/workstreams/${WORKSTREAM_ID}.md` }, revision: REVISION },
       ],
     },
   },
@@ -1112,12 +1227,12 @@ export function relayContractCatalogData(): RelayContractCatalogData {
         {
           id: "publish-dependency-expectation-equality",
           enforcedBy: "preview-service",
-          requirement: "Publish requires exactly the selected local draft, its Workstream, and every unique recipient Member revision, with no unrelated or semantic expectations.",
+          requirement: "Publish requires exactly the selected local draft and every unique recipient Member revision, with no Workstream, unrelated, or semantic expectations.",
         },
         {
           id: "publish-live-authority-and-dependencies",
           enforcedBy: "preview-service",
-          requirement: "Publish revalidates an active canonical sender, active recipient Members, and a planned, active, or blocked Workstream under the workflow lease.",
+          requirement: "Publish revalidates an active canonical sender and every active recipient Member under the workflow lease.",
         },
       ],
       examples: EXAMPLES,

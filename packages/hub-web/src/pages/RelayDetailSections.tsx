@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FilePenLine,
   FileText,
+  GitBranch,
   GitCommitHorizontal,
   Send,
   UserCheck,
@@ -112,11 +113,18 @@ function RelayListSection({ items, title }: { items: readonly string[]; title: s
   );
 }
 
-function RelatedRelayContext({ relay }: { relay: RelayContextContent }) {
+function RelatedRelayContext({
+  relay,
+  workstream,
+}: {
+  relay: RelayContextContent;
+  workstream?: RelayDetail["workstream"];
+}) {
   const hasContext = relay.decisions.length > 0
     || relay.changedFiles.length > 0
     || relay.code.length > 0
-    || relay.evidence.length > 0;
+    || relay.evidence.length > 0
+    || workstream != null;
   if (!hasContext) return null;
   return (
     <Collapsible className={styles.contextDetails}>
@@ -124,6 +132,12 @@ function RelatedRelayContext({ relay }: { relay: RelayContextContent }) {
         <ChevronDown data-icon="inline-start" /> Related context
       </CollapsibleTrigger>
       <CollapsibleContent className={styles.contextContent}>
+        {workstream ? (
+          <section>
+            <h4>Legacy Workstream</h4>
+            <p>{workstream.title ?? "Recorded Workstream"}</p>
+          </section>
+        ) : null}
         {relay.decisions.length ? (
           <section>
             <h4>Decisions</h4>
@@ -133,7 +147,7 @@ function RelatedRelayContext({ relay }: { relay: RelayContextContent }) {
           </section>
         ) : null}
         {relay.changedFiles.length ? (
-          <section><h4>Changed files</h4><ul className={styles.contextList}>{relay.changedFiles.map((path) => <li key={path}><code>{path}</code></li>)}</ul></section>
+          <section><h4>Files involved</h4><ul className={styles.contextList}>{relay.changedFiles.map((path) => <li key={path}><code>{path}</code></li>)}</ul></section>
         ) : null}
         {relay.code.length ? (
           <section><h4>Code references</h4><ul className={styles.contextList}>{relay.code.map((reference, index) => <li key={`${reference.kind}:${index}`}><CodeReference reference={reference} /></li>)}</ul></section>
@@ -151,6 +165,30 @@ function RelatedRelayContext({ relay }: { relay: RelayContextContent }) {
         ) : null}
       </CollapsibleContent>
     </Collapsible>
+  );
+}
+
+function PublicationRepository({ relay }: { relay: RelayDetail }) {
+  const state = relay.publishedRepoState;
+  if (state === null) return null;
+  return (
+    <section className={styles.repositorySection}>
+      <div className={styles.repositoryHeading}>
+        <GitBranch aria-hidden="true" />
+        <h3>Repository when published</h3>
+      </div>
+      <dl>
+        <div><dt>Branch</dt><dd>{state.branch ?? "Detached HEAD"}</dd></div>
+        <div><dt>HEAD</dt><dd>{state.head === null ? "No committed HEAD recorded" : <code>{state.head.slice(0, 8)}</code>}</dd></div>
+        <div><dt>Working tree</dt><dd>{state.dirty ? "Local changes present" : "Clean"}</dd></div>
+        <div><dt>Observed</dt><dd>{formatDate(state.observedAt)}</dd></div>
+      </dl>
+      {state.dirty ? (
+        <p className={styles.dirtyWarning} role="status">
+          MEX recorded that local changes existed when this handoff was published. Their contents were not captured by the Relay.
+        </p>
+      ) : null}
+    </section>
   );
 }
 
@@ -210,7 +248,15 @@ function RelayTechnicalDetails({ relay }: { relay: RelayDetail }) {
           <div><dt>Source path</dt><dd><code>{relay.sourcePath}</code></dd></div>
           <div><dt>Relay revision</dt><dd><code>{relay.revision}</code></dd></div>
           <div><dt>Schema version</dt><dd>{relay.schemaVersion}</dd></div>
-          <div><dt>Workstream ID</dt><dd><code>{relay.workstream.id}</code></dd></div>
+          {relay.workstream ? <div><dt>Legacy Workstream ID</dt><dd><code>{relay.workstream.id}</code></dd></div> : null}
+          {relay.publishedRepoState ? (
+            <>
+              <div><dt>Publication branch</dt><dd><code>{relay.publishedRepoState.branch ?? "null"}</code></dd></div>
+              <div><dt>Publication HEAD</dt><dd><code>{relay.publishedRepoState.head ?? "null"}</code></dd></div>
+              <div><dt>Publication dirty</dt><dd><code>{String(relay.publishedRepoState.dirty)}</code></dd></div>
+              <div><dt>Publication observed</dt><dd><code>{relay.publishedRepoState.observedAt}</code></dd></div>
+            </>
+          ) : null}
           <div><dt>Recorded sender</dt><dd><code>{actorTechnicalValue(relay.sender)}</code></dd></div>
           <div><dt>Recorded recipients</dt><dd>{relay.recipients.map((recipient, index) => {
             const value = actorTechnicalValue(recipient);
@@ -219,6 +265,7 @@ function RelayTechnicalDetails({ relay }: { relay: RelayDetail }) {
           {relay.acknowledgedBy ? <div><dt>Recorded claimant</dt><dd><code>{actorTechnicalValue(relay.acknowledgedBy)}</code></dd></div> : null}
           {relay.closedBy ? <div><dt>Recorded closer</dt><dd><code>{actorTechnicalValue(relay.closedBy)}</code></dd></div> : null}
         </dl>
+        {relay.publishedRepoState === null ? <p>This older Relay format did not record repository state at publication.</p> : null}
         <RawRelayContext relay={relay} />
         {fingerprints.length ? <section><h4>Fingerprints</h4><ul>{fingerprints.map((fingerprint, index) => <li key={`${index}:${fingerprint}`}><code>{fingerprint}</code></li>)}</ul></section> : null}
         {relay.diagnostics.length ? <section><h4>Diagnostics</h4><ul>{relay.diagnostics.map((diagnostic) => <li key={`${diagnostic.code}:${diagnostic.message}`}><code>{diagnostic.code}</code> {diagnostic.message}</li>)}</ul></section> : null}
@@ -231,12 +278,13 @@ function RelaySections({ relay, warnings }: { relay: RelayDetail; warnings?: Rea
   return (
     <div className={styles.semanticDetail}>
       {warnings ? <div className={styles.warningSlot}>{warnings}</div> : null}
+      <PublicationRepository relay={relay} />
       <RelayListSection items={relay.nextActions} title="What to do next" />
       <RelayListSection items={relay.inProgress} title="Where things stand" />
       <RelayListSection items={relay.blockers} title="Blockers" />
       <RelayListSection items={relay.unresolvedQuestions} title="Questions to resolve" />
       <RelayListSection items={relay.completed} title="Already completed" />
-      <RelatedRelayContext relay={relay} />
+      <RelatedRelayContext relay={relay} workstream={relay.workstream} />
       <RelayLifecycle relay={relay} />
       <RelayTechnicalDetails relay={relay} />
     </div>
@@ -260,7 +308,6 @@ function DraftSections({ draft }: { draft: RelayDraftDetail }) {
           <dl>
             <div><dt>Draft ID</dt><dd><code>{draft.id}</code></dd></div>
             <div><dt>Draft revision</dt><dd><code>{draft.revision}</code></dd></div>
-            <div><dt>Workstream ID</dt><dd><code>{draft.input.workstream.id}</code></dd></div>
             <div><dt>Recipient IDs</dt><dd>{draft.input.recipients.map((recipient, index) => <code key={`${index}:${recipient.memberId}`}>{recipient.memberId}</code>)}</dd></div>
           </dl>
           <RawRelayContext relay={draft.input} />

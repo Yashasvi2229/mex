@@ -12,7 +12,6 @@ import type {
   RelayOperationPreviewRequest,
   RelayOperationPreviewResponse,
   TeamMember,
-  TeamWorkstream,
 } from "../api/types";
 import { Alert, AlertDescription, AlertTitle } from "../components/primitives/alert";
 import { Button } from "../components/primitives/button";
@@ -52,7 +51,6 @@ import {
 import { Input } from "../components/primitives/input";
 import { NativeSelect, NativeSelectOption } from "../components/primitives/native-select";
 import { Separator } from "../components/primitives/separator";
-import { sentenceCase } from "../components/ui";
 import styles from "../styles/relay-draft-composer.module.css";
 
 type RecipientRef = RelayDraftInput["recipients"][number];
@@ -81,18 +79,14 @@ export interface RelayDraftComposerProps {
   draft: RelayDraftDetail | null;
   members: readonly TeamMember[];
   membersError?: unknown;
-  workstreams: readonly TeamWorkstream[];
-  workstreamsError?: unknown;
   finalFocus(): HTMLElement | null;
   onClose(): void;
   onApplied(result: RelayOperationApplyResponse): Promise<void>;
   onRetryMembers?(): void;
-  onRetryWorkstreams?(): void;
 }
 
 const PREVIEW_IDENTITY_ERROR = "The signed Relay preview did not exactly match the submitted request.";
 const MEMBER_ID_PATTERN = /^member_[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
-const WORKSTREAM_ID_PATTERN = /^ws_[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 
 function canonicalRequestJson(value: unknown): string {
   if (value === null) return "null";
@@ -323,29 +317,17 @@ export default function RelayDraftComposer({
   draft,
   members,
   membersError,
-  workstreams,
-  workstreamsError,
   finalFocus,
   onClose,
   onApplied,
   onRetryMembers,
-  onRetryWorkstreams,
 }: RelayDraftComposerProps) {
   const api = useHubApi();
   const recipientsInputId = useId();
   const recipientsAnchor = useComboboxAnchor();
   const eligibleMembers = useMemo(() => members.filter((member) => member.active), [members]);
-  const draftWorkstreamKnown = draft !== null
-    && workstreams.some((item) => item.id === draft.input.workstream.id);
   const [recipients, setRecipients] = useState<RecipientRef[]>(draft?.input.recipients ? [...draft.input.recipients] : []);
   const [manualRecipientId, setManualRecipientId] = useState("");
-  const [manualWorkstream, setManualWorkstream] = useState(
-    workstreams.length === 0 || (draft !== null && !draftWorkstreamKnown),
-  );
-  const [workstreamId, setWorkstreamId] = useState(draft?.input.workstream.id ?? workstreams[0]?.id ?? "");
-  const [workstreamTitle, setWorkstreamTitle] = useState(
-    draft ? draft.input.workstream.title ?? "" : workstreams[0]?.title ?? "",
-  );
   const [summary, setSummary] = useState(draft?.input.summary ?? "");
   const [completed, setCompleted] = useState<string[]>(draft?.input.completed ? [...draft.input.completed] : []);
   const [inProgress, setInProgress] = useState<string[]>(draft?.input.inProgress ? [...draft.input.inProgress] : []);
@@ -359,7 +341,6 @@ export default function RelayDraftComposer({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [problem, setProblem] = useState<SaveProblem | null>(null);
   const generation = useRef(0);
-  const workstreamTouched = useRef(false);
 
   const recipientChoices = useMemo(() => {
     const choices = new Map<string, RecipientChoice>();
@@ -410,19 +391,6 @@ export default function RelayDraftComposer({
   });
 
   useEffect(() => () => { generation.current += 1; }, []);
-  useEffect(() => {
-    if (workstreamTouched.current || workstreams.length === 0) return;
-    if (draft !== null) {
-      if (!workstreams.some((workstream) => workstream.id === draft.input.workstream.id)) return;
-      setManualWorkstream(false);
-      setWorkstreamId(draft.input.workstream.id);
-      return;
-    }
-    if (workstreamId) return;
-    setManualWorkstream(false);
-    setWorkstreamId(workstreams[0]!.id);
-    setWorkstreamTitle(workstreams[0]!.title);
-  }, [draft, workstreamId, workstreams]);
 
   const invalidate = () => {
     generation.current += 1;
@@ -468,7 +436,6 @@ export default function RelayDraftComposer({
     setManualRecipientId("");
   };
   const buildInput = (): RelayDraftInput | null => {
-    const workstream = workstreams.find((item) => item.id === workstreamId);
     const clean = (values: string[]) => values.map((value) => value.trim()).filter(Boolean);
     const invalidEvidence = evidence.some((row) => row.value.trim() && (
       (row.kind === "entity" && !row.detail.trim())
@@ -479,22 +446,17 @@ export default function RelayDraftComposer({
       || recipients.length === 0
       || recipients.length > 32
       || recipients.some((recipient) => !MEMBER_ID_PATTERN.test(recipient.memberId))
-      || (manualWorkstream ? !WORKSTREAM_ID_PATTERN.test(workstreamId) : !workstream)
       || invalidEvidence
     ) {
-      if (manualWorkstream && !WORKSTREAM_ID_PATTERN.test(workstreamId)) setAdvancedOpen(true);
       setProblem({
         title: "Finish the required handoff details",
-        detail: "Choose at least one eligible recipient, a Workstream, and a summary. Complete any Knowledge or code evidence fields before saving.",
+        detail: "Choose at least one eligible recipient and add a summary. Complete any Knowledge or code evidence fields before saving.",
         diagnostics: [],
       });
       return null;
     }
     return {
       recipients,
-      workstream: manualWorkstream
-        ? { kind: "workstream", id: workstreamId, ...(workstreamTitle.trim() ? { title: workstreamTitle.trim() } : {}) }
-        : { kind: "workstream", id: workstream!.id, ...(workstreamTitle.trim() ? { title: workstreamTitle.trim() } : {}) },
       summary: summary.trim(),
       completed: clean(completed),
       inProgress: clean(inProgress),
@@ -573,16 +535,14 @@ export default function RelayDraftComposer({
         </DialogHeader>
 
         <div className={styles.scrollRegion} inert={apply.isPending || undefined}>
-          {membersError || workstreamsError ? (
+          {membersError ? (
             <Alert className={styles.referenceWarning}>
               <TriangleAlert aria-hidden="true" />
               <AlertTitle>Some project references could not be loaded</AlertTitle>
               <AlertDescription>
                 {membersError ? <p>{membersError instanceof HubApiError ? membersError.problem.detail : "The active Member list is unavailable. Use an existing recipient or add a raw Member ID under Advanced."}</p> : null}
-                {workstreamsError ? <p>{workstreamsError instanceof HubApiError ? workstreamsError.problem.detail : "The Workstream list is unavailable. Keep or enter an offline Workstream reference under Advanced."}</p> : null}
                 <span className={styles.referenceWarningActions}>
                   {membersError && onRetryMembers ? <Button onClick={onRetryMembers} size="sm" type="button" variant="outline">Retry Members</Button> : null}
-                  {workstreamsError && onRetryWorkstreams ? <Button onClick={onRetryWorkstreams} size="sm" type="button" variant="outline">Retry Workstreams</Button> : null}
                 </span>
               </AlertDescription>
             </Alert>
@@ -634,27 +594,6 @@ export default function RelayDraftComposer({
                 <FieldDescription>Choose one or more active teammates who are eligible to take the published handoff.</FieldDescription>
               </Field>
 
-              <Field>
-                <FieldLabel htmlFor="relay-draft-workstream">Workstream</FieldLabel>
-                <NativeSelect id="relay-draft-workstream" onChange={(event) => {
-                  invalidate();
-                  workstreamTouched.current = true;
-                  const value = event.target.value;
-                  if (value === "__manual__") {
-                    setManualWorkstream(true);
-                    return;
-                  }
-                  const workstream = workstreams.find((item) => item.id === value);
-                  setManualWorkstream(false);
-                  setWorkstreamId(value);
-                  setWorkstreamTitle(workstream?.title ?? "");
-                }} value={manualWorkstream ? "__manual__" : workstreamId}>
-                  {workstreams.map((workstream) => <NativeSelectOption key={workstream.id} value={workstream.id}>{workstream.title} · {sentenceCase(workstream.state)}</NativeSelectOption>)}
-                  <NativeSelectOption value="__manual__">Offline Workstream reference</NativeSelectOption>
-                </NativeSelect>
-                <FieldDescription>{manualWorkstream ? "This draft retains an offline reference. Its structural details are in Advanced." : "Publication checks that this Workstream is still eligible."}</FieldDescription>
-              </Field>
-
               <Field data-invalid={!summary.trim() || undefined}>
                 <FieldLabel htmlFor="relay-draft-summary">Summary</FieldLabel>
                 <Input aria-invalid={!summary.trim()} id="relay-draft-summary" maxLength={8_192} onChange={(event) => change(setSummary)(event.target.value)} placeholder="What should the next person understand first?" value={summary} />
@@ -679,7 +618,7 @@ export default function RelayDraftComposer({
             <CollapsibleContent className={styles.disclosureContent}>
               <StringRows id="relay-draft-completed" label="Completed" onChange={change(setCompleted)} values={completed} />
               <ReferenceRows onChange={change(setDecisions)} values={decisions} />
-              <StringRows id="relay-draft-files" label="Changed files" onChange={change(setFiles)} values={files} />
+              <StringRows id="relay-draft-files" label="Files involved" onChange={change(setFiles)} values={files} />
               <CodeRows onChange={change(setCode)} values={code} />
               <EvidenceRows onChange={change(setEvidence)} values={evidence} />
             </CollapsibleContent>
@@ -688,7 +627,7 @@ export default function RelayDraftComposer({
           <Collapsible className={styles.disclosure} onOpenChange={setAdvancedOpen} open={advancedOpen}>
             <CollapsibleTrigger aria-label="Advanced" render={<Button type="button" variant="ghost" />}>
               <ChevronDown aria-hidden="true" data-icon="inline-start" />
-              <span><strong>Advanced</strong><small>Structural IDs, offline references, and fingerprints</small></span>
+              <span><strong>Advanced</strong><small>Structural IDs and fingerprints</small></span>
             </CollapsibleTrigger>
             <CollapsibleContent className={styles.disclosureContent}>
               {draft ? (
@@ -718,17 +657,6 @@ export default function RelayDraftComposer({
                   </Button>
                 </div>
                 <FieldDescription>Use a raw Member ID only when the project Member list cannot be read. Publication still verifies that recipient exactly.</FieldDescription>
-              </FieldSet>
-
-              <FieldSet className={styles.fieldSet}>
-                <FieldLegend>{manualWorkstream ? "Offline Workstream reference" : "Workstream reference"}</FieldLegend>
-                {manualWorkstream ? (
-                  <div className={styles.advancedPair}>
-                    <Input aria-label="Workstream ID" maxLength={29} onChange={(event) => { workstreamTouched.current = true; change(setWorkstreamId)(event.target.value); }} placeholder="ws_…" value={workstreamId} />
-                    <Input aria-label="Workstream title" maxLength={512} onChange={(event) => { workstreamTouched.current = true; change(setWorkstreamTitle)(event.target.value); }} placeholder="Human-readable title (optional)" value={workstreamTitle} />
-                  </div>
-                ) : <code className={styles.readonlyCode}>{workstreamId}</code>}
-                <FieldDescription>Offline references remain local until publication verifies the current canonical Workstream.</FieldDescription>
               </FieldSet>
 
               {code.length || evidence.some((row) => row.kind === "code") ? (

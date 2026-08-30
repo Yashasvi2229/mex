@@ -50,7 +50,6 @@ import type {
   RelaySummary,
   TeamActorRef,
   TeamMember,
-  TeamWorkstream,
   Tone,
 } from "../api/types";
 import type { InboxOverflowAction } from "./InboxOverflowMenu";
@@ -242,6 +241,14 @@ function relayRelevantTime(relay: RelaySummary | RelayDetail): string | null {
   return value === null ? null : formatDate(value);
 }
 
+function relayRepositoryLabel(relay: RelaySummary | RelayDetail): string | null {
+  const state = relay.publishedRepoState;
+  if (state === null) return null;
+  const branch = state.branch ?? "Detached HEAD";
+  const head = state.head === null ? "No committed HEAD" : state.head.slice(0, 8);
+  return `${branch} · ${head}`;
+}
+
 function artifactExpectation(path: string, revision: string) {
   return { target: { kind: "artifact" as const, path }, revision };
 }
@@ -419,7 +426,10 @@ function RelayQueue({
                           <ItemMedia className={styles.queueItemIcon} variant="icon"><Handshake aria-hidden="true" /></ItemMedia>
                           <ItemContent>
                             <ItemTitle>{relay.summary}</ItemTitle>
-                            <ItemDescription>{relay.workstream.title ?? "Workstream"} · {relayQueueDescription(relay, view)}{time ? ` · ${time}` : ""}</ItemDescription>
+                            <ItemDescription>
+                              {relayQueueDescription(relay, view)}{time ? ` · ${time}` : ""}
+                              {relayRepositoryLabel(relay) ? ` · ${relayRepositoryLabel(relay)}` : ""}
+                            </ItemDescription>
                           </ItemContent>
                           <ItemActions>
                             <Badge className={styles.queueStateBadge} variant={relay.state === "closed" ? "outline" : "secondary"}>
@@ -572,7 +582,7 @@ function RelayDraftQueue({
                     <ItemMedia className={styles.queueItemIcon} variant="icon"><FilePenLine aria-hidden="true" /></ItemMedia>
                     <ItemContent>
                       <ItemTitle>{draft.summary}</ItemTitle>
-                      <ItemDescription>{draft.workstream.title ?? "Workstream"} · Private draft · {formatDate(draft.updatedAt)}</ItemDescription>
+                      <ItemDescription>Private draft · {formatDate(draft.updatedAt)}</ItemDescription>
                     </ItemContent>
                     <ItemActions><ChevronRight aria-hidden="true" /></ItemActions>
                   </Item>
@@ -681,12 +691,6 @@ export function RelayPage() {
     enabled: Boolean(readAvailable && composer !== undefined),
     retry: false,
   });
-  const workstreams = useQuery({
-    queryKey: ["workstreams", "relay", "eligible"],
-    queryFn: () => api.getWorkstreams({ includeArchived: false, limit: 100 }),
-    enabled: Boolean(readAvailable && composer !== undefined),
-    retry: false,
-  });
   const memberPageCount = members.data?.pages.length ?? 0;
   useEffect(() => {
     if (members.hasNextPage && !members.isFetchingNextPage && memberPageCount < MAX_WORKBENCH_PAGES) {
@@ -698,7 +702,6 @@ export function RelayPage() {
     for (const page of members.data?.pages ?? []) for (const member of page.items) items.set(member.id, member);
     return [...items.values()];
   }, [members.data?.pages]);
-  const eligibleWorkstreams = (workstreams.data?.items ?? []).filter((item) => item.state === "planned" || item.state === "active" || item.state === "blocked");
   const drafts = useInfiniteQuery({
     queryKey: ["relays", "drafts"],
     queryFn: ({ pageParam }) => api.getRelayDrafts({ limit: PAGE_SIZE, ...(pageParam ? { cursor: pageParam } : {}) }),
@@ -843,8 +846,6 @@ export function RelayPage() {
         queryClient.invalidateQueries({ queryKey: ["actor", "current"] }),
         queryClient.invalidateQueries({ queryKey: ["member"] }),
         queryClient.invalidateQueries({ queryKey: ["members"] }),
-        queryClient.invalidateQueries({ queryKey: ["workstream"] }),
-        queryClient.invalidateQueries({ queryKey: ["workstreams"] }),
         queryClient.invalidateQueries({ queryKey: ["relays", "lifecycle-principals"] }),
         queryClient.invalidateQueries({ queryKey: ["home"] }),
       ]);
@@ -930,19 +931,10 @@ export function RelayPage() {
     setGitNotice(null);
     try {
       const recipientIds = [...new Set(draft.input.recipients.map((recipient) => recipient.memberId))];
-      const [workstream, ...recipients] = await Promise.all([
-        queryClient.fetchQuery({
-          queryKey: ["workstream", draft.input.workstream.id],
-          queryFn: () => api.getWorkstream(draft.input.workstream.id),
-        }),
-        ...recipientIds.map((memberId) => queryClient.fetchQuery({
+      const recipients = await Promise.all(recipientIds.map((memberId) => queryClient.fetchQuery({
           queryKey: ["member", memberId],
           queryFn: () => api.getMember(memberId),
-        })),
-      ]);
-      if (workstream.state !== "planned" && workstream.state !== "active" && workstream.state !== "blocked") {
-        throw new Error("Choose a Workstream in Planned, Active, or Blocked before publishing.");
-      }
+        })));
       const inactiveRecipient = recipients.find((member) => !member.active);
       if (inactiveRecipient) {
         throw new Error(`${inactiveRecipient.displayName ?? "A recorded recipient"} is not an active team Member. Edit the draft before publishing.`);
@@ -955,18 +947,14 @@ export function RelayPage() {
           action: { kind: "relay.publish", draftId: draft.id },
           expectedRevisions: [
             draftExpectation(draft),
-            artifactExpectation(workstream.sourcePath, workstream.revision),
             ...recipients.map((member) => artifactExpectation(member.sourcePath, member.revision)),
           ],
         },
       }, element);
     } catch (error) {
-      const message = error instanceof Error && (
-        error.message.startsWith("Choose a Workstream")
-        || error.message.includes("is not an active team Member")
-      )
+      const message = error instanceof Error && error.message.includes("is not an active team Member")
         ? error.message
-        : "The Workstream or a recipient could not be verified. Refresh or edit the draft before publishing.";
+        : "A recipient could not be verified. Refresh or edit the draft before publishing.";
       flushSync(() => setStatus(message));
       queueMicrotask(() => statusRef.current?.focus({ preventScroll: true }));
     } finally {
@@ -1057,7 +1045,6 @@ export function RelayPage() {
       <CardContent className={styles.detailContent}>
         <dl className={styles.humanMeta}>
           <div><dt>Recipients</dt><dd>{draftDetail.data.recipients.map(actorLabel).join(", ")}</dd></div>
-          <div><dt>Workstream</dt><dd>{draftDetail.data.workstream.title ?? "Recorded Workstream"}</dd></div>
           <div><dt>Updated</dt><dd>{formatDate(draftDetail.data.updatedAt)}</dd></div>
         </dl>
         <div className={styles.actions} role="group" aria-label="Draft actions">
@@ -1099,7 +1086,7 @@ export function RelayPage() {
     <>
       <CardHeader className={styles.detailHeader}>
         <div>
-          <CardDescription>{relayDetail.data.workstream.title ?? "Workstream"} handoff</CardDescription>
+          <CardDescription>Team handoff</CardDescription>
           <CardTitle><h2>{relayDetail.data.summary}</h2></CardTitle>
         </div>
         <CardAction><Badge variant={relayDetail.data.state === "closed" ? "outline" : "secondary"}>{relayStateLabel(relayDetail.data, canonicalView ?? "all", currentMemberId)}</Badge></CardAction>
@@ -1108,7 +1095,6 @@ export function RelayPage() {
         <dl className={styles.humanMeta}>
           <div><dt>Sender</dt><dd>{actorLabel(relayDetail.data.sender)}</dd></div>
           <div><dt>Recipients</dt><dd>{relayDetail.data.recipients.map(actorLabel).join(", ")}</dd></div>
-          <div><dt>Workstream</dt><dd>{relayDetail.data.workstream.title ?? "Recorded Workstream"}</dd></div>
           {relayDetail.data.acknowledgedBy ? <div><dt>Claimant</dt><dd>{actorLabel(relayDetail.data.acknowledgedBy)}</dd></div> : null}
           {relayRelevantTime(relayDetail.data) ? <div><dt>{relayDetail.data.state === "closed" ? "Closed" : relayDetail.data.state === "acknowledged" ? "Taken" : "Published"}</dt><dd>{relayRelevantTime(relayDetail.data)}</dd></div> : null}
         </dl>
@@ -1312,9 +1298,6 @@ export function RelayPage() {
             onApplied={onApplied}
             onClose={() => setComposer(undefined)}
             onRetryMembers={() => void members.refetch()}
-            onRetryWorkstreams={() => void workstreams.refetch()}
-            workstreams={eligibleWorkstreams}
-            workstreamsError={workstreams.isError ? workstreams.error : undefined}
           />
         </Suspense>
       ) : null}

@@ -25,6 +25,7 @@ import {
   RelayDraftSummarySchema,
   RelayIdSchema,
   RelayListResponseSchema,
+  RelayOperationApplyRequestSchema,
   RelayOperationApplyResponseSchema,
   RelayOperationPreviewRequestSchema,
   RelayOperationPreviewResponseSchema,
@@ -100,13 +101,12 @@ describe("Hub API contracts", () => {
       .toBe(false);
   });
 
-  it("locks strict Relay drafts, all evidence variants, and dual lifecycle projections", () => {
+  it("locks sparse standalone Relay drafts, all evidence variants, and v1/v2/v3 lifecycle projections", () => {
     const revision = "a".repeat(64);
     const member = { kind: "member" as const, memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV", displayName: "Ada" };
     const workstream = { kind: "workstream" as const, id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV", title: "Relay" };
     const draft = {
       recipients: [member],
-      workstream,
       summary: "A complete Relay handoff.",
       completed: ["Captured the characterization."],
       inProgress: ["Reviewing the final gate."],
@@ -126,6 +126,23 @@ describe("Hub API contracts", () => {
       nextActions: ["Run the final gate."],
     };
     expect(RelayDraftInputSchema.parse(draft)).toEqual(draft);
+    expect(RelayDraftInputSchema.parse({
+      recipients: [member],
+      summary: "A sparse standalone handoff.",
+    })).toEqual({
+      recipients: [member],
+      summary: "A sparse standalone handoff.",
+      completed: [],
+      inProgress: [],
+      decisions: [],
+      blockers: [],
+      unresolvedQuestions: [],
+      changedFiles: [],
+      code: [],
+      evidence: [],
+      nextActions: [],
+    });
+    expect(RelayDraftInputSchema.safeParse({ ...draft, workstream }).success).toBe(false);
     expect(RelayDraftInputSchema.safeParse({
       ...draft,
       recipients: [{ ...member, displayName: "M".repeat(512) }],
@@ -157,13 +174,29 @@ describe("Hub API contracts", () => {
       evidence: [draft.evidence[0], draft.evidence[0]],
     }).success).toBe(true);
     expect(RelayDraftInputSchema.safeParse({ ...draft, recipients: [member, member] }).success).toBe(false);
+    const translatedEvidence = [
+      { kind: "entity" as const, entity: workstream },
+      ...Array.from({ length: 64 }, (_, index) => ({
+        kind: "manual" as const,
+        note: `Legacy evidence ${index}`,
+      })),
+    ];
+    expect(RelayDraftInputSchema.safeParse({
+      ...draft,
+      evidence: translatedEvidence,
+    }).success).toBe(false);
+    expect(RelayDraftInputSchema.safeParse({
+      ...draft,
+      evidence: translatedEvidence.map((item, index) => index === 0
+        ? { kind: "manual" as const, note: "Not a translated Workstream" }
+        : item),
+    }).success).toBe(false);
     expect(RelayDraftSummarySchema.safeParse({
       id: "relay-draft-summary",
       revision,
       updatedAt: "2026-08-29T01:00:00.000Z",
       summary: draft.summary,
       recipients: [member, member],
-      workstream,
     }).success).toBe(false);
     expect(RelayDraftInputSchema.safeParse({ ...draft, summary: "not\nsingle line" }).success).toBe(false);
 
@@ -175,11 +208,64 @@ describe("Hub API contracts", () => {
     expect(RelayOperationPreviewRequestSchema.parse(save)).toEqual(save);
     expect(RelayOperationPreviewRequestSchema.safeParse({
       ...save,
+      action: { ...save.action, draft: { ...draft, evidence: translatedEvidence } },
+    }).success).toBe(false);
+    const migratedSave = {
+      ...save,
+      action: {
+        ...save.action,
+        draftId: "relay-migrated-draft",
+        draft: { ...draft, evidence: translatedEvidence },
+      },
+      expectedRevisions: [{
+        target: {
+          kind: "local" as const,
+          namespace: "relay-draft" as const,
+          id: "relay-migrated-draft",
+        },
+        revision,
+      }],
+    };
+    expect(RelayOperationPreviewRequestSchema.safeParse(migratedSave).success).toBe(true);
+    expect(RelayOperationPreviewRequestSchema.safeParse({
+      ...save,
       expectedRevisions: [{
         target: { kind: "artifact", path: ".mex/workstreams/ws_01ARZ3NDEKTSV4RRFFQ69G5FAV.md" },
         revision,
       }],
     }).success).toBe(false);
+
+    const manualEvidence = Array.from({ length: 64 }, (_, index) => ({
+      kind: "manual" as const,
+      note: `Legacy ${index}:`,
+    }));
+    const rawNearLimit = {
+      ...draft,
+      workstream,
+      evidence: manualEvidence,
+    };
+    const size = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    let remaining = HUB_LIMITS.maxMutationBodyBytes - 8 - size(rawNearLimit);
+    for (let index = 0; index < manualEvidence.length && remaining > 0; index += 1) {
+      const addition = Math.min(remaining, 4_000 - manualEvidence[index]!.note.length);
+      manualEvidence[index]!.note += "x".repeat(addition);
+      remaining -= addition;
+    }
+    const translatedNearLimit = {
+      ...draft,
+      evidence: [{ kind: "entity" as const, entity: workstream }, ...manualEvidence],
+    };
+    expect(size(rawNearLimit)).toBeLessThanOrEqual(HUB_LIMITS.maxMutationBodyBytes);
+    expect(size(translatedNearLimit)).toBeGreaterThan(HUB_LIMITS.maxMutationBodyBytes);
+    expect(RelayDraftInputSchema.safeParse(translatedNearLimit).success).toBe(false);
+    expect(RelayDraftDetailSchema.safeParse({
+      id: "relay-near-limit-legacy",
+      revision,
+      updatedAt: "2026-08-29T01:00:00.000Z",
+      summary: translatedNearLimit.summary,
+      recipients: translatedNearLimit.recipients,
+      input: translatedNearLimit,
+    }).success).toBe(true);
 
     const relay = {
       schemaVersion: 2 as const,
@@ -203,6 +289,7 @@ describe("Hub API contracts", () => {
       diagnostics: [],
       diagnosticsTruncated: false,
       publishedAt: "2026-08-29T01:00:00.000Z",
+      publishedRepoState: null,
       acknowledgedBy: member,
       acknowledgedAt: "2026-08-29T02:00:00.000Z",
       closedBy: member,
@@ -215,12 +302,42 @@ describe("Hub API contracts", () => {
       ...relay,
       schemaVersion: 1,
       publishedAt: null,
+      publishedRepoState: null,
       diagnostics: [{
         code: "RELAY_LEGACY_PUBLICATION_TIME",
         severity: "warning",
         message: "One or more legacy schema-v1 Relays have no canonical publication timestamp.",
       }],
     }).success).toBe(true);
+
+    const standaloneRelay = {
+      ...relay,
+      schemaVersion: 3 as const,
+      workstream: null,
+      publishedRepoState: {
+        branch: "feature/relay-v3",
+        head: "f".repeat(40),
+        dirty: true,
+        observedAt: "2026-08-29T01:00:00.000Z",
+      },
+    };
+    expect(RelayDetailSchema.parse(standaloneRelay)).toEqual(standaloneRelay);
+    expect(RelayDetailSchema.safeParse({
+      ...standaloneRelay,
+      workstream,
+    }).success).toBe(false);
+    expect(RelayDetailSchema.safeParse({
+      ...standaloneRelay,
+      publishedRepoState: null,
+    }).success).toBe(false);
+    expect(RelayDetailSchema.safeParse({
+      ...standaloneRelay,
+      evidence: translatedEvidence,
+    }).success).toBe(true);
+    expect(RelayDetailSchema.safeParse({
+      ...relay,
+      evidence: translatedEvidence,
+    }).success).toBe(false);
 
     const legacyMember = { ...member, displayName: "M".repeat(201) };
     const legacyGit = {
@@ -272,6 +389,7 @@ describe("Hub API contracts", () => {
       workstream: legacyRelay.workstream,
       summary: legacyRelay.summary,
       publishedAt: legacyRelay.publishedAt,
+      publishedRepoState: legacyRelay.publishedRepoState,
       acknowledgedBy: legacyRelay.acknowledgedBy,
       acknowledgedAt: legacyRelay.acknowledgedAt,
       closedBy: legacyRelay.closedBy,
@@ -325,6 +443,7 @@ describe("Hub API contracts", () => {
       workstream: relay.workstream,
       summary: relay.summary,
       publishedAt: relay.publishedAt,
+      publishedRepoState: relay.publishedRepoState,
       acknowledgedBy: relay.acknowledgedBy,
       acknowledgedAt: relay.acknowledgedAt,
       closedBy: relay.closedBy,
@@ -383,10 +502,6 @@ describe("Hub API contracts", () => {
       target: { kind: "local" as const, namespace: "relay-draft" as const, id: "draft-publish" },
       revision,
     };
-    const workstreamTarget = {
-      target: { kind: "artifact" as const, path: `.mex/workstreams/${workstream.id}.md` },
-      revision,
-    };
     const memberTarget = {
       target: { kind: "artifact" as const, path: `.mex/team/members/${member.memberId}.md` },
       revision,
@@ -394,19 +509,36 @@ describe("Hub API contracts", () => {
     const publish = {
       operationId: "relay_contract_publish",
       action: { kind: "relay.publish" as const, draftId: "draft-publish" },
-      expectedRevisions: [memberTarget, draftTarget, workstreamTarget],
+      expectedRevisions: [memberTarget, draftTarget],
     };
     expect(RelayOperationPreviewRequestSchema.parse(publish)).toEqual(publish);
     for (const expectedRevisions of [
-      [draftTarget, memberTarget],
-      [draftTarget, workstreamTarget],
-      [draftTarget, workstreamTarget, memberTarget, {
+      [draftTarget],
+      [memberTarget],
+      [draftTarget, memberTarget, {
         target: { kind: "artifact" as const, path: "README.md" },
+        revision,
+      }],
+      [draftTarget, memberTarget, {
+        target: { kind: "artifact" as const, path: `.mex/workstreams/${workstream.id}.md` },
         revision,
       }],
     ]) {
       expect(RelayOperationPreviewRequestSchema.safeParse({ ...publish, expectedRevisions }).success).toBe(false);
     }
+
+    const legacyPublish = {
+      ...publish,
+      expectedRevisions: [
+        draftTarget,
+        memberTarget,
+        {
+          target: { kind: "artifact" as const, path: `.mex/workstreams/${workstream.id}.md` },
+          revision,
+        },
+      ],
+    };
+    expect(RelayOperationPreviewRequestSchema.safeParse(legacyPublish).success).toBe(false);
 
     const previewEnvelope = {
       schemaVersion: 1 as const,
@@ -437,6 +569,22 @@ describe("Hub API contracts", () => {
       },
     };
     expect(RelayOperationPreviewResponseSchema.parse(previewEnvelope)).toEqual(previewEnvelope);
+    const legacyPublishEnvelope = {
+      ...previewEnvelope,
+      request: legacyPublish,
+      preview: { ...previewEnvelope.preview, scope: "mixed" as const },
+      receipt: {
+        ...previewEnvelope.receipt,
+        purposeIds: [
+          { purpose: "activity" as const, id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+          { purpose: "relay" as const, id: "relay_01000000000000000000000001" },
+        ],
+      },
+    };
+    expect(RelayOperationPreviewResponseSchema.safeParse(legacyPublishEnvelope).success)
+      .toBe(false);
+    expect(RelayOperationApplyRequestSchema.safeParse(legacyPublishEnvelope).success)
+      .toBe(true);
     const maximumServiceMember = { ...member, displayName: "S".repeat(512) };
     const maximumAuthorityEnvelope = {
       ...previewEnvelope,

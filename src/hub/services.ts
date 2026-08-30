@@ -1937,7 +1937,7 @@ function projectRelayEntity(entity: EntityRef): { id: string; kind: string; titl
   };
 }
 
-function projectRelayWorkstream(entity: EntityRef): RelayDraftInput["workstream"] {
+function projectRelayWorkstream(entity: EntityRef): NonNullable<RelaySummary["workstream"]> {
   if (entity.kind !== "workstream") throw invalidRelayProjection();
   return { ...projectRelayEntity(entity), kind: "workstream" };
 }
@@ -1976,7 +1976,6 @@ function projectRelayEvidence(evidence: TeamEvidenceRef): RelayEvidenceRef {
 function projectRelayDraftInput(input: TeamRelayDraftDetail["input"]): RelayDraftInput {
   return {
     recipients: input.recipients.map(projectRelayMemberActor),
-    workstream: projectRelayWorkstream(input.workstream),
     summary: input.summary,
     completed: [...input.completed],
     inProgress: [...input.inProgress],
@@ -1997,7 +1996,6 @@ function projectRelayDraftSummary(draft: TeamRelayDraftSummary): RelayDraftSumma
     updatedAt: draft.updatedAt,
     summary: draft.summary,
     recipients: draft.recipients.map(projectRelayMemberActor),
-    workstream: projectRelayWorkstream(draft.workstream),
   };
 }
 
@@ -2015,9 +2013,14 @@ function projectRelaySummary(relay: TeamRelaySummary): RelaySummary {
     state: relay.state,
     sender: projectRelayActor(relay.sender),
     recipients: relay.recipients.map(projectRelayActor),
-    workstream: projectRelayWorkstream(relay.workstream),
+    workstream: relay.workstream === null
+      ? null
+      : projectRelayWorkstream(relay.workstream),
     summary: relay.summary,
     publishedAt: relay.publishedAt,
+    publishedRepoState: relay.publishedRepoState === null
+      ? null
+      : { ...relay.publishedRepoState },
     acknowledgedBy: relay.acknowledgedBy === undefined ? null : projectRelayActor(relay.acknowledgedBy),
     acknowledgedAt: relay.acknowledgedAt ?? null,
     closedBy: relay.closedBy === undefined ? null : projectRelayActor(relay.closedBy),
@@ -2046,7 +2049,6 @@ function projectRelayDetail(relay: TeamRelayDetail): RelayDetail {
 function projectRelayDraftInputToService(input: RelayDraftInput): TeamRelayDraftDetail["input"] {
   return {
     recipients: input.recipients.map((actor) => ({ ...actor })),
-    workstream: { ...input.workstream },
     summary: input.summary,
     completed: [...input.completed],
     inProgress: [...input.inProgress],
@@ -2143,6 +2145,7 @@ function relayDiagnosticMessage(code: string): string {
   switch (code) {
     case "ENVELOPE_TOO_LARGE": return "The Relay operation exceeded its bounded preview envelope.";
     case "PATH_OUTSIDE_PROJECT": return "A Relay preview path was rejected at the repository boundary.";
+    case "RELAY_DIRTY_PUBLICATION_STATE": return "MEX recorded that local changes existed when this Relay was published; it did not record their paths, diff, or contents.";
     case "REVISION_CONFLICT": return "The Relay operation no longer matches the observed repository revision.";
     case "VALIDATION_FAILED": return "The Relay operation failed bounded validation.";
     default: return "The Relay operation reported a bounded diagnostic.";

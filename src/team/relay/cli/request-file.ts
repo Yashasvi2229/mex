@@ -1,12 +1,22 @@
 import { isArtifactId } from "../../artifacts/ulid.js";
-import { isRepoRelativePath, isRevision } from "../../contracts/shared.js";
+import {
+  isRepoRelativePath,
+  isRevision,
+  MexPortError,
+} from "../../contracts/shared.js";
 import type {
   TeamRelayCommand,
   TeamRelayPreviewEnvelope,
 } from "../../contracts/workflow.js";
 import { TeamCliUsageError } from "../../cli/envelope.js";
 import { readBoundedJsonFile } from "../../cli/request-file.js";
-import { isRelayLocalId, normalizeTeamRelayCommand } from "../handoff.js";
+import {
+  isRelayLocalId,
+  normalizeExistingRelayDraftMigrationCommand,
+  normalizeRawLegacyRelayDraftCommand,
+  normalizeTeamRelayCommand,
+  normalizeTranslatedLegacyRelayDraftCommand,
+} from "../handoff.js";
 
 export type RelayMutationCommandName =
   | "relay.draft.save"
@@ -27,7 +37,10 @@ export function readRelayCommandFile(
   path: string,
   expectedCommand: RelayMutationCommandName,
 ): TeamRelayCommand {
-  const command = normalizeTeamRelayCommand(readBoundedJsonFile(path));
+  const raw = readBoundedJsonFile(path);
+  assertCurrentPublishDependencyTopology(raw);
+  assertCallerAuthoredDraftEvidenceBound(raw);
+  const command = normalizeRelayRequest(raw);
   assertCommand(command, expectedCommand);
   return command;
 }
@@ -56,7 +69,7 @@ export function readRelayPreviewFile(
   const data = record(envelope.data, "Relay service preview");
   exactKeys(data, ["schemaVersion", "request", "preview", "receipt"], "Relay service preview");
   if (data.schemaVersion !== 1) fail("The Relay service preview schemaVersion must be 1.");
-  const request = normalizeTeamRelayCommand(data.request);
+  const request = normalizeRelayPreviewRequest(data.request);
   assertCommand(request, expectedCommand);
   const preview = record(data.preview, "Relay public preview");
   assertPublicPreview(preview);
@@ -66,6 +79,174 @@ export function readRelayPreviewFile(
     fail("The Relay preview wrapper diagnostics do not match its service preview.");
   }
   return data as unknown as TeamRelayPreviewEnvelope;
+}
+
+/**
+ * Apply parsing admits the exact pre-v3 publish topology only so the workflow
+ * service can inspect its durable journal and finish an already-started
+ * operation. Unjournaled legacy previews are refused by the apply service.
+ */
+function normalizeRelayPreviewRequest(value: unknown): TeamRelayCommand {
+  try {
+    return normalizeTeamRelayCommand(value);
+  } catch (currentError) {
+    try {
+      return normalizeExistingRelayDraftMigrationCommand(value);
+    } catch {
+      try {
+        return normalizeTranslatedLegacyRelayDraftCommand(value);
+      } catch {
+        // Continue to the separately bounded pre-v3 publication recovery shape.
+      }
+    }
+    const legacy = normalizeLegacyPublishPreviewRequest(value);
+    if (legacy === null) throw currentError;
+    return legacy;
+  }
+}
+
+function normalizeRelayRequest(value: unknown): TeamRelayCommand {
+  try {
+    return normalizeTeamRelayCommand(value);
+  } catch (currentError) {
+    try {
+      return normalizeExistingRelayDraftMigrationCommand(value);
+    } catch {
+      try {
+        return normalizeRawLegacyRelayDraftCommand(value);
+      } catch {
+        throw currentError;
+      }
+    }
+  }
+}
+
+function normalizeLegacyPublishPreviewRequest(
+  value: unknown,
+): TeamRelayCommand | null {
+  if (!plainRecord(value)) return null;
+  const action = plainRecord(value.action) ? value.action : null;
+  if (action?.kind !== "relay.publish" || !Array.isArray(value.expectedRevisions)) {
+    return null;
+  }
+  const legacyIndexes = value.expectedRevisions.flatMap((candidate, index) =>
+    isLegacyWorkstreamExpectation(candidate) ? [index] : []);
+  if (legacyIndexes.length !== 1) return null;
+
+  const legacyIndex = legacyIndexes[0]!;
+  const legacyRaw = record(
+    value.expectedRevisions[legacyIndex],
+    "Legacy Relay Workstream expectation",
+  );
+  exactKeys(
+    legacyRaw,
+    ["target", "revision"],
+    "Legacy Relay Workstream expectation",
+  );
+  const legacyTarget = record(
+    legacyRaw.target,
+    "Legacy Relay Workstream expectation target",
+  );
+  exactKeys(
+    legacyTarget,
+    ["kind", "path"],
+    "Legacy Relay Workstream expectation target",
+  );
+  if (
+    legacyTarget.kind !== "artifact"
+    || typeof legacyTarget.path !== "string"
+    || !/^\.mex\/workstreams\/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/u.test(legacyTarget.path)
+    || typeof legacyRaw.revision !== "string"
+    || !isRevision(legacyRaw.revision)
+  ) return null;
+
+  const current = normalizeTeamRelayCommand({
+    ...value,
+    expectedRevisions: value.expectedRevisions.filter((_, index) => index !== legacyIndex),
+  });
+  if (current.action.kind !== "relay.publish") return null;
+  const legacyExpectation = Object.freeze({
+    target: Object.freeze({
+      kind: "artifact" as const,
+      path: legacyTarget.path,
+    }),
+    revision: legacyRaw.revision,
+  }) as TeamRelayCommand["expectedRevisions"][number];
+  let currentIndex = 0;
+  const expectedRevisions = Object.freeze(value.expectedRevisions.map((_, index) =>
+    index === legacyIndex
+      ? legacyExpectation
+      : current.expectedRevisions[currentIndex++]!));
+  return Object.freeze({
+    operationId: current.operationId,
+    action: current.action,
+    expectedRevisions,
+  });
+}
+
+function isLegacyWorkstreamExpectation(value: unknown): boolean {
+  if (!plainRecord(value) || !plainRecord(value.target)) return false;
+  return value.target.kind === "artifact"
+    && typeof value.target.path === "string"
+    && value.target.path.startsWith(".mex/workstreams/");
+}
+
+/**
+ * A pre-v3 publish preview signed the Workstream as a dependency. That shape
+ * cannot be safely rewritten because doing so would invalidate the receipt.
+ */
+function assertCurrentPublishDependencyTopology(value: unknown): void {
+  if (!plainRecord(value)) return;
+  const action = plainRecord(value.action) ? value.action : null;
+  if (action?.kind !== "relay.publish" || !Array.isArray(value.expectedRevisions)) return;
+  const containsLegacyWorkstream = value.expectedRevisions.some((candidate) => {
+    if (!plainRecord(candidate)) return false;
+    const target = plainRecord(candidate.target) ? candidate.target : null;
+    return target?.kind === "artifact"
+      && typeof target.path === "string"
+      && /^\.mex\/workstreams\/ws_[0-7][0-9A-HJKMNP-TV-Z]{25}\.md$/u.test(target.path);
+  });
+  if (!containsLegacyWorkstream) return;
+  validationFailure(
+    "This Relay publication uses the pre-v3 Workstream dependency topology. Preview again with the current MEX version before applying it.",
+  );
+}
+
+/**
+ * JSON Schema reserves one extra evidence slot so a normalized legacy draft
+ * can survive inside an exact signed preview. New caller-authored drafts still
+ * own the public 64-entry collection bound.
+ */
+function assertCallerAuthoredDraftEvidenceBound(value: unknown): void {
+  if (!plainRecord(value)) return;
+  const action = plainRecord(value.action) ? value.action : null;
+  if (action?.kind !== "relay.draft.save") return;
+  const draft = plainRecord(action.draft) ? action.draft : null;
+  if (
+    draft === null
+    || (typeof action.draftId === "string" && action.draftId.length > 0)
+    || !Array.isArray(draft.evidence)
+    || draft.evidence.length <= 64
+  ) return;
+  validationFailure(
+    "Caller-authored Relay drafts support at most 64 evidence entries. The 65th schema slot is reserved only for legacy Workstream migration.",
+  );
+}
+
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function validationFailure(detail: string): never {
+  throw new MexPortError({
+    title: "Relay request is incompatible with the current contract",
+    status: 422,
+    code: "VALIDATION_FAILED",
+    detail,
+  });
 }
 
 function assertPublicPreview(preview: Record<string, unknown>): void {

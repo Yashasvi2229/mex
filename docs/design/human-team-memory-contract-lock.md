@@ -297,15 +297,26 @@ Its exact contract is recorded in
   closed. Published handoff content is immutable; there is no decline,
   withdrawal, reassignment, reopen, administrative override, notification,
   external delivery, or agent execution.
-- Draft reads and writes remain local and authority-independent. Publication
-  binds one active sender, one eligible Workstream, and one to 32 active Member
-  recipients to their complete exact revision set. Any listed active recipient
-  may win the single acknowledgement claim; only the active recorded sender or
-  active claimant may close.
-- New Relay artifacts use schema v2 with a service-owned publication timestamp
-  equal to the signed authority and `relay.published` Activity time. Strict
-  schema-v1 artifacts remain readable and byte-preserving, retain schema v1
-  through lifecycle writes, and project one bounded missing-time warning.
+- Draft reads and writes remain local, sparse-input tolerant, and
+  authority-independent. They require recipients and summary only; optional
+  structured collections normalize to arrays. A legacy local-draft Workstream
+  becomes entity evidence without a read-side SQLite rewrite.
+- Publication binds one active sender and one to 32 active Member recipients to
+  the local draft plus recipient-only exact revision set. It neither resolves
+  nor depends on a Workstream. Any listed active recipient may win the single
+  acknowledgement claim; only the active recorded sender or active claimant
+  may close.
+- New Relay artifacts use strict schema v3, omit Workstream, and store
+  service-owned `published_at` plus `published_repo_state` copied from signed
+  authority. Dirty, detached, and null-HEAD publication states are valid and
+  honest, but do not capture source bytes. Strict schema-v1/v2 artifacts retain
+  their Workstreams, remain byte-preserving and actionable, and are never
+  backfilled with current checkout state. Every teammate must update MEX before
+  a repository begins publishing strict v3 artifacts.
+- A v3 `relay.published` Activity omits Workstream and uses the same publication
+  repository state. Take and Close preserve that state while their Activity
+  records the action-time repository observation. Legacy lifecycle Activity
+  retains the legacy Relay's Workstream association.
 - The internal facade and registered CLI use a Relay-specific signed portable
   receipt. Draft, Relay, and Activity IDs are purpose-bound so exact envelopes
   apply across processes; actor, repository, dependency, containment, and
@@ -316,16 +327,19 @@ Its exact contract is recorded in
   in the repository-independent static resolver; ordinary capabilities retain
   the existing schema version and byte ceiling.
 - The authenticated private Hub adds only the six Relay API routes and a lazy
-  workbench. `My open` is the actionable recipient/claimant queue; `Sent` and
-  `All` remain explicit perspectives. Without active Member authority, all and
-  draft reads stay available while canonical actions fail honestly.
+  workbench. `For you` is the actionable recipient/claimant queue; `Sent`,
+  `Team`, and `Drafts on this device` remain explicit perspectives. Without
+  active Member authority, Team and draft reads stay available while canonical
+  actions fail honestly. Workstream filtering remains a legacy v1/v2 read
+  compatibility surface only.
 - The deterministic release fixture adds two Members, one local Relay draft,
   and one published Relay while reusing one existing Activity slot. Relay route
   assets, two list APIs, and browser heap are the only ordinary F calibration
   leaves; unrelated budgets remain frozen.
 
 Checkpoint F does not add Playbooks, Catch Up, package-root exports, new MCP,
-Git mutation, hosted behavior, or any delivery mechanism.
+Git mutation, GitHub or other network integration, hosted behavior, or any
+delivery mechanism. Workstreams remain an independent product surface.
 
 ## Explicit exclusions
 
@@ -391,8 +405,9 @@ registers the guarded CLI and bounded static contract resolver, E3 registers the
 private Hub and lazy Inbox workbench, and E4 adds the deterministic fixture plus
 release measurements. Inbox's numeric release candidates are pinned from the
 retained Ubuntu report, and a clean enforcing CI run is required without
-widening earlier thresholds. F1 adds the signed Relay facade, dual schema-v1/v2
-artifact lifecycle, and real repository conformance; F2 registers the guarded
+widening earlier thresholds. F1 adds the signed Relay facade, strict
+schema-v1/v2/v3 artifact lifecycle, and real repository conformance; F2
+registers the guarded
 CLI and bounded static resolver; F3 registers the private Hub and lazy Relay
 workbench; F4 adds the deterministic two-Member/Relay fixture and owned release
 measurements. Relay numeric candidates require retained pinned provenance and a

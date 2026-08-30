@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   RelayDetailSchema,
+  RelayDraftDetailSchema,
   RelayListResponseSchema,
   RelayOperationApplyResponseSchema,
   RelayOperationPreviewResponseSchema,
@@ -15,6 +16,7 @@ import type {
   TeamMember,
   TeamRelayCommand,
   TeamRelayDetail,
+  TeamRelayDraftDetail,
   TeamRelayHandoffPort,
   TeamRelayPreviewEnvelope,
   TeamRelaySummary,
@@ -29,6 +31,7 @@ const WORKSTREAM_ID = "ws_01ARZ3NDEKTSV4RRFFQ69G5FAC";
 const RELAY_ID = "relay_01000000000000000000000001";
 const NOW = "2026-08-29T03:04:05.000Z";
 const LEGACY_WARNING = "One or more legacy schema-v1 Relays have no canonical publication timestamp.";
+const DIRTY_PUBLICATION_WARNING = "MEX recorded that local changes existed when this Relay was published; it did not record their paths, diff, or contents.";
 
 let projectRoot: string;
 
@@ -65,6 +68,7 @@ function relay(): TeamRelayDetail {
     workstream: { id: WORKSTREAM_ID, kind: "workstream", title: "Relay" },
     summary: "Legacy handoff",
     publishedAt: null,
+    publishedRepoState: null,
     completed: ["Characterization completed."],
     inProgress: ["Reviewing the gate."],
     decisions: [{ id: "decision-1", kind: "decision", title: "Keep it pinned" }],
@@ -216,6 +220,92 @@ describe("Hub Relay projections", () => {
     expect(JSON.stringify(page)).not.toContain("/Users/alice");
   });
 
+  it("projects standalone schema-v3 publication state and Workstream-free drafts", async () => {
+    const publishedRepoState = {
+      branch: "feature/standalone-relay",
+      head: null,
+      dirty: true,
+      observedAt: NOW,
+    } as const;
+    const standalone: TeamRelayDetail = {
+      ...relay(),
+      schemaVersion: 3,
+      workstream: null,
+      summary: "Continue the standalone Relay rollout",
+      publishedAt: NOW,
+      publishedRepoState,
+      diagnostics: [],
+    };
+    const draft: TeamRelayDraftDetail = {
+      id: "relay-draft-standalone",
+      revision: "7".repeat(64) as Revision,
+      updatedAt: NOW,
+      recipients: standalone.recipients.filter(
+        (recipient): recipient is Extract<typeof recipient, { kind: "member" }> => recipient.kind === "member",
+      ),
+      summary: "Prepare a standalone handoff",
+      input: {
+        recipients: standalone.recipients,
+        summary: "Prepare a standalone handoff",
+        completed: [],
+        inProgress: [],
+        decisions: [],
+        blockers: [],
+        unresolvedQuestions: [],
+        changedFiles: [],
+        code: [],
+        evidence: [],
+        nextActions: [],
+      },
+    };
+    const base = relayService();
+    const relays: TeamRelayHandoffPort = {
+      ...base,
+      getRelay: async (id) => id === RELAY_ID ? standalone : null,
+      getRelayDraft: async (id) => id === draft.id ? draft : null,
+      listRelays: async () => ({
+        items: [summary(standalone)],
+        nextCursor: null,
+        truncated: false,
+        sourceTruncated: false,
+        deterministicRevision: "8".repeat(64) as Revision,
+        diagnostics: [],
+      }),
+    };
+    const services = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "relay-fixture",
+      jobs: { list: () => ({ items: [] }) },
+      team: identity(),
+      relays,
+      git,
+      now: () => new Date(NOW),
+    });
+
+    const detail = await services.relay?.(RELAY_ID);
+    expect(RelayDetailSchema.safeParse(detail).success).toBe(true);
+    expect(detail).toMatchObject({
+      schemaVersion: 3,
+      workstream: null,
+      publishedAt: NOW,
+      publishedRepoState,
+    });
+
+    const page = await services.relays?.({ perspective: "all", limit: 25 });
+    expect(RelayListResponseSchema.safeParse(page).success).toBe(true);
+    expect(page?.items[0]).toMatchObject({
+      schemaVersion: 3,
+      workstream: null,
+      publishedRepoState,
+    });
+
+    const wireDraft = await services.relayDraft?.(draft.id);
+    expect(RelayDraftDetailSchema.safeParse(wireDraft).success).toBe(true);
+    expect(wireDraft).toEqual(draft);
+    expect(wireDraft).not.toHaveProperty("workstream");
+    expect(wireDraft?.input).not.toHaveProperty("workstream");
+  });
+
   it("counts the exact My-open predicate and reports no-Member recovery as unavailable", async () => {
     const listRelays = vi.fn();
     const services = createLocalHubReadServices({
@@ -291,6 +381,104 @@ describe("Hub Relay projections", () => {
     expect(unavailableList).not.toHaveBeenCalled();
   });
 
+  it("projects the exact bounded dirty-publication warning in a publish preview", async () => {
+    const draftId = "relay-draft-dirty-publication";
+    const request: RelayOperationPreviewRequest = {
+      operationId: "hub_relay_dirty_publication_preview",
+      action: { kind: "relay.publish", draftId },
+      expectedRevisions: [
+        {
+          target: { kind: "local", namespace: "relay-draft", id: draftId },
+          revision: "1".repeat(64),
+        },
+        {
+          target: { kind: "artifact", path: `.mex/team/members/${MEMBER_ID}.md` },
+          revision: "2".repeat(64),
+        },
+      ],
+    };
+    const envelope: TeamRelayPreviewEnvelope = {
+      schemaVersion: 1,
+      request,
+      preview: {
+        valid: true,
+        scope: "mixed",
+        changes: [],
+        localChanges: [],
+        diagnostics: [{
+          code: "RELAY_DIRTY_PUBLICATION_STATE",
+          severity: "warning",
+          message: DIRTY_PUBLICATION_WARNING,
+        }],
+      },
+      receipt: {
+        schemaVersion: 1,
+        authority: {
+          actor: { kind: "member", memberId: MEMBER_ID, displayName: "Ada Lovelace" },
+          occurredAt: NOW,
+          repoState: {
+            branch: "feature/dirty-relay",
+            head: "a".repeat(40),
+            dirty: true,
+            observedAt: NOW,
+          },
+        },
+        purposeIds: [
+          { purpose: "activity", id: "event_01000000000000000000000001" },
+          { purpose: "relay", id: "relay_01000000000000000000000002" },
+        ],
+        requestRevision: "3".repeat(64) as Revision,
+        presentationRevision: "4".repeat(64) as Revision,
+        previewRevision: "5".repeat(64) as Revision,
+      },
+    };
+    let previewEnvelope = envelope;
+    const unused = async (): Promise<never> => { throw new Error("unused"); };
+    const services = createLocalHubReadServices({
+      projectRoot,
+      scaffoldId: "relay-fixture",
+      jobs: { list: () => ({ items: [] }) },
+      team: identity(),
+      relays: {
+        getRelayDraft: unused,
+        listRelayDrafts: unused,
+        getRelay: unused,
+        listRelays: unused,
+        previewRelay: async (received) => {
+          expect(received).toEqual(request);
+          return previewEnvelope;
+        },
+        applyRelay: unused,
+      },
+      git,
+      now: () => new Date(NOW),
+    });
+
+    const wireEnvelope = await services.previewRelayOperation?.(request);
+    expect(RelayOperationPreviewResponseSchema.safeParse(wireEnvelope).success).toBe(true);
+    expect(wireEnvelope?.preview.diagnostics).toEqual([{
+      code: "RELAY_DIRTY_PUBLICATION_STATE",
+      severity: "warning",
+      message: DIRTY_PUBLICATION_WARNING,
+    }]);
+
+    previewEnvelope = {
+      ...envelope,
+      preview: {
+        ...envelope.preview,
+        diagnostics: [{
+          code: "RELAY_DIRTY_PUBLICATION_STATE",
+          severity: "warning",
+          message: "A caller-controlled replacement warning.",
+        }],
+      },
+    };
+    await expect(services.previewRelayOperation?.(request)).rejects.toMatchObject({
+      status: 500,
+      code: "INTERNAL_ERROR",
+    });
+  });
+
   it("round-trips a non-email Git authority through the Relay-only signed envelope unchanged", async () => {
     const draftId = "relay-draft-git-authority";
     const wireRequest: RelayOperationPreviewRequest = {
@@ -299,7 +487,6 @@ describe("Hub Relay projections", () => {
         kind: "relay.draft.save",
         draft: {
           recipients: [{ kind: "member", memberId: MEMBER_ID, displayName: "Ada Lovelace" }],
-          workstream: { id: WORKSTREAM_ID, kind: "workstream", title: "Relay" },
           summary: "Preserve the configured Git authority bytes.",
           completed: [],
           inProgress: [],

@@ -128,6 +128,7 @@ import {
   PlaybookRunRepository,
   RelayRepository,
   WorkstreamRepository,
+  type RelayRepositoryUpdateInput,
   type WorkflowArtifactWritePlan,
   type WorkflowRepositoryPage,
 } from "../artifacts/workflow-repositories.js";
@@ -135,6 +136,7 @@ import {
   inboxProposalArtifactPath,
   normalizeInboxDraftInput,
   normalizeRelayDraftInput,
+  normalizeRelayDraftInputWithLegacy,
   normalizeWorkflowRevisionExpectations,
   playbookArtifactPath,
   playbookRunArtifactPath,
@@ -196,10 +198,13 @@ import {
   decodeRelayCursor,
   encodeRelayCursor,
   hashRelayValue,
+  isRawLegacyRelayDraftCommand,
   isRelayLocalId,
+  normalizeExistingRelayDraftMigrationCommand,
   normalizeRelayListFilter,
-  normalizeRelayProductDraftInput,
+  normalizeStoredRelayProductDraftInput,
   normalizeTeamRelayCommand,
+  normalizeTranslatedLegacyRelayDraftCommand,
   relayDraftProjection,
   relayDraftSummary,
   relayProjection,
@@ -1183,7 +1188,8 @@ export class RepositoryTeamWorkflowPort<
         ) continue;
         if (
           filter.workstreamId !== null
-          && stored.workstream.id !== filter.workstreamId
+          && (stored.schemaVersion === 3
+            || stored.workstream.id !== filter.workstreamId)
         ) continue;
         if (filter.perspective === "sent") {
           if (stored.sender.kind !== "member" || stored.sender.memberId !== memberId) continue;
@@ -1238,7 +1244,7 @@ export class RepositoryTeamWorkflowPort<
     commandValue: TeamRelayCommand,
   ): Promise<TeamRelayPreviewEnvelope> {
     this.#root.assertCurrent();
-    const command = normalizeTeamRelayCommand(commandValue);
+    const command = this.#normalizeRelayPreviewCommand(commandValue);
     const workflowCommand = command as TeamWorkflowCommand<TWikiPayload>;
     let internal = await this.#previewWorkflow(workflowCommand, true);
     if (!this.#portablePreviewIsFresh(internal.command.authority.occurredAt)) {
@@ -1295,18 +1301,79 @@ export class RepositoryTeamWorkflowPort<
     return envelope;
   }
 
+  #normalizeRelayPreviewCommand(commandValue: TeamRelayCommand): TeamRelayCommand {
+    let command: TeamRelayCommand;
+    let strictError: unknown = null;
+    const rawLegacyDraft = isRawLegacyRelayDraftCommand(commandValue);
+    try {
+      command = normalizeTeamRelayCommand(commandValue);
+    } catch (currentError) {
+      strictError = currentError;
+      try {
+        command = rawLegacyDraft
+          ? normalizeTranslatedLegacyRelayDraftCommand(commandValue)
+          : normalizeExistingRelayDraftMigrationCommand(commandValue);
+      } catch {
+        throw currentError;
+      }
+    }
+    if (
+      command.action.kind !== "relay.draft.save"
+      || command.action.draftId === undefined
+    ) return command;
+    const current = requiredDraft<TWikiPayload>(
+      this.#local.getLocalDraft(command.action.draftId),
+      "relay",
+    );
+    let stored: RelayDraftInput;
+    try {
+      stored = normalizeStoredRelayProductDraftInput(current.payload);
+    } catch {
+      if (strictError !== null) throw strictError;
+      return command;
+    }
+    if (stored.evidence.length !== 65) {
+      if (strictError !== null) throw strictError;
+      return command;
+    }
+    requireLocalExpectation(
+      command.expectedRevisions,
+      "relay-draft",
+      command.action.draftId,
+      current.revision,
+    );
+    if (
+      command.action.draft.evidence.length < 1
+      || stableJson(stored.evidence[0])
+        !== stableJson(command.action.draft.evidence[0])
+    ) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Invalid Relay migration evidence",
+        "Saving this migrated Relay draft must preserve its translated Workstream evidence as the first evidence entry.",
+      );
+    }
+    return command;
+  }
+
   async applyRelay(
     envelopeValue: TeamRelayPreviewEnvelope,
   ): Promise<TeamRelayApplyResult> {
     this.#root.assertCurrent();
     let envelope: TeamRelayPreviewEnvelope;
+    let legacyPublishTopology = false;
     try {
       envelope = parseRelayEnvelope(envelopeValue);
     } catch (error) {
-      if (error instanceof MexPortError && error.problem.code === "INVALID_REQUEST") {
-        throw invalidSignedRelayEnvelope();
+      try {
+        envelope = parsePreV3RelayPublishEnvelope(envelopeValue);
+        legacyPublishTopology = true;
+      } catch {
+        if (error instanceof MexPortError && error.problem.code === "INVALID_REQUEST") {
+          throw invalidSignedRelayEnvelope();
+        }
+        throw error;
       }
-      throw error;
     }
     assertRelayPreviewContainment(this.#root.path, envelope.preview);
     const command = deepFreeze({
@@ -1329,6 +1396,9 @@ export class RepositoryTeamWorkflowPort<
     }
     const completedInterruptedOperation = existing !== null
       && existing.phase !== "complete";
+    if (legacyPublishTopology && existing === null) {
+      throw preV3RelayPreviewRequiresRefresh();
+    }
     let result: TeamWorkflowResult<TWikiPayload>;
     if (existing !== null) {
       assertJournalEnvelopeAttestation(existing.effects, envelope);
@@ -1454,7 +1524,16 @@ export class RepositoryTeamWorkflowPort<
   async preview(
     command: TeamWorkflowCommand<TWikiPayload>,
   ): Promise<TeamWorkflowPreview<TWikiPayload>> {
-    return this.#previewWorkflow(command, false);
+    const relayAction = isPlainObject(command)
+      && isPlainObject(command.action)
+      && typeof command.action.kind === "string"
+      && command.action.kind.startsWith("relay.");
+    const normalized = relayAction
+      ? this.#normalizeRelayPreviewCommand(
+          command as unknown as TeamRelayCommand,
+        ) as TeamWorkflowCommand<TWikiPayload>
+      : command;
+    return this.#previewWorkflow(normalized, false);
   }
 
   async #previewWorkflow(
@@ -2148,14 +2227,21 @@ export class RepositoryTeamWorkflowPort<
         }, this.#proposals), "inbox", action.draftId, draft.revision);
       }
       case "relay.publish": {
-        await this.#assertRelayActionDependencies(command);
+        const recoveredWorkstream = legacyRelayPublicationWorkstream(
+          recoveryEffects,
+        );
+        if (recoveredWorkstream === null) {
+          await this.#assertRelayActionDependencies(command);
+        } else {
+          await this.#assertLegacyRelayPublishDependencies(
+            command,
+            recoveredWorkstream,
+          );
+        }
         const draft = requiredDraft<TWikiPayload>(this.#local.getLocalDraft(action.draftId), "relay");
         requireLocalExpectation(expectedRevisions, "relay-draft", action.draftId, draft.revision);
-        const payload = normalizeRelayProductDraftInput(draft.payload);
-        const workstream = await this.#requireWorkstreamDependency(
-          payload.workstream,
-          expectedRevisions,
-        );
+        const compatibility = normalizeRelayDraftInputWithLegacy(draft.payload);
+        const payload = normalizeStoredRelayProductDraftInput(compatibility.input);
         const recipients = await Promise.all(payload.recipients.map(async (recipient) => {
           if (recipient.kind !== "member") throw relayUnauthorized("Relay recipients must be Members.");
           const member = await required(this.#members.get(recipient.memberId), "Member");
@@ -2168,19 +2254,50 @@ export class RepositoryTeamWorkflowPort<
         const recoveryId = recoveryCanonicalId(recoveryEffects, "relay")
           ?? purposeId(purposeIds, "relay")
           ?? null;
+        if (recoveredWorkstream !== null) {
+          if (
+            compatibility.legacy === null
+            || compatibility.legacy.workstream.id !== recoveredWorkstream.id
+          ) throw incompleteRecovery();
+          const workstream = await this.#requireWorkstreamDependency(
+            compatibility.legacy.workstream,
+            expectedRevisions,
+          );
+          const plan = await this.#relays.previewCreate({
+            ...(recoveryId === null ? {} : { id: recoveryId }),
+            ...payload,
+            schemaVersion: 2,
+            evidence: compatibility.legacy.evidence,
+            recipients,
+            workstream: workstream.ref,
+            sender: authority.actor,
+            publishedAt: authority.occurredAt,
+          });
+          return withCleanup(canonicalWorkflowPlan<TWikiPayload, typeof plan.artifact>(plan, "relay", plan.artifact.ref.id, {
+            action: "relay.published",
+            subjects: [entitySubject(plan.artifact.ref)],
+            workstream: workstream.ref,
+          }, this.#relays), "relay", action.draftId, draft.revision);
+        }
         const plan = await this.#relays.previewCreate({
           ...(recoveryId === null ? {} : { id: recoveryId }),
           ...payload,
+          schemaVersion: 3,
           recipients,
-          workstream: workstream.ref,
           sender: authority.actor,
           publishedAt: authority.occurredAt,
+          publishedRepoState: authority.repoState,
         });
-        return withCleanup(canonicalWorkflowPlan<TWikiPayload, typeof plan.artifact>(plan, "relay", plan.artifact.ref.id, {
+        const publication = canonicalWorkflowPlan<TWikiPayload, typeof plan.artifact>(plan, "relay", plan.artifact.ref.id, {
           action: "relay.published",
           subjects: [entitySubject(plan.artifact.ref)],
-          workstream: workstream.ref,
-        }, this.#relays), "relay", action.draftId, draft.revision);
+        }, this.#relays);
+        return withCleanup({
+          ...publication,
+          diagnostics: authority.repoState.dirty
+            ? [relayDirtyPublicationDiagnostic()]
+            : publication.diagnostics,
+        }, "relay", action.draftId, draft.revision);
       }
       case "relay.acknowledge":
       case "relay.close": {
@@ -2188,7 +2305,7 @@ export class RepositoryTeamWorkflowPort<
         const current = await required(this.#relays.get(action.relayId), "Relay");
         requireArtifactExpectation(expectedRevisions, current.sourcePath, current.revision);
         const plan = await this.#relays.previewUpdate(action.relayId, {
-          ...withoutStored(current),
+          ...relayRepositoryUpdateInput(current),
           ...(action.kind === "relay.acknowledge"
             ? { state: "acknowledged" as const, acknowledgedBy: authority.actor, acknowledgedAt: authority.occurredAt }
             : { state: "closed" as const, closedBy: authority.actor, closedAt: authority.occurredAt }),
@@ -2196,7 +2313,9 @@ export class RepositoryTeamWorkflowPort<
         return canonicalWorkflowPlan(plan, "relay", action.relayId, {
           action: action.kind === "relay.acknowledge" ? "relay.acknowledged" : "relay.closed",
           subjects: [entitySubject(plan.artifact.ref)],
-          workstream: current.workstream,
+          ...(current.schemaVersion === 3
+            ? {}
+            : { workstream: current.workstream }),
         }, this.#relays);
       }
       case "playbook.create": {
@@ -2760,24 +2879,7 @@ export class RepositoryTeamWorkflowPort<
         this.#local.getLocalDraft(action.draftId),
         "relay",
       );
-      const payload = normalizeRelayProductDraftInput(draft.payload);
-      const workstream = await required(
-        this.#workstreams.get(payload.workstream.id),
-        "Workstream",
-      );
-      if (
-        payload.workstream.kind !== "workstream"
-        || (workstream.state !== "planned"
-          && workstream.state !== "active"
-          && workstream.state !== "blocked")
-      ) {
-        throw artifactError(
-          "VALIDATION_FAILED",
-          "Relay Workstream is not publishable",
-          "Relay publication requires a planned, active, or blocked Workstream.",
-          workstream.sourcePath,
-        );
-      }
+      const payload = normalizeStoredRelayProductDraftInput(draft.payload);
       const recipients = await Promise.all(payload.recipients.map(async (recipient) => {
         if (recipient.kind !== "member") {
           throw artifactError(
@@ -2799,7 +2901,6 @@ export class RepositoryTeamWorkflowPort<
       }));
       const targets = [
         `local:relay-draft:${action.draftId}`,
-        `artifact:${workstream.sourcePath}`,
         ...recipients.map((member) => `artifact:${member.sourcePath}`),
       ];
       assertExactRelayExpectationTargets(command.expectedRevisions, targets);
@@ -2808,11 +2909,6 @@ export class RepositoryTeamWorkflowPort<
         "relay-draft",
         action.draftId,
         draft.revision,
-      );
-      requireArtifactExpectation(
-        command.expectedRevisions,
-        workstream.sourcePath,
-        workstream.revision,
       );
       for (const member of recipients) {
         requireArtifactExpectation(
@@ -2884,6 +2980,94 @@ export class RepositoryTeamWorkflowPort<
     }
   }
 
+  async #assertLegacyRelayPublishDependencies(
+    command: PreparedTeamWorkflowCommand<TWikiPayload>,
+    recordedWorkstream: EntityRef,
+  ): Promise<void> {
+    const action = command.action;
+    if (action.kind !== "relay.publish") throw incompleteRecovery();
+    if (command.authority.actor.kind !== "member") {
+      throw relayUnauthorized("Canonical Relay actions require an active Member.");
+    }
+    const actor = await this.#members.get(command.authority.actor.memberId);
+    if (actor?.active !== true) {
+      throw relayUnauthorized("The current Relay actor is missing or inactive.");
+    }
+    const draft = requiredDraft<TWikiPayload>(
+      this.#local.getLocalDraft(action.draftId),
+      "relay",
+    );
+    const compatibility = normalizeRelayDraftInputWithLegacy(draft.payload);
+    if (
+      compatibility.legacy === null
+      || compatibility.legacy.workstream.id !== recordedWorkstream.id
+    ) throw incompleteRecovery();
+    const workstream = await required(
+      this.#workstreams.get(compatibility.legacy.workstream.id),
+      "Workstream",
+    );
+    if (
+      compatibility.legacy.workstream.kind !== "workstream"
+      || (workstream.state !== "planned"
+        && workstream.state !== "active"
+        && workstream.state !== "blocked")
+    ) {
+      throw artifactError(
+        "VALIDATION_FAILED",
+        "Relay Workstream is not publishable",
+        "Recovery of this pre-v3 Relay publication requires its original planned, active, or blocked Workstream.",
+        workstream.sourcePath,
+      );
+    }
+    const recipients = await Promise.all(
+      compatibility.input.recipients.map(async (recipient) => {
+        if (recipient.kind !== "member") {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Invalid Relay recipient",
+            "Relay recipients must be canonical Members.",
+          );
+        }
+        const member = await required(
+          this.#members.get(recipient.memberId),
+          "Member",
+        );
+        if (!member.active) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Inactive Relay recipient",
+            `Relay recipient ${recipient.memberId} is inactive.`,
+            member.sourcePath,
+          );
+        }
+        return member;
+      }),
+    );
+    assertExactRelayExpectationTargets(command.expectedRevisions, [
+      `local:relay-draft:${action.draftId}`,
+      `artifact:${workstream.sourcePath}`,
+      ...recipients.map((member) => `artifact:${member.sourcePath}`),
+    ]);
+    requireLocalExpectation(
+      command.expectedRevisions,
+      "relay-draft",
+      action.draftId,
+      draft.revision,
+    );
+    requireArtifactExpectation(
+      command.expectedRevisions,
+      workstream.sourcePath,
+      workstream.revision,
+    );
+    for (const member of recipients) {
+      requireArtifactExpectation(
+        command.expectedRevisions,
+        member.sourcePath,
+        member.revision,
+      );
+    }
+  }
+
   async #assertAuthorityCurrent(
     authority: { actor: ActorRef; repoState: RepoState },
     allowStaleSelectionFallback = false,
@@ -2932,19 +3116,28 @@ export class RepositoryTeamWorkflowPort<
   }
 
   /**
-   * Relay eligibility is derived from mutable Member, Workstream, Relay, and
-   * checkout-local draft state. Once a Relay preview has been reviewed, stale
+   * Relay eligibility is derived from mutable Member, Relay, and checkout-local
+   * draft state. Once a Relay preview has been reviewed, stale
    * authority or exact target revisions must win over a newly invalid semantic
    * state so callers receive the stable REVISION_CONFLICT re-preview signal.
    * Keep the historical dependency-first order for every non-Relay workflow.
    */
   async #assertPreWriteFreshnessAndDependencies(
     command: PreparedTeamWorkflowCommand<TWikiPayload>,
+    recoveryEffects?: readonly TeamWorkflowJournalEffect[],
   ): Promise<void> {
     if (command.action.kind.startsWith("relay.")) {
       await this.#assertCommandAuthorityCurrent(command);
       await this.#assertExpectationsCurrent(command.expectedRevisions);
-      await this.#assertRelayActionDependencies(command);
+      const legacyWorkstream = legacyRelayPublicationWorkstream(recoveryEffects);
+      if (legacyWorkstream === null) {
+        await this.#assertRelayActionDependencies(command);
+      } else {
+        await this.#assertLegacyRelayPublishDependencies(
+          command,
+          legacyWorkstream,
+        );
+      }
       return;
     }
     await this.#assertRelayActionDependencies(command);
@@ -3186,7 +3379,7 @@ export class RepositoryTeamWorkflowPort<
       )
     ) {
       this.#assertPortablePreviewFresh(command.authority.occurredAt);
-      await this.#assertPreWriteFreshnessAndDependencies(command);
+      await this.#assertPreWriteFreshnessAndDependencies(command, entry.effects);
     }
     const leaseToken = this.#acquireLease();
     let current = this.#local.getWorkflowOperation(entry.operationId) ?? entry;
@@ -3384,7 +3577,7 @@ export class RepositoryTeamWorkflowPort<
     // Once an exact effect exists, the journaled recovery path below may finish
     // without depending on mutable current identity.
     this.#assertPortablePreviewFresh(command.authority.occurredAt);
-    await this.#assertPreWriteFreshnessAndDependencies(command);
+    await this.#assertPreWriteFreshnessAndDependencies(command, effects);
     const activity = effects.find(
       (effect): effect is ActivityWorkflowEffect => effect.kind === "activity",
     );
@@ -3416,7 +3609,7 @@ export class RepositoryTeamWorkflowPort<
     await this.#runPhaseHook("before-canonical-publication");
     this.#root.assertCurrent();
     this.#assertPortablePreviewFresh(command.authority.occurredAt);
-    await this.#assertPreWriteFreshnessAndDependencies(command);
+    await this.#assertPreWriteFreshnessAndDependencies(command, effects);
     await this.#assertInboxActionDependencies(command);
     await planned.applyPrimary();
     await this.#runPhaseHook("after-canonical-publication");
@@ -4581,10 +4774,138 @@ function parseRelayEnvelope(value: unknown): TeamRelayPreviewEnvelope {
     invalidRelayEnvelope,
   );
   if (parsed.schemaVersion !== 1) throw invalidRelayEnvelope();
-  const request = normalizeTeamRelayCommand(parsed.request);
+  let request: TeamRelayCommand;
+  try {
+    request = normalizeTeamRelayCommand(parsed.request);
+  } catch (currentError) {
+    try {
+      request = normalizeExistingRelayDraftMigrationCommand(parsed.request);
+    } catch {
+      try {
+        request = normalizeTranslatedLegacyRelayDraftCommand(parsed.request);
+      } catch {
+        throw currentError;
+      }
+    }
+  }
   const preview = parseRelayPublicPreview(parsed.preview);
   const receipt = parseRelayReceipt(parsed.receipt, request, preview);
   return deepFreeze({ schemaVersion: 1, request, preview, receipt });
+}
+
+/**
+ * Compatibility parser for an exact pre-v3 signed publication envelope. It is
+ * intentionally used only by apply so a durable journal can attest and finish
+ * old intent; current preview/request parsing remains standalone-v3-only.
+ */
+function parsePreV3RelayPublishEnvelope(
+  value: unknown,
+): TeamRelayPreviewEnvelope {
+  const serialized = boundedRelayJson(value);
+  const parsed = JSON.parse(serialized) as unknown;
+  if (!isPlainObject(parsed)) throw invalidRelayEnvelope();
+  exactEnvelopeKeys(
+    parsed,
+    ["schemaVersion", "request", "preview", "receipt"],
+    [],
+    invalidRelayEnvelope,
+  );
+  if (parsed.schemaVersion !== 1) throw invalidRelayEnvelope();
+  const request = normalizePreV3RelayPublishCommand(parsed.request);
+  const preview = parseRelayPublicPreview(parsed.preview);
+  const receipt = parseRelayReceipt(parsed.receipt, request, preview);
+  return deepFreeze({ schemaVersion: 1, request, preview, receipt });
+}
+
+function normalizePreV3RelayPublishCommand(value: unknown): TeamRelayCommand {
+  if (!isPlainObject(value)) throw invalidRelayEnvelope();
+  exactEnvelopeKeys(
+    value,
+    ["operationId", "action", "expectedRevisions"],
+    [],
+    invalidRelayEnvelope,
+  );
+  if (typeof value.operationId !== "string" || !OPERATION_ID.test(value.operationId)) {
+    throw invalidRelayEnvelope();
+  }
+  if (!isPlainObject(value.action)) throw invalidRelayEnvelope();
+  exactEnvelopeKeys(value.action, ["kind", "draftId"], [], invalidRelayEnvelope);
+  if (
+    value.action.kind !== "relay.publish"
+    || typeof value.action.draftId !== "string"
+    || !isRelayLocalId(value.action.draftId)
+  ) throw invalidRelayEnvelope();
+  const expectations = normalizeWorkflowRevisionExpectations(
+    value.expectedRevisions,
+  );
+  if (expectations.length > TEAM_RELAY_LIMITS.maxRecipients + 2) {
+    throw invalidRelayEnvelope();
+  }
+  let draftCount = 0;
+  let workstreamCount = 0;
+  const memberIds: string[] = [];
+  for (const expectation of expectations) {
+    if (expectation.revision === null || expectation.semanticRevision !== undefined) {
+      throw invalidRelayEnvelope();
+    }
+    if (expectation.target.kind === "local") {
+      if (
+        expectation.target.namespace !== "relay-draft"
+        || expectation.target.id !== value.action.draftId
+      ) throw invalidRelayEnvelope();
+      draftCount += 1;
+      continue;
+    }
+    if (expectation.target.kind !== "artifact") throw invalidRelayEnvelope();
+    const workstreamId = relayDependencyArtifactId(
+      expectation.target.path,
+      ".mex/workstreams",
+      "ws",
+    );
+    if (
+      workstreamId !== null
+      && workstreamArtifactPath(workstreamId) === expectation.target.path
+    ) {
+      workstreamCount += 1;
+      continue;
+    }
+    const memberId = relayDependencyArtifactId(
+      expectation.target.path,
+      ".mex/team/members",
+      "member",
+    );
+    if (
+      memberId !== null
+      && memberArtifactPath(memberId) === expectation.target.path
+    ) {
+      memberIds.push(memberId);
+      continue;
+    }
+    throw invalidRelayEnvelope();
+  }
+  if (
+    draftCount !== 1
+    || workstreamCount !== 1
+    || memberIds.length < 1
+    || memberIds.length > TEAM_RELAY_LIMITS.maxRecipients
+    || new Set(memberIds).size !== memberIds.length
+  ) throw invalidRelayEnvelope();
+  return deepFreeze({
+    operationId: value.operationId,
+    action: { kind: "relay.publish", draftId: value.action.draftId },
+    expectedRevisions: expectations,
+  });
+}
+
+function relayDependencyArtifactId(
+  path: RepoRelativePath,
+  directory: ".mex/workstreams" | ".mex/team/members",
+  prefix: "ws" | "member",
+): string | null {
+  const start = `${directory}/${prefix}_`;
+  if (!path.startsWith(start) || !path.endsWith(".md")) return null;
+  const id = path.slice(directory.length + 1, -3);
+  return isArtifactId(id, prefix) ? id : null;
 }
 
 function parseRelayPublicPreview(
@@ -5394,6 +5715,14 @@ function invalidSignedRelayEnvelope(): MexPortError {
   );
 }
 
+function preV3RelayPreviewRequiresRefresh(): MexPortError {
+  return artifactError(
+    "REVISION_CONFLICT",
+    "Relay publication preview is outdated",
+    "This pre-v3 Relay preview has no durable operation intent to recover. Preview the standalone handoff again with the current MEX version.",
+  );
+}
+
 function relayEnvelopeTooLarge(): MexPortError {
   const detail = `The complete Relay preview envelope exceeds ${TEAM_RELAY_LIMITS.maxEnvelopeBytes} UTF-8 bytes.`;
   return new MexPortError({
@@ -5984,6 +6313,42 @@ function withoutStored<T extends { schemaVersion: number; ref: EntityRef; kind: 
   return rest;
 }
 
+/** Preserve the Relay schema discriminator and its immutable publication context. */
+function relayRepositoryUpdateInput(relay: Relay): RelayRepositoryUpdateInput {
+  const {
+    ref: _ref,
+    kind: _kind,
+    sourcePath: _sourcePath,
+    revision: _revision,
+    entityRevision: _entityRevision,
+    ...input
+  } = relay;
+  return input as RelayRepositoryUpdateInput;
+}
+
+function legacyRelayPublicationWorkstream(
+  effects: readonly TeamWorkflowJournalEffect[] | undefined,
+): EntityRef | null {
+  if (effects === undefined) return null;
+  const activities = effects.filter(
+    (effect): effect is ActivityWorkflowEffect =>
+      effect.kind === "activity" && effect.action === "relay.published",
+  );
+  if (activities.length !== 1) return null;
+  const workstream = activities[0]!.workstream;
+  if (workstream === undefined) return null;
+  if (workstream.kind !== "workstream") throw incompleteRecovery();
+  return workstream;
+}
+
+function relayDirtyPublicationDiagnostic(): Diagnostic {
+  return {
+    code: "RELAY_DIRTY_PUBLICATION_STATE",
+    severity: "warning",
+    message: "MEX recorded that local changes existed when this Relay was published; it did not record their paths, diff, or contents.",
+  };
+}
+
 function workstreamCallerProjectionIsEqual(
   current: Workstream,
   candidate: Workstream,
@@ -6241,7 +6606,7 @@ function assertExactRelayExpectationTargets(
     throw artifactError(
       "VALIDATION_FAILED",
       "Incomplete Relay expectation set",
-      "Relay publication requires exactly its draft, Workstream, and recipient Members; lifecycle actions require only the Relay.",
+      "Relay publication requires exactly its draft and recipient Members; lifecycle actions require only the Relay.",
     );
   }
 }

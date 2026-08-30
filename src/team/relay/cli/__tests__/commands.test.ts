@@ -41,7 +41,6 @@ function request(action: TeamRelayCommand["action"], expectedRevisions: unknown[
 function draftInput(): any {
   return {
     recipients: [{ kind: "member", memberId: MEMBER_ID }],
-    workstream: { id: WORKSTREAM_ID, kind: "workstream" },
     summary: "Continue the reviewed handoff.",
     completed: ["Implemented the contract."],
     inProgress: ["Run the checks."],
@@ -76,11 +75,15 @@ function publishExpectations(): any[] {
       target: { kind: "artifact", path: `.mex/team/members/${MEMBER_ID}.md` },
       revision: REVISION,
     },
-    {
-      target: { kind: "artifact", path: `.mex/workstreams/${WORKSTREAM_ID}.md` },
-      revision: REVISION,
-    },
   ];
+}
+
+function legacyDraftInput(evidence: unknown[] = []): any {
+  return {
+    ...draftInput(),
+    workstream: { id: WORKSTREAM_ID, kind: "workstream", title: "Legacy lane" },
+    evidence,
+  };
 }
 
 const mutationCases = [
@@ -276,16 +279,52 @@ describe("Relay CLI adapter", () => {
         problem: { code: "VALIDATION_FAILED" },
       });
     }
+
+    const legacyDependencyPath = join(root, "legacy-workstream-publish.json");
+    writeFileSync(legacyDependencyPath, JSON.stringify(request(
+      { kind: "relay.publish", draftId: "draft-1" },
+      [
+        ...valid,
+        {
+          target: { kind: "artifact", path: `.mex/workstreams/${WORKSTREAM_ID}.md` },
+          revision: REVISION,
+        },
+      ],
+    )));
+    const legacyFactory = vi.fn(async () => service());
+    const legacyOutput = io();
+    await runRelayMutation(
+      legacyFactory,
+      "relay.publish",
+      legacyDependencyPath,
+      { json: true },
+      legacyOutput.value,
+    );
+    expect(legacyFactory).not.toHaveBeenCalled();
+    expect(legacyOutput.exits).toEqual([1]);
+    expect(JSON.parse(legacyOutput.lines[0]!)).toMatchObject({
+      command: "relay.publish",
+      mode: "preview",
+      ok: false,
+      problem: {
+        code: "VALIDATION_FAILED",
+        detail: expect.stringMatching(/preview again/i),
+      },
+    });
   });
 
-  it("validates Relay draft Workstream IDs and repository paths before service construction", async () => {
+  it("normalizes sparse drafts and translates legacy Workstreams without accepting new over-limit evidence", async () => {
     const root = fixture();
     const validPath = join(root, "valid-draft.json");
     writeFileSync(validPath, JSON.stringify(request({
       kind: "relay.draft.save",
-      draft: draftInput(),
-    })));
-    const validFactory = vi.fn(async () => service());
+      draft: {
+        recipients: [{ kind: "member", memberId: MEMBER_ID }],
+        summary: "Continue the sparse standalone handoff.",
+      },
+    } as any)));
+    const validPort = service();
+    const validFactory = vi.fn(async () => validPort);
     const validOutput = io();
     await runRelayMutation(
       validFactory,
@@ -296,16 +335,28 @@ describe("Relay CLI adapter", () => {
     );
     expect(validFactory).toHaveBeenCalledOnce();
     expect(validOutput.exits).toEqual([0]);
+    expect(validPort.previewRelay).toHaveBeenCalledWith(expect.objectContaining({
+      action: {
+        kind: "relay.draft.save",
+        draft: {
+          recipients: [{ kind: "member", memberId: MEMBER_ID }],
+          summary: "Continue the sparse standalone handoff.",
+          completed: [],
+          inProgress: [],
+          decisions: [],
+          blockers: [],
+          unresolvedQuestions: [],
+          changedFiles: [],
+          code: [],
+          evidence: [],
+          nextActions: [],
+        },
+      },
+    }));
+    expect((vi.mocked(validPort.previewRelay).mock.calls[0]![0] as any).action.draft)
+      .not.toHaveProperty("workstream");
 
     const invalidDrafts = [
-      ...[
-        "ws_not-a-ulid",
-        MEMBER_ID,
-        "ws_81ARZ3NDEKTSV4RRFFQ69G5FAV",
-      ].map((id) => ({
-        ...draftInput(),
-        workstream: { kind: "workstream", id },
-      })),
       ...["src/relay\u0085.ts", "src/relay\u2028.ts", "src/relay\u2029.ts"].flatMap((path) => [
         { ...draftInput(), changedFiles: [path] },
         { ...draftInput(), evidence: [{ kind: "file", path }] },
@@ -326,6 +377,78 @@ describe("Relay CLI adapter", () => {
         problem: { code: "VALIDATION_FAILED" },
       });
     }
+
+    const legacyPath = join(root, "legacy-draft.json");
+    writeFileSync(legacyPath, JSON.stringify(request({
+      kind: "relay.draft.save",
+      draft: legacyDraftInput([{ kind: "manual", note: "Existing context" }]),
+    })));
+    const legacyPort = service();
+    const legacyFactory = vi.fn(async () => legacyPort);
+    const legacyOutput = io();
+    await runRelayMutation(
+      legacyFactory,
+      "relay.draft.save",
+      legacyPath,
+      { json: true },
+      legacyOutput.value,
+    );
+    expect(legacyOutput.exits).toEqual([0]);
+    expect((vi.mocked(legacyPort.previewRelay).mock.calls[0]![0] as any).action.draft)
+      .toMatchObject({
+        evidence: [
+          { kind: "entity", entity: { id: WORKSTREAM_ID, kind: "workstream", title: "Legacy lane" } },
+          { kind: "manual", note: "Existing context" },
+        ],
+      });
+    expect((vi.mocked(legacyPort.previewRelay).mock.calls[0]![0] as any).action.draft)
+      .not.toHaveProperty("workstream");
+
+    const fullEvidence = Array.from({ length: 64 }, (_, index) => ({
+      kind: "manual",
+      note: `Legacy context ${String(index).padStart(2, "0")}`,
+    }));
+    writeFileSync(legacyPath, JSON.stringify(request({
+      kind: "relay.draft.save",
+      draft: legacyDraftInput(fullEvidence),
+    })));
+    const fullLegacyPort = service();
+    const fullLegacyOutput = io();
+    await runRelayMutation(
+      fullLegacyPort,
+      "relay.draft.save",
+      legacyPath,
+      { json: true },
+      fullLegacyOutput.value,
+    );
+    expect(fullLegacyOutput.exits).toEqual([0]);
+    const translatedEvidence = (vi.mocked(fullLegacyPort.previewRelay).mock.calls[0]![0] as any)
+      .action.draft.evidence;
+    expect(translatedEvidence).toHaveLength(65);
+    expect(translatedEvidence.slice(1)).toEqual(fullEvidence);
+
+    const overLimitPath = join(root, "new-over-limit-draft.json");
+    writeFileSync(overLimitPath, JSON.stringify(request({
+      kind: "relay.draft.save",
+      draft: {
+        ...draftInput(),
+        evidence: [
+          { kind: "entity", entity: { id: WORKSTREAM_ID, kind: "workstream", title: "Legacy lane" } },
+          ...fullEvidence,
+        ],
+      },
+    })));
+    const overLimitFactory = vi.fn(async () => service());
+    const overLimitOutput = io();
+    await runRelayMutation(
+      overLimitFactory,
+      "relay.draft.save",
+      overLimitPath,
+      { json: true },
+      overLimitOutput.value,
+    );
+    expect(overLimitFactory).not.toHaveBeenCalled();
+    expect(overLimitOutput.exits).toEqual([1]);
   });
 
   it("projects draft and Relay reads with typed not-found and ID validation", async () => {
@@ -335,21 +458,26 @@ describe("Relay CLI adapter", () => {
       revision: REVISION,
       updatedAt: "2026-08-29T00:00:00.000Z",
       recipients: [{ kind: "member" as const, memberId: MEMBER_ID }],
-      workstream: { id: WORKSTREAM_ID, kind: "workstream" },
       summary: "Continue the reviewed handoff.",
       input: draftInput(),
     };
-    const relay: TeamRelayDetail = {
-      schemaVersion: 2,
+    const relay = {
+      schemaVersion: 3,
       ref: { id: RELAY_ID, kind: "relay" },
       sourcePath: `.mex/relays/${RELAY_ID}.md`,
       revision: REVISION,
       state: "published",
       sender: { kind: "member", memberId: MEMBER_ID },
       recipients: [{ kind: "member", memberId: MEMBER_ID }],
-      workstream: { id: WORKSTREAM_ID, kind: "workstream" },
+      workstream: null,
       summary: "Continue the reviewed handoff.",
       publishedAt: "2026-08-29T00:00:00.000Z",
+      publishedRepoState: {
+        branch: "benchmark",
+        head: "b".repeat(40),
+        dirty: true,
+        observedAt: "2026-08-29T00:00:00.000Z",
+      },
       completed: [],
       inProgress: [],
       decisions: [],
@@ -360,14 +488,13 @@ describe("Relay CLI adapter", () => {
       evidence: [],
       nextActions: [],
       diagnostics: [],
-    };
+    } as unknown as TeamRelayDetail;
     vi.mocked(port.listRelayDrafts).mockResolvedValue({
       items: [{
         id: draft.id,
         revision: draft.revision,
         updatedAt: draft.updatedAt,
         recipients: draft.recipients,
-        workstream: draft.workstream,
         summary: draft.summary,
       }],
       nextCursor: "next",
@@ -399,25 +526,81 @@ describe("Relay CLI adapter", () => {
       .toBe("2026-08-29T00:00:00.000Z");
     const relayShow = io();
     await runRelayShow(port, RELAY_ID, { json: true }, relayShow.value);
-    expect(JSON.parse(relayShow.lines[0]!).data.ref.id).toBe(RELAY_ID);
+    expect(JSON.parse(relayShow.lines[0]!)).toMatchObject({
+      data: {
+        schemaVersion: 3,
+        ref: { id: RELAY_ID },
+        workstream: null,
+        publishedRepoState: {
+          branch: "benchmark",
+          head: "b".repeat(40),
+          dirty: true,
+        },
+      },
+    });
+
+    const humanDraftList = io();
+    await runRelayDraftList(port, {}, humanDraftList.value);
+    expect(humanDraftList.lines.join("\n")).toContain("Continue the reviewed handoff.");
+    expect(humanDraftList.lines.join("\n")).not.toMatch(/Workstream|undefined/u);
+    const humanDraftShow = io();
+    await runRelayDraftShow(port, "draft-1", {}, humanDraftShow.value);
+    expect(humanDraftShow.lines.join("\n")).not.toMatch(/Workstream|undefined/u);
+    const humanRelayList = io();
+    await runRelayList(port, {}, humanRelayList.value);
+    expect(humanRelayList.lines.join("\n")).toMatch(/benchmark/u);
+    expect(humanRelayList.lines.join("\n")).toContain("bbbbbbbb");
+    expect(humanRelayList.lines.join("\n")).not.toMatch(/Workstream|undefined/u);
+    const humanRelayShow = io();
+    await runRelayShow(port, RELAY_ID, {}, humanRelayShow.value);
+    expect(humanRelayShow.lines.join("\n")).toMatch(/benchmark/u);
+    expect(humanRelayShow.lines.join("\n")).toContain("bbbbbbbb");
+    expect(humanRelayShow.lines.join("\n")).toMatch(/local changes|dirty/iu);
+    expect(humanRelayShow.lines.join("\n")).toContain("2026-08-29T00:00:00.000Z");
+    expect(humanRelayShow.lines.join("\n")).not.toMatch(/Workstream|undefined/u);
 
     vi.mocked(port.getRelay).mockResolvedValue({
       ...relay,
       schemaVersion: 1,
+      workstream: { id: WORKSTREAM_ID, kind: "workstream", title: "Legacy lane" },
       publishedAt: null,
+      publishedRepoState: null,
       diagnostics: [{
         code: "RELAY_LEGACY_PUBLICATION_TIME",
         severity: "warning",
         message: "Legacy Relay publication time is unavailable.",
       }],
-    });
+    } as unknown as TeamRelayDetail);
     const legacyShow = io();
     await runRelayShow(port, RELAY_ID, { json: true }, legacyShow.value);
     expect(JSON.parse(legacyShow.lines[0]!)).toMatchObject({
       ok: true,
-      data: { publishedAt: null },
+      data: {
+        schemaVersion: 1,
+        workstream: { id: WORKSTREAM_ID },
+        publishedAt: null,
+        publishedRepoState: null,
+      },
       diagnostics: [{ code: "RELAY_LEGACY_PUBLICATION_TIME" }],
     });
+    const humanLegacyShow = io();
+    await runRelayShow(port, RELAY_ID, {}, humanLegacyShow.value);
+    expect(humanLegacyShow.lines.join("\n")).toContain(WORKSTREAM_ID);
+    expect(humanLegacyShow.lines.join("\n")).not.toContain("undefined");
+
+    vi.mocked(port.getRelay).mockResolvedValue({
+      ...relay,
+      publishedRepoState: {
+        branch: null,
+        head: null,
+        dirty: false,
+        observedAt: "2026-08-29T00:00:00.000Z",
+      },
+    } as unknown as TeamRelayDetail);
+    const detachedShow = io();
+    await runRelayShow(port, RELAY_ID, {}, detachedShow.value);
+    expect(detachedShow.lines.join("\n")).toMatch(/Detached HEAD/i);
+    expect(detachedShow.lines.join("\n")).toMatch(/No committed HEAD/i);
 
     for (const run of [
       (create: () => Promise<TeamRelayCliService>, output: ReturnType<typeof io>) =>

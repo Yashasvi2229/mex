@@ -171,9 +171,11 @@ function reviewCopy(source: RelayReviewSource): {
       description: "This converts the private checkout-local draft into a Git-tracked Relay.",
       confirm: "Publish handoff",
       pendingTitle: "Checking publication",
-      pendingDetail: "Confirming the current sender, recipients, Workstream, and draft revision.",
+      pendingDetail: "Confirming the current sender, recipients, draft revision, and repository state.",
       consequence: [
         "The local draft will be removed after the Relay is created.",
+        "The Relay records branch, HEAD, clean or dirty state, and observation time.",
+        "MEX does not create a commit or capture source-file or local-change contents.",
         "Commit and push are still required before teammates can receive it.",
       ],
     };
@@ -265,6 +267,17 @@ export default function RelayMutationDialog({
           <h3>{handoffSummary}</h3>
           <ul>{copy.consequence.map((item) => <li key={item}>{item}</li>)}</ul>
           {envelope ? <p><strong>{source.kind === "acknowledge" ? "Taking as" : source.kind === "close" ? "Closing as" : "Acting as"} {actorLabel(envelope.receipt.authority.actor)}</strong></p> : null}
+          {source.kind === "publish" && envelope ? (
+            <p>
+              <strong>Repository at publication:</strong>{" "}
+              {envelope.receipt.authority.repoState.branch ?? "Detached HEAD"},{" "}
+              {envelope.receipt.authority.repoState.head === null
+                ? "no committed HEAD recorded"
+                : `HEAD ${envelope.receipt.authority.repoState.head.slice(0, 8)}`},{" "}
+              {envelope.receipt.authority.repoState.dirty ? "local changes present" : "clean"},{" "}
+              observed {formatDate(envelope.receipt.authority.repoState.observedAt)}.
+            </p>
+          ) : null}
         </section>
         {preview.isPending ? <StatePanel compact state="loading" title={copy.pendingTitle} detail={copy.pendingDetail} /> : null}
         {preview.isError ? <ErrorState error={preview.error} retry={requestPreview} /> : null}

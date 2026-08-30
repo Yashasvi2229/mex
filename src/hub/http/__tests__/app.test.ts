@@ -54,6 +54,7 @@ const INBOX_PROPOSAL_ID = "proposal_01000000000000000000001720";
 const RELAY_DRAFT_ID = "relay-draft-01";
 const RELAY_ID = "relay_01000000000000000000000001";
 const TEAM_NOW = "2026-08-27T04:05:06.000Z";
+const RELAY_DIRTY_PUBLICATION_WARNING = "MEX recorded that local changes existed when this Relay was published; it did not record their paths, diff, or contents.";
 
 describe("Project Hub HTTP application", () => {
   it("exchanges the bootstrap once and protects every ordinary API route", async () => {
@@ -937,6 +938,54 @@ describe("Project Hub HTTP application", () => {
     }
     expect(previewRelayOperation).not.toHaveBeenCalled();
 
+    const reservedEvidence = [
+      {
+        kind: "entity" as const,
+        entity: { kind: "workstream" as const, id: TEAM_WORKSTREAM_ID, title: "Legacy lane" },
+      },
+      ...Array.from({ length: 64 }, (_, index) => ({
+        kind: "manual" as const,
+        note: `Legacy evidence ${index}`,
+      })),
+    ];
+    const newReservedDraft = await app.request(`${ORIGIN}/api/v1/relays/operations/preview`, {
+      method: "POST",
+      headers: mutationRequestHeaders,
+      body: JSON.stringify({
+        ...request,
+        operationId: "hub_relay_new_reserved_evidence",
+        action: {
+          ...request.action,
+          draft: { ...draft, evidence: reservedEvidence },
+        },
+      }),
+    });
+    expect(newReservedDraft.status).toBe(400);
+    expect((await newReservedDraft.json() as { detail: string }).detail).toContain("64");
+    expect(previewRelayOperation).not.toHaveBeenCalled();
+
+    const migratedReservedRequest: RelayOperationPreviewRequest = {
+      ...request,
+      operationId: "hub_relay_existing_reserved_evidence",
+      action: {
+        kind: "relay.draft.save",
+        draftId: RELAY_DRAFT_ID,
+        draft: { ...draft, evidence: reservedEvidence },
+      },
+      expectedRevisions: [{
+        target: { kind: "local", namespace: "relay-draft", id: RELAY_DRAFT_ID },
+        revision: relayDraftDetail().revision,
+      }],
+    };
+    const migratedReservedDraft = await app.request(`${ORIGIN}/api/v1/relays/operations/preview`, {
+      method: "POST",
+      headers: mutationRequestHeaders,
+      body: JSON.stringify(migratedReservedRequest),
+    });
+    expect(migratedReservedDraft.status).toBe(200);
+    expect(previewRelayOperation).toHaveBeenCalledWith(migratedReservedRequest);
+    previewRelayOperation.mockClear();
+
     const maximumDraftMutation: RelayOperationPreviewRequest = {
       operationId: "hub_relay_draft_id_boundary",
       action: { kind: "relay.draft.delete", draftId: maximumDraftId },
@@ -984,13 +1033,13 @@ describe("Project Hub HTTP application", () => {
     const publishRequest: RelayOperationPreviewRequest = {
       operationId: "hub_relay_publish",
       action: { kind: "relay.publish", draftId: RELAY_DRAFT_ID },
-      expectedRevisions: [memberExpectation, draftExpectation, workstreamExpectation],
+      expectedRevisions: [memberExpectation, draftExpectation],
     };
     for (const [label, expectedRevisions] of [
-      ["missing local draft", [memberExpectation, workstreamExpectation]],
-      ["missing Workstream", [draftExpectation, memberExpectation]],
-      ["missing recipient", [draftExpectation, workstreamExpectation]],
-      ["unrelated artifact", [draftExpectation, workstreamExpectation, memberExpectation, {
+      ["missing local draft", [memberExpectation]],
+      ["missing recipient", [draftExpectation]],
+      ["legacy Workstream dependency", [draftExpectation, memberExpectation, workstreamExpectation]],
+      ["unrelated artifact", [draftExpectation, memberExpectation, {
         target: { kind: "artifact" as const, path: "README.md" },
         revision: "c".repeat(64),
       }]],
@@ -1001,9 +1050,28 @@ describe("Project Hub HTTP application", () => {
         body: JSON.stringify({ ...publishRequest, expectedRevisions }),
       });
       expect(malformed.status, label).toBe(400);
+      if (label === "legacy Workstream dependency") {
+        expect((await malformed.json() as { detail: string }).detail)
+          .toContain("Preview again with the current MEX version");
+      }
     }
     expect(previewRelayOperation).not.toHaveBeenCalled();
 
+    previewRelayOperation.mockImplementationOnce((received) => {
+      const envelope = relayPreviewEnvelope(received);
+      return {
+        ...envelope,
+        preview: {
+          ...envelope.preview,
+          scope: "mixed",
+          diagnostics: [{
+            code: "RELAY_DIRTY_PUBLICATION_STATE",
+            severity: "warning",
+            message: RELAY_DIRTY_PUBLICATION_WARNING,
+          }],
+        },
+      };
+    });
     const reorderedPublish = await app.request(`${ORIGIN}/api/v1/relays/operations/preview`, {
       method: "POST",
       headers: mutationRequestHeaders,
@@ -1011,6 +1079,15 @@ describe("Project Hub HTTP application", () => {
     });
     expect(reorderedPublish.status).toBe(200);
     expect(previewRelayOperation).toHaveBeenCalledWith(publishRequest);
+    expect(await reorderedPublish.json()).toMatchObject({
+      preview: {
+        diagnostics: [{
+          code: "RELAY_DIRTY_PUBLICATION_STATE",
+          severity: "warning",
+          message: RELAY_DIRTY_PUBLICATION_WARNING,
+        }],
+      },
+    });
     previewRelayOperation.mockClear();
 
     const preview = await app.request(`${ORIGIN}/api/v1/relays/operations/preview`, {
@@ -1051,6 +1128,39 @@ describe("Project Hub HTTP application", () => {
       operationId: request.operationId,
       applied: true,
       localChanges: [{ id: RELAY_DRAFT_ID }],
+    });
+
+    applyRelayOperation.mockClear();
+    const legacyPublishRequest: RelayOperationPreviewRequest = {
+      operationId: "hub_relay_journaled_legacy_publish",
+      action: { kind: "relay.publish", draftId: RELAY_DRAFT_ID },
+      expectedRevisions: [
+        {
+          target: { kind: "local", namespace: "relay-draft", id: RELAY_DRAFT_ID },
+          revision: relayDraftDetail().revision,
+        },
+        {
+          target: { kind: "artifact", path: `.mex/team/members/${TEAM_MEMBER_ID}.md` },
+          revision: "b".repeat(64),
+        },
+        {
+          target: { kind: "artifact", path: `.mex/workstreams/${TEAM_WORKSTREAM_ID}.md` },
+          revision: "c".repeat(64),
+        },
+      ],
+    };
+    const legacyEnvelope = relayPreviewEnvelope(legacyPublishRequest);
+    const legacyEnvelopeBytes = JSON.stringify(legacyEnvelope);
+    const recoveredLegacyApply = await app.request(`${ORIGIN}/api/v1/relays/operations/apply`, {
+      method: "POST",
+      headers: mutationRequestHeaders,
+      body: legacyEnvelopeBytes,
+    });
+    expect(recoveredLegacyApply.status).toBe(200);
+    expect(JSON.stringify(applyRelayOperation.mock.calls[0]![0])).toBe(legacyEnvelopeBytes);
+    expect(await recoveredLegacyApply.json()).toMatchObject({
+      operationId: legacyPublishRequest.operationId,
+      applied: true,
     });
   });
 
@@ -1096,9 +1206,6 @@ describe("Project Hub HTTP application", () => {
       expectedRevisions: [{
         target: { kind: "local", namespace: "relay-draft", id: RELAY_DRAFT_ID },
         revision: relayDraftDetail().revision,
-      }, {
-        target: { kind: "artifact", path: `.mex/workstreams/${TEAM_WORKSTREAM_ID}.md` },
-        revision: "a".repeat(64),
       }, {
         target: { kind: "artifact", path: `.mex/team/members/${TEAM_MEMBER_ID}.md` },
         revision: "b".repeat(64),
@@ -1974,7 +2081,6 @@ function relayReadServices(): HubReadServices {
 function relayInput() {
   return {
     recipients: [{ kind: "member" as const, memberId: TEAM_MEMBER_ID, displayName: "Ada Lovelace" }],
-    workstream: { kind: "workstream" as const, id: TEAM_WORKSTREAM_ID, title: "Checkpoint D" },
     summary: "Carry the release evidence through the final gate.",
     completed: ["The deterministic fixture is stable."],
     inProgress: ["Review the final gate."],
@@ -2003,7 +2109,6 @@ function relayDraftDetail(): RelayDraftDetail {
     updatedAt: TEAM_NOW,
     summary: input.summary,
     recipients: input.recipients,
-    workstream: input.workstream,
     input,
   };
 }
@@ -2030,7 +2135,9 @@ function relayDetail(): RelayDetail {
     state: "published",
     sender: { kind: "member", memberId: TEAM_MEMBER_ID, displayName: "Ada Lovelace" },
     ...relayInput(),
+    workstream: { kind: "workstream", id: TEAM_WORKSTREAM_ID, title: "Checkpoint D" },
     publishedAt: null,
+    publishedRepoState: null,
     acknowledgedBy: null,
     acknowledgedAt: null,
     closedBy: null,

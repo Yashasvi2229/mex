@@ -543,6 +543,14 @@ describe("release benchmark contract", () => {
       ref: { id: "relay_fixed" },
       summary: "Published Relay fixture",
       state: "published",
+      schemaVersion: 3,
+      workstream: null,
+      publishedRepoState: {
+        branch: "benchmark",
+        head: null,
+        dirty: false,
+        observedAt: "2026-08-01T00:00:00.000Z",
+      },
     }), {
       kind: "relay",
       id: "relay_fixed",
@@ -552,11 +560,31 @@ describe("release benchmark contract", () => {
       ref: { id: "relay_fixed" },
       summary: "Published Relay fixture",
       state: "acknowledged",
+      schemaVersion: 3,
+      workstream: null,
+      publishedRepoState: {
+        branch: "benchmark",
+        head: null,
+        dirty: false,
+        observedAt: "2026-08-01T00:00:00.000Z",
+      },
     }), {
       kind: "relay",
       id: "relay_fixed",
       summary: "Published Relay fixture",
     })).toThrow(/not published/u);
+    expect(() => assertRelayFixturePage(page({
+      ref: { id: "relay_fixed" },
+      summary: "Published Relay fixture",
+      state: "published",
+      schemaVersion: 2,
+      workstream: { id: "ws_legacy", kind: "workstream" },
+      publishedRepoState: null,
+    }), {
+      kind: "relay",
+      id: "relay_fixed",
+      summary: "Published Relay fixture",
+    })).toThrow(/standalone schema-v3 publication/u);
     expect(() => assertRelayFixturePage({
       ...page({ id: "relay-draft-fixed", summary: "Local Relay fixture" }),
       diagnostics: [{ code: "RELAY_PUBLISHED_AT_MISSING" }],

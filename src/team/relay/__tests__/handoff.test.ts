@@ -3,7 +3,9 @@ import type { ActorRef, Diagnostic } from "../../contracts/shared.js";
 import { generateArtifactId } from "../../artifacts/ulid.js";
 import {
   aggregateRelayDiagnostics,
+  normalizeExistingRelayDraftMigrationCommand,
   normalizeRelayProductDraftInput,
+  normalizeStoredRelayProductDraftInput,
   normalizeTeamRelayCommand,
 } from "../handoff.js";
 
@@ -34,9 +36,15 @@ describe("Relay product normalization", () => {
     ]))).toThrow(/member IDs must be unique/);
   });
 
-  it("requires a canonical Workstream artifact ID structurally without lookup", () => {
+  it("translates only a canonical legacy Workstream reference without lookup", () => {
     const valid = input([member(7)]);
-    expect(normalizeRelayProductDraftInput(valid).workstream.id).toBe(WORKSTREAM);
+    expect(normalizeRelayProductDraftInput(valid)).toMatchObject({
+      evidence: [{
+        kind: "entity",
+        entity: { id: WORKSTREAM, kind: "workstream" },
+      }],
+    });
+    expect(normalizeRelayProductDraftInput(valid)).not.toHaveProperty("workstream");
 
     for (const id of [
       "ws_not-a-ulid",
@@ -46,8 +54,45 @@ describe("Relay product normalization", () => {
       expect(() => normalizeRelayProductDraftInput({
         ...valid,
         workstream: { ...valid.workstream, id },
-      }), id).toThrow(/canonical ws_ prefixed ULID/);
+      }), id).toThrow(/malformed or exceeds/);
     }
+  });
+
+  it("reserves translated evidence for exact-revision updates, never new caller drafts", () => {
+    const recipient = member(7);
+    const evidence = [
+      { kind: "entity" as const, entity: { id: WORKSTREAM, kind: "workstream" as const } },
+      ...Array.from({ length: 64 }, (_, index) => ({
+        kind: "manual" as const,
+        note: `Legacy evidence ${index}`,
+      })),
+    ];
+    const migrated = {
+      ...input([recipient]),
+      workstream: undefined,
+      evidence,
+    };
+    delete (migrated as { workstream?: unknown }).workstream;
+    expect(() => normalizeRelayProductDraftInput(migrated)).toThrow(/at most 64|limited to 64/);
+    expect(normalizeStoredRelayProductDraftInput(migrated).evidence).toEqual(evidence);
+    expect(() => normalizeTeamRelayCommand({
+      operationId: "relay_new_reserved_evidence",
+      action: { kind: "relay.draft.save", draft: migrated },
+      expectedRevisions: [],
+    })).toThrow(/at most 64|limited to 64/);
+
+    const existing = {
+      operationId: "relay_existing_reserved_evidence",
+      action: { kind: "relay.draft.save", draftId: "relay_migrated", draft: migrated },
+      expectedRevisions: [{
+        target: { kind: "local", namespace: "relay-draft", id: "relay_migrated" },
+        revision: REVISION,
+      }],
+    };
+    expect(() => normalizeTeamRelayCommand(existing)).toThrow(/at most 64|limited to 64/);
+    expect(normalizeExistingRelayDraftMigrationCommand(existing)).toMatchObject({
+      action: { draftId: "relay_migrated", draft: { evidence } },
+    });
   });
 
   it("rejects control and line-separator characters in Relay repository paths", () => {
@@ -146,23 +191,22 @@ describe("Relay product normalization", () => {
       memberExpectations[1]!,
       local,
       memberExpectations[0]!,
-      workstream,
     ];
     expect(() => normalizeTeamRelayCommand(
       publishCommand(draftId, valid),
     )).not.toThrow();
     expect(() => normalizeTeamRelayCommand(
-      publishCommand(draftId, [local, workstream, ...memberExpectations.slice(0, 32)]),
+      publishCommand(draftId, [local, ...memberExpectations.slice(0, 32)]),
     )).not.toThrow();
 
     const invalidTopologies: readonly (readonly unknown[])[] = [
-      valid.filter((expectation) => expectation !== workstream),
-      [local, workstream],
+      valid.filter((expectation) => expectation !== local),
+      [local],
       [...valid, workstream],
+      [...valid, local],
       [...valid, memberExpectations[0]!],
       [
         { ...local, target: { ...local.target, id: `${draftId}_other` } },
-        workstream,
         memberExpectations[0]!,
       ],
       [
@@ -170,15 +214,12 @@ describe("Relay product normalization", () => {
           ...local,
           target: { kind: "local", namespace: "cursor", id: draftId },
         },
-        workstream,
         memberExpectations[0]!,
       ],
-      [{ ...local, revision: null }, workstream, memberExpectations[0]!],
-      [local, { ...workstream, revision: null }, memberExpectations[0]!],
-      [local, workstream, { ...memberExpectations[0]!, revision: null }],
+      [{ ...local, revision: null }, memberExpectations[0]!],
+      [local, { ...memberExpectations[0]!, revision: null }],
       [
         local,
-        workstream,
         {
           target: { kind: "entity", id: "relay:unrelated" },
           revision: REVISION,
@@ -187,7 +228,6 @@ describe("Relay product normalization", () => {
       ],
       [
         local,
-        workstream,
         {
           target: {
             kind: "artifact",
@@ -198,7 +238,6 @@ describe("Relay product normalization", () => {
       ],
       [
         local,
-        workstream,
         {
           target: { kind: "artifact", path: ".mex/other/arbitrary.md" },
           revision: REVISION,
@@ -206,13 +245,12 @@ describe("Relay product normalization", () => {
       ],
       [
         local,
-        workstream,
         {
           ...memberExpectations[0]!,
           semanticRevision: 1,
         },
       ],
-      [local, workstream, ...memberExpectations],
+      [local, ...memberExpectations],
     ];
     for (const expectedRevisions of invalidTopologies) {
       expect(() => normalizeTeamRelayCommand(

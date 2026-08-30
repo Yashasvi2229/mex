@@ -121,15 +121,17 @@ Then read this file fully before doing anything else in this session.
   are calibrated from the retained schema-valid report; a clean enforcing CI
   run remains a mandatory merge gate and cannot widen earlier thresholds.
 - Checkpoints F1-F4 implement repository-native Relay handoffs: authority-free
-  checkout-local drafts, exact active-Member and Workstream publication,
-  first-recipient claim, sender-or-claimant close, schema-v1/v2 reads, and
-  Relay-specific signed portable preview/apply. The guarded CLI and static
-  resolver, private Hub API, lazy Relay workbench, deterministic two-Member
-  fixture, and owned release measurements are active. Pinned Ubuntu Relay
-  route, two Relay list API, and Relay heap candidates are calibrated from the
-  retained schema-valid report; Home, Members, and every shared budget remain
-  frozen. A separate clean enforcing run on the final exact head remains
-  mandatory.
+  checkout-local drafts, standalone active-Member publication,
+  first-recipient claim, sender-or-claimant close, strict schema-v1/v2/v3 reads,
+  and Relay-specific signed portable preview/apply. New schema-v3 Relays omit
+  Workstream and preserve the publication-time branch, HEAD, dirty flag, and
+  observation time from signed authority; v1/v2 remain byte-preserving legacy
+  formats. The guarded CLI and static resolver, private Hub API, lazy Relay
+  workbench, deterministic two-Member fixture, and owned release measurements
+  are active. Pinned Ubuntu Relay route, two Relay list API, and Relay heap
+  candidates are calibrated from the retained schema-valid report; Home,
+  Members, and every shared budget remain frozen. A separate clean enforcing
+  run on the final exact head remains mandatory.
 
 **Not Built:**
 - Wiki migration and synthesis UI, grounding-drift/review workbenches, product

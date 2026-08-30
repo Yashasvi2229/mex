@@ -300,6 +300,7 @@ describe("HttpHubApi shared-contract boundary", () => {
       limit: 25,
     });
     const relay = await fixture.getRelay(relays.items[0]!.ref.id);
+    const legacyWorkstreamId = "ws_01K37WVM6H7JK8M9NPQRSTVVW0";
     const request: RelayOperationPreviewRequest = {
       operationId: "hub_relay_client_exact_envelope",
       action: { kind: "relay.draft.save", draft: draft.input },
@@ -324,7 +325,7 @@ describe("HttpHubApi shared-contract boundary", () => {
     await api.getRelays({
       perspective: "mine",
       states: ["published", "acknowledged"],
-      workstreamId: relay.workstream.id,
+      workstreamId: legacyWorkstreamId,
       cursor: "relay-page-2",
       limit: 25,
     });
@@ -343,7 +344,7 @@ describe("HttpHubApi shared-contract boundary", () => {
       perspective: "mine",
       limit: "25",
       state: "published,acknowledged",
-      workstreamId: relay.workstream.id,
+      workstreamId: legacyWorkstreamId,
       cursor: "relay-page-2",
     });
     expect(new URL(calls[4]![0], "http://127.0.0.1").pathname).toBe(`/api/v1/relays/${relay.ref.id}`);

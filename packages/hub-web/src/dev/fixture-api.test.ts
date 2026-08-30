@@ -17,6 +17,8 @@ import {
   RelayDraftDetailSchema,
   RelayDraftListResponseSchema,
   RelayListResponseSchema,
+  RelayOperationApplyResponseSchema,
+  RelayOperationPreviewResponseSchema,
   SearchResponseSchema,
   SessionResponseSchema,
   SpecDetailResponseSchema,
@@ -201,6 +203,17 @@ describe("development-only populated fixture", () => {
       [...teamOpen.items, ...sentClosed.items].map((relay) => api.getRelay(relay.ref.id)),
     );
     expect(details.every((relay) => RelayDetailSchema.safeParse(relay).success)).toBe(true);
+    expect(details.every((relay) => (
+      relay.schemaVersion === 3
+      && relay.workstream === null
+      && relay.publishedRepoState !== null
+    ))).toBe(true);
+    expect(details.map((relay) => relay.publishedRepoState)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ branch: "codex/hub-ux", dirty: false }),
+      expect.objectContaining({ branch: "feature/relay-accessibility", dirty: true }),
+      expect.objectContaining({ branch: null, head: expect.any(String) }),
+      expect.objectContaining({ branch: "feature/unborn-relay", head: null }),
+    ]));
     expect(details.find((relay) => (
       relay.state === "acknowledged"
       && relay.acknowledgedBy?.kind === "member"
@@ -209,10 +222,16 @@ describe("development-only populated fixture", () => {
       .toMatchObject({ summary: "Finish the keyboard and screen-reader pass for the Hub review surfaces." });
 
     expect(RelayDraftListResponseSchema.safeParse(drafts).success).toBe(true);
-    expect(drafts.items).toHaveLength(1);
-    expect(Object.hasOwn(drafts.items[0]!, "input")).toBe(false);
-    const draft = await api.getRelayDraft(drafts.items[0]!.id);
+    expect(drafts.items).toHaveLength(2);
+    expect(drafts.items.every((draft) => !Object.hasOwn(draft, "input"))).toBe(true);
+    const richSummary = drafts.items.find((draft) => (
+      draft.summary === "Carry the release evidence through the final cross-platform gate."
+    ));
+    if (richSummary === undefined) throw new Error("Expected the translated legacy Relay draft fixture.");
+    const draft = await api.getRelayDraft(richSummary.id);
     expect(RelayDraftDetailSchema.safeParse(draft).success).toBe(true);
+    expect(draft).not.toHaveProperty("workstream");
+    expect(draft.input).not.toHaveProperty("workstream");
     expect(draft.input).toMatchObject({
       completed: ["The deterministic benchmark fixture is stable."],
       inProgress: ["Collect the final pinned runner evidence."],
@@ -224,12 +243,83 @@ describe("development-only populated fixture", () => {
     expect(draft.input.code.map((item) => item.kind)).toEqual(["symbol", "file"]);
     expect(draft.input.evidence.map((item) => item.kind)).toEqual([
       "entity",
+      "entity",
       "code",
       "file",
       "commit",
       "external",
       "manual",
     ]);
+    expect(draft.input.evidence[0]).toMatchObject({
+      kind: "entity",
+      entity: { kind: "workstream", id: "ws_01K37WVM6H7JK8M9NPQRSTVVW0" },
+    });
+
+    const sparseSummary = drafts.items.find((item) => item.id === "relay-draft-02");
+    if (sparseSummary === undefined) throw new Error("Expected the sparse standalone Relay draft fixture.");
+    const sparse = await api.getRelayDraft(sparseSummary.id);
+    expect(RelayDraftDetailSchema.safeParse(sparse).success).toBe(true);
+    expect(sparse.input).toEqual({
+      recipients: sparse.recipients,
+      summary: sparse.summary,
+      completed: [],
+      inProgress: [],
+      decisions: [],
+      blockers: [],
+      unresolvedQuestions: [],
+      changedFiles: [],
+      code: [],
+      evidence: [],
+      nextActions: [],
+    });
+  });
+
+  it("publishes a standalone schema-v3 Relay with exact repository provenance", async () => {
+    const api = createFixtureApi();
+    const draft = await api.getRelayDraft("relay-draft-01");
+    const recipient = draft.recipients[0];
+    if (recipient?.kind !== "member") throw new Error("Expected the Relay fixture recipient to be a Member.");
+    const member = await api.getMember(recipient.memberId);
+    const preview = await api.previewRelayOperation({
+      operationId: "fixture_standalone_relay_publish",
+      action: { kind: "relay.publish", draftId: draft.id },
+      expectedRevisions: [
+        {
+          target: { kind: "local", namespace: "relay-draft", id: draft.id },
+          revision: draft.revision,
+        },
+        {
+          target: { kind: "artifact", path: member.sourcePath },
+          revision: member.revision,
+        },
+      ],
+    });
+    expect(RelayOperationPreviewResponseSchema.safeParse(preview).success).toBe(true);
+    expect(preview.receipt.authority.repoState.dirty).toBe(true);
+    expect(preview.preview.diagnostics).toEqual([{
+      code: "RELAY_DIRTY_PUBLICATION_STATE",
+      severity: "warning",
+      message: "MEX recorded that local changes existed when this Relay was published; it did not record their paths, diff, or contents.",
+    }]);
+
+    const applied = await api.applyRelayOperation(preview);
+    expect(RelayOperationApplyResponseSchema.safeParse(applied).success).toBe(true);
+    expect(applied.relays).toHaveLength(1);
+    expect(applied.relays[0]).toMatchObject({
+      schemaVersion: 3,
+      workstream: null,
+      publishedAt: preview.receipt.authority.occurredAt,
+      publishedRepoState: preview.receipt.authority.repoState,
+      evidence: draft.input.evidence,
+    });
+    expect(applied.events).toEqual([
+      expect.objectContaining({
+        action: "relay.published",
+        workstream: null,
+        repoState: preview.receipt.authority.repoState,
+      }),
+    ]);
+    await expect(api.getRelayDraft(draft.id)).rejects.toThrow("Fixture Relay draft not found.");
   });
 
   it("models the complete Inbox review desk in stable server order", async () => {
@@ -649,7 +739,7 @@ describe("development-only populated fixture", () => {
       reason: "Select an active Member to see your open Relay handoffs.",
     });
     expect(team.items).toHaveLength(4);
-    expect(drafts.items).toHaveLength(1);
+    expect(drafts.items).toHaveLength(2);
     await expect(api.getRelays({
       perspective: "mine",
       states: ["published", "acknowledged"],
@@ -680,11 +770,11 @@ describe("development-only populated fixture", () => {
       },
     });
     expect(homeResult.sections.relays).toEqual({ availability: "available", count: 2 });
-    expect(drafts.items).toHaveLength(1);
+    expect(drafts.items).toHaveLength(2);
     expect(relays.items).toHaveLength(2);
   });
 
-  it("isolates a schema-v1 Relay and its canonical legacy warning", async () => {
+  it("isolates schema-v1/v2 Relays with their recorded Workstreams and v1 warning", async () => {
     const api = createFixtureApi({ relayFixture: "legacy" });
     const page = await api.getRelays({
       perspective: "mine",
@@ -694,6 +784,7 @@ describe("development-only populated fixture", () => {
 
     expect(RelayListResponseSchema.safeParse(page).success).toBe(true);
     expect(page.items.map((relay) => relay.ref.id)).toEqual([
+      "relay_01000000000000000000000007",
       "relay_01000000000000000000000006",
     ]);
     expect(page.diagnostics).toEqual([{
@@ -701,13 +792,24 @@ describe("development-only populated fixture", () => {
       severity: "warning",
       message: "One or more legacy schema-v1 Relays have no canonical publication timestamp.",
     }]);
-    const detail = await api.getRelay(page.items[0]!.ref.id);
-    expect(RelayDetailSchema.safeParse(detail).success).toBe(true);
-    expect(detail).toMatchObject({
+    const details = await Promise.all(page.items.map((relay) => api.getRelay(relay.ref.id)));
+    expect(details.every((detail) => RelayDetailSchema.safeParse(detail).success)).toBe(true);
+    expect(details[0]).toMatchObject({
+      schemaVersion: 2,
+      workstream: {
+        kind: "workstream",
+        id: "ws_01K37WVM6H7JK8M9NPQRSTVVW0",
+      },
+      publishedAt: expect.any(String),
+      publishedRepoState: null,
+      diagnostics: [],
+    });
+    expect(details[1]).toMatchObject({
       schemaVersion: 1,
       state: "published",
       sender: { kind: "git", name: "Grace", email: "grace@example.test" },
       publishedAt: null,
+      publishedRepoState: null,
       diagnostics: page.diagnostics,
     });
   });

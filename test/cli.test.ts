@@ -359,7 +359,8 @@ describe("built CLI main-module guard", () => {
       );
       expect(resolved.status, resolved.stderr).toBe(0);
       expect(Buffer.byteLength(resolved.stdout, "utf8")).toBeLessThanOrEqual(65_536);
-      expect(JSON.parse(resolved.stdout)).toMatchObject({
+      const catalogEnvelope = JSON.parse(resolved.stdout) as any;
+      expect(catalogEnvelope).toMatchObject({
         schemaVersion: 1,
         command: "inbox.contract",
         mode: "read",
@@ -421,7 +422,8 @@ describe("built CLI main-module guard", () => {
       );
       expect(resolved.status, resolved.stderr).toBe(0);
       expect(Buffer.byteLength(resolved.stdout, "utf8")).toBeLessThanOrEqual(65_536);
-      expect(JSON.parse(resolved.stdout)).toMatchObject({
+      const catalogEnvelope = JSON.parse(resolved.stdout);
+      expect(catalogEnvelope).toMatchObject({
         schemaVersion: 1,
         command: "relay.contract",
         mode: "read",
@@ -437,6 +439,14 @@ describe("built CLI main-module guard", () => {
           },
         },
       });
+      const examples = catalogEnvelope.data.requestFile.examples as any[];
+      expect(Object.keys(examples[0].request.action.draft).sort())
+        .toEqual(["recipients", "summary"]);
+      const evidence = examples.flatMap((example) => example.request.action?.draft?.evidence ?? []);
+      expect(evidence).toEqual(expect.arrayContaining([
+        expect.objectContaining({ kind: "commit" }),
+        expect.objectContaining({ kind: "external" }),
+      ]));
       expect(snapshotProcessTree(project)).toEqual(beforeProject);
       expect(snapshotProcessTree(userHome)).toEqual(beforeHome);
 
@@ -504,7 +514,7 @@ describe("built CLI main-module guard", () => {
     }
   });
 
-  it("round-trips local Relay previews with bounded Git identity and WHATWG evidence", () => {
+  it("round-trips sparse standalone Relay previews with bounded Git identity and WHATWG evidence", () => {
     const fixture = mkdtempSync(join(tmpdir(), "mex-relay-local-cli-"));
     const userHome = mkdtempSync(join(tmpdir(), "mex-relay-local-home-"));
     const requestRoot = mkdtempSync(join(tmpdir(), "mex-relay-local-request-"));
@@ -544,20 +554,8 @@ describe("built CLI main-module guard", () => {
               kind: "member",
               memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV",
             }],
-            workstream: {
-              id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-              kind: "workstream",
-            },
             summary: "Preserve the local Relay authority contract.",
-            completed: [],
-            inProgress: [],
-            decisions: [],
-            blockers: [],
-            unresolvedQuestions: [],
-            changedFiles: [],
-            code: [],
             evidence: externalUris.map((uri) => ({ kind: "external", uri })),
-            nextActions: [],
           },
         },
         expectedRevisions: [],
@@ -577,7 +575,15 @@ describe("built CLI main-module guard", () => {
           request: {
             action: {
               draft: {
+                completed: [],
+                inProgress: [],
+                decisions: [],
+                blockers: [],
+                unresolvedQuestions: [],
+                changedFiles: [],
+                code: [],
                 evidence: externalUris.map((uri) => ({ kind: "external", uri })),
+                nextActions: [],
               },
             },
           },
@@ -592,6 +598,7 @@ describe("built CLI main-module guard", () => {
           },
         },
       });
+      expect(envelope.data.request.action.draft).not.toHaveProperty("workstream");
 
       const previewPath = join(requestRoot, "preview.json");
       writeFileSync(previewPath, preview.stdout);
@@ -601,12 +608,92 @@ describe("built CLI main-module guard", () => {
         { cwd: fixture, encoding: "utf8", env: environment },
       );
       expect(applied.status, applied.stderr).toBe(0);
-      expect(JSON.parse(applied.stdout)).toMatchObject({
+      const appliedEnvelope = JSON.parse(applied.stdout) as any;
+      expect(appliedEnvelope).toMatchObject({
         command: "relay.draft.save",
         mode: "apply",
         ok: true,
         data: { applied: true },
       });
+      const createdDraftId = appliedEnvelope.data.localChanges[0]?.id;
+      expect(typeof createdDraftId).toBe("string");
+      const shown = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "draft", "show", createdDraftId, "--json"],
+        { cwd: fixture, encoding: "utf8", env: environment },
+      );
+      expect(shown.status, shown.stderr).toBe(0);
+      expect(JSON.parse(shown.stdout)).toMatchObject({
+        command: "relay.draft.show",
+        mode: "read",
+        ok: true,
+        data: {
+          id: createdDraftId,
+          input: {
+            recipients: [{ memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV" }],
+            summary: "Preserve the local Relay authority contract.",
+            completed: [],
+            inProgress: [],
+            decisions: [],
+            blockers: [],
+            unresolvedQuestions: [],
+            changedFiles: [],
+            code: [],
+            evidence: externalUris.map((uri) => ({ kind: "external", uri })),
+            nextActions: [],
+          },
+        },
+      });
+      expect(JSON.parse(shown.stdout).data.input).not.toHaveProperty("workstream");
+
+      const legacyRequestPath = join(requestRoot, "legacy-save.json");
+      writeFileSync(legacyRequestPath, JSON.stringify({
+        operationId: "relay-legacy-local-process-001",
+        action: {
+          kind: "relay.draft.save",
+          draft: {
+            recipients: [{
+              kind: "member",
+              memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            }],
+            workstream: {
+              id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+              kind: "workstream",
+              title: "Legacy Relay lane",
+            },
+            summary: "Translate the pre-change local Relay request.",
+            completed: [],
+            inProgress: [],
+            decisions: [],
+            blockers: [],
+            unresolvedQuestions: [],
+            changedFiles: [],
+            code: [],
+            evidence: [{ kind: "manual", note: "Preserve this context" }],
+            nextActions: [],
+          },
+        },
+        expectedRevisions: [],
+      }));
+      const translated = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "draft", "save", legacyRequestPath, "--json"],
+        { cwd: fixture, encoding: "utf8", env: environment },
+      );
+      expect(translated.status, translated.stderr).toBe(0);
+      const translatedDraft = JSON.parse(translated.stdout).data.request.action.draft;
+      expect(translatedDraft).not.toHaveProperty("workstream");
+      expect(translatedDraft.evidence).toEqual([
+        {
+          kind: "entity",
+          entity: {
+            id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            kind: "workstream",
+            title: "Legacy Relay lane",
+          },
+        },
+        { kind: "manual", note: "Preserve this context" },
+      ]);
     } finally {
       rmSync(fixture, { recursive: true, force: true });
       rmSync(userHome, { recursive: true, force: true });
@@ -640,16 +727,12 @@ describe("built CLI main-module guard", () => {
               kind: "member" as const,
               memberId: "member_01ARZ3NDEKTSV4RRFFQ69G5FAV",
             }],
-            workstream: {
-              id: "ws_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-              kind: "workstream" as const,
-            },
             summary: "s".repeat(8_192),
             completed: Array.from({ length: 12 }, (_, index) =>
               `${String(index).padStart(2, "0")}:${"c".repeat(4_093)}`),
             inProgress: [`p${"x".repeat(4_095)}`],
             decisions: [],
-            blockers: [`b${"y".repeat(2_559)}`],
+            blockers: [`b${"y".repeat(2_687)}`],
             unresolvedQuestions: [],
             changedFiles: [],
             code: [],

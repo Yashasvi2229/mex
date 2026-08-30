@@ -13,7 +13,6 @@ import type {
   RelayOperationPreviewRequest,
   RelayOperationPreviewResponse,
   RelaySummary,
-  TeamWorkstreamListResponse,
 } from "../api/types";
 import { createFixtureApi } from "../dev/fixture-api";
 import { AppRoutes } from "./App";
@@ -464,7 +463,6 @@ describe("Relay handoff workbench", () => {
               updatedAt: draft.updatedAt,
               summary: draft.summary,
               recipients: draft.recipients,
-              workstream: draft.workstream,
             }],
           }
         : emptyRelayDraftPage()
@@ -778,6 +776,147 @@ describe("Relay handoff workbench", () => {
     expect(screen.queryByRole("heading", { name: "Finish the keyboard and screen-reader pass for the Hub review surfaces." })).not.toBeInTheDocument();
   });
 
+  it.each([
+    {
+      repository: "clean branch",
+      state: {
+        branch: "feature/standalone-relay",
+        head: "abcdef0123456789abcdef0123456789abcdef01",
+        dirty: false,
+        observedAt: "2026-08-24T10:11:12.000Z",
+      },
+      branchLabel: "feature/standalone-relay",
+      headLabel: /abcdef01/,
+      treeLabel: "Clean",
+    },
+    {
+      repository: "dirty branch",
+      state: {
+        branch: "feature/relay-with-local-work",
+        head: "1234567890abcdef1234567890abcdef12345678",
+        dirty: true,
+        observedAt: "2026-08-24T11:12:13.000Z",
+      },
+      branchLabel: "feature/relay-with-local-work",
+      headLabel: /12345678/,
+      treeLabel: "Local changes present",
+    },
+    {
+      repository: "detached HEAD",
+      state: {
+        branch: null,
+        head: "234567890abcdef1234567890abcdef123456789",
+        dirty: false,
+        observedAt: "2026-08-24T12:13:14.000Z",
+      },
+      branchLabel: "Detached HEAD",
+      headLabel: /23456789/,
+      treeLabel: "Clean",
+    },
+    {
+      repository: "unborn branch",
+      state: {
+        branch: "feature/first-commit",
+        head: null,
+        dirty: false,
+        observedAt: "2026-08-24T13:14:15.000Z",
+      },
+      branchLabel: "feature/first-commit",
+      headLabel: /No committed HEAD recorded/i,
+      treeLabel: "Clean",
+    },
+  ] as const)("presents a standalone handoff's $repository publication state honestly", async ({ state, branchLabel, headLabel, treeLabel }) => {
+    const api = createFixtureApi();
+    const base = await api.getRelay(RELAY_ID);
+    const relay: RelayDetail = {
+      ...base,
+      schemaVersion: 3,
+      workstream: null,
+      publishedRepoState: state,
+    };
+    mockSingleRelay(api, relay);
+    renderRoute(api, `/relays?view=mine&state=open&relay=${RELAY_ID}`);
+
+    expect(await screen.findByText("Team handoff")).toBeVisible();
+    const detail = screen.getByRole("region", { name: "Selected handoff detail" });
+    expect(within(detail).getByRole("heading", { name: "Repository when published" })).toBeVisible();
+    expect(within(detail).getByText(branchLabel, { exact: true })).toBeVisible();
+    expect(within(detail).getByText(headLabel)).toBeVisible();
+    expect(within(detail).getByText(treeLabel, { exact: true })).toBeVisible();
+    expect(within(detail).getByText("Observed", { exact: true })).toBeVisible();
+    expect(detail).not.toHaveTextContent("Recorded Workstream");
+    expect(detail).not.toHaveTextContent(WORKSTREAM_ID);
+
+    if (state.dirty) {
+      expect(within(detail).getByText("MEX recorded that local changes existed when this handoff was published. Their contents were not captured by the Relay.")).toBeVisible();
+    } else {
+      expect(within(detail).queryByText(/Their contents were not captured by the Relay/i)).not.toBeInTheDocument();
+    }
+  });
+
+  it("keeps full publication repository values collapsed under Technical details", async () => {
+    const api = createFixtureApi();
+    const base = await api.getRelay(RELAY_ID);
+    const head = "abcdef0123456789abcdef0123456789abcdef01";
+    const observedAt = "2026-08-24T10:11:12.000Z";
+    const relay: RelayDetail = {
+      ...base,
+      schemaVersion: 3,
+      workstream: null,
+      publishedRepoState: {
+        branch: "feature/standalone-relay",
+        head,
+        dirty: true,
+        observedAt,
+      },
+    };
+    mockSingleRelay(api, relay);
+    renderRoute(api, `/relays?view=mine&state=open&relay=${RELAY_ID}`);
+
+    await screen.findByRole("heading", { name: relay.summary });
+    const detail = screen.getByRole("region", { name: "Selected handoff detail" });
+    expect(detail).not.toHaveTextContent(head);
+    const technical = within(detail).getByRole("button", { name: "Technical details" });
+    expect(technical).toHaveAttribute("aria-expanded", "false");
+    await userEvent.setup().click(technical);
+    expect(within(detail).getByText(head, { exact: true })).toBeVisible();
+    expect(within(detail).getAllByText("feature/standalone-relay", { exact: true }).length).toBeGreaterThan(1);
+    expect(within(detail).getByText("true", { exact: true })).toBeVisible();
+    expect(within(detail).getByText(observedAt, { exact: true })).toBeVisible();
+  });
+
+  it.each([1, 2] as const)("shows a schema-v%s Workstream only as legacy related context", async (schemaVersion) => {
+    const api = createFixtureApi();
+    const base = await api.getRelay(RELAY_ID);
+    const relay: RelayDetail = {
+      ...base,
+      schemaVersion,
+      workstream: { kind: "workstream", id: WORKSTREAM_ID, title: "Historical release stream" },
+      publishedAt: schemaVersion === 1 ? null : base.publishedAt,
+      publishedRepoState: null,
+      diagnostics: schemaVersion === 1
+        ? [{ code: "RELAY_LEGACY_PUBLICATION_TIME", severity: "warning", message: LEGACY_WARNING }]
+        : [],
+    };
+    mockSingleRelay(api, relay);
+    renderRoute(api, `/relays?view=mine&state=open&relay=${RELAY_ID}`);
+
+    await screen.findByRole("heading", { name: relay.summary });
+    const detail = screen.getByRole("region", { name: "Selected handoff detail" });
+    expect(within(detail).queryByRole("heading", { name: "Repository when published" })).not.toBeInTheDocument();
+    expect(within(detail).queryByText("Historical release stream", { exact: true })).not.toBeInTheDocument();
+
+    const context = within(detail).getByRole("button", { name: "Related context" });
+    await userEvent.setup().click(context);
+    expect(within(detail).getByText("Historical release stream", { exact: true })).toBeVisible();
+    expect(within(detail).getByRole("heading", { name: "Legacy Workstream" })).toBeVisible();
+
+    const technical = within(detail).getByRole("button", { name: "Technical details" });
+    await userEvent.setup().click(technical);
+    expect(within(detail).getByText(WORKSTREAM_ID, { exact: true })).toBeVisible();
+    expect(within(detail).getByText(/older Relay format.*did not record repository state at publication/i)).toBeVisible();
+  });
+
   it("presents handoff content in human order, hides empty sections, and safely links related context", async () => {
     const api = createFixtureApi();
     const base = await api.getRelay(RELAY_ID);
@@ -807,6 +946,7 @@ describe("Relay handoff workbench", () => {
     renderRoute(api, `/relays?view=mine&state=open&relay=${RELAY_ID}`);
 
     const summary = await screen.findByRole("heading", { name: relay.summary });
+    expect(screen.getByText("Team handoff")).toBeVisible();
     const next = screen.getByRole("heading", { name: "What to do next" });
     const standing = screen.getByRole("heading", { name: "Where things stand" });
     const blockers = screen.getByRole("heading", { name: "Blockers" });
@@ -830,6 +970,8 @@ describe("Relay handoff workbench", () => {
     expect(detail).not.toHaveTextContent("symbol-fingerprint-v1");
 
     await userEvent.setup().click(context);
+    expect(screen.getByRole("heading", { name: "Files involved" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "Changed files" })).not.toBeInTheDocument();
     expect(document.querySelector(`a[href="/knowledge/${KNOWLEDGE_ID}"]`)).toBeVisible();
     expect(document.querySelector('a[href="/code/symbols/sym.createHubServer"]')).toBeVisible();
     const external = screen.getByRole("link", { name: "Release run" });
@@ -926,32 +1068,32 @@ describe("Relay handoff workbench", () => {
     expect(within(composer).getByRole("button", { name: "Add decision" })).toBeVisible();
     expect(within(composer).getByRole("button", { name: "Add code reference" })).toBeVisible();
     expect(within(composer).getByRole("button", { name: "Add evidence" })).toBeVisible();
+    expect(within(composer).getByText("Files involved")).toBeVisible();
 
     await user.click(advanced);
     expect(advanced).toHaveAttribute("aria-expanded", "true");
     expect(within(composer).getByText(DRAFT_ID)).toBeVisible();
+    expect(within(composer).queryByRole("combobox", { name: "Workstream" })).not.toBeInTheDocument();
+    expect(within(composer).queryByRole("textbox", { name: "Workstream ID" })).not.toBeInTheDocument();
+    expect(within(composer).queryByRole("textbox", { name: "Workstream title" })).not.toBeInTheDocument();
   });
 
-  it("reconciles an untouched existing draft to its canonical Workstream after options load", async () => {
+  it("never fetches or selects a Workstream while reading and editing a standalone draft", async () => {
     const api = createFixtureApi();
-    const workstreamPage = await api.getWorkstreams({ includeArchived: false, limit: 100 });
-    const delayedWorkstreams = deferred<TeamWorkstreamListResponse>();
-    vi.spyOn(api, "getWorkstreams").mockReturnValue(delayedWorkstreams.promise);
+    const workstreams = vi.spyOn(api, "getWorkstreams");
+    const workstream = vi.spyOn(api, "getWorkstream");
     const preview = vi.spyOn(api, "previewRelayOperation");
     const user = userEvent.setup();
     renderRoute(api, `/relays?view=drafts&draft=${DRAFT_ID}`);
 
     await user.click(await screen.findByRole("button", { name: "Edit wording" }));
     const composer = await screen.findByRole("dialog", { name: "Edit handoff draft" });
-    const workstream = within(composer).getByRole("combobox", { name: "Workstream" });
-    expect(workstream).toHaveValue("__manual__");
-    await act(async () => {
-      delayedWorkstreams.resolve(workstreamPage);
-      await delayedWorkstreams.promise;
-    });
-
-    await waitFor(() => expect(workstream).toHaveValue(WORKSTREAM_ID));
-    expect(within(composer).getByText("Publication checks that this Workstream is still eligible.")).toBeVisible();
+    expect(within(composer).getByRole("combobox", { name: "Eligible recipients" })).toBeVisible();
+    expect(within(composer).getByRole("textbox", { name: "Summary" })).toBeVisible();
+    expect(within(composer).queryByRole("combobox", { name: "Workstream" })).not.toBeInTheDocument();
+    expect(within(composer).queryByText(/Workstream.*(?:required|eligible|offline)/i)).not.toBeInTheDocument();
+    expect(workstreams).not.toHaveBeenCalled();
+    expect(workstream).not.toHaveBeenCalled();
     expect(preview).not.toHaveBeenCalled();
   });
 
@@ -1251,18 +1393,11 @@ describe("Relay handoff workbench", () => {
     expect(apply).not.toHaveBeenCalled();
   });
 
-  it("keeps local composition available with no eligible Workstream lookup", async () => {
+  it("saves a standalone sparse draft without any Workstream query or payload field", async () => {
     const user = userEvent.setup();
     const api = createFixtureApi();
-    vi.spyOn(api, "getWorkstreams").mockResolvedValue({
-      items: [],
-      nextCursor: null,
-      truncated: false,
-      sourceTruncated: false,
-      deterministicRevision: "2".repeat(64),
-      diagnostics: [],
-      diagnosticsTruncated: false,
-    } satisfies TeamWorkstreamListResponse);
+    const workstreams = vi.spyOn(api, "getWorkstreams");
+    const workstream = vi.spyOn(api, "getWorkstream");
     const preview = vi.spyOn(api, "previewRelayOperation");
     const apply = vi.spyOn(api, "applyRelayOperation");
     renderRoute(api, "/relays?view=drafts");
@@ -1273,21 +1408,32 @@ describe("Relay handoff workbench", () => {
     const composer = await screen.findByRole("dialog", { name: "Create handoff draft" });
     const recipients = within(composer).getByRole("combobox", { name: "Eligible recipients" });
     await user.type(recipients, "Grace");
-    expect(await screen.findByRole("option", { name: "Grace Hopper" })).toBeVisible();
-    await user.keyboard("{ArrowDown}{Enter}");
-    await user.click(within(composer).getByRole("button", { name: "Advanced" }));
-    fireEvent.change(within(composer).getByRole("textbox", { name: "Workstream ID" }), { target: { value: WORKSTREAM_ID } });
-    fireEvent.change(within(composer).getByRole("textbox", { name: "Workstream title" }), { target: { value: "Offline Relay" } });
-    fireEvent.change(within(composer).getByRole("textbox", { name: "Summary" }), { target: { value: "Local draft without repository Workstream lookup." } });
+    await user.click(await screen.findByRole("option", { name: "Grace Hopper" }));
+    fireEvent.change(within(composer).getByRole("textbox", { name: "Summary" }), { target: { value: "Standalone local handoff for a teammate." } });
     await user.click(within(composer).getByRole("button", { name: "Save draft" }));
     await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
-    expect(preview).toHaveBeenCalledWith(expect.objectContaining({
-      action: expect.objectContaining({
-        kind: "relay.draft.save",
-        draft: expect.objectContaining({ workstream: { kind: "workstream", id: WORKSTREAM_ID, title: "Offline Relay" } }),
-      }),
-      expectedRevisions: [],
-    }));
+    expect(workstreams).not.toHaveBeenCalled();
+    expect(workstream).not.toHaveBeenCalled();
+    const request = preview.mock.calls[0]![0];
+    expect(request.expectedRevisions).toEqual([]);
+    expect(request.action).toEqual({
+      kind: "relay.draft.save",
+      draft: {
+        recipients: [{ kind: "member", memberId: GRACE_ID, displayName: "Grace Hopper" }],
+        summary: "Standalone local handoff for a teammate.",
+        completed: [],
+        inProgress: [],
+        decisions: [],
+        blockers: [],
+        unresolvedQuestions: [],
+        changedFiles: [],
+        code: [],
+        evidence: [],
+        nextActions: [],
+      },
+    });
+    if (request.action.kind !== "relay.draft.save") throw new Error("Expected a standalone draft save request.");
+    expect("workstream" in request.action.draft).toBe(false);
     expect(apply.mock.calls[0]![0]).toBe(await preview.mock.results[0]!.value);
   });
 
@@ -1309,14 +1455,10 @@ describe("Relay handoff workbench", () => {
 
     await user.click(await screen.findByRole("button", { name: "Create manually" }));
     const composer = await screen.findByRole("dialog", { name: "Create handoff draft" });
-    await waitFor(() => expect(within(composer).getByRole("combobox", { name: "Workstream" })).toHaveValue(WORKSTREAM_ID));
-    fireEvent.change(within(composer).getByRole("combobox", { name: "Workstream" }), { target: { value: "__manual__" } });
     await user.click(within(composer).getByRole("button", { name: "Advanced" }));
     await user.type(within(composer).getByRole("textbox", { name: "Recipient Member ID" }), GRACE_ID);
     await user.click(within(composer).getByRole("button", { name: "Add recipient ID" }));
     expect(within(composer).getByText(GRACE_ID)).toBeVisible();
-    fireEvent.change(within(composer).getByRole("textbox", { name: "Workstream ID" }), { target: { value: WORKSTREAM_ID } });
-    fireEvent.change(within(composer).getByRole("textbox", { name: "Workstream title" }), { target: { value: "Offline Relay" } });
     fireEvent.change(within(composer).getByRole("textbox", { name: "Summary" }), { target: { value: "A local handoff prepared without a Member list." } });
     await user.click(within(composer).getByRole("button", { name: "Save draft" }));
 
@@ -1332,13 +1474,13 @@ describe("Relay handoff workbench", () => {
     expect(apply.mock.calls[0]![0]).toBe(await preview.mock.results[0]!.value);
   });
 
-  it("publishes across an explicit privacy boundary with exact dependencies, then opens the new Sent handoff", async () => {
+  it("publishes across an explicit privacy boundary with only draft and recipient dependencies, then opens the new Sent handoff", async () => {
     const user = userEvent.setup();
     const api = createFixtureApi();
     const exactMember = api.getMember.bind(api);
-    const exactWorkstream = api.getWorkstream.bind(api);
     const member = vi.spyOn(api, "getMember").mockImplementation(exactMember);
-    const workstream = vi.spyOn(api, "getWorkstream").mockImplementation(exactWorkstream);
+    const workstreams = vi.spyOn(api, "getWorkstreams");
+    const workstream = vi.spyOn(api, "getWorkstream");
     const preview = vi.spyOn(api, "previewRelayOperation");
     const apply = vi.spyOn(api, "applyRelayOperation");
     const relayList = vi.spyOn(api, "getRelays");
@@ -1347,28 +1489,38 @@ describe("Relay handoff workbench", () => {
     const publish = await screen.findByRole("button", { name: "Publish handoff" });
     await waitFor(() => expect(publish).toBeEnabled());
     expect(member).not.toHaveBeenCalled();
+    expect(workstreams).not.toHaveBeenCalled();
     expect(workstream).not.toHaveBeenCalled();
     expect(preview).not.toHaveBeenCalled();
     await user.click(publish);
     const dialog = await screen.findByRole("alertdialog", { name: "Publish this handoff?" });
     expect(member).toHaveBeenCalledWith(GRACE_ID);
-    expect(workstream).toHaveBeenCalledWith(WORKSTREAM_ID);
+    expect(workstreams).not.toHaveBeenCalled();
+    expect(workstream).not.toHaveBeenCalled();
     expect(within(dialog).getByText(/private checkout-local draft.*Git-tracked Relay/i)).toBeVisible();
+    expect(within(dialog).getByText(/records branch, HEAD, clean or dirty state, and observation time/i)).toBeVisible();
     expect(within(dialog).getByText(/commit and push.*teammates can receive/i)).toBeVisible();
+    expect(within(dialog).getByText(/does not create a commit or capture source-file or local-change contents/i)).toBeVisible();
     expect(await within(dialog).findByText(/Acting as Ada Lovelace/i)).toBeVisible();
+    const repositoryAtPublication = within(dialog).getByText(/feat\/project-hub-foundation,/i).closest("p");
+    expect(repositoryAtPublication).not.toBeNull();
+    expect(repositoryAtPublication as HTMLElement).toHaveTextContent(/Repository at publication:.*feat\/project-hub-foundation.*HEAD 6484dd00.*local changes present.*observed/i);
     const technical = within(dialog).getByRole("button", { name: "Technical details" });
     expect(technical).toHaveAttribute("aria-expanded", "false");
     expect(within(dialog).queryByText(`.mex/team/members/${GRACE_ID}.md`)).not.toBeInTheDocument();
 
-    const request = preview.mock.calls.at(-1)![0];
+    await waitFor(() => expect(preview).toHaveBeenCalledTimes(1));
+    const request = preview.mock.calls[0]![0];
     expect(request.action).toEqual({ kind: "relay.publish", draftId: DRAFT_ID });
-    expect(request.expectedRevisions).toHaveLength(3);
+    expect(request.expectedRevisions).toHaveLength(2);
     expect(request.expectedRevisions).toEqual(expect.arrayContaining([
       expect.objectContaining({ target: { kind: "local", namespace: "relay-draft", id: DRAFT_ID } }),
       expect.objectContaining({ target: { kind: "artifact", path: `.mex/team/members/${GRACE_ID}.md` } }),
-      expect.objectContaining({ target: { kind: "artifact", path: `.mex/workstreams/${WORKSTREAM_ID}.md` } }),
     ]));
-    const exactEnvelope = await preview.mock.results.at(-1)!.value;
+    expect(request.expectedRevisions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ target: expect.objectContaining({ path: expect.stringContaining(".mex/workstreams/") }) }),
+    ]));
+    const exactEnvelope = await preview.mock.results[0]!.value;
     await user.click(within(dialog).getByRole("button", { name: "Publish handoff" }));
     await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
     expect(apply.mock.calls[0]![0]).toBe(exactEnvelope);
@@ -1384,17 +1536,20 @@ describe("Relay handoff workbench", () => {
     expect(await screen.findByRole("heading", { name: "Carry the release evidence through the final cross-platform gate." })).toBeVisible();
   });
 
-  it("blocks publication with visible recovery when an exact dependency is ineligible", async () => {
+  it("does not let an unavailable Workstream service block standalone publication", async () => {
     const api = createFixtureApi();
-    const workstream = await api.getWorkstream(WORKSTREAM_ID);
-    vi.spyOn(api, "getWorkstream").mockResolvedValue({ ...workstream, state: "done" });
+    const workstreams = vi.spyOn(api, "getWorkstreams").mockRejectedValue(new Error("Workstream list unavailable."));
+    const workstream = vi.spyOn(api, "getWorkstream").mockRejectedValue(new Error("Workstream unavailable."));
     const preview = vi.spyOn(api, "previewRelayOperation");
     renderRoute(api, `/relays?view=drafts&draft=${DRAFT_ID}`);
 
     const publish = await screen.findByRole("button", { name: "Publish handoff" });
     await userEvent.setup().click(publish);
-    await waitFor(() => expect(screen.getByText("Choose a Workstream in Planned, Active, or Blocked before publishing.")).toBeVisible());
-    expect(preview).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alertdialog", { name: "Publish this handoff?" })).toBeVisible();
+    await waitFor(() => expect(preview).toHaveBeenCalledTimes(1));
+    expect(workstreams).not.toHaveBeenCalled();
+    expect(workstream).not.toHaveBeenCalled();
+    expect(preview.mock.calls[0]![0].expectedRevisions).toHaveLength(2);
   });
 
   it("deletes a local draft through its overflow with normal confirmation and focus return", async () => {
@@ -1429,7 +1584,8 @@ describe("Relay handoff workbench", () => {
     await user.click(within(dialog).getByRole("button", { name: "Delete draft" }));
     await waitFor(() => expect(apply).toHaveBeenCalledTimes(1));
     expect(apply.mock.calls[0]![0]).toBe(exactEnvelope);
-    expect(await screen.findByText("No handoff drafts on this device")).toBeVisible();
+    expect(await screen.findByText("Hand off the standalone Relay follow-up.")).toBeVisible();
+    expect(document.querySelector(`button[data-relay-draft-id="${DRAFT_ID}"]`)).not.toBeInTheDocument();
   });
 
   it("keeps All and Drafts reachable without Member authority and surfaces legacy warnings", async () => {

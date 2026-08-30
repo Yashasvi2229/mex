@@ -61,7 +61,10 @@ measured PR head `9becb8635e90b324c168b0d387954307808f3e02` through GitHub's
 synthetic merge commit `2b25e73292bc1c54d68fae004eca07c7ec7832c7`. The report strictly
 validated on Ubuntu 24.04, Linux x64, Node 22.22.0 with ten timing and five
 heap samples. Every fixture had two Members, one local Relay draft, one
-published Relay, and zero outbound browser requests.
+published Relay, and zero outbound browser requests. The retained measurements
+predate the standalone schema-v3 artifact change; the fixture adaptation keeps
+the same counts, routes, and budgets, so a clean enforcing run on the final v3
+head remains required.
 
 Only the exact Relay asset candidates (`200128` JS, `12285` CSS, `0` font),
 draft/list API candidates (`5`/`15` ms small, `3`/`12` ms medium, and
@@ -85,7 +88,9 @@ contracts are versioned by
 
 The benchmark generates three fixed Git repositories. Every profile contains
 one Workstream, one checkout-local Inbox draft, one pending canonical proposal,
-two active Members, one checkout-local Relay draft, and one published Relay.
+two active Members, one sparse standalone checkout-local Relay draft, and one
+standalone schema-v3 published Relay. The Workstream remains an independent
+route fixture and is not referenced by either Relay fixture.
 Small contains four source files, four Wiki entities, and four canonical
 Activity events; medium contains sixteen of each; large contains forty-eight of
 each. Relay publication reuses the first existing Activity slot, so Activity and
@@ -94,17 +99,18 @@ unchanged. The first four existing Wiki entity IDs form a root
 Spec/requirement/constraint/acceptance-criterion slice under `.mex/specs/**`;
 no extra synthetic Knowledge or Spec-family records are added. The team-owned
 Workstream and Relay remain separately readable through the Wiki index, as in a
-real repository. IDs, contents, timestamps, Git identity, commit timestamp, and
-repository shape are deterministic. Graph and Wiki indexes are built only by
-explicit setup in the benchmark. Reads never initialize storage or maintain
-either index.
+real repository. The Relay stores a deterministic clean publication repository
+observation and omits Workstream; its Activity uses the same repository state.
+IDs, contents, timestamps, Git identity, commit timestamp, and repository shape
+are deterministic. Graph and Wiki indexes are built only by explicit setup in
+the benchmark. Reads never initialize storage or maintain either index.
 
 Each profile records:
 
 - ten cold Hub readiness timings;
 - five idle server RSS and CPU samples over a two-second quiet window;
 - ten exact Hub API timings for Search, Code, Knowledge, Activity, Inbox draft
-  and proposal listing, and Relay draft and My-open Relay listing;
+  and proposal listing, and Relay draft and `mine`/open Relay listing;
 - ten timings for each Graph/Wiki refresh and rebuild, with five peak-RSS
   samples for each operation;
 - Graph and Wiki SQLite-family bytes relative to their indexed input bytes.
