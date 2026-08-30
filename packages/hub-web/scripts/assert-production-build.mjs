@@ -35,7 +35,12 @@ const initialDynamicImports = new Set(
   [...initialChunks].flatMap((key) => manifest[key]?.dynamicImports ?? []),
 );
 const workbenchEntries = lazyWorkbenchSources.map((source) => {
-  const key = Object.keys(manifest).find((candidate) => candidate === source || manifest[candidate].src === source);
+  const expectedName = source.slice(source.lastIndexOf("/") + 1, source.lastIndexOf("."));
+  const key = Object.keys(manifest).find((candidate) => (
+    candidate === source
+    || manifest[candidate].src === source
+    || manifest[candidate].name === expectedName
+  ));
   if (!key) throw new Error(`The production Hub manifest has no route chunk for ${source}.`);
   if (!manifest[key].isDynamicEntry || !initialDynamicImports.has(key)) {
     throw new Error(`The production Hub route ${source} is not loaded through a lazy workbench boundary.`);
@@ -56,14 +61,25 @@ for (const entry of workbenchEntries) {
   }
 }
 const relayEntry = workbenchEntries.find((entry) => entry.source === "src/pages/RelayPage.tsx");
+const relayComposerKey = Object.keys(manifest).find((candidate) => (
+  candidate === "src/pages/RelayDraftComposer.tsx"
+  || manifest[candidate].src === "src/pages/RelayDraftComposer.tsx"
+));
 const relayRuntimeKey = Object.keys(manifest).find((candidate) => {
   const record = manifest[candidate] ?? {};
-  return [candidate, record.src].some((value) => (
+  return record.name === "relay-client" || [candidate, record.src].some((value) => (
     typeof value === "string" && /(?:^|\/)src\/api\/relay-client\.tsx?$/u.test(value)
   ));
 });
-if (!relayEntry || !relayRuntimeKey) {
-  throw new Error("The production Hub manifest has no private Relay runtime chunk.");
+if (!relayEntry || !relayRuntimeKey || !relayComposerKey) {
+  throw new Error("The production Hub manifest has no private Relay runtime or lazy composer chunk.");
+}
+if (
+  !manifest[relayComposerKey].isDynamicEntry
+  || !(manifest[relayEntry.key].dynamicImports ?? []).includes(relayComposerKey)
+  || staticImportClosure(relayEntry.key).has(relayComposerKey)
+) {
+  throw new Error("The Relay draft composer is not isolated behind its open-on-demand boundary.");
 }
 if (!(manifest[relayEntry.key].imports ?? []).includes(relayRuntimeKey)) {
   throw new Error("The Relay workbench does not directly own its strict runtime contract and transport chunk.");

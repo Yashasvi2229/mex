@@ -320,7 +320,7 @@ describe("Project Hub routes", () => {
     expect(await screen.findByText("Set team identity")).toBeVisible();
     expect(within(repositoryBar).getByText("Current project")).toBeVisible();
     expect(screen.queryByLabelText("3 proposals awaiting team review.")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("1 open Relays for you.")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("2 open Relays for you.")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("1 active system operations.")).not.toBeInTheDocument();
     expect(getHome).toHaveBeenCalledTimes(2);
   });
@@ -406,18 +406,20 @@ describe("Project Hub routes", () => {
     expect(screen.getByRole("link", { name: /^Inbox/u })).toHaveAttribute("href", "/inbox");
     expect(screen.getByRole("link", { name: /^Relays/u })).toHaveAttribute("href", "/relays");
     const relaySection = within(screen.getByRole("region", { name: "Project sections" })).getByText("Relays").closest('[role="listitem"]');
-    expect(relaySection).toHaveTextContent("Relays1");
+    expect(relaySection).toHaveTextContent("Relays2");
     expect(screen.queryByText("Wiki unavailable")).not.toBeInTheDocument();
   });
 
   it("loads the lazy Relay workbench when the private Relay service is connected", async () => {
+    const user = userEvent.setup();
     renderRoute("/relays");
-    expect(await screen.findByRole("heading", { level: 2, name: "Relay desk" })).toBeVisible();
+    expect(await screen.findByRole("heading", { level: 1, name: "Relays" })).toBeVisible();
     expect(document.querySelector('[data-relay-workbench="ready"]')).toBeInTheDocument();
-    await waitFor(() => {
-      expect(document.querySelector("[data-relay-draft-id]")).toBeInTheDocument();
-      expect(document.querySelector("[data-relay-id]")).toBeInTheDocument();
-    });
+    await waitFor(() => expect(document.querySelector("[data-relay-id]")).toBeInTheDocument());
+    expect(document.querySelector("[data-relay-draft-id]")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Drafts on this device" }));
+    await waitFor(() => expect(document.querySelector("[data-relay-draft-id]")).toBeInTheDocument());
   });
 
   it("keeps the Search input synchronized with browser history", async () => {

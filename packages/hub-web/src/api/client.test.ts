@@ -4,6 +4,7 @@ import {
   HubApiError,
   fixturesEnabled,
   inboxFixtureVariant,
+  relayFixtureVariant,
   readBootstrapToken,
 } from "./client";
 import type { ActivityResponse, JobSummary, RelayOperationPreviewRequest } from "./types";
@@ -61,6 +62,7 @@ describe("bootstrap fragment handling", () => {
     expect(fixturesEnabled(false, "?fixture=populated")).toBe(false);
     expect(fixturesEnabled(true, "?fixture=populated")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=populated&inboxFixture=empty")).toBe(true);
+    expect(fixturesEnabled(true, "?fixture=populated&relayFixture=legacy")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=empty")).toBe(false);
   });
 
@@ -74,6 +76,20 @@ describe("bootstrap fragment handling", () => {
     ["?fixture=populated&inboxFixture=../../private", undefined],
   ])("bounds the Inbox fixture variant in %s", (search, expected) => {
     expect(inboxFixtureVariant(search)).toBe(expected);
+  });
+
+  it.each([
+    ["?fixture=populated&relayFixture=empty", "empty"],
+    ["?fixture=populated&relayFixture=closed", "closed"],
+    ["?fixture=populated&relayFixture=missing", "missing"],
+    ["?fixture=populated&relayFixture=partial", "partial"],
+    ["?fixture=populated&relayFixture=legacy", "legacy"],
+    ["?fixture=populated", undefined],
+    ["?fixture=populated&relayFixture=populated", undefined],
+    ["?fixture=populated&relayFixture=LEGACY", undefined],
+    ["?fixture=populated&relayFixture=../../private", undefined],
+  ])("bounds the Relay fixture variant in %s", (search, expected) => {
+    expect(relayFixtureVariant(search)).toBe(expected);
   });
 });
 

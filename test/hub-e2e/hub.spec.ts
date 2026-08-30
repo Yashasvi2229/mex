@@ -8,6 +8,13 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const runningJobId = "job_01K36WVM6H7JK8M9NPQRSTVVWX";
+const readyRelayId = "relay_01000000000000000000000001";
+const claimedRelayId = "relay_01000000000000000000000002";
+const sentWaitingRelayId = "relay_01000000000000000000000003";
+const sentTakenRelayId = "relay_01000000000000000000000004";
+const closedRelayId = "relay_01000000000000000000000005";
+const legacyRelayId = "relay_01000000000000000000000006";
+const relayDraftId = "relay-draft-01";
 
 function watchBrowserErrors(page: Page): string[] {
   const errors: string[] = [];
@@ -907,29 +914,417 @@ test.describe("populated development fixture", () => {
     await expect(page).toHaveScreenshot("hub-inbox.png", { fullPage: true });
   });
 
-  for (const width of [390, 768, 1024, 1440] as const) {
-    test(`keeps Relay guarded or overflow-free and accessible at ${width}px`, async ({ page }) => {
+  test("renders Relays as a human-first handoff inbox with role-aware queues and detail", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    const requests: string[] = [];
+    page.on("request", (request) => requests.push(new URL(request.url()).pathname));
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/relays?fixture=populated");
+
+    await expect(page.getByRole("heading", { level: 1, name: "Relays" })).toBeVisible();
+    await expect(page.getByText(
+      "Continue work with the progress, decisions, and next steps your teammate left.",
+      { exact: true },
+    )).toBeVisible();
+    await expect(page.getByRole("button", { name: "Refresh", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "New local draft" })).toHaveCount(0);
+    await expect(page.getByText(/\d+ loaded/)).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "For you" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { name: "Drafts on this device" })).toHaveAttribute("aria-selected", "false");
+    const state = page.getByRole("group", { name: "Relay state" });
+    await expect(state.getByRole("button", { name: "Open" })).toHaveAttribute("aria-pressed", "true");
+    await expect(state.getByRole("button", { name: "Closed" })).toHaveAttribute("aria-pressed", "false");
+    await expect.poll(() => Object.fromEntries(new URL(page.url()).searchParams)).toMatchObject({
+      fixture: "populated",
+      view: "mine",
+      state: "open",
+    });
+    expect(new URL(page.url()).searchParams.has("relay")).toBe(false);
+    expect(requests).not.toContain("/api/v1/relays/drafts");
+    expect(requests.some((request) => request.includes("/src/pages/RelayDraftComposer"))).toBe(false);
+    expect(requests.some((request) => request.includes("/src/pages/RelayDetailSections"))).toBe(false);
+
+    const queue = page.getByRole("region", { name: "Handoffs" });
+    await expect(queue.getByRole("heading", { name: "Ready to take" })).toBeVisible();
+    await expect(queue.getByRole("heading", { name: "In your hands" })).toBeVisible();
+    const ready = queue.locator(`[data-relay-id="${readyRelayId}"]`);
+    await expect(ready).toContainText("Release evidence is ready for the final cross-platform gate.");
+    await expect(ready).toContainText("From Grace Hopper");
+    await expect(ready).toContainText("Ready to take");
+    await expect(ready).not.toHaveAttribute("aria-current", "true");
+
+    const detail = page.getByRole("region", { name: "Selected handoff detail" });
+    await expect(detail.getByText("Choose a handoff", { exact: true })).toBeVisible();
+    await ready.click();
+    await expect(ready).toHaveAttribute("aria-current", "true");
+    await expect.poll(() => requests.filter((request) => request.includes("/src/pages/RelayDetailSections")).length)
+      .toBe(1);
+    await expect(page).toHaveURL(new RegExp(`view=mine.*state=open.*relay=${readyRelayId}`));
+    await expect(detail.getByRole("heading", {
+      level: 2,
+      name: "Release evidence is ready for the final cross-platform gate.",
+    })).toBeVisible();
+    for (const heading of [
+      "What to do next",
+      "Where things stand",
+      "Blockers",
+      "Questions to resolve",
+      "Already completed",
+      "Lifecycle",
+    ]) {
+      await expect(detail.getByRole("heading", { name: heading })).toBeVisible();
+    }
+    const related = detail.getByRole("button", { name: "Related context" });
+    const technical = detail.getByRole("button", { name: "Technical details" });
+    await expect(related).toHaveAttribute("aria-expanded", "false");
+    await expect(technical).toHaveAttribute("aria-expanded", "false");
+    await expect(detail.getByText(readyRelayId, { exact: true })).toHaveCount(0);
+    await expect(detail.getByRole("button", { name: "Take handoff" })).toBeVisible();
+    await related.click();
+    await expect(detail.getByRole("link", { name: "Human-team memory release" }).first())
+      .toHaveAttribute("href", "/knowledge/mx_01000000000000000000000001");
+    await expect(detail.getByRole("link", { name: "Open referenced code symbol" }).first())
+      .toHaveAttribute("href", "/code/symbols/sym.createHubServer");
+    const external = detail.getByRole("link", { name: "Node.js release matrix" });
+    await expect(external).toHaveAttribute("target", "_blank");
+    await expect(external).toHaveAttribute("rel", /noopener/);
+
+    const claimed = queue.locator(`[data-relay-id="${claimedRelayId}"]`);
+    await claimed.focus();
+    await page.keyboard.press("Enter");
+    await expect(claimed).toHaveAttribute("aria-current", "true");
+    await expect(detail.getByRole("heading", {
+      level: 2,
+      name: "Finish the keyboard and screen-reader pass for the Hub review surfaces.",
+    })).toBeVisible();
+    await expect(detail.getByText("In your hands", { exact: true }).first()).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Close handoff" })).toBeVisible();
+
+    await page.getByRole("tab", { name: "Sent" }).click();
+    await expect(page.getByRole("tab", { name: "Sent" })).toHaveAttribute("aria-selected", "true");
+    await expect(state.getByRole("button", { name: "Open" })).toHaveAttribute("aria-pressed", "true");
+    const waiting = page.locator(`[data-relay-id="${sentWaitingRelayId}"]`);
+    const taken = page.locator(`[data-relay-id="${sentTakenRelayId}"]`);
+    await expect(waiting).toContainText("Waiting for pickup");
+    await expect(taken).toContainText("Taken by Grace Hopper");
+    await waiting.click();
+    await expect(detail.getByRole("heading", {
+      level: 2,
+      name: "Run the final Relay contract regression suite against the merged branch.",
+    })).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Take handoff" })).toHaveCount(0);
+    await expect(detail.getByText("This handoff is addressed to Grace Hopper.", { exact: true })).toBeVisible();
+    await expect(detail.getByText(/listed recipient can take it.*active team identity/i)).toBeVisible();
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps Relay perspective, lifecycle, deep links, and explicit Refresh recoverable", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/relays?fixture=populated&view=all&state=closed&relay=${closedRelayId}`);
+
+    await expect(page.getByRole("tab", { name: "Team" })).toHaveAttribute("aria-selected", "true");
+    const state = page.getByRole("group", { name: "Relay state" });
+    await expect(state.getByRole("button", { name: "Closed" })).toHaveAttribute("aria-pressed", "true");
+    const detail = page.getByRole("region", { name: "Selected handoff detail" });
+    await expect(detail.getByRole("heading", {
+      level: 2,
+      name: "The Sidebar verification handoff no longer needs team attention.",
+    })).toBeVisible();
+    await expect(detail.getByText("Immutable closed handoff.", { exact: true })).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Take handoff" })).toHaveCount(0);
+    await expect(detail.getByRole("button", { name: "Close handoff" })).toHaveCount(0);
+
+    await state.getByRole("button", { name: "Open" }).click();
+    await expect(page.getByRole("tab", { name: "Team" })).toHaveAttribute("aria-selected", "true");
+    await expect(state.getByRole("button", { name: "Open" })).toHaveAttribute("aria-pressed", "true");
+    await expect.poll(() => Object.fromEntries(new URL(page.url()).searchParams)).toMatchObject({
+      view: "all",
+      state: "open",
+    });
+    expect(new URL(page.url()).searchParams.has("relay")).toBe(false);
+    await page.locator(`[data-relay-id="${readyRelayId}"]`).click();
+    await expect(page).toHaveURL(new RegExp(`view=all.*state=open.*relay=${readyRelayId}`));
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Relays refreshed." })).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`view=all.*state=open.*relay=${readyRelayId}`));
+
+    await page.goto("/relays?fixture=populated&view=all&state=open&relay=not-a-relay");
+    await expect(page.getByText("This handoff link is invalid", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Return to queue" })).toBeVisible();
+
+    await page.goto(`/relays?fixture=populated&view=all&state=closed&relay=${readyRelayId}`);
+    await expect(page.getByText("This handoff is not available in this view", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Return to handoffs" })).toBeVisible();
+
+    const missingRelayId = "relay_07000000000000000000000007";
+    await page.goto(`/relays?fixture=populated&view=all&state=open&relay=${missingRelayId}`);
+    await expect(page.getByText("This view could not be loaded", { exact: true })).toBeVisible();
+    await expect(page.getByText(
+      "The Hub kept the last trustworthy state. Try the request again.",
+      { exact: true },
+    )).toBeVisible();
+    await expect(page.getByRole("button", { name: "Return to queue" })).toBeVisible();
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps Relay identity and capability failures local while Team and drafts stay readable", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/relays?fixture=populated&relayFixture=missing");
+
+    await expect(page.getByRole("tab", { name: "Team" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByText("Check your team identity", { exact: true })).toBeVisible();
+    await expect(page.getByText("The referenced member no longer exists.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Open Members" }).first()).toHaveAttribute("href", "/members");
+    await expect(page.locator("[data-relay-id]")).not.toHaveCount(0);
+    await page.getByRole("tab", { name: "For you" }).click();
+    await expect(page.getByText("Select an active team identity", { exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "Drafts on this device" }).click();
+    await expect(page.locator(`[data-relay-draft-id="${relayDraftId}"]`)).toBeVisible();
+    await expectAccessible(page);
+
+    await page.goto("/relays?fixture=populated&relayFixture=partial");
+    await page.locator(`[data-relay-id="${readyRelayId}"]`).click();
+    const reviewDetail = page.getByRole("region", { name: "Selected handoff detail" });
+    await expect(reviewDetail.getByRole("button", { name: "Take handoff" })).toBeDisabled();
+    await expect(reviewDetail.getByText(
+      "Relay lifecycle writes are not connected in this Hub process.",
+      { exact: true },
+    )).toBeVisible();
+    await page.getByRole("tab", { name: "Drafts on this device" }).click();
+    await page.locator(`[data-relay-draft-id="${relayDraftId}"]`).click();
+    const draftDetail = page.getByRole("region", { name: "Selected handoff draft detail" });
+    await expect(draftDetail.getByRole("button", { name: "Publish handoff" })).toBeDisabled();
+    await expect(draftDetail.getByText(
+      "Relay publication is not connected in this Hub process.",
+      { exact: true },
+    )).toBeVisible();
+    await expect(draftDetail.getByRole("button", { name: "Edit wording" })).toBeEnabled();
+    await expect(draftDetail.getByRole("button", { name: "More draft actions" })).toBeEnabled();
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("renders honest empty, closed, and legacy Relay fixture states", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+
+    await page.goto("/relays?fixture=populated&relayFixture=empty");
+    await expect(page.getByText("No handoffs need your attention", { exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "Drafts on this device" }).click();
+    await expect(page.getByText("No handoff drafts on this device", { exact: true })).toBeVisible();
+    await expect(page.getByText(
+      "Your coding agent can prepare a structured Relay when you pause or hand work to a teammate.",
+      { exact: true },
+    )).toBeVisible();
+    const emptyDrafts = page.locator('[data-slot="empty"]').filter({ hasText: "No handoff drafts on this device" });
+    await expect(emptyDrafts.getByRole("button", { name: "Create manually" })).toBeVisible();
+    await expectAccessible(page);
+
+    await page.goto(`/relays?fixture=populated&relayFixture=closed&view=all&state=closed&relay=${closedRelayId}`);
+    await expect(page.getByRole("heading", {
+      level: 2,
+      name: "The Sidebar verification handoff no longer needs team attention.",
+    })).toBeVisible();
+    await expect(page.getByText("Immutable closed handoff.", { exact: true })).toBeVisible();
+    await expectAccessible(page);
+
+    await page.goto("/relays?fixture=populated&relayFixture=legacy");
+    await expect(page.getByText("Relay compatibility warning", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText(
+      "One or more legacy schema-v1 Relays have no canonical publication timestamp.",
+      { exact: true },
+    ).first()).toBeVisible();
+    await page.locator(`[data-relay-id="${legacyRelayId}"]`).click();
+    const legacyDetail = page.getByRole("region", { name: "Selected handoff detail" });
+    await expect(legacyDetail.getByRole("heading", {
+      level: 2,
+      name: "Review a legacy handoff whose original publication time was not recorded.",
+    })).toBeVisible();
+    await expect(legacyDetail.getByText(/Legacy publication time unavailable/)).toBeVisible();
+    await expect(legacyDetail.getByRole("button", { name: "Take handoff" })).toBeVisible();
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps Relay draft review, searchable recipients, disclosures, overflow, and focus complete", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/relays?fixture=populated&view=drafts&draft=${relayDraftId}`);
+
+    await expect(page.getByRole("tab", { name: "Drafts on this device" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("group", { name: "Relay state" })).toHaveCount(0);
+    const draft = page.locator(`[data-relay-draft-id="${relayDraftId}"]`);
+    await expect(draft).toHaveAttribute("aria-current", "true");
+    const detail = page.getByRole("region", { name: "Selected handoff draft detail" });
+    await expect(detail.getByRole("heading", {
+      level: 2,
+      name: "Carry the release evidence through the final cross-platform gate.",
+    })).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Publish handoff" })).toBeVisible();
+    const edit = detail.getByRole("button", { name: "Edit wording" });
+    const more = detail.getByRole("button", { name: "More draft actions" });
+    await expect(edit).toBeVisible();
+    await expect(more).toBeVisible();
+    await expect(detail.getByRole("button", { name: "Related context" })).toHaveAttribute("aria-expanded", "false");
+    await expect(detail.getByRole("button", { name: "Technical details" })).toHaveAttribute("aria-expanded", "false");
+    await expect(detail.getByText(relayDraftId, { exact: true })).toHaveCount(0);
+
+    await edit.click();
+    const composer = page.getByRole("dialog", { name: "Edit handoff draft" });
+    await expect(composer).toBeVisible();
+    await expect.poll(() => composer.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    const recipients = composer.getByRole("combobox", { name: "Eligible recipients" });
+    await expect(recipients).toBeVisible();
+    await expect(composer.getByText("Grace Hopper", { exact: true })).toBeVisible();
+    await recipients.click();
+    await recipients.fill("Ada");
+    await expect(page.getByRole("option", { name: "Ada Lovelace" })).toBeVisible();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(composer.getByText("Ada Lovelace", { exact: true })).toBeVisible();
+    await expect(composer.getByText("Grace Hopper", { exact: true })).toBeVisible();
+    const additional = composer.getByRole("button", { name: "Additional context" });
+    const advanced = composer.getByRole("button", { name: "Advanced" });
+    await expect(additional).toHaveAttribute("aria-expanded", "false");
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await additional.click();
+    await expect(composer.getByRole("button", { name: "Add completed" })).toBeVisible();
+    await expect(composer.getByRole("button", { name: "Add decision" })).toBeVisible();
+    await expect(composer.getByRole("button", { name: "Add code reference" })).toBeVisible();
+    await expect(composer.getByRole("button", { name: "Add evidence" })).toBeVisible();
+    await advanced.click();
+    await expect(composer.getByText(relayDraftId, { exact: true })).toBeVisible();
+    await expectAccessible(page);
+    await composer.getByRole("button", { name: "Cancel" }).click();
+    await expect(composer).toBeHidden();
+    await expect(edit).toBeFocused();
+
+    await more.focus();
+    await page.keyboard.press("Enter");
+    const deleteItem = page.getByRole("menuitem", { name: "Delete draft" });
+    await expect(deleteItem).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(deleteItem).toBeHidden();
+    await expect(more).toBeFocused();
+    await more.click();
+    await page.getByRole("menuitem", { name: "Delete draft" }).click();
+    const deletion = page.getByRole("alertdialog", { name: "Delete this handoff draft?" });
+    await expect(deletion).toBeVisible();
+    await expect.poll(() => deletion.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await expect(deletion.getByRole("button", { name: "Technical details" })).toHaveAttribute("aria-expanded", "false");
+    await expectAccessible(page);
+    await deletion.getByRole("button", { name: "Keep reviewing" }).click();
+    await expect(deletion).toBeHidden();
+    await expect(more).toBeFocused();
+    expect(errors).toEqual([]);
+  });
+
+  test("keeps Take, Close, and Publish confirmations concise and reports Git working-tree truth", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/relays?fixture=populated&view=mine&state=open&relay=${readyRelayId}`);
+
+    const detail = page.getByRole("region", { name: "Selected handoff detail" });
+    const take = detail.getByRole("button", { name: "Take handoff" });
+    await take.click();
+    const takeDialog = page.getByRole("alertdialog", { name: "Take this handoff?" });
+    await expect(takeDialog).toBeVisible();
+    await expect(takeDialog.getByText(/sole claimant/i)).toBeVisible();
+    await expect(takeDialog.getByText(/no unclaim or reassignment/i)).toBeVisible();
+    await expect(takeDialog.getByText(/pull the latest repository state/i)).toBeVisible();
+    const takeTechnical = takeDialog.getByRole("button", { name: "Technical details" });
+    await expect(takeTechnical).toHaveAttribute("aria-expanded", "false");
+    await expect(takeDialog.getByText("relay.acknowledge", { exact: true })).toHaveCount(0);
+    await expect.poll(() => takeDialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(takeDialog).toBeHidden();
+    await expect(take).toBeFocused();
+
+    await take.click();
+    await takeDialog.getByRole("button", { name: "Take handoff" }).click();
+    const claimedNotice = page.getByText(
+      "Handoff claimed in your working tree. Commit and push so the team can see that you took it.",
+      { exact: true },
+    );
+    await expect(claimedNotice).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`view=mine.*state=open.*relay=${readyRelayId}`));
+
+    await page.goto(`/relays?fixture=populated&view=sent&state=open&relay=${sentTakenRelayId}`);
+    const close = page.getByRole("region", { name: "Selected handoff detail" })
+      .getByRole("button", { name: "Close handoff" });
+    await close.click();
+    const closeDialog = page.getByRole("alertdialog", { name: "Close this handoff?" });
+    await expect(closeDialog.getByText(/closing is irreversible/i)).toBeVisible();
+    await expect(closeDialog.getByText(/does not complete or modify the Workstream or task/i)).toBeVisible();
+    await expect(closeDialog.getByRole("button", { name: "Technical details" })).toHaveAttribute("aria-expanded", "false");
+    await closeDialog.getByRole("button", { name: "Close handoff" }).click();
+    await expect(page.getByText(
+      "Handoff closed in your working tree. Commit and push to share the final state.",
+      { exact: true },
+    )).toBeVisible();
+    await expect(page.getByRole("button", { name: "View closed" })).toBeVisible();
+    await expect(page.locator(`[data-relay-id="${sentWaitingRelayId}"]`)).toHaveAttribute("aria-current", "true");
+    await expect(page).toHaveURL(new RegExp(`view=sent.*state=open.*relay=${sentWaitingRelayId}`));
+
+    await page.goto(`/relays?fixture=populated&view=drafts&draft=${relayDraftId}`);
+    const publish = page.getByRole("button", { name: "Publish handoff" });
+    await publish.click();
+    const publishDialog = page.getByRole("alertdialog", { name: "Publish this handoff?" });
+    await expect(publishDialog.getByText(/private checkout-local draft into a Git-tracked Relay/i)).toBeVisible();
+    await expect(publishDialog.getByText(/Commit and push are still required/i)).toBeVisible();
+    await expect(publishDialog.getByRole("button", { name: "Technical details" })).toHaveAttribute("aria-expanded", "false");
+    await publishDialog.getByRole("button", { name: "Publish handoff" }).click();
+    await expect(page.getByText(
+      "Handoff created in your working tree. Commit and push it so teammates can receive it.",
+      { exact: true },
+    )).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Sent" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("group", { name: "Relay state" }).getByRole("button", { name: "Open" }))
+      .toHaveAttribute("aria-pressed", "true");
+    await expect(page).toHaveURL(/view=sent.*state=open.*relay=relay_02000000000000000000000001/);
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  for (const viewport of [
+    { width: 390, height: 900 },
+    { width: 768, height: 900 },
+    { width: 1024, height: 768 },
+    { width: 1440, height: 900 },
+  ] as const) {
+    test(`keeps Relays guarded or overflow-free and accessible at ${viewport.width}x${viewport.height}`, async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
-      await page.setViewportSize({ width, height: 900 });
+      await page.setViewportSize(viewport);
       await page.goto("/relays?fixture=populated");
 
-      if (width < 1024) {
+      if (viewport.width < 1024) {
         await expect(page.getByRole("heading", { name: "A wider workbench is required" })).toBeVisible();
         await expect(page.getByRole("navigation", { name: "Primary" })).toBeHidden();
       } else {
         await expect(page.getByRole("heading", { level: 1, name: "Relays" })).toBeVisible();
-        await expect(page.locator('[data-relay-workbench="ready"]')).toBeVisible();
-        await expect(page.locator('[data-relay-draft-id="relay-draft-01"]')).toContainText(
-          "Carry the release evidence through the final cross-platform gate.",
-        );
-        await expect(page.locator('[data-relay-id="relay_01000000000000000000000001"]')).toContainText(
-          "Release evidence is ready for the final cross-platform gate.",
-        );
-        const drafts = await page.getByRole("region", { name: "Draft rail" }).boundingBox();
-        const desk = await page.getByRole("region", { name: "Relay desk" }).boundingBox();
-        expect(drafts).not.toBeNull();
-        expect(desk).not.toBeNull();
-        expect(drafts!.x).toBeLessThan(desk!.x);
+        const queue = page.getByRole("region", { name: "Handoffs" });
+        const detail = page.getByRole("region", { name: "Selected handoff detail" });
+        await expect(queue.locator(`[data-relay-id="${readyRelayId}"]`)).toBeVisible();
+        await queue.locator(`[data-relay-id="${readyRelayId}"]`).click();
+        await expect(detail.getByRole("heading", {
+          level: 2,
+          name: "Release evidence is ready for the final cross-platform gate.",
+        })).toBeVisible();
+        const boxes = await Promise.all([queue.boundingBox(), detail.boundingBox()]);
+        expect(boxes[0]).not.toBeNull();
+        expect(boxes[1]).not.toBeNull();
+        expect(boxes[0]!.x).toBeLessThan(boxes[1]!.x);
+        expect(boxes[0]!.x + boxes[0]!.width).toBeLessThanOrEqual(boxes[1]!.x + 1);
       }
 
       const geometry = await page.evaluate(() => ({
@@ -939,61 +1334,30 @@ test.describe("populated development fixture", () => {
         bodyScrollWidth: document.body.scrollWidth,
       }));
       expect(geometry).toEqual({
-        viewportWidth: width,
-        documentClientWidth: width,
-        documentScrollWidth: width,
-        bodyScrollWidth: width,
+        viewportWidth: viewport.width,
+        documentClientWidth: viewport.width,
+        documentScrollWidth: viewport.width,
+        bodyScrollWidth: viewport.width,
       });
       await expectAccessible(page);
     });
   }
 
-  test("keeps Relay keyboard selection, composer, and signed review focus complete", async ({ page }) => {
+  test("renders the deterministic Relays handoff visual", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto("/relays?fixture=populated");
-    await expect(page.locator('[data-relay-workbench="ready"]')).toBeVisible();
-
-    const draft = page.locator('[data-relay-draft-id="relay-draft-01"]');
-    await draft.focus();
-    await page.keyboard.press("Enter");
-    await expect(draft).toHaveAttribute("aria-current", "true");
-    await expect(page.getByRole("region", { name: "Selected Relay detail" })
-      .getByRole("heading", { name: "Carry the release evidence through the final cross-platform gate." })).toBeVisible();
-
-    const relay = page.locator('[data-relay-id="relay_01000000000000000000000001"]');
-    await relay.focus();
-    await page.keyboard.press("Enter");
-    await expect(relay).toHaveAttribute("aria-current", "true");
-    await expect(page.getByRole("region", { name: "Selected Relay detail" })
-      .getByRole("heading", { name: "Release evidence is ready for the final cross-platform gate." })).toBeVisible();
-
-    const compose = page.getByRole("button", { name: "New local draft", exact: true });
-    await compose.click();
-    const composer = page.getByRole("dialog", { name: "Compose a local Relay draft" });
-    await expect(composer).toBeVisible();
-    await expect.poll(() => composer.evaluate((element) => element.contains(document.activeElement))).toBe(true);
-    await page.keyboard.press("Shift+Tab");
-    await expect.poll(() => composer.evaluate((element) => element.contains(document.activeElement))).toBe(true);
-    await expectAccessible(page);
-    await page.keyboard.press("Escape");
-    await expect(composer).toBeHidden();
-    await expect(compose).toBeFocused();
-
-    const claim = page.getByRole("button", { name: "Claim handoff", exact: true });
-    await claim.click();
-    const review = page.getByRole("alertdialog", { name: "Review the exact Relay operation" });
-    await expect(review.getByRole("heading", { name: "Exact handoff docket" })).toBeVisible();
-    await expect.poll(() => review.evaluate((element) => element.contains(document.activeElement))).toBe(true);
-    await page.keyboard.press("Shift+Tab");
-    await expect.poll(() => review.evaluate((element) => element.contains(document.activeElement))).toBe(true);
-    await expectAccessible(page);
-    await page.keyboard.press("Escape");
-    await expect(review).toBeHidden();
-    await expect(claim).toBeFocused();
+    await page.goto(`/relays?fixture=populated&view=mine&state=open&relay=${readyRelayId}`);
+    const detail = page.getByRole("region", { name: "Selected handoff detail" });
+    await expect(detail.getByRole("heading", {
+      level: 2,
+      name: "Release evidence is ready for the final cross-platform gate.",
+    })).toBeVisible();
+    await expect(detail.getByRole("heading", { name: "What to do next" })).toBeVisible();
+    await expect(detail.getByText("Opening handoff details", { exact: true })).toHaveCount(0);
+    await expect(page).toHaveScreenshot("hub-relays.png", { fullPage: true });
   });
 
-  test("loads Relay lazily with one local chunk and stays external-free and idle", async ({ page }) => {
+  test("loads the Relay route and draft composer lazily without polling or external requests", async ({ page }) => {
     const requests: string[] = [];
     const external: string[] = [];
     const apiWrites: string[] = [];
@@ -1013,10 +1377,26 @@ test.describe("populated development fixture", () => {
     await page.getByRole("link", { name: /^Relays(?: |$)/ }).click();
     await expect(page.locator('[data-relay-workbench="ready"]')).toBeVisible();
     await page.waitForLoadState("networkidle");
-    expect(requests.filter((request) => request === "GET /src/pages/RelayPage.tsx")).toHaveLength(1);
-    const idleRequestCount = requests.length;
+    expect(requests.filter((request) => request.includes("/src/pages/RelayPage"))).toHaveLength(1);
+    expect(requests.some((request) => request.includes("/src/pages/RelayDraftComposer"))).toBe(false);
+    expect(requests.some((request) => request.includes("/src/pages/RelayDetailSections"))).toBe(false);
+    await page.getByRole("tab", { name: "Drafts on this device" }).click();
+    await expect(page.locator(`[data-relay-draft-id="${relayDraftId}"]`)).toBeVisible();
+    expect(new URL(page.url()).searchParams.has("draft")).toBe(false);
+    await expect(page.getByRole("region", { name: "Selected handoff draft detail" })
+      .getByText("Choose a handoff draft", { exact: true })).toBeVisible();
+    expect(requests.some((request) => request.includes("/src/pages/RelayDraftComposer"))).toBe(false);
+    expect(requests.some((request) => request.includes("/src/pages/RelayDetailSections"))).toBe(false);
+    await page.locator(`[data-relay-draft-id="${relayDraftId}"]`).click();
+    await expect.poll(() => requests.filter((request) => request.includes("/src/pages/RelayDetailSections")).length)
+      .toBe(1);
+    await page.getByRole("button", { name: "Edit wording" }).click();
+    await expect(page.getByRole("dialog", { name: "Edit handoff draft" })).toBeVisible();
+    await expect.poll(() => requests.filter((request) => request.includes("/src/pages/RelayDraftComposer")).length)
+      .toBe(1);
+    const relayReadCount = requests.filter((request) => /GET \/api\/v1\/relays(?:\/drafts)?(?:\?|$)/.test(request)).length;
     await page.waitForTimeout(5_500);
-    expect(requests).toHaveLength(idleRequestCount);
+    expect(requests.filter((request) => /GET \/api\/v1\/relays(?:\/drafts)?(?:\?|$)/.test(request))).toHaveLength(relayReadCount);
     expect(apiWrites).toEqual([]);
     expect(external).toEqual([]);
   });
@@ -1195,7 +1575,7 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     const sidebar = page.locator('aside[aria-label="Project Hub navigation"]');
     await expect(sidebar.getByLabel("3 proposals awaiting team review.")).toHaveText("3");
-    await expect(sidebar.getByLabel("1 open Relays for you.")).toHaveText("1");
+    await expect(sidebar.getByLabel("2 open Relays for you.")).toHaveText("2");
     await expect(sidebar.getByLabel("1 active system operations.")).toHaveText("1");
     await expect(sidebar.getByRole("link", { name: "Team", exact: true })).toHaveAttribute("href", "/members");
     await expect(sidebar.getByText("Ada Lovelace", { exact: true })).toBeVisible();
@@ -1449,10 +1829,14 @@ test.describe("built production Hub", () => {
     const productionOrigin = new URL(bootstrapUrl).origin;
     const crossOriginRequests: string[] = [];
     const idleApiRequests: string[] = [];
+    const relayDraftRequests: string[] = [];
     let observeIdleApi = false;
     page.on("request", (request) => {
       const url = new URL(request.url());
       if (url.origin !== productionOrigin) crossOriginRequests.push(request.url());
+      if (url.origin === productionOrigin && url.pathname === "/api/v1/relays/drafts") {
+        relayDraftRequests.push(request.url());
+      }
       if (observeIdleApi && url.origin === productionOrigin && url.pathname.startsWith("/api/")) {
         idleApiRequests.push(`${request.method()} ${url.pathname}${url.search}`);
       }
@@ -1511,20 +1895,10 @@ test.describe("built production Hub", () => {
     expect(draftsResponse.status()).toBe(200);
     expect(await draftsResponse.json()).toMatchObject({ items: [], nextCursor: null });
 
-    const [relayDraftsResponse] = await Promise.all([
-      page.waitForResponse((candidate) => new URL(candidate.url()).pathname === "/api/v1/relays/drafts"),
+    const [relayListResponse] = await Promise.all([
+      page.waitForResponse((candidate) => new URL(candidate.url()).pathname === "/api/v1/relays"),
       page.goto(`${productionOrigin}/relays?fixture=populated`),
     ]);
-    expect(relayDraftsResponse.status()).toBe(200);
-    expect(Object.fromEntries(new URL(relayDraftsResponse.url()).searchParams)).toEqual({ limit: "25" });
-    expect(await relayDraftsResponse.json()).toMatchObject({ items: [], nextCursor: null });
-    await expect(page.getByRole("heading", { level: 1, name: "Relays" })).toBeVisible();
-    await expect(page.locator('[data-relay-workbench="ready"]')).toBeVisible();
-    const relayListResponsePromise = page.waitForResponse(
-      (candidate) => new URL(candidate.url()).pathname === "/api/v1/relays",
-    );
-    await page.getByRole("tab", { name: "All open" }).click();
-    const relayListResponse = await relayListResponsePromise;
     expect(relayListResponse.status()).toBe(200);
     expect(Object.fromEntries(new URL(relayListResponse.url()).searchParams)).toEqual({
       perspective: "all",
@@ -1532,6 +1906,32 @@ test.describe("built production Hub", () => {
       limit: "25",
     });
     expect(await relayListResponse.json()).toMatchObject({ items: [], nextCursor: null });
+    await expect(page.getByRole("heading", { level: 1, name: "Relays" })).toBeVisible();
+    await expect(page.locator('[data-relay-workbench="ready"]')).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Team" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("group", { name: "Relay state" }).getByRole("button", { name: "Open" }))
+      .toHaveAttribute("aria-pressed", "true");
+    expect(relayDraftRequests).toEqual([]);
+
+    const relayDraftsResponsePromise = page.waitForResponse(
+      (candidate) => new URL(candidate.url()).pathname === "/api/v1/relays/drafts",
+    );
+    await page.getByRole("tab", { name: "Drafts on this device" }).click();
+    const relayDraftsResponse = await relayDraftsResponsePromise;
+    expect(relayDraftsResponse.status()).toBe(200);
+    expect(Object.fromEntries(new URL(relayDraftsResponse.url()).searchParams)).toEqual({ limit: "25" });
+    expect(await relayDraftsResponse.json()).toMatchObject({ items: [], nextCursor: null });
+    expect(relayDraftRequests).toHaveLength(1);
+
+    const createManually = page.getByRole("button", { name: "Create manually" });
+    await expect(createManually).toBeEnabled();
+    await createManually.click();
+    const relayComposer = page.getByRole("dialog", { name: "Create handoff draft" });
+    await expect(relayComposer).toBeVisible();
+    await expect(relayComposer.getByRole("combobox", { name: "Eligible recipients" })).toBeVisible();
+    await relayComposer.getByRole("button", { name: "Cancel" }).click();
+    await expect(relayComposer).toBeHidden();
+
     await page.waitForLoadState("networkidle");
     if (!projectRoot) throw new Error("The production Hub fixture root is unavailable.");
     const beforeIdle = snapshotReleaseProtectedState(projectRoot);

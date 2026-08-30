@@ -121,9 +121,11 @@ export interface JobSubscription {
 }
 
 export type InboxFixtureVariant = "empty" | "unknown" | "partial";
+export type RelayFixtureVariant = "empty" | "closed" | "missing" | "partial" | "legacy";
 
 export interface FixtureApiOptions {
   inboxFixture?: InboxFixtureVariant;
+  relayFixture?: RelayFixtureVariant;
 }
 
 export interface HubApi {
@@ -637,13 +639,28 @@ export function inboxFixtureVariant(search: string): InboxFixtureVariant | undef
     : undefined;
 }
 
+export function relayFixtureVariant(search: string): RelayFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("relayFixture");
+  return value === "empty"
+    || value === "closed"
+    || value === "missing"
+    || value === "partial"
+    || value === "legacy"
+    ? value
+    : undefined;
+}
+
 export async function resolveApi(): Promise<HubApi> {
   if (
     createFixtureApi !== null
     && fixturesEnabled(import.meta.env.DEV, window.location.search)
   ) {
-    const variant = inboxFixtureVariant(window.location.search);
-    return createFixtureApi(variant === undefined ? {} : { inboxFixture: variant });
+    const inboxVariant = inboxFixtureVariant(window.location.search);
+    const relayVariant = relayFixtureVariant(window.location.search);
+    return createFixtureApi({
+      ...(inboxVariant === undefined ? {} : { inboxFixture: inboxVariant }),
+      ...(relayVariant === undefined ? {} : { relayFixture: relayVariant }),
+    });
   }
   return new HttpHubApi();
 }

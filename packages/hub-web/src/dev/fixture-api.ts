@@ -1145,28 +1145,39 @@ const fixtureInboxProposals: InboxProposalDetail[] = [
 ];
 
 const fixtureRelayDraftId = "relay-draft-01";
-const fixtureRelayId = "relay_01000000000000000000000001";
+const fixtureRelayIds = {
+  ready: "relay_01000000000000000000000001",
+  claimed: "relay_01000000000000000000000002",
+  sentWaiting: "relay_01000000000000000000000003",
+  sentTaken: "relay_01000000000000000000000004",
+  closed: "relay_01000000000000000000000005",
+  legacy: "relay_01000000000000000000000006",
+} as const;
+const fixtureMissingMemberId = "member_01K39WVM6H7JK8M9NPQRSTVVWX";
+const fixtureLegacyRelayWarning = "One or more legacy schema-v1 Relays have no canonical publication timestamp.";
+const fixtureCurrentMemberActor = {
+  kind: "member" as const,
+  memberId: fixtureMemberIds[0],
+  displayName: fixtureMembers[0].displayName,
+};
+const fixtureTeammateMemberActor = {
+  kind: "member" as const,
+  memberId: fixtureMemberIds[1],
+  displayName: fixtureMembers[1].displayName,
+};
 const fixtureRelayDrafts: RelayDraftDetail[] = [{
   id: fixtureRelayDraftId,
   revision: revision("7"),
   updatedAt: timestamp(11),
   summary: "Carry the release evidence through the final cross-platform gate.",
-  recipients: [{
-    kind: "member",
-    memberId: fixtureMemberIds[1],
-    displayName: fixtureMembers[1].displayName,
-  }],
+  recipients: [fixtureTeammateMemberActor],
   workstream: {
     kind: "workstream",
     id: fixtureWorkstreamIds[0],
     title: fixtureWorkstreams[0].title,
   },
   input: {
-    recipients: [{
-      kind: "member",
-      memberId: fixtureMemberIds[1],
-      displayName: fixtureMembers[1].displayName,
-    }],
+    recipients: [fixtureTeammateMemberActor],
     workstream: {
       kind: "workstream",
       id: fixtureWorkstreamIds[0],
@@ -1175,55 +1186,229 @@ const fixtureRelayDrafts: RelayDraftDetail[] = [{
     summary: "Carry the release evidence through the final cross-platform gate.",
     completed: ["The deterministic benchmark fixture is stable."],
     inProgress: ["Collect the final pinned runner evidence."],
-    decisions: [],
-    blockers: [],
+    decisions: [{
+      id: fixtureInboxSpecId,
+      kind: "spec",
+      title: "Human-team memory release",
+    }],
+    blockers: ["Windows packed-install evidence is not yet recorded."],
     unresolvedQuestions: ["Does the Windows packed-install run retain the same digest?"],
     changedFiles: ["scripts/release-benchmark/run.mjs"],
-    code: [{ kind: "file", path: "scripts/release-benchmark/run.mjs" }],
-    evidence: [{ kind: "manual", note: "Prepared in the Relay fixture workbench." }],
+    code: [
+      { kind: "symbol", symbolId: "sym.createHubServer", fingerprint: revision("1") },
+      { kind: "file", path: "scripts/release-benchmark/run.mjs", fingerprint: revision("2") },
+    ],
+    evidence: [
+      { kind: "entity", entity: { id: fixtureInboxSpecId, kind: "spec", title: "Human-team memory release" } },
+      { kind: "code", code: { kind: "symbol", symbolId: "sym.createHubServer", fingerprint: revision("1") } },
+      { kind: "file", path: "scripts/release-benchmark/run.mjs" },
+      { kind: "commit", hash: "d34db33fd34db33fd34db33fd34db33fd34db33f" },
+      { kind: "external", uri: "https://nodejs.org/en/download", label: "Node.js release matrix" },
+      { kind: "manual", note: "Prepared in the Relay fixture workbench." },
+    ],
     nextActions: ["Run the cross-platform storage matrix."],
   },
 }];
 
-const fixtureRelays: RelayDetail[] = [{
-  schemaVersion: 2,
-  ref: { kind: "relay", id: fixtureRelayId, title: "Release evidence handoff" },
-  sourcePath: `.mex/relays/${fixtureRelayId}.md`,
-  revision: revision("8"),
+const fixtureRelays: RelayDetail[] = [
+  {
+    schemaVersion: 2,
+    ref: { kind: "relay", id: fixtureRelayIds.ready },
+    sourcePath: `.mex/relays/${fixtureRelayIds.ready}.md`,
+    revision: revision("8"),
+    state: "published",
+    sender: fixtureTeammateMemberActor,
+    recipients: [fixtureCurrentMemberActor],
+    workstream: {
+      kind: "workstream",
+      id: fixtureWorkstreamIds[0],
+      title: fixtureWorkstreams[0].title,
+    },
+    summary: "Release evidence is ready for the final cross-platform gate.",
+    completed: ["Linux Node 22 characterization is captured."],
+    inProgress: ["Cross-platform storage portability is awaiting claim."],
+    decisions: [{ id: fixtureInboxSpecId, kind: "spec", title: "Human-team memory release" }],
+    blockers: ["The Windows packed-install run still needs pinned evidence."],
+    unresolvedQuestions: ["Does the Windows run retain the same archive digest?"],
+    changedFiles: ["scripts/release-benchmark/run.mjs"],
+    code: [
+      { kind: "symbol", symbolId: "sym.createHubServer", fingerprint: revision("1") },
+      { kind: "file", path: "scripts/release-benchmark/run.mjs" },
+    ],
+    evidence: [
+      { kind: "entity", entity: { id: fixtureInboxSpecId, kind: "spec", title: "Human-team memory release" } },
+      { kind: "code", code: { kind: "symbol", symbolId: "sym.createHubServer" } },
+      { kind: "file", path: "scripts/release-benchmark/run.mjs" },
+      { kind: "commit", hash: "d34db33fd34db33fd34db33fd34db33fd34db33f" },
+      { kind: "external", uri: "https://nodejs.org/en/download", label: "Node.js release matrix" },
+      { kind: "manual", note: "Exact fixture evidence for Relay UI validation." },
+    ],
+    nextActions: ["Take the handoff and run the remaining matrix."],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    publishedAt: timestamp(70),
+    acknowledgedBy: null,
+    acknowledgedAt: null,
+    closedBy: null,
+    closedAt: null,
+  },
+  {
+    schemaVersion: 2,
+    ref: { kind: "relay", id: fixtureRelayIds.claimed },
+    sourcePath: `.mex/relays/${fixtureRelayIds.claimed}.md`,
+    revision: revision("9"),
+    state: "acknowledged",
+    sender: fixtureTeammateMemberActor,
+    recipients: [fixtureCurrentMemberActor],
+    workstream: {
+      kind: "workstream",
+      id: fixtureWorkstreamIds[0],
+      title: fixtureWorkstreams[0].title,
+    },
+    summary: "Finish the keyboard and screen-reader pass for the Hub review surfaces.",
+    completed: ["Route focus and skip-link behavior are covered by unit tests."],
+    inProgress: ["The two supported desktop viewports still need a final keyboard pass."],
+    decisions: [],
+    blockers: [],
+    unresolvedQuestions: ["Should the queue announce its new selection through the existing live region?"],
+    changedFiles: ["packages/hub-web/src/pages/InboxPage.tsx"],
+    code: [{ kind: "file", path: "packages/hub-web/src/pages/InboxPage.tsx" }],
+    evidence: [{ kind: "manual", note: "The focused accessibility tests pass in both themes." }],
+    nextActions: ["Verify keyboard selection at 1024×768 and 1440×900."],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    publishedAt: timestamp(55),
+    acknowledgedBy: fixtureCurrentMemberActor,
+    acknowledgedAt: timestamp(24),
+    closedBy: null,
+    closedAt: null,
+  },
+  {
+    schemaVersion: 2,
+    ref: { kind: "relay", id: fixtureRelayIds.sentWaiting },
+    sourcePath: `.mex/relays/${fixtureRelayIds.sentWaiting}.md`,
+    revision: revision("a"),
+    state: "published",
+    sender: fixtureCurrentMemberActor,
+    recipients: [fixtureTeammateMemberActor],
+    workstream: {
+      kind: "workstream",
+      id: fixtureWorkstreamIds[1],
+      title: fixtureWorkstreams[1].title,
+    },
+    summary: "Run the final Relay contract regression suite against the merged branch.",
+    completed: ["The local fixture matrix is deterministic."],
+    inProgress: [],
+    decisions: [],
+    blockers: [],
+    unresolvedQuestions: [],
+    changedFiles: [],
+    code: [],
+    evidence: [{ kind: "manual", note: "All focused contract tests pass locally." }],
+    nextActions: ["Take the handoff after pulling the latest integration branch."],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    publishedAt: timestamp(90),
+    acknowledgedBy: null,
+    acknowledgedAt: null,
+    closedBy: null,
+    closedAt: null,
+  },
+  {
+    schemaVersion: 2,
+    ref: { kind: "relay", id: fixtureRelayIds.sentTaken },
+    sourcePath: `.mex/relays/${fixtureRelayIds.sentTaken}.md`,
+    revision: revision("b"),
+    state: "acknowledged",
+    sender: fixtureCurrentMemberActor,
+    recipients: [fixtureTeammateMemberActor],
+    workstream: {
+      kind: "workstream",
+      id: fixtureWorkstreamIds[1],
+      title: fixtureWorkstreams[1].title,
+    },
+    summary: "Grace is carrying the final performance evidence into release review.",
+    completed: ["Route budgets are recorded at the checkpoint SHA."],
+    inProgress: ["Grace is comparing the production chunks with the pinned budget."],
+    decisions: [],
+    blockers: [],
+    unresolvedQuestions: [],
+    changedFiles: ["packages/hub-web/scripts/assert-route-budgets.mjs"],
+    code: [{ kind: "file", path: "packages/hub-web/scripts/assert-route-budgets.mjs" }],
+    evidence: [{ kind: "manual", note: "The release benchmark log is attached to the checkpoint evidence." }],
+    nextActions: ["Close the handoff after the production build is recorded."],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    publishedAt: timestamp(180),
+    acknowledgedBy: fixtureTeammateMemberActor,
+    acknowledgedAt: timestamp(130),
+    closedBy: null,
+    closedAt: null,
+  },
+  {
+    schemaVersion: 2,
+    ref: { kind: "relay", id: fixtureRelayIds.closed },
+    sourcePath: `.mex/relays/${fixtureRelayIds.closed}.md`,
+    revision: revision("c"),
+    state: "closed",
+    sender: fixtureCurrentMemberActor,
+    recipients: [fixtureTeammateMemberActor],
+    workstream: {
+      kind: "workstream",
+      id: fixtureWorkstreamIds[2],
+      title: fixtureWorkstreams[2].title,
+    },
+    summary: "The Sidebar verification handoff no longer needs team attention.",
+    completed: ["Keyboard, overflow, routing, and visual checks are recorded."],
+    inProgress: [],
+    decisions: [],
+    blockers: [],
+    unresolvedQuestions: [],
+    changedFiles: ["packages/hub-web/src/app/HubSidebar.tsx"],
+    code: [{ kind: "file", path: "packages/hub-web/src/app/HubSidebar.tsx" }],
+    evidence: [{ kind: "manual", note: "The sender closed this handoff after the verification pass." }],
+    nextActions: [],
+    diagnostics: [],
+    diagnosticsTruncated: false,
+    publishedAt: timestamp(420),
+    acknowledgedBy: fixtureTeammateMemberActor,
+    acknowledgedAt: timestamp(330),
+    closedBy: fixtureCurrentMemberActor,
+    closedAt: timestamp(210),
+  },
+];
+
+const fixtureLegacyRelay: RelayDetail = {
+  schemaVersion: 1,
+  ref: { kind: "relay", id: fixtureRelayIds.legacy },
+  sourcePath: `.mex/relays/${fixtureRelayIds.legacy}.md`,
+  revision: revision("e"),
   state: "published",
-  sender: {
-    kind: "member",
-    memberId: fixtureMemberIds[1],
-    displayName: fixtureMembers[1].displayName,
-  },
-  recipients: [{
-    kind: "member",
-    memberId: fixtureMemberIds[0],
-    displayName: fixtureMembers[0].displayName,
-  }],
-  workstream: {
-    kind: "workstream",
-    id: fixtureWorkstreamIds[0],
-    title: fixtureWorkstreams[0].title,
-  },
-  summary: "Release evidence is ready for the final cross-platform gate.",
-  completed: ["Linux Node 22 characterization is captured."],
-  inProgress: ["Cross-platform storage portability is awaiting claim."],
+  sender: { kind: "git", name: "Grace", email: "grace@example.test" },
+  recipients: [fixtureCurrentMemberActor],
+  workstream: { kind: "workstream", id: "historical-release", title: "Historical release" },
+  summary: "Review a legacy handoff whose original publication time was not recorded.",
+  completed: ["The original release notes were recovered."],
+  inProgress: [],
   decisions: [],
   blockers: [],
   unresolvedQuestions: [],
-  changedFiles: ["scripts/release-benchmark/run.mjs"],
-  code: [{ kind: "file", path: "scripts/release-benchmark/run.mjs" }],
-  evidence: [{ kind: "manual", note: "Exact fixture evidence for Relay UI validation." }],
-  nextActions: ["Claim the handoff and run the remaining matrix."],
-  diagnostics: [],
+  changedFiles: ["docs/releases/legacy-handoff.md"],
+  code: [],
+  evidence: [{ kind: "manual", note: "Imported from a schema-v1 Relay document." }],
+  nextActions: ["Review the legacy warning before acting on this handoff."],
+  diagnostics: [{
+    code: "RELAY_LEGACY_PUBLICATION_TIME",
+    severity: "warning",
+    message: fixtureLegacyRelayWarning,
+  }],
   diagnosticsTruncated: false,
-  publishedAt: timestamp(7),
+  publishedAt: null,
   acknowledgedBy: null,
   acknowledgedAt: null,
   closedBy: null,
   closedAt: null,
-}];
+};
 
 function fixtureCurrentActor(
   members: readonly TeamMember[],
@@ -1312,10 +1497,11 @@ class FixtureHubApi implements HubApi {
   readonly #members = structuredClone(fixtureMembers);
   readonly #workstreams = structuredClone(fixtureWorkstreams);
   readonly #inboxFixture: FixtureApiOptions["inboxFixture"];
+  readonly #relayFixture: FixtureApiOptions["relayFixture"];
   readonly #inboxDrafts: InboxDraftDetail[];
   readonly #inboxProposals: InboxProposalDetail[];
-  readonly #relayDrafts = structuredClone(fixtureRelayDrafts);
-  readonly #relays = structuredClone(fixtureRelays);
+  readonly #relayDrafts: RelayDraftDetail[];
+  readonly #relays: RelayDetail[];
   readonly #activityItems = structuredClone(activityItems);
   #selection: TeamCurrentActorResponse["selection"] = {
     memberId: fixtureMemberIds[0],
@@ -1326,12 +1512,32 @@ class FixtureHubApi implements HubApi {
 
   constructor(options: FixtureApiOptions = {}) {
     this.#inboxFixture = options.inboxFixture;
+    this.#relayFixture = options.relayFixture;
     this.#inboxDrafts = structuredClone(
       options.inboxFixture === "empty" ? [] : fixtureInboxDrafts,
     );
     this.#inboxProposals = structuredClone(
       options.inboxFixture === "empty" ? [] : fixtureInboxProposals,
     );
+    this.#relayDrafts = structuredClone(
+      options.relayFixture === "empty" ? [] : fixtureRelayDrafts,
+    );
+    this.#relays = structuredClone(
+      options.relayFixture === "empty"
+        ? []
+        : options.relayFixture === "closed"
+          ? fixtureRelays.filter((relay) => relay.state === "closed")
+          : options.relayFixture === "legacy"
+            ? [fixtureLegacyRelay]
+            : fixtureRelays,
+    );
+    if (options.relayFixture === "missing") {
+      this.#selection = {
+        memberId: fixtureMissingMemberId,
+        updatedAt: timestamp(12),
+        revision: revision("d"),
+      };
+    }
   }
 
   #currentInboxActor(): TeamCurrentActorResponse {
@@ -1354,16 +1560,22 @@ class FixtureHubApi implements HubApi {
   bootstrap() { return Promise.resolve({ expiresAt: session.expiresAt }); }
   getSession() { return Promise.resolve(session); }
   getCapabilities() {
-    return Promise.resolve(structuredClone(this.#inboxFixture === "partial"
-      ? {
-          ...capabilities,
-          inbox: {
-            ...capabilities.inbox,
-            proposalMutation: unavailable("Inbox proposal writes are not connected in this Hub process."),
-            specApproval: unavailable("Inbox Spec approval requires exact Wiki planning and apply."),
-          },
-        }
-      : capabilities));
+    const projected = structuredClone(capabilities);
+    if (this.#inboxFixture === "partial") {
+      projected.inbox = {
+        ...projected.inbox,
+        proposalMutation: unavailable("Inbox proposal writes are not connected in this Hub process."),
+        specApproval: unavailable("Inbox Spec approval requires exact Wiki planning and apply."),
+      };
+    }
+    if (this.#relayFixture === "partial") {
+      projected.relays = {
+        ...projected.relays,
+        publish: unavailable("Relay publication is not connected in this Hub process."),
+        lifecycleMutation: unavailable("Relay lifecycle writes are not connected in this Hub process."),
+      };
+    }
+    return Promise.resolve(projected);
   }
   getHome() {
     const actor = this.#currentInboxActor().actor;
@@ -1456,10 +1668,13 @@ class FixtureHubApi implements HubApi {
   getRelayDrafts(request: RelayDraftListRequest): Promise<RelayDraftListResponse> {
     const parsedOffset = request.cursor?.match(/^fixture_relay_drafts_(\d+)$/)?.[1];
     const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
-    const details = this.#relayDrafts.slice(offset, offset + request.limit);
+    const orderedDrafts = [...this.#relayDrafts].sort((left, right) => (
+      right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id)
+    ));
+    const details = orderedDrafts.slice(offset, offset + request.limit);
     const items = details.map(({ input: _input, ...summary }) => summary);
     const nextOffset = offset + items.length;
-    const nextCursor = nextOffset < this.#relayDrafts.length ? `fixture_relay_drafts_${nextOffset}` : null;
+    const nextCursor = nextOffset < orderedDrafts.length ? `fixture_relay_drafts_${nextOffset}` : null;
     return Promise.resolve({
       items: structuredClone(items),
       nextCursor,
@@ -1492,6 +1707,11 @@ class FixtureHubApi implements HubApi {
       return relay.state === "published"
         ? relay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === current.memberId)
         : relay.acknowledgedBy?.kind === "member" && relay.acknowledgedBy.memberId === current.memberId;
+    }).sort((left, right) => {
+      if (left.publishedAt === null && right.publishedAt !== null) return 1;
+      if (left.publishedAt !== null && right.publishedAt === null) return -1;
+      const publishedOrder = right.publishedAt?.localeCompare(left.publishedAt ?? "") ?? 0;
+      return publishedOrder || right.ref.id.localeCompare(left.ref.id);
     });
     const parsedOffset = request.cursor?.match(/^fixture_relays_(\d+)$/)?.[1];
     const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
@@ -1518,7 +1738,9 @@ class FixtureHubApi implements HubApi {
       truncated: nextCursor !== null,
       sourceTruncated: false,
       deterministicRevision: revision("b"),
-      diagnostics: [],
+      diagnostics: filtered.some((relay) => relay.schemaVersion === 1)
+        ? structuredClone(fixtureLegacyRelay.diagnostics)
+        : [],
       diagnosticsTruncated: false,
     });
   }

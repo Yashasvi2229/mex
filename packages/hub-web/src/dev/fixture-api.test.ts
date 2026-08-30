@@ -65,7 +65,7 @@ describe("development-only populated fixture", () => {
     expect(ActivityResponseSchema.safeParse(activity).success).toBe(true);
     expect(home.sections.activity).toEqual({ availability: "available", count: 4 });
     expect(home.sections.inbox).toEqual({ availability: "available", count: 3 });
-    expect(home.sections.relays).toEqual({ availability: "available", count: 1 });
+    expect(home.sections.relays).toEqual({ availability: "available", count: 2 });
     expect(activity.items.some((item) => item.source === "activity")).toBe(true);
     expect(activity.items.some((item) => item.source === "legacy")).toBe(true);
     expect(SearchResponseSchema.safeParse(search).success).toBe(true);
@@ -150,6 +150,86 @@ describe("development-only populated fixture", () => {
     expect(TeamOperationApplyResponseSchema.safeParse(workstreamApplied).success).toBe(true);
     expect(workstreamApplied.workstreams).toHaveLength(1);
     expect(workstreamApplied.events).toHaveLength(1);
+  });
+
+  it("models the human Relay inbox across personal, sent, team, closed, and draft views", async () => {
+    const api = createFixtureApi();
+    const mineFirst = await api.getRelays({
+      perspective: "mine",
+      states: ["published", "acknowledged"],
+      limit: 1,
+    });
+    const mineSecond = await api.getRelays({
+      perspective: "mine",
+      states: ["published", "acknowledged"],
+      limit: 1,
+      cursor: mineFirst.nextCursor ?? undefined,
+    });
+    const [sentOpen, sentClosed, teamOpen, drafts] = await Promise.all([
+      api.getRelays({ perspective: "sent", states: ["published", "acknowledged"], limit: 25 }),
+      api.getRelays({ perspective: "sent", states: ["closed"], limit: 25 }),
+      api.getRelays({ perspective: "all", states: ["published", "acknowledged"], limit: 25 }),
+      api.getRelayDrafts({ limit: 25 }),
+    ]);
+    const mine = [...mineFirst.items, ...mineSecond.items];
+
+    for (const page of [mineFirst, mineSecond, sentOpen, sentClosed, teamOpen]) {
+      expect(RelayListResponseSchema.safeParse(page).success).toBe(true);
+    }
+    expect(mine.map((relay) => [relay.ref.id, relay.state])).toEqual([
+      ["relay_01000000000000000000000002", "acknowledged"],
+      ["relay_01000000000000000000000001", "published"],
+    ]);
+    expect(mineFirst).toMatchObject({ nextCursor: "fixture_relays_1", truncated: true });
+    expect(mineSecond).toMatchObject({ nextCursor: null, truncated: false });
+    expect(sentOpen.items.map((relay) => [relay.ref.id, relay.state])).toEqual([
+      ["relay_01000000000000000000000003", "published"],
+      ["relay_01000000000000000000000004", "acknowledged"],
+    ]);
+    expect(sentClosed.items.map((relay) => [relay.ref.id, relay.state])).toEqual([
+      ["relay_01000000000000000000000005", "closed"],
+    ]);
+    expect(teamOpen.items.map((relay) => relay.ref.id)).toEqual([
+      "relay_01000000000000000000000002",
+      "relay_01000000000000000000000001",
+      "relay_01000000000000000000000003",
+      "relay_01000000000000000000000004",
+    ]);
+    expect([...teamOpen.items, ...sentClosed.items].every((relay) => relay.ref.title === undefined)).toBe(true);
+
+    const details = await Promise.all(
+      [...teamOpen.items, ...sentClosed.items].map((relay) => api.getRelay(relay.ref.id)),
+    );
+    expect(details.every((relay) => RelayDetailSchema.safeParse(relay).success)).toBe(true);
+    expect(details.find((relay) => (
+      relay.state === "acknowledged"
+      && relay.acknowledgedBy?.kind === "member"
+      && relay.acknowledgedBy.memberId === "member_01K36WVM6H7JK8M9NPQRSTVVWX"
+    )))
+      .toMatchObject({ summary: "Finish the keyboard and screen-reader pass for the Hub review surfaces." });
+
+    expect(RelayDraftListResponseSchema.safeParse(drafts).success).toBe(true);
+    expect(drafts.items).toHaveLength(1);
+    expect(Object.hasOwn(drafts.items[0]!, "input")).toBe(false);
+    const draft = await api.getRelayDraft(drafts.items[0]!.id);
+    expect(RelayDraftDetailSchema.safeParse(draft).success).toBe(true);
+    expect(draft.input).toMatchObject({
+      completed: ["The deterministic benchmark fixture is stable."],
+      inProgress: ["Collect the final pinned runner evidence."],
+      blockers: ["Windows packed-install evidence is not yet recorded."],
+      unresolvedQuestions: ["Does the Windows packed-install run retain the same digest?"],
+      nextActions: ["Run the cross-platform storage matrix."],
+    });
+    expect(draft.input.decisions).toHaveLength(1);
+    expect(draft.input.code.map((item) => item.kind)).toEqual(["symbol", "file"]);
+    expect(draft.input.evidence.map((item) => item.kind)).toEqual([
+      "entity",
+      "code",
+      "file",
+      "commit",
+      "external",
+      "manual",
+    ]);
   });
 
   it("models the complete Inbox review desk in stable server order", async () => {
@@ -491,6 +571,196 @@ describe("development-only populated fixture", () => {
     expect(proposals.items).toHaveLength(3);
     expect(WikiEntityListResponseSchema.safeParse(wiki).success).toBe(true);
   });
+
+  it("projects exact empty Relay queues and drafts without suppressing Relay reads", async () => {
+    const api = createFixtureApi({ relayFixture: "empty" });
+    const [capability, homeResult, drafts, open, closed] = await Promise.all([
+      api.getCapabilities(),
+      api.getHome(),
+      api.getRelayDrafts({ limit: 25 }),
+      api.getRelays({ perspective: "all", states: ["published", "acknowledged"], limit: 25 }),
+      api.getRelays({ perspective: "all", states: ["closed"], limit: 25 }),
+    ]);
+
+    expect(HubCapabilitiesSchema.safeParse(capability).success).toBe(true);
+    expect(HomeResponseSchema.safeParse(homeResult).success).toBe(true);
+    expect(RelayDraftListResponseSchema.safeParse(drafts).success).toBe(true);
+    expect(RelayListResponseSchema.safeParse(open).success).toBe(true);
+    expect(RelayListResponseSchema.safeParse(closed).success).toBe(true);
+    expect(capability.relays).toEqual({
+      read: { availability: "available" },
+      draftMutation: { availability: "available" },
+      publish: { availability: "available" },
+      lifecycleMutation: { availability: "available" },
+    });
+    expect(homeResult.sections.relays).toEqual({ availability: "available", count: 0 });
+    expect(drafts).toMatchObject({ items: [], nextCursor: null, truncated: false });
+    expect(open).toMatchObject({ items: [], nextCursor: null, truncated: false });
+    expect(closed).toMatchObject({ items: [], nextCursor: null, truncated: false });
+    await expect(api.getRelayDraft("relay-draft-01")).rejects.toThrow("Fixture Relay draft not found.");
+    await expect(api.getRelay("relay_01000000000000000000000001")).rejects.toThrow("Fixture Relay not found.");
+  });
+
+  it("isolates a contract-valid closed handoff for closed-state visual review", async () => {
+    const api = createFixtureApi({ relayFixture: "closed" });
+    const [homeResult, open, closed] = await Promise.all([
+      api.getHome(),
+      api.getRelays({ perspective: "all", states: ["published", "acknowledged"], limit: 25 }),
+      api.getRelays({ perspective: "all", states: ["closed"], limit: 25 }),
+    ]);
+
+    expect(homeResult.sections.relays).toEqual({ availability: "available", count: 0 });
+    expect(open.items).toEqual([]);
+    expect(closed.items.map((relay) => relay.ref.id)).toEqual([
+      "relay_01000000000000000000000005",
+    ]);
+    const detail = await api.getRelay(closed.items[0]!.ref.id);
+    expect(RelayDetailSchema.safeParse(detail).success).toBe(true);
+    expect(detail).toMatchObject({
+      state: "closed",
+      acknowledgedBy: { kind: "member", displayName: "Grace Hopper" },
+      closedBy: { kind: "member", displayName: "Ada Lovelace" },
+    });
+  });
+
+  it("projects a stale configured Member while retaining Team and local-draft reads", async () => {
+    const api = createFixtureApi({ relayFixture: "missing" });
+    const [actor, homeResult, team, drafts] = await Promise.all([
+      api.getCurrentActor(),
+      api.getHome(),
+      api.getRelays({ perspective: "all", states: ["published", "acknowledged"], limit: 25 }),
+      api.getRelayDrafts({ limit: 25 }),
+    ]);
+
+    expect(TeamCurrentActorResponseSchema.safeParse(actor).success).toBe(true);
+    expect(actor).toMatchObject({
+      actor: { kind: "git", name: "Ada", email: "ada@example.test" },
+      source: "git-fallback",
+      selection: { memberId: "member_01K39WVM6H7JK8M9NPQRSTVVWX" },
+      diagnostics: [{
+        code: "ACTOR_MEMBER_MISSING",
+        severity: "warning",
+        message: "The referenced member no longer exists.",
+      }],
+    });
+    expect(homeResult.sections.relays).toEqual({
+      availability: "unavailable",
+      count: null,
+      reason: "Select an active Member to see your open Relay handoffs.",
+    });
+    expect(team.items).toHaveLength(4);
+    expect(drafts.items).toHaveLength(1);
+    await expect(api.getRelays({
+      perspective: "mine",
+      states: ["published", "acknowledged"],
+      limit: 25,
+    })).rejects.toThrow("Select an active Member to use this Relay perspective.");
+  });
+
+  it("projects partial Relay mutation capability without suppressing reads or local drafts", async () => {
+    const api = createFixtureApi({ relayFixture: "partial" });
+    const [capability, homeResult, drafts, relays] = await Promise.all([
+      api.getCapabilities(),
+      api.getHome(),
+      api.getRelayDrafts({ limit: 25 }),
+      api.getRelays({ perspective: "mine", states: ["published", "acknowledged"], limit: 25 }),
+    ]);
+
+    expect(HubCapabilitiesSchema.safeParse(capability).success).toBe(true);
+    expect(capability.relays).toEqual({
+      read: { availability: "available" },
+      draftMutation: { availability: "available" },
+      publish: {
+        availability: "unavailable",
+        reason: "Relay publication is not connected in this Hub process.",
+      },
+      lifecycleMutation: {
+        availability: "unavailable",
+        reason: "Relay lifecycle writes are not connected in this Hub process.",
+      },
+    });
+    expect(homeResult.sections.relays).toEqual({ availability: "available", count: 2 });
+    expect(drafts.items).toHaveLength(1);
+    expect(relays.items).toHaveLength(2);
+  });
+
+  it("isolates a schema-v1 Relay and its canonical legacy warning", async () => {
+    const api = createFixtureApi({ relayFixture: "legacy" });
+    const page = await api.getRelays({
+      perspective: "mine",
+      states: ["published", "acknowledged"],
+      limit: 25,
+    });
+
+    expect(RelayListResponseSchema.safeParse(page).success).toBe(true);
+    expect(page.items.map((relay) => relay.ref.id)).toEqual([
+      "relay_01000000000000000000000006",
+    ]);
+    expect(page.diagnostics).toEqual([{
+      code: "RELAY_LEGACY_PUBLICATION_TIME",
+      severity: "warning",
+      message: "One or more legacy schema-v1 Relays have no canonical publication timestamp.",
+    }]);
+    const detail = await api.getRelay(page.items[0]!.ref.id);
+    expect(RelayDetailSchema.safeParse(detail).success).toBe(true);
+    expect(detail).toMatchObject({
+      schemaVersion: 1,
+      state: "published",
+      sender: { kind: "git", name: "Grace", email: "grace@example.test" },
+      publishedAt: null,
+      diagnostics: page.diagnostics,
+    });
+  });
+
+  it.each(["empty", "closed", "missing", "partial", "legacy"] as const)(
+    "keeps Knowledge, Inbox, Activity, and Workstreams stable for the %s Relay variant",
+    async (relayFixture) => {
+      const baseline = createFixtureApi();
+      const variant = createFixtureApi({ relayFixture });
+      const request = { limit: 25 } as const;
+      const [
+        baselineKnowledge,
+        variantKnowledge,
+        baselineInboxDrafts,
+        variantInboxDrafts,
+        baselineInboxProposals,
+        variantInboxProposals,
+        baselineActivity,
+        variantActivity,
+        baselineWorkstreams,
+        variantWorkstreams,
+      ] = await Promise.all([
+        baseline.listWikiEntities(request),
+        variant.listWikiEntities(request),
+        baseline.getInboxDrafts(request),
+        variant.getInboxDrafts(request),
+        baseline.getInboxProposals({ states: ["pending", "stale"], limit: 25 }),
+        variant.getInboxProposals({ states: ["pending", "stale"], limit: 25 }),
+        baseline.getActivity(request),
+        variant.getActivity(request),
+        baseline.getWorkstreams(request),
+        variant.getWorkstreams(request),
+      ]);
+
+      expect(variantKnowledge).toEqual(baselineKnowledge);
+      const [baselineKnowledgeNext, variantKnowledgeNext] = await Promise.all([
+        baseline.listWikiEntities({
+          limit: 25,
+          cursor: baselineKnowledge.nextCursor ?? undefined,
+        }),
+        variant.listWikiEntities({
+          limit: 25,
+          cursor: variantKnowledge.nextCursor ?? undefined,
+        }),
+      ]);
+      expect(variantKnowledgeNext).toEqual(baselineKnowledgeNext);
+      expect([...variantKnowledge.items, ...variantKnowledgeNext.items]).toHaveLength(3);
+      expect(variantInboxDrafts).toEqual(baselineInboxDrafts);
+      expect(variantInboxProposals).toEqual(baselineInboxProposals);
+      expect(variantActivity).toEqual(baselineActivity);
+      expect(variantWorkstreams).toEqual(baselineWorkstreams);
+    },
+  );
 
   it.each(["empty", "unknown", "partial"] as const)(
     "keeps unrelated fixture routes stable for the %s Inbox variant",
