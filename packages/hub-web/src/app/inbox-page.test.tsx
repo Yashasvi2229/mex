@@ -1244,7 +1244,7 @@ describe("Inbox Spec-authoring workbench", () => {
     await user.click(screen.getByRole("button", { name: "Refresh" }));
     expect(await screen.findByText("That draft is no longer on this device. Choose another draft.")).toBeVisible();
     expect(await screen.findByText("No drafts on this device")).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Choose a draft" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Choose a draft" })).toBeVisible();
     expect(detail).toHaveBeenCalledTimes(2);
   });
 

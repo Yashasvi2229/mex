@@ -401,9 +401,16 @@ describe("Members identity and team directory", () => {
     const { queryClient } = renderRoute(api);
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
 
-    await screen.findByText("Ada Lovelace");
+    await screen.findByRole("heading", { level: 1, name: "Members" });
+    await waitFor(() => expect(routeLocation()).toContain(`member=${ADA_ID}`));
+    const selectedDetail = await screen.findByRole("region", { name: "Selected Member detail" });
+    expect(await within(selectedDetail).findByRole("heading", { name: "Ada Lovelace" })).toBeVisible();
     expect(screen.queryByText("Grace Hopper")).not.toBeInTheDocument();
     const callsBeforeIdle = members.mock.calls.length;
+    const currentCallsBeforeRefresh = current.mock.calls.length;
+    const detailCallsBeforeRefresh = detail.mock.calls.length;
+    expect(currentCallsBeforeRefresh).toBeGreaterThan(0);
+    expect(detailCallsBeforeRefresh).toBeGreaterThan(0);
     await new Promise((resolve) => setTimeout(resolve, 25));
     expect(members).toHaveBeenCalledTimes(callsBeforeIdle);
 
@@ -412,8 +419,8 @@ describe("Members identity and team directory", () => {
     expect(await screen.findByText("Members and identity refreshed.")).toBeVisible();
     expect(await screen.findByText("Grace Hopper")).toBeVisible();
     expect(members.mock.calls.length).toBeGreaterThan(callsBeforeIdle);
-    expect(current.mock.calls.length).toBeGreaterThan(1);
-    expect(detail.mock.calls.length).toBeGreaterThan(1);
+    expect(current.mock.calls.length).toBeGreaterThan(currentCallsBeforeRefresh);
+    expect(detail.mock.calls.length).toBeGreaterThan(detailCallsBeforeRefresh);
     const keys = invalidate.mock.calls.map(([filters]) => filters?.queryKey);
     expect(keys).toContainEqual(["home"]);
     expect(keys).toContainEqual(["inbox"]);
