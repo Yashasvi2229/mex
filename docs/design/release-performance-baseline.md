@@ -78,6 +78,14 @@ non-Relay budget stays frozen. A separate clean enforcing run on the final
 exact head is mandatory, including confirmation of the four potentially
 material maintenance crossings from the characterization pass.
 
+The identity-first Members workbench was measured again from the final local
+production build after its dialog code moved behind an explicit mutation
+boundary. The route measured `83232` JS, `12038` CSS, and `0` font bytes. Only
+the Members CSS ceiling was recalibrated to the exact frozen formula candidate
+of `12640` bytes (`ceil(12038 * 1.05)`); its existing `93022`-byte JS ceiling
+and every other asset and runtime budget remain unchanged. A clean pinned
+enforcing run on the final exact head remains required before release.
+
 ## Runner contract
 
 `npm run benchmark:release` builds the package and writes the bounded JSON

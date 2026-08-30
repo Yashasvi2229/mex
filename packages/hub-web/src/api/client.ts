@@ -123,11 +123,21 @@ export interface JobSubscription {
 export type InboxFixtureVariant = "empty" | "unknown" | "partial";
 export type RelayFixtureVariant = "empty" | "closed" | "missing" | "partial" | "legacy";
 export type ActivityFixtureVariant = "empty" | "legacy" | "partial";
+export type MemberFixtureVariant =
+  | "configured"
+  | "git-alias"
+  | "git-fallback"
+  | "unknown"
+  | "stale"
+  | "inactive"
+  | "ambiguous"
+  | "partial";
 
 export interface FixtureApiOptions {
   inboxFixture?: InboxFixtureVariant;
   relayFixture?: RelayFixtureVariant;
   activityFixture?: ActivityFixtureVariant;
+  memberFixture?: MemberFixtureVariant;
 }
 
 export interface HubApi {
@@ -659,6 +669,20 @@ export function activityFixtureVariant(search: string): ActivityFixtureVariant |
     : undefined;
 }
 
+export function memberFixtureVariant(search: string): MemberFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("memberFixture");
+  return value === "configured"
+    || value === "git-alias"
+    || value === "git-fallback"
+    || value === "unknown"
+    || value === "stale"
+    || value === "inactive"
+    || value === "ambiguous"
+    || value === "partial"
+    ? value
+    : undefined;
+}
+
 export async function resolveApi(): Promise<HubApi> {
   if (
     createFixtureApi !== null
@@ -667,10 +691,12 @@ export async function resolveApi(): Promise<HubApi> {
     const inboxVariant = inboxFixtureVariant(window.location.search);
     const relayVariant = relayFixtureVariant(window.location.search);
     const activityVariant = activityFixtureVariant(window.location.search);
+    const memberVariant = memberFixtureVariant(window.location.search);
     return createFixtureApi({
       ...(inboxVariant === undefined ? {} : { inboxFixture: inboxVariant }),
       ...(relayVariant === undefined ? {} : { relayFixture: relayVariant }),
       ...(activityVariant === undefined ? {} : { activityFixture: activityVariant }),
+      ...(memberVariant === undefined ? {} : { memberFixture: memberVariant }),
     });
   }
   return new HttpHubApi();

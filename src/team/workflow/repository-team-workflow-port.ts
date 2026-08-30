@@ -1933,6 +1933,14 @@ export class RepositoryTeamWorkflowPort<
         const current = await required(this.#members.get(action.memberId), "Member");
         requireArtifactExpectation(expectedRevisions, current.sourcePath, current.revision);
         const plan = await this.#members.previewUpdate(action.memberId, action.patch, current.revision);
+        if (plan.member.revision === current.revision) {
+          throw artifactError(
+            "VALIDATION_FAILED",
+            "Member update has no changes",
+            `Member ${action.memberId} already has the proposed display name and Git identities.`,
+            current.sourcePath,
+          );
+        }
         return canonicalPlan<TWikiPayload>(plan, "member", action.memberId, workflowActivity("member.update", {
           action: "member.updated",
           subjects: [entitySubject(plan.member.ref)],

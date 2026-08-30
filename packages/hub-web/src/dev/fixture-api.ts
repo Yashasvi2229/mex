@@ -1548,36 +1548,94 @@ const fixtureLegacyRelayV2: RelayDetail = {
   closedAt: null,
 };
 
+type FixtureGitIdentity = { name: string | null; email: string | null };
+
+const fixtureAdaGitIdentity: FixtureGitIdentity = {
+  name: "Ada",
+  email: "ada@example.test",
+};
+
 function fixtureCurrentActor(
   members: readonly TeamMember[],
   selection: TeamCurrentActorResponse["selection"],
+  gitIdentity: FixtureGitIdentity | null,
 ): TeamCurrentActorResponse {
-  if (selection === null) return {
-    actor: { kind: "git", name: "Ada", email: "ada@example.test" },
-    source: "git-fallback",
-    selection: null,
-    diagnostics: [],
-    diagnosticsTruncated: false,
-  };
-  const candidate = members.find((member) => member.id === selection.memberId) ?? null;
-  if (candidate?.active !== true) return {
-    actor: { kind: "git", name: "Ada", email: "ada@example.test" },
-    source: "git-fallback",
-    selection,
-    diagnostics: [{
-      code: candidate === null ? "ACTOR_MEMBER_MISSING" : "ACTOR_MEMBER_INACTIVE",
-      severity: "warning",
-      message: candidate === null
-        ? "The referenced member no longer exists."
-        : "The referenced member is currently inactive.",
-    }],
-    diagnosticsTruncated: false,
-  };
+  const candidate = selection === null
+    ? null
+    : members.find((member) => member.id === selection.memberId) ?? null;
+  if (candidate?.active === true) {
+    return {
+      actor: { kind: "member", memberId: candidate.id, displayName: candidate.displayName },
+      source: "configured-member",
+      selection,
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    };
+  }
+
+  const selectionDiagnostic: TeamCurrentActorResponse["diagnostics"][number] | null = selection === null
+    ? null
+    : candidate === null
+      ? {
+          code: "ACTOR_MEMBER_MISSING",
+          severity: "warning",
+          message: "The referenced member no longer exists.",
+        }
+      : {
+          code: "ACTOR_MEMBER_INACTIVE",
+          severity: "warning",
+          message: "The referenced member is currently inactive.",
+          path: candidate.sourcePath,
+        };
+  if (gitIdentity === null) {
+    return {
+      actor: { kind: "unknown" },
+      source: "unknown",
+      selection,
+      diagnostics: [
+        ...(selectionDiagnostic === null ? [] : [selectionDiagnostic]),
+        {
+          code: "GIT_IDENTITY_UNAVAILABLE",
+          severity: "warning",
+          message: "Git identity could not be inspected safely.",
+        },
+      ],
+      diagnosticsTruncated: false,
+    };
+  }
+
+  const normalizedName = gitIdentity.name?.trim().normalize("NFC") ?? null;
+  const normalizedEmail = gitIdentity.email?.trim().normalize("NFC").toLowerCase() ?? null;
+  const matchingMembers = members.filter((member) => member.active && member.gitAliases.some((alias) => (
+    (normalizedEmail !== null && alias.email?.trim().normalize("NFC").toLowerCase() === normalizedEmail)
+    || (normalizedName !== null && alias.name?.trim().normalize("NFC") === normalizedName)
+  )));
+  const resolutionDiagnostic: TeamCurrentActorResponse["diagnostics"][number] | null = matchingMembers.length > 1
+    ? {
+        code: "ACTOR_ALIAS_AMBIGUOUS",
+        severity: "warning",
+        message: "The recorded Git identity matches multiple active members and was not remapped.",
+      }
+    : null;
+  const diagnostics = [
+    ...(selectionDiagnostic === null ? [] : [selectionDiagnostic]),
+    ...(resolutionDiagnostic === null ? [] : [resolutionDiagnostic]),
+  ];
+  if (matchingMembers.length === 1) {
+    const member = matchingMembers[0]!;
+    return {
+      actor: { kind: "member", memberId: member.id, displayName: member.displayName },
+      source: "git-alias",
+      selection,
+      diagnostics,
+      diagnosticsTruncated: false,
+    };
+  }
   return {
-    actor: { kind: "member", memberId: candidate.id, displayName: candidate.displayName },
-    source: "configured-member",
+    actor: { kind: "git", ...gitIdentity },
+    source: "git-fallback",
     selection,
-    diagnostics: [],
+    diagnostics,
     diagnosticsTruncated: false,
   };
 }
@@ -1636,27 +1694,58 @@ function fixtureTimelineEvent(event: TeamActivityEvent): ActivityItem {
 
 class FixtureHubApi implements HubApi {
   readonly #jobs = structuredClone(jobs);
-  readonly #members = structuredClone(fixtureMembers);
+  readonly #members: TeamMember[];
   readonly #workstreams = structuredClone(fixtureWorkstreams);
   readonly #inboxFixture: FixtureApiOptions["inboxFixture"];
   readonly #relayFixture: FixtureApiOptions["relayFixture"];
   readonly #activityFixture: FixtureApiOptions["activityFixture"];
+  readonly #memberFixture: NonNullable<FixtureApiOptions["memberFixture"]>;
+  readonly #gitIdentity: FixtureGitIdentity | null;
   readonly #inboxDrafts: InboxDraftDetail[];
   readonly #inboxProposals: InboxProposalDetail[];
   readonly #relayDrafts: RelayDraftDetail[];
   readonly #relays: RelayDetail[];
   readonly #activityItems: ActivityItem[];
-  #selection: TeamCurrentActorResponse["selection"] = {
-    memberId: fixtureMemberIds[0],
-    updatedAt: timestamp(12),
-    revision: revision("d"),
-  };
+  #selection: TeamCurrentActorResponse["selection"];
   #previewSequence = 0;
 
   constructor(options: FixtureApiOptions = {}) {
     this.#inboxFixture = options.inboxFixture;
     this.#relayFixture = options.relayFixture;
     this.#activityFixture = options.activityFixture;
+    this.#memberFixture = options.memberFixture
+      ?? (options.inboxFixture === "unknown"
+        ? "unknown"
+        : options.relayFixture === "missing"
+          ? "stale"
+          : "configured");
+    this.#members = structuredClone(fixtureMembers);
+    this.#gitIdentity = this.#memberFixture === "unknown"
+      ? null
+      : this.#memberFixture === "git-fallback"
+        ? { name: "MEX Contributor", email: "contributor@example.test" }
+        : this.#memberFixture === "ambiguous"
+          ? { name: "Grace", email: "ada@example.test" }
+          : fixtureAdaGitIdentity;
+    this.#selection = this.#memberFixture === "configured" || this.#memberFixture === "partial"
+      ? {
+          memberId: fixtureMemberIds[0],
+          updatedAt: timestamp(12),
+          revision: revision("d"),
+        }
+      : this.#memberFixture === "stale"
+        ? {
+            memberId: fixtureMissingMemberId,
+            updatedAt: timestamp(12),
+            revision: revision("d"),
+          }
+        : this.#memberFixture === "inactive"
+          ? {
+              memberId: fixtureMemberIds[2],
+              updatedAt: timestamp(12),
+              revision: revision("d"),
+            }
+          : null;
     this.#inboxDrafts = structuredClone(
       options.inboxFixture === "empty" ? [] : fixtureInboxDrafts,
     );
@@ -1682,30 +1771,10 @@ class FixtureHubApi implements HubApi {
           ? activityItems.filter((item) => item.source === "legacy")
           : activityItems,
     );
-    if (options.relayFixture === "missing") {
-      this.#selection = {
-        memberId: fixtureMissingMemberId,
-        updatedAt: timestamp(12),
-        revision: revision("d"),
-      };
-    }
   }
 
-  #currentInboxActor(): TeamCurrentActorResponse {
-    if (this.#inboxFixture !== "unknown") {
-      return fixtureCurrentActor(this.#members, this.#selection);
-    }
-    return {
-      actor: { kind: "unknown" },
-      source: "unknown",
-      selection: null,
-      diagnostics: [{
-        code: "ACTOR_UNKNOWN",
-        severity: "warning",
-        message: "MEX could not resolve a current Team or Git identity.",
-      }],
-      diagnosticsTruncated: false,
-    };
+  #currentActor(): TeamCurrentActorResponse {
+    return fixtureCurrentActor(this.#members, this.#selection, this.#gitIdentity);
   }
 
   bootstrap() { return Promise.resolve({ expiresAt: session.expiresAt }); }
@@ -1726,11 +1795,16 @@ class FixtureHubApi implements HubApi {
         lifecycleMutation: unavailable("Relay lifecycle writes are not connected in this Hub process."),
       };
     }
+    if (this.#memberFixture === "partial") {
+      projected.members = {
+        ...projected.members,
+        canonicalMutation: unavailable("Canonical Member writes are not connected in this Hub process."),
+      };
+    }
     return Promise.resolve(projected);
   }
   getHome() {
-    const actor = this.#currentInboxActor().actor;
-    const relayActor = fixtureCurrentActor(this.#members, this.#selection).actor;
+    const actor = this.#currentActor().actor;
     return Promise.resolve({
       ...home,
       actor: actor.kind === "member"
@@ -1742,13 +1816,13 @@ class FixtureHubApi implements HubApi {
           availability: "available" as const,
           count: this.#workstreams.filter((item) => item.state !== "archived").length,
         },
-        relays: relayActor.kind !== "member"
+        relays: actor.kind !== "member"
           ? { availability: "unavailable" as const, count: null, reason: "Select an active Member to see your open Relay handoffs." }
           : {
               availability: "available" as const,
               count: this.#relays.filter((relay) => (
-                (relay.state === "published" && relay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === relayActor.memberId))
-                || (relay.state === "acknowledged" && relay.acknowledgedBy?.kind === "member" && relay.acknowledgedBy.memberId === relayActor.memberId)
+                (relay.state === "published" && relay.recipients.some((recipient) => recipient.kind === "member" && recipient.memberId === actor.memberId))
+                || (relay.state === "acknowledged" && relay.acknowledgedBy?.kind === "member" && relay.acknowledgedBy.memberId === actor.memberId)
               )).length,
             },
         inbox: {
@@ -1768,9 +1842,11 @@ class FixtureHubApi implements HubApi {
     const filtered = this.#members.filter((member) => (
       request.active === undefined || member.active === request.active
     ));
-    const offset = request.cursor === "fixture_members_2" ? 2 : 0;
+    const parsedOffset = request.cursor?.match(/^fixture_members_(\d+)$/)?.[1];
+    const offset = parsedOffset === undefined ? 0 : Number(parsedOffset);
     const items = filtered.slice(offset, offset + request.limit);
-    const nextCursor = offset + items.length < filtered.length ? "fixture_members_2" : null;
+    const nextOffset = offset + items.length;
+    const nextCursor = nextOffset < filtered.length ? `fixture_members_${nextOffset}` : null;
     return Promise.resolve({
       items: structuredClone(items),
       nextCursor,
@@ -1788,7 +1864,7 @@ class FixtureHubApi implements HubApi {
       : Promise.resolve(structuredClone(member));
   }
   getCurrentActor(): Promise<TeamCurrentActorResponse> {
-    return Promise.resolve(structuredClone(this.#currentInboxActor()));
+    return Promise.resolve(structuredClone(this.#currentActor()));
   }
   getWorkstreams(request: TeamWorkstreamListRequest): Promise<TeamWorkstreamListResponse> {
     const filtered = this.#workstreams.filter((workstream) => (
@@ -1843,7 +1919,7 @@ class FixtureHubApi implements HubApi {
       : Promise.resolve(structuredClone(draft));
   }
   getRelays(request: RelayListRequest): Promise<RelayListResponse> {
-    const current = fixtureCurrentActor(this.#members, this.#selection).actor;
+    const current = this.#currentActor().actor;
     if ((request.perspective === "mine" || request.perspective === "sent") && current.kind !== "member") {
       return Promise.reject(new Error("Select an active Member to use this Relay perspective."));
     }
@@ -1988,7 +2064,7 @@ class FixtureHubApi implements HubApi {
       receipt: {
         schemaVersion: 1,
         authority: {
-          actor: fixtureCurrentActor(this.#members, this.#selection).actor,
+          actor: this.#currentActor().actor,
           occurredAt: timestamp(0),
           repoState: { branch: home.repository.branch, head: home.repository.head, dirty: home.repository.dirty, observedAt: timestamp(0) },
         },
@@ -2296,7 +2372,7 @@ class FixtureHubApi implements HubApi {
       receipt: {
         schemaVersion: 1,
         authority: {
-          actor: this.#currentInboxActor().actor,
+          actor: this.#currentActor().actor,
           occurredAt: timestamp(0),
           repoState: {
             branch: home.repository.branch,
@@ -2568,7 +2644,7 @@ class FixtureHubApi implements HubApi {
       receipt: {
         schemaVersion: 1,
         authority: {
-          actor: fixtureCurrentActor(this.#members, this.#selection).actor,
+          actor: this.#currentActor().actor,
           occurredAt: timestamp(0),
           repoState: {
             branch: home.repository.branch,

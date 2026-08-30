@@ -102,6 +102,24 @@ if (
 ) {
   throw new Error("Detailed Activity context is not isolated behind its explicit expansion boundary.");
 }
+const membersEntry = workbenchEntries.find((entry) => entry.source === "src/pages/MembersPage.tsx");
+const membersMutationKey = Object.keys(manifest).find((candidate) => (
+  candidate === "src/pages/MembersMutationDialogs.tsx"
+  || manifest[candidate].src === "src/pages/MembersMutationDialogs.tsx"
+));
+if (!membersEntry || !membersMutationKey) {
+  throw new Error("The production Hub manifest has no open-on-demand Members mutation chunk.");
+}
+if (
+  !manifest[membersMutationKey].isDynamicEntry
+  || !(manifest[membersEntry.key].dynamicImports ?? []).includes(membersMutationKey)
+  || staticImportClosure(membersEntry.key).has(membersMutationKey)
+) {
+  throw new Error("Members mutation dialogs are not isolated behind their explicit review boundary.");
+}
+if (initialChunks.has(membersMutationKey) || homeChunks.has(membersMutationKey)) {
+  throw new Error("Members mutation dialogs leaked into the application shell or Home workbench.");
+}
 if (Object.entries(manifest).some(([key, record]) => (
   [key, record?.src, record?.name].some((value) => (
     typeof value === "string" && /(?:^|\/)ActivityRecordDialog(?:\.tsx)?$/u.test(value)

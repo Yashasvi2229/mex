@@ -37,7 +37,7 @@
       "catchUp": { "jsBytes": 7095, "cssBytes": 3510, "fontBytes": 0 },
       "inbox": { "jsBytes": 120514, "cssBytes": 15589, "fontBytes": 0 },
       "relays": { "jsBytes": 200128, "cssBytes": 12285, "fontBytes": 0 },
-      "members": { "jsBytes": 93022, "cssBytes": 11685, "fontBytes": 0 },
+      "members": { "jsBytes": 93022, "cssBytes": 12640, "fontBytes": 0 },
       "activity": { "jsBytes": 66663, "cssBytes": 19437, "fontBytes": 0 },
       "jobs": { "jsBytes": 29416, "cssBytes": 14641, "fontBytes": 0 },
       "health": { "jsBytes": 30410, "cssBytes": 16736, "fontBytes": 0 },

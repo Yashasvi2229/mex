@@ -16,6 +16,9 @@ const closedRelayId = "relay_01000000000000000000000005";
 const legacyRelayId = "relay_01000000000000000000000006";
 const legacyRelayV2Id = "relay_01000000000000000000000007";
 const relayDraftId = "relay-draft-01";
+const adaMemberId = "member_01K36WVM6H7JK8M9NPQRSTVVWX";
+const graceMemberId = "member_01K36R3X4A5BC6DE7FGHJKMNPQ";
+const inactiveMemberId = "member_01K35Z2A3B4C5D6E7FGHJKMNPQ";
 
 function watchBrowserErrors(page: Page): string[] {
   const errors: string[] = [];
@@ -389,79 +392,231 @@ test.describe("populated development fixture", () => {
     await expect(page).toHaveScreenshot("hub-jobs.png", { fullPage: true });
   });
 
-  test("reviews canonical member changes separately and keeps selection local", async ({ page }) => {
+  test("keeps local identity choice human-first and separate from Git and Activity", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto("/members?fixture=populated");
+    await page.goto("/members?fixture=populated&memberFixture=configured");
 
-    await expect(page.getByRole("heading", { level: 1, name: "Members" })).toBeVisible();
-    await expect(page.locator("#current-actor-heading")).toHaveText("Ada Lovelace");
-    await expect(page.getByText("Selected for this checkout", { exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: /Grace Hopper/ })).toBeVisible();
+    await expect(page.locator('[data-members-workbench="ready"]')).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`member=${adaMemberId}`));
+    const identity = page.getByRole("region", { name: "Your identity" });
+    await expect(identity.getByRole("heading", { level: 3, name: "You’re working as Ada Lovelace." })).toBeVisible();
+    await expect(identity.getByText("This controls how MEX attributes actions in this checkout. It is not authentication.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Deactivate" })).toHaveCount(0);
 
-    await page.getByRole("button", { name: /Grace Hopper/ }).click();
-    await page.getByRole("button", { name: "Select locally" }).click();
-    const selectDialog = page.getByRole("dialog", { name: "Select Grace Hopper" });
-    await expect(selectDialog.getByText(/emits no Activity event/).first()).toBeVisible();
-    await selectDialog.getByRole("button", { name: "Preview change" }).click();
-    await expect(selectDialog.getByRole("heading", { name: "Operation preview" })).toBeVisible();
-    await selectDialog.getByRole("button", { name: "Review apply" }).click();
-    await page.getByRole("button", { name: "Apply approved preview" }).click();
-    await expect(page.getByText("Local member selection updated. No Activity event was created.")).toBeVisible();
-    await expect(page.locator("#current-actor-heading")).toHaveText("Grace Hopper");
+    const useGit = identity.getByRole("button", { name: "Use Git identity instead" });
+    await useGit.click();
+    const remove = page.getByRole("alertdialog", { name: "Remove your saved identity choice?" });
+    await expect(remove.getByText("MEX will resolve your identity again from Git. This changes only this checkout and writes neither Git files nor Activity.", { exact: true })).toBeVisible();
+    await remove.getByRole("button", { name: "Remove saved choice" }).click();
 
-    await page.getByRole("button", { name: "Clear selection" }).click();
-    const clearDialog = page.getByRole("dialog", { name: "Clear current member" });
-    await clearDialog.getByRole("button", { name: "Preview change" }).click();
-    await clearDialog.getByRole("button", { name: "Review apply" }).click();
-    await page.getByRole("button", { name: "Apply approved preview" }).click();
-    await expect(page.getByText("Git identity fallback", { exact: true })).toBeVisible();
+    const removedNotice = page.getByRole("alert").filter({ hasText: "Saved identity removed" });
+    await expect(removedNotice).toBeFocused();
+    await expect(removedNotice.getByText("MEX now recognizes you as Ada Lovelace from your Git identity. Nothing was written to Git.", { exact: true })).toBeVisible();
+    await expect(identity.getByRole("heading", { level: 3, name: "MEX recognizes you as Ada Lovelace." })).toBeVisible();
 
-    const addMember = page.getByRole("button", { name: "Add member" });
-    await addMember.click();
-    const addDialog = page.getByRole("dialog", { name: "Add member" });
-    await expect(addDialog.getByRole("textbox", { name: "Display name" })).toBeFocused();
-    await addDialog.getByRole("textbox", { name: "Display name" }).fill("Katherine Johnson");
-    await addDialog.getByRole("textbox", { name: /Git aliases/ }).fill("Katherine | kj@example.test");
-    await addDialog.getByRole("button", { name: "Preview change" }).click();
-    await expect(addDialog.getByRole("heading", { name: "Operation preview" })).toBeVisible();
-    await addDialog.getByRole("button", { name: "Review apply" }).click();
-    await page.getByRole("button", { name: "Apply approved preview" }).click();
-    await expect(page.locator("#member-detail-heading")).toHaveText("Katherine Johnson");
-    await expect(page.getByText("Canonical member change applied with one immutable Activity event.")).toBeVisible();
+    const choose = identity.getByRole("button", { name: "Choose an existing member" });
+    await choose.click();
+    const chooser = page.getByRole("dialog", { name: "Choose your identity" });
+    const picker = chooser.getByRole("combobox", { name: "Team member" });
+    await expect(picker).toBeFocused();
+    await picker.fill("Grace");
+    await page.getByRole("option", { name: /Grace Hopper/ }).click();
+    const reviewOverride = chooser.getByRole("button", { name: "Review local override" });
+    await reviewOverride.click();
+    const override = page.getByRole("alertdialog", { name: "Work as Grace Hopper in this checkout?" });
+    await expect(override.getByText("This is a local identity override for this checkout. It is not sign-in, writes no Git files, and creates no Activity.", { exact: true })).toBeVisible();
+    await override.getByRole("button", { name: "Keep current identity" }).click();
+    await expect(reviewOverride).toBeFocused();
+    await reviewOverride.click();
+    await page.getByRole("alertdialog", { name: "Work as Grace Hopper in this checkout?" })
+      .getByRole("button", { name: "Use as me" }).click();
 
-    await page.getByRole("button", { name: "Update" }).click();
-    const updateDialog = page.getByRole("dialog", { name: "Update Katherine Johnson" });
-    await updateDialog.getByRole("textbox", { name: "Display name" }).fill("Katherine G. Johnson");
-    await updateDialog.getByRole("button", { name: "Preview change" }).click();
-    await updateDialog.getByRole("button", { name: "Review apply" }).click();
-    await page.getByRole("button", { name: "Apply approved preview" }).click();
-    await expect(page.locator("#member-detail-heading")).toHaveText("Katherine G. Johnson");
-
-    await page.getByRole("button", { name: "Deactivate" }).click();
-    const deactivateDialog = page.getByRole("dialog", { name: "Deactivate Katherine G. Johnson" });
-    await deactivateDialog.getByRole("button", { name: "Preview change" }).click();
-    await deactivateDialog.getByRole("button", { name: "Review apply" }).click();
-    await page.getByRole("button", { name: "Apply approved preview" }).click();
-    await expect(page.getByRole("region", { name: "Selected member detail" }).getByText("Inactive", { exact: true })).toBeVisible();
-
+    const chosenNotice = page.getByRole("alert").filter({ hasText: "You’re now working as Grace Hopper" });
+    await expect(chosenNotice).toBeFocused();
+    await expect(chosenNotice.getByText("You’re now working as Grace Hopper in this checkout. Nothing was written to Git or Activity.", { exact: true })).toBeVisible();
+    await expect(identity.getByRole("heading", { level: 3, name: "You’re working as Grace Hopper." })).toBeVisible();
     await expectAccessible(page);
     expect(errors).toEqual([]);
   });
 
-  for (const width of [1440, 1024] as const) {
-    test(`keeps Members accessible and overflow-free at ${width}px`, async ({ page }) => {
-      await page.emulateMedia({ reducedMotion: "reduce" });
-      await page.setViewportSize({ width, height: 900 });
-      await page.goto("/members?fixture=populated");
-      await expect(page.getByRole("heading", { level: 1, name: "Members" })).toBeVisible();
+  test("uses structured shared-Member review with concise semantic confirmation", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/members?fixture=populated&memberFixture=configured");
+    await expect(page.locator('[data-members-workbench="ready"]')).toBeVisible();
 
-      const directory = await page.getByRole("region", { name: "Team roster" }).boundingBox();
-      const detail = await page.getByRole("region", { name: "Selected member detail" }).boundingBox();
+    const addMember = page.getByRole("button", { name: "Add member" });
+    await addMember.click();
+    const addDialog = page.getByRole("dialog", { name: "Add team member" });
+    const displayName = addDialog.getByRole("textbox", { name: "Display name" });
+    await expect(displayName).toBeFocused();
+    await expect(addDialog.getByText("Shared through Git, not an invitation", { exact: true })).toBeVisible();
+    await expect(addDialog.getByText("Names and emails are committed to the repository and may become public history in a public repository. This does not invite anyone or grant repository access.", { exact: true })).toBeVisible();
+    await expect(addDialog.getByRole("button", { name: "Review member" })).toBeDisabled();
+    await displayName.fill("Katherine Johnson");
+    await expect(addDialog.getByRole("button", { name: "Add another identity" })).toBeVisible();
+    await addDialog.getByRole("textbox", { name: "Git email" }).fill("kj@example.test");
+    await addDialog.getByRole("textbox", { name: /Git name/ }).fill("Katherine");
+    await expect(addDialog.getByRole("textbox", { name: /Git aliases/ })).toHaveCount(0);
+    await addDialog.getByRole("button", { name: "Review member" }).click();
+
+    const addConfirmation = page.getByRole("alertdialog", { name: "Add this member?" });
+    await expect(addConfirmation.getByText("This writes a shared Member record and one Activity entry in your working tree. Commit and push are still required to share it with teammates.", { exact: true })).toBeVisible();
+    const addTechnical = addConfirmation.getByRole("button", { name: "Technical details" });
+    await expect(addTechnical).toHaveAttribute("aria-expanded", "false");
+    await addConfirmation.getByRole("button", { name: "Keep editing" }).click();
+    await expect(addDialog.getByRole("button", { name: "Review member" })).toBeFocused();
+    await addDialog.getByRole("button", { name: "Review member" }).click();
+    await page.getByRole("alertdialog", { name: "Add this member?" }).getByRole("button", { name: "Add member" }).click();
+
+    const addedNotice = page.getByRole("alert").filter({ hasText: "Member added" });
+    await expect(addedNotice).toBeFocused();
+    await expect(addedNotice.getByText("Member added in your working tree. Commit and push to share this identity with teammates.", { exact: true })).toBeVisible();
+    const detail = page.getByRole("region", { name: "Selected Member detail" });
+    await expect(detail.getByRole("heading", { level: 3, name: "Katherine Johnson" })).toBeVisible();
+
+    await detail.getByRole("button", { name: "Edit member" }).click();
+    const editDialog = page.getByRole("dialog", { name: "Edit Katherine Johnson" });
+    const editedName = editDialog.getByRole("textbox", { name: "Display name" });
+    await expect(editDialog.getByRole("button", { name: "Review member" })).toBeDisabled();
+    await expect(editDialog.getByText("Change the display name or a Git identity before reviewing.", { exact: true })).toBeVisible();
+    await editedName.fill("Katherine G. Johnson");
+    await editDialog.getByRole("button", { name: "Review member" }).click();
+    const editConfirmation = page.getByRole("alertdialog", { name: "Save changes to Katherine Johnson?" });
+    await expect(editConfirmation.getByText("This writes a shared Member record and one Activity entry in your working tree. Commit and push are still required to share it with teammates.", { exact: true })).toBeVisible();
+    await editConfirmation.getByRole("button", { name: "Save member" }).click();
+
+    const updatedNotice = page.getByRole("alert").filter({ hasText: "Member updated" });
+    await expect(updatedNotice).toBeFocused();
+    await expect(updatedNotice.getByText("Member updated in your working tree. Commit and push to share the change.", { exact: true })).toBeVisible();
+    await expect(detail.getByRole("heading", { level: 3, name: "Katherine G. Johnson" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Deactivate" })).toHaveCount(0);
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  test("renders every bounded identity fixture honestly", async ({ page }) => {
+    const cases = [
+      ["configured", "You’re working as Ada Lovelace.", "Use Git identity instead"],
+      ["git-alias", "MEX recognizes you as Ada Lovelace.", "Choose an existing member"],
+      ["git-fallback", "Your Git identity isn’t linked to a MEX member.", "Add myself"],
+      ["unknown", "MEX could not find a usable Git identity.", "Add myself"],
+      ["stale", "Your saved identity choice must be removed first.", "Remove saved choice"],
+      ["inactive", "Your saved identity choice must be removed first.", "Remove saved choice"],
+      ["ambiguous", "Your Git identity matches more than one MEX member.", "Choose an existing member"],
+      ["partial", "You’re working as Ada Lovelace.", "Use Git identity instead"],
+    ] as const;
+
+    for (const [variant, headline, action] of cases) {
+      await page.goto(`/members?fixture=populated&memberFixture=${variant}`);
+      const identity = page.getByRole("region", { name: "Your identity" });
+      await expect(page.locator('[data-members-workbench="ready"]')).toBeVisible();
+      await expect(identity.getByRole("heading", { level: 3, name: headline })).toBeVisible();
+      await expect(identity.getByRole("button", { name: action })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Deactivate" })).toHaveCount(0);
+
+      if (variant === "unknown") {
+        await expect(identity.getByText("MEX could not inspect a usable Git identity.", { exact: true })).toBeVisible();
+      } else if (variant === "stale") {
+        await expect(identity.getByText("Your saved Member no longer exists.", { exact: true })).toBeVisible();
+      } else if (variant === "inactive") {
+        await expect(identity.getByText("Your saved Member is inactive.", { exact: true })).toBeVisible();
+      } else if (variant === "ambiguous") {
+        await expect(identity.getByText("Your Git identity matches multiple active Members, so MEX did not guess.", { exact: true })).toBeVisible();
+      } else if (variant === "git-fallback") {
+        await expect(identity.getByText("contributor@example.test", { exact: true })).toBeVisible();
+      } else if (variant === "partial") {
+        await expect(page.getByRole("button", { name: "Add member" })).toBeDisabled();
+        await expect(page.getByText("Canonical Member writes are not connected in this Hub process.", { exact: true }).first()).toBeVisible();
+      }
+    }
+  });
+
+  test("keeps Member status and selection URL-backed and refreshable", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/members?fixture=populated&memberFixture=configured&status=inactive&member=${inactiveMemberId}`);
+    const inactiveTab = page.getByRole("tab", { name: "Inactive", exact: true });
+    await expect(inactiveTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("region", { name: "Selected Member detail" })
+      .getByRole("heading", { level: 3, name: "Lin Chen" })).toBeVisible();
+
+    await inactiveTab.focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.getByRole("tab", { name: "Active", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/status=active/);
+    await expect(page).toHaveURL(new RegExp(`member=${adaMemberId}`));
+    await expect(page.getByRole("region", { name: "Selected Member detail" })
+      .getByRole("heading", { level: 3, name: "Ada Lovelace" })).toBeVisible();
+    await page.getByRole("button", { name: /Grace Hopper/ }).click();
+    await expect(page).toHaveURL(new RegExp(`member=${graceMemberId}`));
+    await expect(page.getByRole("region", { name: "Selected Member detail" })
+      .getByRole("heading", { level: 3, name: "Grace Hopper" })).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`member=${adaMemberId}`));
+    await page.goBack();
+    await expect(inactiveTab).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(new RegExp(`member=${inactiveMemberId}`));
+
+    const beforeRefresh = page.url();
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(page.getByText("Members and identity refreshed.", { exact: true })).toBeVisible();
+    expect(page.url()).toBe(beforeRefresh);
+    await expect(page.getByRole("region", { name: "Selected Member detail" })
+      .getByRole("heading", { level: 3, name: "Lin Chen" })).toBeVisible();
+
+    await page.goto("/members?fixture=populated&status=active&member=not-a-member-id");
+    await expect(page.getByText("That Member link isn’t valid", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Return to team list" }).click();
+    await expect(page).not.toHaveURL(/member=/);
+
+    await page.goto(`/members?fixture=populated&status=active&member=${inactiveMemberId}`);
+    await expect(page.getByText("Lin Chen is in inactive Members", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "View inactive Members" }).click();
+    await expect(inactiveTab).toHaveAttribute("aria-selected", "true");
+    await expect(page).toHaveURL(/status=inactive/);
+    await expectAccessible(page);
+    expect(errors).toEqual([]);
+  });
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1024, height: 768 },
+  ] as const) {
+    test(`keeps Members accessible and overflow-free at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await page.setViewportSize(viewport);
+      await page.goto(`/members?fixture=populated&memberFixture=configured&status=active&member=${adaMemberId}`);
+      await expect(page.locator('[data-members-workbench="ready"]')).toBeVisible();
+
+      const directory = await page.getByRole("region", { name: "Active Members" }).boundingBox();
+      const detail = await page.getByRole("region", { name: "Selected Member detail" }).boundingBox();
       expect(directory).not.toBeNull();
       expect(detail).not.toBeNull();
-      if (width === 1440) expect(directory!.x).toBeLessThan(detail!.x);
-      else expect(directory!.y).toBeLessThan(detail!.y);
+      expect(directory!.x).toBeLessThan(detail!.x);
+      const geometry = await page.evaluate(() => ({
+        viewportWidth: window.innerWidth,
+        documentClientWidth: document.documentElement.clientWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+      }));
+      expect(geometry).toEqual({
+        viewportWidth: viewport.width,
+        documentClientWidth: viewport.width,
+        documentScrollWidth: viewport.width,
+        bodyScrollWidth: viewport.width,
+      });
+      await expectAccessible(page);
+    });
+  }
+
+  for (const width of [768, 390] as const) {
+    test(`keeps Members behind the desktop guard at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await page.goto("/members?fixture=populated");
+      await expect(page.getByRole("heading", { name: "A wider workbench is required" })).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "Primary" })).toBeHidden();
       const geometry = await page.evaluate(() => ({
         viewportWidth: window.innerWidth,
         documentClientWidth: document.documentElement.clientWidth,
@@ -477,6 +632,47 @@ test.describe("populated development fixture", () => {
       await expectAccessible(page);
     });
   }
+
+  test("renders the deterministic Members identity workbench", async ({ page }) => {
+    test.skip(process.platform !== "darwin", "The requested Members visual baseline is Darwin-only.");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/members?fixture=populated&memberFixture=configured&status=active&member=${adaMemberId}`);
+    await expect(page.locator('[data-members-workbench="ready"]')).toBeVisible();
+    await expect(page.getByRole("region", { name: "Selected Member detail" })
+      .getByRole("heading", { level: 3, name: "Ada Lovelace" })).toBeVisible();
+    await page.mouse.move(1, 1);
+    await expect(page).toHaveScreenshot("hub-members.png", { fullPage: true });
+  });
+
+  test("loads Members and its mutation dialogs lazily without polling or external requests", async ({ page }) => {
+    const requests: string[] = [];
+    const external: string[] = [];
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      requests.push(`${request.method()} ${url.pathname}`);
+      if (url.hostname !== "127.0.0.1") external.push(request.url());
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/?fixture=populated");
+    await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
+    expect(requests.some((request) => request.includes("/src/pages/MembersPage"))).toBe(false);
+    expect(requests.some((request) => request.includes("/src/pages/MembersMutationDialogs"))).toBe(false);
+
+    await page.getByRole("link", { name: "Team", exact: true }).click();
+    await expect(page.locator('[data-members-workbench="ready"]')).toBeVisible();
+    await page.waitForLoadState("networkidle");
+    expect(requests.filter((request) => request.includes("/src/pages/MembersPage"))).toHaveLength(1);
+    expect(requests.some((request) => request.includes("/src/pages/MembersMutationDialogs"))).toBe(false);
+    const settledRequestCount = requests.length;
+    await page.waitForTimeout(300);
+    expect(requests).toHaveLength(settledRequestCount);
+
+    await page.getByRole("button", { name: "Add member" }).click();
+    await expect(page.getByRole("dialog", { name: "Add team member" })).toBeVisible();
+    expect(requests.filter((request) => request.includes("/src/pages/MembersMutationDialogs"))).toHaveLength(1);
+    expect(external).toEqual([]);
+  });
 
   test("renders the real Activity workbench with bounded, expandable history", async ({ page }) => {
     const errors = watchBrowserErrors(page);
@@ -1112,13 +1308,13 @@ test.describe("populated development fixture", () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/relays?fixture=populated&relayFixture=missing");
 
-    await expect(page.getByRole("tab", { name: "Team" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tab", { name: "For you" })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByText("Check your team identity", { exact: true })).toBeVisible();
     await expect(page.getByText("The referenced member no longer exists.", { exact: true })).toBeVisible();
     await expect(page.getByRole("link", { name: "Open Members" }).first()).toHaveAttribute("href", "/members");
     await expect(page.locator("[data-relay-id]")).not.toHaveCount(0);
-    await page.getByRole("tab", { name: "For you" }).click();
-    await expect(page.getByText("Select an active team identity", { exact: true })).toBeVisible();
+    await page.getByRole("tab", { name: "Team" }).click();
+    await expect(page.locator("[data-relay-id]")).not.toHaveCount(0);
     await page.getByRole("tab", { name: "Drafts on this device" }).click();
     await expect(page.locator(`[data-relay-draft-id="${relayDraftId}"]`)).toBeVisible();
     await expectAccessible(page);
@@ -1637,12 +1833,13 @@ test.describe("populated development fixture", () => {
 
     await page.goto("/members?fixture=populated");
     await page.getByRole("button", { name: "Add member" }).click();
-    const dialog = page.getByRole("dialog", { name: "Add member" });
+    const dialog = page.getByRole("dialog", { name: "Add team member" });
     const cancel = dialog.getByRole("button", { name: "Cancel" });
+    const membersUrl = page.url();
     await cancel.focus();
     await page.keyboard.press("/");
     await expect(dialog).toBeVisible();
-    await expect(page).toHaveURL(/\/members\?fixture=populated$/);
+    await expect(page).toHaveURL(membersUrl);
   });
 
   test("exposes neutral queue counts, team identity, and exact locality guidance", async ({ page }) => {

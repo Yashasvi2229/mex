@@ -221,6 +221,246 @@ describe("development-only populated fixture", () => {
     ]);
   });
 
+  it("projects each bounded Member identity through Current, Home, Relay, and receipt reads", async () => {
+    const cases = [
+      {
+        variant: "configured",
+        actor: { kind: "member", memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX", displayName: "Ada Lovelace" },
+        source: "configured-member",
+        selectionId: "member_01K36WVM6H7JK8M9NPQRSTVVWX",
+        diagnosticCodes: [],
+      },
+      {
+        variant: "git-alias",
+        actor: { kind: "member", memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX", displayName: "Ada Lovelace" },
+        source: "git-alias",
+        selectionId: null,
+        diagnosticCodes: [],
+      },
+      {
+        variant: "git-fallback",
+        actor: { kind: "git", name: "MEX Contributor", email: "contributor@example.test" },
+        source: "git-fallback",
+        selectionId: null,
+        diagnosticCodes: [],
+      },
+      {
+        variant: "unknown",
+        actor: { kind: "unknown" },
+        source: "unknown",
+        selectionId: null,
+        diagnosticCodes: ["GIT_IDENTITY_UNAVAILABLE"],
+      },
+      {
+        variant: "stale",
+        actor: { kind: "member", memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX", displayName: "Ada Lovelace" },
+        source: "git-alias",
+        selectionId: "member_01K39WVM6H7JK8M9NPQRSTVVWX",
+        diagnosticCodes: ["ACTOR_MEMBER_MISSING"],
+      },
+      {
+        variant: "inactive",
+        actor: { kind: "member", memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX", displayName: "Ada Lovelace" },
+        source: "git-alias",
+        selectionId: "member_01K35Z2A3B4C5D6E7FGHJKMNPQ",
+        diagnosticCodes: ["ACTOR_MEMBER_INACTIVE"],
+      },
+      {
+        variant: "ambiguous",
+        actor: { kind: "git", name: "Grace", email: "ada@example.test" },
+        source: "git-fallback",
+        selectionId: null,
+        diagnosticCodes: ["ACTOR_ALIAS_AMBIGUOUS"],
+      },
+      {
+        variant: "partial",
+        actor: { kind: "member", memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX", displayName: "Ada Lovelace" },
+        source: "configured-member",
+        selectionId: "member_01K36WVM6H7JK8M9NPQRSTVVWX",
+        diagnosticCodes: [],
+      },
+    ] as const;
+
+    for (const fixtureCase of cases) {
+      const api = createFixtureApi({ memberFixture: fixtureCase.variant });
+      const actor = await api.getCurrentActor();
+      const homeResult = await api.getHome();
+      const preview = await api.previewTeamOperation({
+        operationId: `fixture_member_projection_${fixtureCase.variant.replace("-", "_")}`,
+        action: { kind: "member.clear" },
+        expectedRevisions: [{
+          target: { kind: "local", namespace: "member-selection", id: "current" },
+          revision: actor.selection?.revision ?? null,
+        }],
+      });
+
+      expect(TeamCurrentActorResponseSchema.safeParse(actor).success).toBe(true);
+      expect(HomeResponseSchema.safeParse(homeResult).success).toBe(true);
+      expect(TeamOperationPreviewResponseSchema.safeParse(preview).success).toBe(true);
+      expect(actor.actor, fixtureCase.variant).toEqual(fixtureCase.actor);
+      expect(actor.source, fixtureCase.variant).toBe(fixtureCase.source);
+      expect(actor.selection?.memberId ?? null, fixtureCase.variant).toBe(fixtureCase.selectionId);
+      expect(actor.diagnostics.map((diagnostic) => diagnostic.code), fixtureCase.variant)
+        .toEqual(fixtureCase.diagnosticCodes);
+      if (fixtureCase.variant === "inactive") {
+        expect(actor.diagnostics[0]?.path).toBe(
+          ".mex/team/members/member_01K35Z2A3B4C5D6E7FGHJKMNPQ.md",
+        );
+      }
+      expect(homeResult.actor, fixtureCase.variant).toEqual(actor.actor);
+      expect(preview.receipt.authority.actor, fixtureCase.variant).toEqual(actor.actor);
+
+      if (actor.actor.kind === "member") {
+        expect(homeResult.sections.relays, fixtureCase.variant)
+          .toEqual({ availability: "available", count: 2 });
+        await expect(api.getRelays({
+          perspective: "mine",
+          states: ["published", "acknowledged"],
+          limit: 25,
+        })).resolves.toMatchObject({ items: expect.any(Array) });
+      } else {
+        expect(homeResult.sections.relays, fixtureCase.variant).toEqual({
+          availability: "unavailable",
+          count: null,
+          reason: "Select an active Member to see your open Relay handoffs.",
+        });
+        await expect(api.getRelays({
+          perspective: "mine",
+          states: ["published", "acknowledged"],
+          limit: 25,
+        })).rejects.toThrow("Select an active Member to use this Relay perspective.");
+      }
+    }
+  });
+
+  it("falls back through the matching Git alias after clearing local selection across all receipts", async () => {
+    const api = createFixtureApi({ memberFixture: "configured" });
+    const selected = await api.getCurrentActor();
+    const clear = await api.previewTeamOperation({
+      operationId: "fixture_member_clear_to_git_alias",
+      action: { kind: "member.clear" },
+      expectedRevisions: [{
+        target: { kind: "local", namespace: "member-selection", id: "current" },
+        revision: selected.selection?.revision ?? null,
+      }],
+    });
+    await api.applyTeamOperation(clear);
+
+    const actor = await api.getCurrentActor();
+    const homeResult = await api.getHome();
+    const [inboxDrafts, relayDrafts] = await Promise.all([
+      api.getInboxDrafts({ limit: 25 }),
+      api.getRelayDrafts({ limit: 25 }),
+    ]);
+    const inboxDraft = inboxDrafts.items[0]!;
+    const relayDraft = relayDrafts.items[0]!;
+    const [teamPreview, inboxPreview, relayPreview] = await Promise.all([
+      api.previewTeamOperation({
+        operationId: "fixture_member_clear_alias_team_receipt",
+        action: { kind: "member.clear" },
+        expectedRevisions: [{
+          target: { kind: "local", namespace: "member-selection", id: "current" },
+          revision: null,
+        }],
+      }),
+      api.previewInboxOperation({
+        operationId: "fixture_member_clear_alias_inbox_receipt",
+        action: { kind: "inbox.draft.delete", draftId: inboxDraft.id },
+        expectedRevisions: [{
+          target: { kind: "local", namespace: "inbox-draft", id: inboxDraft.id },
+          revision: inboxDraft.revision,
+        }],
+      }),
+      api.previewRelayOperation({
+        operationId: "fixture_member_clear_alias_relay_receipt",
+        action: { kind: "relay.draft.delete", draftId: relayDraft.id },
+        expectedRevisions: [{
+          target: { kind: "local", namespace: "relay-draft", id: relayDraft.id },
+          revision: relayDraft.revision,
+        }],
+      }),
+    ]);
+
+    expect(actor).toMatchObject({
+      actor: { kind: "member", memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX", displayName: "Ada Lovelace" },
+      source: "git-alias",
+      selection: null,
+      diagnostics: [],
+    });
+    expect(homeResult.actor).toEqual(actor.actor);
+    expect(homeResult.sections.relays).toEqual({ availability: "available", count: 2 });
+    await expect(api.getRelays({
+      perspective: "mine",
+      states: ["published", "acknowledged"],
+      limit: 25,
+    })).resolves.toMatchObject({ items: expect.any(Array) });
+    expect([
+      teamPreview.receipt.authority.actor,
+      inboxPreview.receipt.authority.actor,
+      relayPreview.receipt.authority.actor,
+    ]).toEqual([actor.actor, actor.actor, actor.actor]);
+  });
+
+  it("paginates Members by the actual bounded offset for every page size", async () => {
+    const api = createFixtureApi();
+    const first = await api.getMembers({ limit: 1 });
+    const second = await api.getMembers({ limit: 1, cursor: first.nextCursor ?? undefined });
+    const third = await api.getMembers({ limit: 1, cursor: second.nextCursor ?? undefined });
+
+    for (const page of [first, second, third]) {
+      expect(TeamMemberListResponseSchema.safeParse(page).success).toBe(true);
+    }
+    expect(first.nextCursor).toBe("fixture_members_1");
+    expect(second.nextCursor).toBe("fixture_members_2");
+    expect(third.nextCursor).toBeNull();
+    expect([...first.items, ...second.items, ...third.items].map((member) => member.displayName))
+      .toEqual(["Ada Lovelace", "Grace Hopper", "Lin Chen"]);
+  });
+
+  it("keeps Member fixture state and granular capability projections isolated", async () => {
+    const first = createFixtureApi({ memberFixture: "configured" });
+    const second = createFixtureApi({ memberFixture: "configured" });
+    const partial = createFixtureApi({ memberFixture: "partial" });
+    const explicit = createFixtureApi({
+      memberFixture: "configured",
+      inboxFixture: "unknown",
+      relayFixture: "missing",
+    });
+    const firstActor = await first.getCurrentActor();
+    const clear = await first.previewTeamOperation({
+      operationId: "fixture_member_instance_isolation",
+      action: { kind: "member.clear" },
+      expectedRevisions: [{
+        target: { kind: "local", namespace: "member-selection", id: "current" },
+        revision: firstActor.selection?.revision ?? null,
+      }],
+    });
+    await first.applyTeamOperation(clear);
+
+    expect((await first.getCurrentActor()).source).toBe("git-alias");
+    expect(await second.getCurrentActor()).toMatchObject({
+      source: "configured-member",
+      selection: { memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX" },
+    });
+    expect(await explicit.getCurrentActor()).toMatchObject({
+      source: "configured-member",
+      selection: { memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX" },
+    });
+    expect((await partial.getCapabilities()).members).toEqual({
+      read: { availability: "available" },
+      canonicalMutation: {
+        availability: "unavailable",
+        reason: "Canonical Member writes are not connected in this Hub process.",
+      },
+      localSelection: { availability: "available" },
+    });
+    expect((await second.getCapabilities()).members).toEqual({
+      read: { availability: "available" },
+      canonicalMutation: { availability: "available" },
+      localSelection: { availability: "available" },
+    });
+  });
+
   it("models the human Relay inbox across personal, sent, team, closed, and draft views", async () => {
     const api = createFixtureApi();
     const mineFirst = await api.getRelays({
@@ -693,9 +933,9 @@ describe("development-only populated fixture", () => {
       source: "unknown",
       selection: null,
       diagnostics: [{
-        code: "ACTOR_UNKNOWN",
+        code: "GIT_IDENTITY_UNAVAILABLE",
         severity: "warning",
-        message: "MEX could not resolve a current Team or Git identity.",
+        message: "Git identity could not be inspected safely.",
       }],
       diagnosticsTruncated: false,
     });
@@ -861,8 +1101,8 @@ describe("development-only populated fixture", () => {
 
     expect(TeamCurrentActorResponseSchema.safeParse(actor).success).toBe(true);
     expect(actor).toMatchObject({
-      actor: { kind: "git", name: "Ada", email: "ada@example.test" },
-      source: "git-fallback",
+      actor: { kind: "member", memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX", displayName: "Ada Lovelace" },
+      source: "git-alias",
       selection: { memberId: "member_01K39WVM6H7JK8M9NPQRSTVVWX" },
       diagnostics: [{
         code: "ACTOR_MEMBER_MISSING",
@@ -870,18 +1110,14 @@ describe("development-only populated fixture", () => {
         message: "The referenced member no longer exists.",
       }],
     });
-    expect(homeResult.sections.relays).toEqual({
-      availability: "unavailable",
-      count: null,
-      reason: "Select an active Member to see your open Relay handoffs.",
-    });
+    expect(homeResult.sections.relays).toEqual({ availability: "available", count: 2 });
     expect(team.items).toHaveLength(4);
     expect(drafts.items).toHaveLength(2);
     await expect(api.getRelays({
       perspective: "mine",
       states: ["published", "acknowledged"],
       limit: 25,
-    })).rejects.toThrow("Select an active Member to use this Relay perspective.");
+    })).resolves.toMatchObject({ items: expect.any(Array) });
   });
 
   it("projects partial Relay mutation capability without suppressing reads or local drafts", async () => {
@@ -1010,8 +1246,8 @@ describe("development-only populated fixture", () => {
       const [baselineActivity, variantActivity, baselineRelays, variantRelays, baselineWorkstreams, variantWorkstreams] = await Promise.all([
         baseline.getActivity(request),
         variant.getActivity(request),
-        baseline.getRelays({ perspective: "mine", states: ["published", "acknowledged"], limit: 25 }),
-        variant.getRelays({ perspective: "mine", states: ["published", "acknowledged"], limit: 25 }),
+        baseline.getRelays({ perspective: "all", states: ["published", "acknowledged"], limit: 25 }),
+        variant.getRelays({ perspective: "all", states: ["published", "acknowledged"], limit: 25 }),
         baseline.getWorkstreams(request),
         variant.getWorkstreams(request),
       ]);

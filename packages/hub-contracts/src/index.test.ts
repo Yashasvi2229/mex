@@ -38,6 +38,7 @@ import {
   SpecListResponseSchema,
   TeamCurrentActorResponseSchema,
   TeamActivityEventSchema,
+  TeamMemberIdSchema,
   TeamMemberListRequestSchema,
   TeamMemberListResponseSchema,
   TeamMemberSchema,
@@ -54,7 +55,8 @@ import {
 } from "./index.js";
 
 describe("Hub API contracts", () => {
-  it("keeps the private Relay runtime entry on the canonical schema instances", () => {
+  it("keeps the private ID and Relay runtime entries on the canonical schema instances", () => {
+    expect(IdRuntime.TeamMemberIdSchema).toBe(TeamMemberIdSchema);
     expect(IdRuntime.RelayIdSchema).toBe(RelayIdSchema);
     expect(RelayRuntime.RelayDetailSchema).toBe(RelayDetailSchema);
     expect(RelayRuntime.RelayDraftDetailSchema).toBe(RelayDraftDetailSchema);
@@ -68,6 +70,9 @@ describe("Hub API contracts", () => {
     expect(IdRuntime.RelayIdSchema.parse("relay_01000000000000000000000001"))
       .toBe("relay_01000000000000000000000001");
     expect(IdRuntime.RelayIdSchema.safeParse("relay-not-portable").success).toBe(false);
+    expect(IdRuntime.TeamMemberIdSchema.parse("member_01ARZ3NDEKTSV4RRFFQ69G5FAV"))
+      .toBe("member_01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    expect(IdRuntime.TeamMemberIdSchema.safeParse("member-not-portable").success).toBe(false);
   });
 
   it("rejects unknown request fields and oversized queries", () => {

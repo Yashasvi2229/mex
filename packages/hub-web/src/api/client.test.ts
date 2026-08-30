@@ -5,8 +5,10 @@ import {
   activityFixtureVariant,
   fixturesEnabled,
   inboxFixtureVariant,
+  memberFixtureVariant,
   relayFixtureVariant,
   readBootstrapToken,
+  resolveApi,
 } from "./client";
 import type { ActivityResponse, JobSummary, RelayOperationPreviewRequest } from "./types";
 import { createFixtureApi } from "../dev/fixture-api";
@@ -65,6 +67,7 @@ describe("bootstrap fragment handling", () => {
     expect(fixturesEnabled(true, "?fixture=populated&inboxFixture=empty")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=populated&relayFixture=legacy")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=populated&activityFixture=partial")).toBe(true);
+    expect(fixturesEnabled(true, "?fixture=populated&memberFixture=git-alias")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=empty")).toBe(false);
   });
 
@@ -104,6 +107,37 @@ describe("bootstrap fragment handling", () => {
     ["?fixture=populated&activityFixture=../../private", undefined],
   ])("bounds the Activity fixture variant in %s", (search, expected) => {
     expect(activityFixtureVariant(search)).toBe(expected);
+  });
+
+  it.each([
+    ["?fixture=populated&memberFixture=configured", "configured"],
+    ["?fixture=populated&memberFixture=git-alias", "git-alias"],
+    ["?fixture=populated&memberFixture=git-fallback", "git-fallback"],
+    ["?fixture=populated&memberFixture=unknown", "unknown"],
+    ["?fixture=populated&memberFixture=stale", "stale"],
+    ["?fixture=populated&memberFixture=inactive", "inactive"],
+    ["?fixture=populated&memberFixture=ambiguous", "ambiguous"],
+    ["?fixture=populated&memberFixture=partial", "partial"],
+    ["?fixture=populated", undefined],
+    ["?fixture=populated&memberFixture=populated", undefined],
+    ["?fixture=populated&memberFixture=GIT-ALIAS", undefined],
+    ["?fixture=populated&memberFixture=../../private", undefined],
+  ])("bounds the Member fixture variant in %s", (search, expected) => {
+    expect(memberFixtureVariant(search)).toBe(expected);
+  });
+
+  it("passes a bounded Member variant into the development fixture API", async () => {
+    vi.stubGlobal("window", {
+      location: { search: "?fixture=populated&memberFixture=unknown" },
+    });
+
+    const api = await resolveApi();
+
+    await expect(api.getCurrentActor()).resolves.toMatchObject({
+      actor: { kind: "unknown" },
+      source: "unknown",
+      diagnostics: [{ code: "GIT_IDENTITY_UNAVAILABLE" }],
+    });
   });
 });
 

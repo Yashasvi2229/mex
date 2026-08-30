@@ -47,12 +47,13 @@ const budgets = JSON.parse(readFileSync(new URL("./budgets.json", import.meta.ur
 const budgetsSchema = JSON.parse(readFileSync(new URL("./budgets.schema.json", import.meta.url), "utf8"));
 const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 const reportSchema = JSON.parse(readFileSync(new URL("./report.schema.json", import.meta.url), "utf8"));
-const PRE_RELAY_ACTIVITY_FROZEN_BUDGETS_SHA256 = "eefed77fb3085a592f23274d55a8aaeb74e3178bbd169605bb7893af11848f67";
+const FROZEN_NON_MEMBERS_UX_BUDGETS_SHA256 = "2a14eb7b1ccb476a0e6151ebfe180cbac468bef3086fe421cd073379446cf10a";
 
 function frozenAllowedCalibrationProjection(value) {
   const projected = structuredClone(value);
   projected.calibration.status = "__RELAY_CALIBRATION_STATUS__";
   projected.assets.routes.relays = { jsBytes: 0, cssBytes: 0, fontBytes: 0 };
+  projected.assets.routes.members.cssBytes = "__MEMBERS_CSS_CALIBRATION__";
   projected.assets.routes.activity.jsBytes = "__ACTIVITY_JS_CALIBRATION__";
   projected.assets.routes.activity.cssBytes = "__ACTIVITY_CSS_CALIBRATION__";
   delete projected.assets.routes.catchUp;
@@ -68,15 +69,16 @@ function frozenAllowedCalibrationProjection(value) {
 }
 
 describe("release benchmark contract", () => {
-  it("permits only the calibrated Relay whitelist and Activity asset budgets", () => {
+  it("permits only the calibrated Relay whitelist and Activity or Members asset budgets", () => {
     const digest = (value) => createHash("sha256")
       .update(JSON.stringify(frozenAllowedCalibrationProjection(value)))
       .digest("hex");
-    expect(digest(budgets)).toBe(PRE_RELAY_ACTIVITY_FROZEN_BUDGETS_SHA256);
+    expect(digest(budgets)).toBe(FROZEN_NON_MEMBERS_UX_BUDGETS_SHA256);
 
     const allowed = structuredClone(budgets);
     allowed.calibration.status = "calibrated-from-pinned-run-example";
     allowed.assets.routes.relays = { jsBytes: 123, cssBytes: 45, fontBytes: 0 };
+    allowed.assets.routes.members.cssBytes += 1;
     allowed.assets.routes.activity.jsBytes += 1;
     allowed.assets.routes.activity.cssBytes += 1;
     for (const profile of ["small", "medium", "large"]) {
@@ -86,11 +88,11 @@ describe("release benchmark contract", () => {
       allowed.runtime.browserHeapBytes[profile].members += 1;
       allowed.runtime.browserHeapBytes[profile].relays += 1;
     }
-    expect(digest(allowed)).toBe(PRE_RELAY_ACTIVITY_FROZEN_BUDGETS_SHA256);
+    expect(digest(allowed)).toBe(FROZEN_NON_MEMBERS_UX_BUDGETS_SHA256);
 
     const forbidden = structuredClone(allowed);
     forbidden.runtime.apiLatencyMs.small.search += 1;
-    expect(digest(forbidden)).not.toBe(PRE_RELAY_ACTIVITY_FROZEN_BUDGETS_SHA256);
+    expect(digest(forbidden)).not.toBe(FROZEN_NON_MEMBERS_UX_BUDGETS_SHA256);
   });
 
   it("locks the sample counts and deterministic route budget surface", () => {
@@ -153,6 +155,11 @@ describe("release benchmark contract", () => {
         large: { relayDrafts: 4, relays: 13 },
       },
       heap: { small: 7753875, medium: 7754561, large: 7748627 },
+    });
+    expect(budgets.assets.routes.members).toEqual({
+      jsBytes: 93022,
+      cssBytes: 12640,
+      fontBytes: 0,
     });
     expect(budgets.assets.routes.code).toEqual(budgets.assets.routes.search);
     expect(budgets.assets.routes.catchUp).toEqual(budgets.assets.routes.playbooks);

@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { RelayIdSchema } from "./ids.js";
+import { RelayIdSchema, TeamMemberIdSchema } from "./ids.js";
 
-export { RelayIdSchema } from "./ids.js";
+export { RelayIdSchema, TeamMemberIdSchema } from "./ids.js";
 
 export const HUB_API_VERSION = "v1" as const;
 
@@ -265,8 +265,7 @@ export const HomeResponseSchema = z.object({
   attention: z.array(HubAttentionItemSchema).max(100),
 }).strict();
 
-const teamMemberId = z.string()
-  .regex(/^member_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid member ID.");
+const teamMemberId = TeamMemberIdSchema;
 const teamEventId = z.string()
   .regex(/^event_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Activity event ID.");
 const teamWorkstreamId = z.string()
@@ -299,7 +298,6 @@ const teamRepositoryPath = utf8Text(4_096).refine((value) => {
   );
 }, "Path must be a safe repository-relative POSIX path.");
 
-export const TeamMemberIdSchema = teamMemberId;
 export const TeamWorkstreamIdSchema = teamWorkstreamId;
 
 export const TeamGitAliasSchema = z.object({

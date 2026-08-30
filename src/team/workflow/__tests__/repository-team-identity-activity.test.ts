@@ -635,6 +635,57 @@ describe("RepositoryTeamWorkflowPort identity and Activity contract", () => {
     expect(activityFiles(root)).toHaveLength(3);
   });
 
+  it("rejects canonical no-op Member updates before planning another Activity event", async () => {
+    const root = temporaryRoot();
+    const service = port(root, fakeGit(), {
+      memberIds: [MEMBER_IDS[0]],
+      eventIds: [EVENT_IDS[0], EVENT_IDS[1]],
+    });
+    const added = await service.applyIdentityActivity(await service.previewIdentityActivity({
+      operationId: "identity_noop_add",
+      action: {
+        kind: "member.add",
+        member: {
+          displayName: "Ada Lovelace",
+          gitAliases: [
+            { name: "Second identity", email: "second@example.test" },
+            { name: "Ada", email: "ada@example.test" },
+          ],
+        },
+      },
+      expectedRevisions: [],
+    }));
+    const member = added.artifacts[0];
+    if (member?.kind !== "member") throw new Error("Expected one Member artifact.");
+    const before = await service.getMember(member.ref.id);
+
+    await expect(service.previewIdentityActivity({
+      operationId: "identity_noop_update",
+      action: {
+        kind: "member.update",
+        memberId: member.ref.id,
+        patch: {
+          displayName: member.displayName,
+          // Canonical Member serialization owns alias ordering, so reordering
+          // the same identities must not manufacture a change or Activity.
+          gitAliases: [...member.gitAliases].reverse(),
+        },
+      },
+      expectedRevisions: [{
+        target: { kind: "artifact", path: member.sourcePath },
+        revision: member.revision,
+      }],
+    })).rejects.toMatchObject({
+      problem: {
+        code: "VALIDATION_FAILED",
+        title: "Member update has no changes",
+      },
+    });
+
+    expect(await service.getMember(member.ref.id)).toEqual(before);
+    expect(activityFiles(root)).toEqual([`${EVENT_IDS[0]}.md`]);
+  });
+
   it("exposes missing or inactive selections and permits exact local recovery only", async () => {
     const staleCases = ["missing", "inactive"] as const;
     for (const staleCase of staleCases) {

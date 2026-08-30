@@ -128,6 +128,29 @@ describe("real Project Hub Team identity integration", () => {
     expect(memberDetail.status).toBe(200);
     expect(await memberDetail.json()).toEqual(member);
 
+    const beforeNoOp = snapshotReadProtectedState(root);
+    const noOp = await hub.post("/api/v1/team/operations/preview", {
+      operationId: "hub_member_noop_update",
+      action: {
+        kind: "member.update",
+        memberId: member.id,
+        patch: {
+          displayName: member.displayName,
+          gitAliases: member.gitAliases,
+        },
+      },
+      expectedRevisions: [{
+        target: { kind: "artifact", path: member.sourcePath },
+        revision: member.revision,
+      }],
+    });
+    expect(noOp.status).toBe(422);
+    expect(await noOp.json()).toMatchObject({
+      code: "VALIDATION_FAILED",
+      title: "Validation failed",
+    });
+    expect(snapshotReadProtectedState(root)).toEqual(beforeNoOp);
+
     const replayed = TeamOperationApplyResponseSchema.parse(
       await (await hub.post("/api/v1/team/operations/apply", addPreview)).json(),
     );
