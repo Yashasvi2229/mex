@@ -107,11 +107,14 @@ import type {
 } from "../contracts/wiki.js";
 import {
   ActivityRepository,
+  type ActivityCreateInput,
   type ActivityCreatePreview,
+  type ActivityCreateProvenance,
   type PreparedActivityPublication,
 } from "../activity/repository.js";
 import {
   ACTIVITY_ARTIFACT_MAX_BYTES,
+  ACTIVITY_LABEL_MAX_BYTES,
   memberArtifactPath,
 } from "../artifacts/codecs.js";
 import { artifactError } from "../artifacts/errors.js";
@@ -294,6 +297,8 @@ interface PrimaryResult<TWikiPayload extends JsonValue> {
   localChanges: readonly LocalStateChange[];
   wikiResult?: WikiOperationResult;
 }
+
+type PlannedActivityInput = Omit<ActivityCreateInput, "actor"> & ActivityCreateProvenance;
 
 type PortableWorkflowPurposeId =
   | TeamIdentityActivityPurposeId
@@ -1810,15 +1815,22 @@ export class RepositoryTeamWorkflowPort<
         planned.wiki.preview.changes,
       );
     }
-    const activity = planned.activityInput === null
+    const plannedActivity = planned.activityInput;
+    const activity = plannedActivity === null
       ? null
-      : await this.#activity.previewCreateWithAuthority({
-          ...planned.activityInput,
-          actor: command.authority.actor,
-        }, {
-          timestamp: command.authority.occurredAt,
-          repoState: command.authority.repoState,
-        }, purposeId(purposeIds, "activity"));
+      : await (async () => {
+          const { origin, label, ...input } = plannedActivity;
+          return this.#activity.previewCreateWithAuthority({
+            ...input,
+            actor: command.authority.actor,
+          }, {
+            timestamp: command.authority.occurredAt,
+            repoState: command.authority.repoState,
+          }, purposeId(purposeIds, "activity"), {
+            origin,
+            ...(label === undefined ? {} : { label }),
+          });
+        })();
     const changes = [
       ...planned.changes,
       ...(activity?.changes ?? []),
@@ -1892,7 +1904,7 @@ export class RepositoryTeamWorkflowPort<
     effects: readonly (CanonicalWorkflowEffect | LocalWorkflowEffect)[];
     cleanup: readonly LocalCleanupWorkflowEffect[];
     innerRevisions: readonly (Revision | null)[];
-    activityInput: Omit<Parameters<ActivityRepository["previewCreate"]>[0], "actor"> | null;
+    activityInput: PlannedActivityInput | null;
     applyPrimary(): Promise<PrimaryResult<TWikiPayload>>;
     wiki?: { request: WikiOperationRequest<TWikiPayload>; preview: WikiOperationPreview<TWikiPlan> };
   }> {
@@ -1909,10 +1921,10 @@ export class RepositoryTeamWorkflowPort<
           gitAliases: action.member.gitAliases,
           active: action.member.active ?? true,
         });
-        return canonicalPlan<TWikiPayload>(plan, "member", plan.member.ref.id, {
+        return canonicalPlan<TWikiPayload>(plan, "member", plan.member.ref.id, workflowActivity("member.add", {
           action: "member.added",
           subjects: [entitySubject(plan.member.ref)],
-        }, async () => {
+        }, plan.member.displayName), async () => {
           const applied = await this.#members.apply(plan, plan.previewRevision);
           return primary([applied.member], [applied.change]);
         });
@@ -1921,10 +1933,10 @@ export class RepositoryTeamWorkflowPort<
         const current = await required(this.#members.get(action.memberId), "Member");
         requireArtifactExpectation(expectedRevisions, current.sourcePath, current.revision);
         const plan = await this.#members.previewUpdate(action.memberId, action.patch, current.revision);
-        return canonicalPlan<TWikiPayload>(plan, "member", action.memberId, {
+        return canonicalPlan<TWikiPayload>(plan, "member", action.memberId, workflowActivity("member.update", {
           action: "member.updated",
           subjects: [entitySubject(plan.member.ref)],
-        }, async () => {
+        }, plan.member.displayName), async () => {
           const applied = await this.#members.apply(plan, plan.previewRevision);
           return primary([applied.member], [applied.change]);
         });
@@ -1946,10 +1958,10 @@ export class RepositoryTeamWorkflowPort<
           { active: false },
           current.revision,
         );
-        return canonicalPlan<TWikiPayload>(plan, "member", action.memberId, {
+        return canonicalPlan<TWikiPayload>(plan, "member", action.memberId, workflowActivity("member.deactivate", {
           action: "member.deactivated",
           subjects: [entitySubject(plan.member.ref)],
-        }, async () => {
+        }, plan.member.displayName), async () => {
           const applied = await this.#members.apply(plan, plan.previewRevision);
           return primary([applied.member], [applied.change]);
         });
@@ -2054,7 +2066,10 @@ export class RepositoryTeamWorkflowPort<
           effects: [],
           cleanup: [],
           innerRevisions: [],
-          activityInput: action.activity,
+          activityInput: {
+            ...action.activity,
+            origin: { kind: "custom" },
+          },
           applyPrimary: async () => primary([], []),
         };
       case "workstream.create": {
@@ -2078,11 +2093,11 @@ export class RepositoryTeamWorkflowPort<
           updatedBy: authority.actor,
           updatedAt: authority.occurredAt,
         });
-        return canonicalWorkflowPlan(plan, "workstream", plan.artifact.ref.id, {
+        return canonicalWorkflowPlan(plan, "workstream", plan.artifact.ref.id, workflowActivity("workstream.create", {
           action: "workstream.created",
           subjects: [entitySubject(plan.artifact.ref)],
           workstream: plan.artifact.ref,
-        }, this.#workstreams);
+        }, plan.artifact.title), this.#workstreams);
       }
       case "workstream.update":
       case "workstream.archive": {
@@ -2120,11 +2135,11 @@ export class RepositoryTeamWorkflowPort<
             "A Workstream update must change at least one caller-owned field.",
           );
         }
-        return canonicalWorkflowPlan(plan, "workstream", action.workstreamId, {
+        return canonicalWorkflowPlan(plan, "workstream", action.workstreamId, workflowActivity(action.kind, {
           action: action.kind === "workstream.archive" ? "workstream.archived" : "workstream.updated",
           subjects: [entitySubject(plan.artifact.ref)],
           workstream: plan.artifact.ref,
-        }, this.#workstreams);
+        }, plan.artifact.title), this.#workstreams);
       }
       case "inbox.draft.save":
       case "relay.draft.save": {
@@ -2221,10 +2236,13 @@ export class RepositoryTeamWorkflowPort<
           request: payload.request,
           targetRevisions: payload.targetRevisions,
         });
-        return withCleanup(canonicalWorkflowPlan<TWikiPayload, typeof plan.artifact>(plan, "proposal", plan.artifact.ref.id, {
+        const proposalLabel = productProposalProjection(
+          plan.artifact as unknown as InboxProposal<JsonValue>,
+        )?.title;
+        return withCleanup(canonicalWorkflowPlan<TWikiPayload, typeof plan.artifact>(plan, "proposal", plan.artifact.ref.id, workflowActivity("inbox.publish", {
           action: "inbox.published",
           subjects: [entitySubject(plan.artifact.ref)],
-        }, this.#proposals), "inbox", action.draftId, draft.revision);
+        }, proposalLabel), this.#proposals), "inbox", action.draftId, draft.revision);
       }
       case "relay.publish": {
         const recoveredWorkstream = legacyRelayPublicationWorkstream(
@@ -2273,11 +2291,11 @@ export class RepositoryTeamWorkflowPort<
             sender: authority.actor,
             publishedAt: authority.occurredAt,
           });
-          return withCleanup(canonicalWorkflowPlan<TWikiPayload, typeof plan.artifact>(plan, "relay", plan.artifact.ref.id, {
+          return withCleanup(canonicalWorkflowPlan<TWikiPayload, typeof plan.artifact>(plan, "relay", plan.artifact.ref.id, workflowActivity("relay.publish", {
             action: "relay.published",
             subjects: [entitySubject(plan.artifact.ref)],
             workstream: workstream.ref,
-          }, this.#relays), "relay", action.draftId, draft.revision);
+          }, plan.artifact.summary), this.#relays), "relay", action.draftId, draft.revision);
         }
         const plan = await this.#relays.previewCreate({
           ...(recoveryId === null ? {} : { id: recoveryId }),
@@ -2288,10 +2306,10 @@ export class RepositoryTeamWorkflowPort<
           publishedAt: authority.occurredAt,
           publishedRepoState: authority.repoState,
         });
-        const publication = canonicalWorkflowPlan<TWikiPayload, typeof plan.artifact>(plan, "relay", plan.artifact.ref.id, {
+        const publication = canonicalWorkflowPlan<TWikiPayload, typeof plan.artifact>(plan, "relay", plan.artifact.ref.id, workflowActivity("relay.publish", {
           action: "relay.published",
           subjects: [entitySubject(plan.artifact.ref)],
-        }, this.#relays);
+        }, plan.artifact.summary), this.#relays);
         return withCleanup({
           ...publication,
           diagnostics: authority.repoState.dirty
@@ -2310,13 +2328,13 @@ export class RepositoryTeamWorkflowPort<
             ? { state: "acknowledged" as const, acknowledgedBy: authority.actor, acknowledgedAt: authority.occurredAt }
             : { state: "closed" as const, closedBy: authority.actor, closedAt: authority.occurredAt }),
         }, current.revision);
-        return canonicalWorkflowPlan(plan, "relay", action.relayId, {
+        return canonicalWorkflowPlan(plan, "relay", action.relayId, workflowActivity(action.kind, {
           action: action.kind === "relay.acknowledge" ? "relay.acknowledged" : "relay.closed",
           subjects: [entitySubject(plan.artifact.ref)],
           ...(current.schemaVersion === 3
             ? {}
             : { workstream: current.workstream }),
-        }, this.#relays);
+        }, current.summary), this.#relays);
       }
       case "playbook.create": {
         const recoveryId = recoveryCanonicalId(recoveryEffects, "playbook");
@@ -2324,9 +2342,9 @@ export class RepositoryTeamWorkflowPort<
           ...action.playbook,
           ...(recoveryId === null ? {} : { id: recoveryId }),
         });
-        return canonicalWorkflowPlan(plan, "playbook", plan.artifact.ref.id, {
+        return canonicalWorkflowPlan(plan, "playbook", plan.artifact.ref.id, workflowActivity("playbook.create", {
           action: "playbook.created", subjects: [entitySubject(plan.artifact.ref)],
-        }, this.#playbooks);
+        }, plan.artifact.title), this.#playbooks);
       }
       case "playbook.update":
       case "playbook.archive": {
@@ -2336,10 +2354,10 @@ export class RepositoryTeamWorkflowPort<
         const plan = await this.#playbooks.previewUpdate(action.playbookId, {
           ...withoutStored(current), ...patch,
         }, current.revision);
-        return canonicalWorkflowPlan(plan, "playbook", action.playbookId, {
+        return canonicalWorkflowPlan(plan, "playbook", action.playbookId, workflowActivity(action.kind, {
           action: action.kind === "playbook.archive" ? "playbook.archived" : "playbook.updated",
           subjects: [entitySubject(plan.artifact.ref)],
-        }, this.#playbooks);
+        }, plan.artifact.title), this.#playbooks);
       }
       case "playbook.run.start": {
         const playbook = await this.#requirePlaybookDependency(action.playbook, expectedRevisions);
@@ -2353,9 +2371,9 @@ export class RepositoryTeamWorkflowPort<
           startedBy: authority.actor,
           startedAt: authority.occurredAt,
         });
-        return canonicalWorkflowPlan(plan, "playbook-run", plan.artifact.ref.id, {
+        return canonicalWorkflowPlan(plan, "playbook-run", plan.artifact.ref.id, workflowActivity("playbook.run.start", {
           action: "playbook.run.started", subjects: [entitySubject(plan.artifact.ref)], workstream: workstream.ref,
-        }, this.#runs);
+        }, playbook.title), this.#runs);
       }
       case "playbook.run.complete-step": {
         const current = await required(this.#runs.get(action.runId), "Playbook run");
@@ -2370,9 +2388,9 @@ export class RepositoryTeamWorkflowPort<
           steps,
           state: steps.every((step) => step.completedBy !== undefined) ? "completed" : "active",
         }, current.revision);
-        return canonicalWorkflowPlan(plan, "playbook-run", action.runId, {
+        return canonicalWorkflowPlan(plan, "playbook-run", action.runId, workflowActivity("playbook.run.complete-step", {
           action: "playbook.run.step-completed", subjects: [entitySubject(plan.artifact.ref)], workstream: current.workstream,
-        }, this.#runs);
+        }, current.playbook.title), this.#runs);
       }
       case "inbox.reject":
       case "inbox.withdraw":
@@ -2403,6 +2421,9 @@ export class RepositoryTeamWorkflowPort<
     const specChange = storedSpecChange(
       current as unknown as InboxProposal<JsonValue>,
     );
+    const currentProposalLabel = productProposalProjection(
+      current as unknown as InboxProposal<JsonValue>,
+    )?.title;
     if (governedInbox && specChange === null) {
       throw artifactError(
         "VALIDATION_FAILED",
@@ -2448,11 +2469,11 @@ export class RepositoryTeamWorkflowPort<
         ...withoutStored(current),
         state: "stale",
       }, current.revision);
-      return canonicalWorkflowPlan(plan, "proposal", current.ref.id, {
+      return canonicalWorkflowPlan(plan, "proposal", current.ref.id, workflowActivity("inbox.mark-stale", {
         action: "inbox.marked-stale",
         subjects: [entitySubject(plan.artifact.ref)],
         metadata: { rationaleExcerpt: utf8Excerpt(action.rationale) },
-      }, this.#proposals);
+      }, currentProposalLabel), this.#proposals);
     }
     if (action.kind === "inbox.approve") {
       await this.#assertExpectationsCurrent(current.targetRevisions);
@@ -2502,7 +2523,7 @@ export class RepositoryTeamWorkflowPort<
         ...withoutStored(current), state: "approved", reviewer: command.authority.actor,
         reviewedAt: command.authority.occurredAt,
       }, current.revision);
-      const base = canonicalWorkflowPlan(plan, "proposal", current.ref.id, {
+      const base = canonicalWorkflowPlan(plan, "proposal", current.ref.id, workflowActivity("inbox.approve", {
         action: "inbox.approved",
         subjects: specChange === null
           ? [entitySubject(current.ref), ...wikiPreview.affectedEntities.map(entitySubject)]
@@ -2512,7 +2533,7 @@ export class RepositoryTeamWorkflowPort<
                 ? { id: pinnedSpecId!, kind: specChange.entityKind }
                 : specChange.target),
             ],
-      }, this.#proposals);
+      }, currentProposalLabel), this.#proposals);
       const wikiEffects = wikiPreview.changes.map((change, index): CanonicalWorkflowEffect => ({
         kind: "canonical", namespace: "wiki", id: `${current.ref.id}:${index}`,
         path: change.path, beforeRevision: change.beforeRevision, afterRevision: change.afterRevision,
@@ -2547,10 +2568,13 @@ export class RepositoryTeamWorkflowPort<
     const plan = await this.#proposals.previewUpdate(current.ref.id, {
       ...withoutStored(current), ...next,
     }, current.revision);
-    return canonicalWorkflowPlan(plan, "proposal", current.ref.id, {
+    const nextProposalLabel = productProposalProjection(
+      plan.artifact as unknown as InboxProposal<JsonValue>,
+    )?.title ?? currentProposalLabel;
+    return canonicalWorkflowPlan(plan, "proposal", current.ref.id, workflowActivity(action.kind, {
       action: action.kind === "inbox.reject" ? "inbox.rejected" : action.kind === "inbox.withdraw" ? "inbox.withdrawn" : "inbox.repaired",
       subjects: [entitySubject(plan.artifact.ref)],
-    }, this.#proposals);
+    }, nextProposalLabel), this.#proposals);
   }
 
   async #assertExpectationsCurrent(
@@ -3945,17 +3969,72 @@ export class RepositoryTeamWorkflowPort<
   async #recoverActivity(effects: readonly TeamWorkflowJournalEffect[]): Promise<void> {
     const effect = effects.find((item): item is ActivityWorkflowEffect => item.kind === "activity");
     if (effect === undefined) return;
-    await this.#activity.recoverJournaledCreate({
-      schemaVersion: 1,
-      id: effect.id,
-      timestamp: effect.occurredAt,
-      actor: effect.actor,
-      action: effect.action,
-      subjects: effect.subjects,
-      ...(effect.workstream === undefined ? {} : { workstream: effect.workstream }),
-      repoState: effect.repoState,
-      ...(effect.metadata === undefined ? {} : { metadata: effect.metadata }),
-    }, effect.revision);
+    const label = await this.#recoverActivityLabel(effects, effect);
+    await this.#activity.recoverJournaledCreate(
+      activityEventFromEffect(effect, label),
+      effect.revision,
+    );
+  }
+
+  async #recoverActivityLabel(
+    effects: readonly TeamWorkflowJournalEffect[],
+    activity: ActivityWorkflowEffect,
+  ): Promise<string | undefined> {
+    if (activity.schemaVersion !== 2 || activity.origin.kind !== "workflow") {
+      return undefined;
+    }
+    const canonical = (namespace: string): CanonicalWorkflowEffect | undefined =>
+      effects.find((effect): effect is CanonicalWorkflowEffect =>
+        effect.kind === "canonical" && effect.namespace === namespace);
+    const operation = activity.origin.operation;
+    if (operation.startsWith("member.")) {
+      const effect = canonical("member");
+      const member = effect === undefined ? null : await this.#members.get(effect.id);
+      return effect !== undefined && member !== null && member.revision === effect.afterRevision
+        ? activityLabelExcerpt(member.displayName)
+        : undefined;
+    }
+    if (operation.startsWith("workstream.")) {
+      const effect = canonical("workstream");
+      const workstream = effect === undefined ? null : await this.#workstreams.get(effect.id);
+      return effect !== undefined && workstream !== null && workstream.revision === effect.afterRevision
+        ? activityLabelExcerpt(workstream.title)
+        : undefined;
+    }
+    if (operation.startsWith("inbox.")) {
+      const effect = canonical("proposal");
+      const proposal = effect === undefined ? null : await this.#proposals.get(effect.id);
+      const title = proposal === null
+        ? undefined
+        : productProposalProjection(proposal as unknown as InboxProposal<JsonValue>)?.title;
+      return effect !== undefined && proposal !== null
+        && proposal.revision === effect.afterRevision && title !== undefined
+        ? activityLabelExcerpt(title)
+        : undefined;
+    }
+    if (operation.startsWith("relay.")) {
+      const effect = canonical("relay");
+      const relay = effect === undefined ? null : await this.#relays.get(effect.id);
+      return effect !== undefined && relay !== null && relay.revision === effect.afterRevision
+        ? activityLabelExcerpt(relay.summary)
+        : undefined;
+    }
+    if (operation.startsWith("playbook.run.")) {
+      const effect = canonical("playbook-run");
+      const run = effect === undefined ? null : await this.#runs.get(effect.id);
+      return effect !== undefined && run !== null
+        && run.revision === effect.afterRevision && run.playbook.title !== undefined
+        ? activityLabelExcerpt(run.playbook.title)
+        : undefined;
+    }
+    if (operation.startsWith("playbook.")) {
+      const effect = canonical("playbook");
+      const playbook = effect === undefined ? null : await this.#playbooks.get(effect.id);
+      return effect !== undefined && playbook !== null && playbook.revision === effect.afterRevision
+        ? activityLabelExcerpt(playbook.title)
+        : undefined;
+    }
+    return undefined;
   }
 
   #primaryEffectState(effects: readonly TeamWorkflowJournalEffect[]): "none" | "some" | "all" {
@@ -5819,7 +5898,7 @@ function canonicalPlan<TWikiPayload extends JsonValue>(
   plan: MemberWritePlan,
   namespace: string,
   id: string,
-  activityInput: Omit<Parameters<ActivityRepository["previewCreate"]>[0], "actor">,
+  activityInput: PlannedActivityInput,
   applyPrimary: () => Promise<PrimaryResult<TWikiPayload>>,
 ) {
   return {
@@ -5833,7 +5912,7 @@ function canonicalWorkflowPlan<TWikiPayload extends JsonValue, TArtifact extends
   plan: WorkflowArtifactWritePlan<TArtifact>,
   namespace: string,
   id: string,
-  activityInput: Omit<Parameters<ActivityRepository["previewCreate"]>[0], "actor">,
+  activityInput: PlannedActivityInput,
   repository: { apply(plan: WorkflowArtifactWritePlan<TArtifact>, revision: Revision): Promise<{ artifact: TArtifact; change: FileChange }> },
 ) {
   return {
@@ -5845,6 +5924,34 @@ function canonicalWorkflowPlan<TWikiPayload extends JsonValue, TArtifact extends
       return primary([applied.artifact], [applied.change]);
     },
   };
+}
+
+function workflowActivity(
+  operation: string,
+  input: Omit<ActivityCreateInput, "actor">,
+  label?: string,
+): PlannedActivityInput {
+  const boundedLabel = label === undefined ? undefined : activityLabelExcerpt(label);
+  return {
+    ...input,
+    origin: { kind: "workflow", operation },
+    ...(boundedLabel === undefined ? {} : { label: boundedLabel }),
+  };
+}
+
+function activityLabelExcerpt(value: string): string | undefined {
+  if (
+    value.length === 0
+    || value.trim() !== value
+    || value.normalize("NFC") !== value
+    || /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(value)
+  ) return undefined;
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= ACTIVITY_LABEL_MAX_BYTES) return value;
+  let end = ACTIVITY_LABEL_MAX_BYTES;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  const excerpt = bytes.subarray(0, end).toString("utf8").trimEnd();
+  return excerpt.length === 0 ? undefined : excerpt;
 }
 
 function withCleanup<T extends { cleanup: readonly LocalCleanupWorkflowEffect[]; localChanges: readonly LocalStateChange[]; effects: readonly TeamWorkflowJournalEffect[] }>(
@@ -5970,18 +6077,26 @@ function recoveryLocalId(
 }
 
 function activityEffect(preview: ActivityCreatePreview): ActivityWorkflowEffect {
-  return {
-    kind: "activity", id: preview.event.id, path: preview.sourcePath, revision: preview.revision,
+  const common = {
+    kind: "activity" as const, id: preview.event.id, path: preview.sourcePath, revision: preview.revision,
     action: preview.event.action, actor: preview.event.actor, occurredAt: preview.event.timestamp,
     repoState: preview.event.repoState, subjects: preview.event.subjects,
     ...(preview.event.workstream === undefined ? {} : { workstream: preview.event.workstream }),
     ...(preview.event.metadata === undefined ? {} : { metadata: preview.event.metadata }),
   };
+  if (preview.event.schemaVersion === 1) return common;
+  return {
+    ...common,
+    schemaVersion: 2,
+    origin: preview.event.origin,
+  };
 }
 
-function activityEventFromEffect(effect: ActivityWorkflowEffect): ActivityEvent {
-  return {
-    schemaVersion: 1,
+function activityEventFromEffect(
+  effect: ActivityWorkflowEffect,
+  recoveredLabel?: string,
+): ActivityEvent {
+  const common = {
     id: effect.id,
     timestamp: effect.occurredAt,
     actor: effect.actor,
@@ -5991,10 +6106,17 @@ function activityEventFromEffect(effect: ActivityWorkflowEffect): ActivityEvent 
     repoState: effect.repoState,
     ...(effect.metadata === undefined ? {} : { metadata: effect.metadata }),
   };
+  if (effect.schemaVersion !== 2) return { schemaVersion: 1, ...common };
+  return {
+    schemaVersion: 2,
+    ...common,
+    origin: effect.origin,
+    ...(recoveredLabel === undefined ? {} : { label: recoveredLabel }),
+  };
 }
 
 function assertRecoveryActivityIntent(
-  input: Omit<Parameters<ActivityRepository["previewCreate"]>[0], "actor"> | null,
+  input: PlannedActivityInput | null,
   authority: PreparedTeamWorkflowCommand<JsonValue>["authority"],
   effect: ActivityWorkflowEffect | undefined,
 ): void {
@@ -6021,6 +6143,13 @@ function assertRecoveryActivityIntent(
     ...(effect.metadata === undefined ? {} : { metadata: effect.metadata }),
   };
   if (stableJson(expected) !== stableJson(actual)) throw incompleteRecovery();
+  if (effect.schemaVersion === 2) {
+    const expectedProvenance = { origin: input.origin };
+    const actualProvenance = { origin: effect.origin };
+    if (stableJson(expectedProvenance) !== stableJson(actualProvenance)) {
+      throw incompleteRecovery();
+    }
+  }
 }
 
 function primary<TWikiPayload extends JsonValue>(

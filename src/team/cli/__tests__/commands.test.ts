@@ -20,6 +20,7 @@ import {
   type TeamCommandIo,
 } from "../commands.js";
 import { TEAM_CLI_EXIT } from "../envelope.js";
+import { projectActivity } from "../projections.js";
 import type { TeamIdentityActivityCliService } from "../service.js";
 
 const MEMBER_ID = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -44,6 +45,32 @@ describe("Team CLI commands", () => {
         nextCursor: null,
       },
       problem: null,
+    });
+  });
+
+  it("projects Activity provenance without inventing it for schema-v1 events", () => {
+    const historical = activityFixture();
+    if (historical.schemaVersion !== 1) throw new Error("Expected schema-v1 fixture.");
+    expect(projectActivity(historical)).toMatchObject({
+      schemaVersion: 1,
+      recordOrigin: { kind: "unknown" },
+      label: null,
+    });
+    const {
+      schemaVersion: _schemaVersion,
+      sourcePath: _sourcePath,
+      revision: _revision,
+      ...common
+    } = historical;
+    expect(projectActivity({
+      schemaVersion: 2,
+      ...common,
+      origin: { kind: "workflow", operation: "member.add" },
+      label: "Ada Lovelace",
+    })).toMatchObject({
+      schemaVersion: 2,
+      recordOrigin: { kind: "workflow", operation: "member.add" },
+      label: "Ada Lovelace",
     });
   });
 

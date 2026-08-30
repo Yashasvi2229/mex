@@ -294,10 +294,12 @@ to request a specific loopback port.
 
 The Hub displays repository context, locally persisted job history, canonical
 members and Workstreams, read-only Specs, the effective checkout actor, and the
-Activity timeline. The Members workbench uses explicit preview/review/apply for
-canonical identity changes and keeps member selection local. Activity remains
-immutable and adds only an append-only reviewed record flow; the service
-captures actor, timestamp, branch, HEAD, and dirty state. The Workstreams
+read-only Activity timeline. The Members workbench uses explicit
+preview/review/apply for canonical identity changes and keeps member selection
+local. Activity presents immutable MEX records alongside Project
+notes without exposing a manual recorder in the browser. New records retain a
+service-owned workflow/custom origin and an optional human label; older records
+remain byte-preserving and display an unknown origin. The Workstreams
 workbench uses the same exact preview/apply boundary for create, update, and
 one-way archive operations; every successful canonical change emits one
 Activity event. Specs are a fresh-index, read-only view of canonical Wiki Spec

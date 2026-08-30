@@ -264,22 +264,36 @@ const activityItems: ActivityItem[] = [
     source: "activity",
     id: "event_01K36WVM6H7JK8M9NPQRSTVVWX",
     timestamp: timestamp(7),
-    action: "hub.activity_view_connected",
+    action: "inbox.published",
+    recordOrigin: { kind: "workflow", operation: "inbox.publish" },
+    label: "Keep approval consequences explicit",
     subjects: [
-      { kind: "entity", entity: { id: "project_hub", entityKind: "workstream", title: "Project Hub" } },
-      { kind: "file", path: "packages/hub-web/src/pages/ActivityPage.tsx" },
-      { kind: "symbol", symbolId: "ActivityPage" },
-      { kind: "commit", hash: "aeaf0ab" },
+      {
+        kind: "entity",
+        entity: {
+          id: "proposal_01000000000000000000001721",
+          entityKind: "proposal",
+          title: "Keep approval consequences explicit",
+        },
+      },
     ],
-    subjectCount: 4,
+    subjectCount: 1,
     subjectsTruncated: false,
     sourcePath: ".mex/events/activity/2026-08/event_01K36WVM6H7JK8M9NPQRSTVVWX.md",
-    recordedActor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
-    effectiveActor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
+    recordedActor: {
+      kind: "member",
+      memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX",
+      displayName: "Ada Lovelace",
+    },
+    effectiveActor: {
+      kind: "member",
+      memberId: "member_01K36WVM6H7JK8M9NPQRSTVVWX",
+      displayName: "Ada Lovelace",
+    },
     actorDiagnostics: [],
-    workstream: { id: "project_hub", entityKind: "workstream", title: "Project Hub" },
+    workstream: null,
     repository: {
-      branch: "feat/hub-activity-timeline",
+      branch: "codex/hub-ux",
       head: "aeaf0ab0022ac5d704404585d981b4da5f2c1cbf",
       dirty: true,
       observedAt: timestamp(7),
@@ -290,24 +304,36 @@ const activityItems: ActivityItem[] = [
     source: "activity",
     id: "event_01K36R3X4A5BC6DE7FGHJKMNPQ",
     timestamp: timestamp(38),
-    action: "team.member_alias_updated",
+    action: "relay.acknowledged",
+    recordOrigin: { kind: "workflow", operation: "relay.acknowledge" },
+    label: "Carry the release evidence through the final cross-platform gate.",
     subjects: [
-      { kind: "entity", entity: { id: "member_daksh", entityKind: "member", title: "Daksh" } },
-      { kind: "file", path: ".mex/team/members/member_daksh.md" },
+      {
+        kind: "entity",
+        entity: {
+          id: "relay_01000000000000000000000001",
+          entityKind: "relay",
+          title: "Carry the release evidence through the final cross-platform gate.",
+        },
+      },
     ],
-    subjectCount: 2,
+    subjectCount: 1,
     subjectsTruncated: false,
     sourcePath: ".mex/events/activity/2026-08/event_01K36R3X4A5BC6DE7FGHJKMNPQ.md",
-    recordedActor: { kind: "git", name: "Daksh Jaitly", email: "daksh@example.test" },
-    effectiveActor: { kind: "member", memberId: "member_daksh", displayName: "Daksh" },
-    actorDiagnostics: [{
-      code: "ACTOR_ALIAS_REMAPPED",
-      severity: "info",
-      message: "The recorded Git identity currently resolves to member Daksh.",
-    }],
+    recordedActor: {
+      kind: "member",
+      memberId: "member_01K36R3X4A5BC6DE7FGHJKMNPQ",
+      displayName: "Grace Hopper",
+    },
+    effectiveActor: {
+      kind: "member",
+      memberId: "member_01K36R3X4A5BC6DE7FGHJKMNPQ",
+      displayName: "Grace Hopper",
+    },
+    actorDiagnostics: [],
     workstream: null,
     repository: {
-      branch: "feat/hub-activity-timeline",
+      branch: "codex/hub-ux",
       head: "aeaf0ab0022ac5d704404585d981b4da5f2c1cbf",
       dirty: false,
       observedAt: timestamp(38),
@@ -333,25 +359,40 @@ const activityItems: ActivityItem[] = [
     repository: null,
     revision: null,
     sourceLine: 18,
-    message: "Keep activity immutable and preserve legacy history as a read-only projection.",
+    message: "Keep activity immutable and preserve Project notes as a read-only projection.",
     messageTruncated: false,
   },
   {
     source: "activity",
     id: "event_01K35Z2A3B4C5D6E7FGHJKMNPQ",
     timestamp: timestamp(1_510),
-    action: "graph.refresh_requested",
+    action: "member.updated",
+    recordOrigin: { kind: "workflow", operation: "member.update" },
+    label: "Daksh Jaitly",
     subjects: [
-      { kind: "symbol", symbolId: "GitCliAdapter.repositoryState" },
-      { kind: "file", path: "src/team/git/adapter.ts" },
-      { kind: "commit", hash: "6484dd0" },
+      {
+        kind: "entity",
+        entity: {
+          id: "member_01K35Z2A3B4C5D6E7FGHJKMNPQ",
+          entityKind: "member",
+          title: "Daksh Jaitly",
+        },
+      },
     ],
-    subjectCount: 3,
+    subjectCount: 1,
     subjectsTruncated: false,
     sourcePath: ".mex/events/activity/2026-08/event_01K35Z2A3B4C5D6E7FGHJKMNPQ.md",
-    recordedActor: { kind: "git", name: "MEX Maintainer", email: "maintainer@example.test" },
-    effectiveActor: { kind: "git", name: "MEX Maintainer", email: "maintainer@example.test" },
-    actorDiagnostics: [],
+    recordedActor: { kind: "git", name: "Daksh Jaitly", email: "daksh@example.test" },
+    effectiveActor: {
+      kind: "member",
+      memberId: "member_01K35Z2A3B4C5D6E7FGHJKMNPQ",
+      displayName: "Daksh Jaitly",
+    },
+    actorDiagnostics: [{
+      code: "ACTOR_ALIAS_REMAPPED",
+      severity: "info",
+      message: "The recorded Git identity currently resolves to member Daksh Jaitly.",
+    }],
     workstream: null,
     repository: {
       branch: null,
@@ -365,11 +406,39 @@ const activityItems: ActivityItem[] = [
     source: "activity",
     id: "event_01K34P2A3B4C5D6E7FGHJKMNPQ",
     timestamp: timestamp(2_930),
+    action: "relay.closed",
+    recordOrigin: { kind: "custom" },
+    label: "Imported closure note",
+    subjects: [
+      { kind: "file", path: "docs/handovers/imported-closure.md" },
+      { kind: "commit", hash: "6484dd0" },
+    ],
+    subjectCount: 2,
+    subjectsTruncated: false,
+    sourcePath: ".mex/events/activity/2026-08/event_01K34P2A3B4C5D6E7FGHJKMNPQ.md",
+    recordedActor: { kind: "git", name: "MEX Maintainer", email: "maintainer@example.test" },
+    effectiveActor: { kind: "git", name: "MEX Maintainer", email: "maintainer@example.test" },
+    actorDiagnostics: [],
+    workstream: null,
+    repository: {
+      branch: null,
+      head: "6484dd00022ac5d704404585d981b4da5f2c1cbf",
+      dirty: false,
+      observedAt: timestamp(2_930),
+    },
+    revision: revision("5"),
+  },
+  {
+    source: "activity",
+    id: "event_01K34P2A3B4C5D6E7FGHJKMNPR",
+    timestamp: timestamp(3_100),
     action: "repository.initialized",
+    recordOrigin: { kind: "unknown" },
+    label: null,
     subjects: [],
     subjectCount: 0,
     subjectsTruncated: false,
-    sourcePath: ".mex/events/activity/2026-08/event_01K34P2A3B4C5D6E7FGHJKMNPQ.md",
+    sourcePath: ".mex/events/activity/2026-08/event_01K34P2A3B4C5D6E7FGHJKMNPR.md",
     recordedActor: { kind: "unknown" },
     effectiveActor: { kind: "unknown" },
     actorDiagnostics: [],
@@ -378,9 +447,9 @@ const activityItems: ActivityItem[] = [
       branch: "feat/wiki-port-contract-lock",
       head: null,
       dirty: false,
-      observedAt: timestamp(2_930),
+      observedAt: timestamp(3_100),
     },
-    revision: revision("5"),
+    revision: revision("7"),
   },
   {
     source: "legacy",
@@ -458,13 +527,13 @@ const home: HomeResponse = {
     workstreams: { availability: "available", count: fixtureWorkstreams.length },
     relays: { availability: "available", count: 1 },
     inbox: { availability: "unavailable", count: null, reason: "Inbox workflows are not part of this read-only slice." },
-    activity: { availability: "available", count: 4 },
+    activity: { availability: "available", count: 5 },
   },
   activeJobs: 1,
   attention: [
     { id: "attention_graph", kind: "job", title: "Graph refresh is in progress", summary: "Extraction is processing generation 14.", route: `/jobs?job=${jobs[0].id}`, tone: "neutral" },
     { id: "attention_graph_freshness", kind: "health", title: "The code graph is behind this branch", summary: "Seven repository changes are outside the last trustworthy graph snapshot.", route: "/health", tone: "warning" },
-    { id: "attention_activity", kind: "activity", title: "Repository activity is available", summary: "Immutable canonical and legacy history can be reviewed without changing the project.", route: "/activity", tone: "neutral" },
+    { id: "attention_activity", kind: "activity", title: "Repository activity is available", summary: "MEX records and Project notes can be reviewed without changing the project.", route: "/activity", tone: "neutral" },
   ],
 };
 
@@ -1544,6 +1613,10 @@ function fixtureTimelineEvent(event: TeamActivityEvent): ActivityItem {
     id: event.id,
     timestamp: event.timestamp,
     action: event.action,
+    recordOrigin: event.schemaVersion === 1
+      ? { kind: "unknown" }
+      : structuredClone(event.origin),
+    label: event.schemaVersion === 1 ? null : event.label ?? null,
     subjects,
     subjectCount: subjects.length,
     subjectsTruncated: false,
@@ -1567,11 +1640,12 @@ class FixtureHubApi implements HubApi {
   readonly #workstreams = structuredClone(fixtureWorkstreams);
   readonly #inboxFixture: FixtureApiOptions["inboxFixture"];
   readonly #relayFixture: FixtureApiOptions["relayFixture"];
+  readonly #activityFixture: FixtureApiOptions["activityFixture"];
   readonly #inboxDrafts: InboxDraftDetail[];
   readonly #inboxProposals: InboxProposalDetail[];
   readonly #relayDrafts: RelayDraftDetail[];
   readonly #relays: RelayDetail[];
-  readonly #activityItems = structuredClone(activityItems);
+  readonly #activityItems: ActivityItem[];
   #selection: TeamCurrentActorResponse["selection"] = {
     memberId: fixtureMemberIds[0],
     updatedAt: timestamp(12),
@@ -1582,6 +1656,7 @@ class FixtureHubApi implements HubApi {
   constructor(options: FixtureApiOptions = {}) {
     this.#inboxFixture = options.inboxFixture;
     this.#relayFixture = options.relayFixture;
+    this.#activityFixture = options.activityFixture;
     this.#inboxDrafts = structuredClone(
       options.inboxFixture === "empty" ? [] : fixtureInboxDrafts,
     );
@@ -1599,6 +1674,13 @@ class FixtureHubApi implements HubApi {
           : options.relayFixture === "legacy"
             ? [fixtureLegacyRelayV2, fixtureLegacyRelay]
             : fixtureRelays,
+    );
+    this.#activityItems = structuredClone(
+      options.activityFixture === "empty"
+        ? []
+        : options.activityFixture === "legacy"
+          ? activityItems.filter((item) => item.source === "legacy")
+          : activityItems,
     );
     if (options.relayFixture === "missing") {
       this.#selection = {
@@ -1991,11 +2073,13 @@ class FixtureHubApi implements HubApi {
     }
     const eventId = envelope.receipt.purposeIds.find((item) => item.purpose === "activity")?.id;
     const events: TeamActivityEvent[] = eventId === undefined ? [] : [{
-      schemaVersion: 1,
+      schemaVersion: 2,
       id: eventId,
       timestamp: envelope.receipt.authority.occurredAt,
       actor: structuredClone(envelope.receipt.authority.actor),
       action: action.kind === "relay.publish" ? "relay.published" : action.kind === "relay.acknowledge" ? "relay.acknowledged" : "relay.closed",
+      origin: { kind: "workflow", operation: action.kind },
+      ...(relays[0]?.summary === undefined ? {} : { label: relays[0].summary }),
       subjects: relays[0] ? [{ kind: "entity", entity: { ...relays[0].ref } }] : [],
       workstream: relays[0]?.workstream ?? null,
       repoState: structuredClone(envelope.receipt.authority.repoState),
@@ -2367,11 +2451,13 @@ class FixtureHubApi implements HubApi {
             : [];
       if (actionName !== null) {
         event = {
-          schemaVersion: 1,
+          schemaVersion: 2,
           id: activityId,
           timestamp: envelope.receipt.authority.occurredAt,
           actor: envelope.receipt.authority.actor,
           action: actionName,
+          origin: { kind: "workflow", operation: action.kind },
+          ...(proposals[0]?.title === undefined ? {} : { label: proposals[0].title }),
           subjects: [...subjectProposal, ...approvalTarget],
           workstream: null,
           repoState: envelope.receipt.authority.repoState,
@@ -2608,11 +2694,23 @@ class FixtureHubApi implements HubApi {
         }]
       );
       event = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         id: eventPurpose.id,
         timestamp: envelope.receipt.authority.occurredAt,
         actor: envelope.receipt.authority.actor,
         action: eventAction,
+        origin: direct === null
+          ? { kind: "workflow", operation: action.kind }
+          : { kind: "custom" },
+        ...(
+          direct !== null
+            ? {}
+            : eventMember !== null
+              ? { label: eventMember.displayName }
+              : workstream !== null
+                ? { label: workstream.title }
+                : {}
+        ),
         subjects: eventSubjects,
         workstream: direct?.workstream ?? (workstream === null
           ? null
@@ -2645,19 +2743,24 @@ class FixtureHubApi implements HubApi {
     const items = filtered.slice(offset, offset + pageSize);
     const nextOffset = offset + items.length;
     const nextCursor = nextOffset < filtered.length ? `fixture_${nextOffset}` : null;
+    const includeLegacyDiagnostic = request.source !== "activity"
+      && this.#activityFixture !== "empty"
+      && this.#activityFixture !== "legacy";
     return Promise.resolve({
       items,
       nextCursor,
       hasMore: nextCursor !== null,
-      sourceTruncated: false,
+      sourceTruncated: this.#activityFixture === "partial",
       deterministicRevision: revision(request.source === "legacy" ? "8" : request.source === "activity" ? "9" : "7"),
-      diagnostics: [{
-        code: "LEGACY_ACTIVITY_MALFORMED",
-        severity: "warning",
-        message: "One malformed legacy row was excluded while valid history was retained.",
-        path: ".mex/events/decisions.jsonl",
-      }],
-      diagnosticsTruncated: false,
+      diagnostics: includeLegacyDiagnostic
+        ? [{
+            code: "LEGACY_ACTIVITY_MALFORMED",
+            severity: "warning",
+            message: "One malformed legacy row was excluded while valid history was retained.",
+            path: ".mex/events/decisions.jsonl",
+          }]
+        : [],
+      diagnosticsTruncated: this.#activityFixture === "partial",
     });
   }
   search(request: SearchRequest) { return Promise.resolve(searchResponse(request)); }

@@ -388,7 +388,10 @@ export function defineTeamRelayHandoffContract(
         expect(publish.receipt.purposeIds.find((item) => item.purpose === "activity")?.id)
           .toBe(published.events[0]!.id);
         expect(published.events[0]).toMatchObject({
+          schemaVersion: 2,
           action: "relay.published",
+          origin: { kind: "workflow", operation: "relay.publish" },
+          label: draft.input.summary,
           timestamp: harness.oracle.now,
           actor: harness.oracle.sender,
           subjects: [{
@@ -425,7 +428,10 @@ export function defineTeamRelayHandoffContract(
         expect(acknowledge.receipt.purposeIds[0]!.id)
           .toBe(acknowledged.events[0]!.id);
         expect(acknowledged.events[0]).toMatchObject({
+          schemaVersion: 2,
           action: "relay.acknowledged",
+          origin: { kind: "workflow", operation: "relay.acknowledge" },
+          label: draft.input.summary,
           timestamp: acknowledgeRepoState.observedAt,
           actor: harness.oracle.recipient,
           subjects: [{ kind: "entity", entity: relay.ref }],
@@ -455,7 +461,10 @@ export function defineTeamRelayHandoffContract(
         expect(closed.events).toHaveLength(1);
         expect(close.receipt.purposeIds[0]!.id).toBe(closed.events[0]!.id);
         expect(closed.events[0]).toMatchObject({
+          schemaVersion: 2,
           action: "relay.closed",
+          origin: { kind: "workflow", operation: "relay.close" },
+          label: draft.input.summary,
           timestamp: closeRepoState.observedAt,
           actor: harness.oracle.recipient,
           subjects: [{ kind: "entity", entity: relay.ref }],

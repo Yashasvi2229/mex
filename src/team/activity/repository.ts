@@ -66,6 +66,12 @@ export interface ActivityCreateInput {
   metadata?: Readonly<Record<string, JsonValue>>;
 }
 
+/** Service-owned provenance for a new schema-v2 Activity event. */
+export interface ActivityCreateProvenance {
+  origin: Extract<ActivityEvent, { schemaVersion: 2 }>["origin"];
+  label?: string;
+}
+
 export interface ActivityCreatePreview {
   event: ActivityEvent;
   sourcePath: RepoRelativePath;
@@ -146,7 +152,7 @@ export class ActivityRepository {
     return this.previewCreateWithAuthority(input, {
       timestamp: now.toISOString(),
       repoState: await this.git.getRepoState(),
-    });
+    }, undefined, { origin: { kind: "custom" } });
   }
 
   /**
@@ -158,6 +164,7 @@ export class ActivityRepository {
     input: ActivityCreateInput,
     authority: PreparedActivityAuthority,
     eventId?: string,
+    provenance: ActivityCreateProvenance = { origin: { kind: "custom" } },
   ): Promise<ActivityCreatePreview> {
     const timestampDate = new Date(authority.timestamp);
     if (
@@ -179,7 +186,7 @@ export class ActivityRepository {
       );
     }
     const event: ActivityEvent = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       id,
       timestamp: authority.timestamp,
       actor: input.actor,
@@ -188,6 +195,8 @@ export class ActivityRepository {
       ...(input.workstream === undefined ? {} : { workstream: input.workstream }),
       repoState: { ...authority.repoState },
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+      origin: provenance.origin,
+      ...(provenance.label === undefined ? {} : { label: provenance.label }),
     };
     const issued = previewFor(event);
     this.#assertCapacityFor(issued.preview, issued.bytes);

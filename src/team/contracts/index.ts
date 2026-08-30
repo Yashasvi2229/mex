@@ -159,6 +159,9 @@ export {
 } from "./workflow.js";
 export type {
   ActivityEvent,
+  ActivityEventV1,
+  ActivityEventV2,
+  ActivityRecordOrigin,
   ActivitySubjectRef,
   ActorResolutionRequest,
   InboxDraft,

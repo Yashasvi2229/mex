@@ -191,6 +191,12 @@ async function assertReleaseRouteReady(page, route, teamFixture) {
       summary: teamFixture.relaySummary,
     });
   }
+  if (route === "activity") {
+    await page.locator('[data-activity-workbench="ready"]')
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+    await page.locator('[role="article"][data-source]').first()
+      .waitFor({ state: "visible", timeout: PAGE_READY_TIMEOUT_MS });
+  }
 }
 
 async function addApiCookie(context, origin, serializedCookie) {

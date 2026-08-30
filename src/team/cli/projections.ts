@@ -32,7 +32,7 @@ export interface TeamMemberProjection {
 }
 
 export interface TeamActivityProjection {
-  schemaVersion: 1;
+  schemaVersion: ActivityEvent["schemaVersion"];
   id: string;
   timestamp: string;
   actor: ActorRef;
@@ -41,6 +41,11 @@ export interface TeamActivityProjection {
   workstream: ActivityEvent["workstream"] | null;
   repoState: RepoState;
   metadata: ActivityEvent["metadata"] | null;
+  recordOrigin:
+    | { kind: "workflow"; operation: string }
+    | { kind: "custom" }
+    | { kind: "unknown" };
+  label: string | null;
   sourcePath: string | null;
   revision: Revision | null;
 }
@@ -133,7 +138,7 @@ export function projectActivity(
 ): TeamActivityProjection {
   const stored = activity as Partial<StoredActivityEvent>;
   return {
-    schemaVersion: 1,
+    schemaVersion: activity.schemaVersion,
     id: activity.id,
     timestamp: activity.timestamp,
     actor: structuredClone(activity.actor),
@@ -142,6 +147,10 @@ export function projectActivity(
     workstream: activity.workstream === undefined ? null : structuredClone(activity.workstream),
     repoState: structuredClone(activity.repoState),
     metadata: activity.metadata === undefined ? null : structuredClone(activity.metadata),
+    recordOrigin: activity.schemaVersion === 1
+      ? { kind: "unknown" }
+      : structuredClone(activity.origin),
+    label: activity.schemaVersion === 1 ? null : activity.label ?? null,
     sourcePath: stored.sourcePath ?? null,
     revision: stored.revision ?? null,
   };

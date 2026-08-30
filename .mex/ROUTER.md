@@ -42,9 +42,11 @@ Then read this file fully before doing anything else in this session.
 - Lane B provides the loopback-only Project Hub, secure browser-session
   bootstrap, bounded `/api/v1` contracts, persistent local job orchestration,
   packaged React shell, and honest Home/Search/Health/Jobs states.
-- The Project Hub now projects Lane C's immutable canonical activity and legacy
-  decision log through a bounded, read-only Activity timeline. Recorded actors
-  remain immutable while current alias resolution is shown separately.
+- The Project Hub now presents Lane C's immutable MEX records and
+  Project notes through a bounded, read-only Activity timeline. Recorded actors
+  remain immutable while current alias resolution is shown separately;
+  schema-v2 workflow/custom origin and optional labels are projected without
+  rewriting schema-v1 history.
 - Versioned graph snapshot provenance and read-only freshness inspection gate
   grounding in check, doctor, and dashboard flows without implicit graph sync.
 - Explicit graph status, refresh, and isolated rebuild/recovery commands preserve

@@ -12,6 +12,10 @@
     "./relay": {
       "types": "./dist/relay.d.ts",
       "import": "./dist/relay.js"
+    },
+    "./ids": {
+      "types": "./dist/ids.d.ts",
+      "import": "./dist/ids.js"
     }
   },
   "scripts": {

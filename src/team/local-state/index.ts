@@ -40,7 +40,11 @@ import {
   WIKI_OPERATION_TYPES,
   type WikiOperationRecoveryManifest,
 } from "../contracts/wiki.js";
-import type { ActivitySubjectRef, CatchUpCursor } from "../contracts/workflow.js";
+import type {
+  ActivityRecordOrigin,
+  ActivitySubjectRef,
+  CatchUpCursor,
+} from "../contracts/workflow.js";
 import { ACTIVITY_SUBJECT_LIMIT } from "../artifacts/codecs.js";
 
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
@@ -595,7 +599,7 @@ export interface CanonicalWorkflowEffect {
 }
 
 /** Bounded immutable audit state needed to recreate an exact missing Activity file. */
-export interface ActivityWorkflowEffect {
+interface ActivityWorkflowEffectBase {
   kind: "activity";
   id: string;
   path: RepoRelativePath;
@@ -608,6 +612,24 @@ export interface ActivityWorkflowEffect {
   workstream?: EntityRef;
   metadata?: Readonly<Record<string, JsonValue>>;
 }
+
+/** Pre-v2 journal shape retained byte-for-byte for interrupted recovery. */
+export interface ActivityWorkflowEffectV1 extends ActivityWorkflowEffectBase {
+  schemaVersion?: never;
+  origin?: never;
+  label?: never;
+}
+
+export interface ActivityWorkflowEffectV2 extends ActivityWorkflowEffectBase {
+  schemaVersion: 2;
+  origin: ActivityRecordOrigin;
+  // Human labels stay out of the body-free journal and are recovered from the
+  // exact canonical primary artifact before the Activity revision is attested.
+}
+
+export type ActivityWorkflowEffect =
+  | ActivityWorkflowEffectV1
+  | ActivityWorkflowEffectV2;
 
 /**
  * Body-free attestation of the exact portable C preview envelope accepted by
@@ -2262,15 +2284,22 @@ function normalizeWorkflowEffect(value: unknown, index: number): TeamWorkflowJou
     };
   }
   if (value.kind === "activity") {
+    const schemaVersion = value.schemaVersion === 2 ? 2 : 1;
     assertOnlyKeys(
       value,
-      [
-        "kind", "id", "path", "revision", "action", "actor", "occurredAt",
-        "repoState", "subjects", "workstream", "metadata",
-      ],
+      schemaVersion === 1
+        ? [
+            "kind", "id", "path", "revision", "action", "actor", "occurredAt",
+            "repoState", "subjects", "workstream", "metadata",
+          ]
+        : [
+            "kind", "schemaVersion", "id", "path", "revision", "action", "actor",
+            "occurredAt", "repoState", "subjects", "workstream", "metadata",
+            "origin",
+          ],
       `Workflow effect ${index}`,
     );
-    return {
+    const common: ActivityWorkflowEffectV1 = {
       kind: "activity",
       id: validateLocalIdentifier(value.id, `workflow effect ${index} Activity ID`),
       path: validateJournalPath(value.path),
@@ -2286,6 +2315,12 @@ function normalizeWorkflowEffect(value: unknown, index: number): TeamWorkflowJou
       ...(value.metadata === undefined
         ? {}
         : { metadata: normalizeActivityMetadata(value.metadata) }),
+    };
+    if (schemaVersion === 1) return common;
+    return {
+      ...common,
+      schemaVersion: 2,
+      origin: normalizeJournalActivityOrigin(value.origin),
     };
   }
   if (value.kind === "identity_activity_receipt") {
@@ -2558,6 +2593,29 @@ function normalizeJournalRepoState(value: unknown): RepoState {
     dirty: validateBoolean(value.dirty, "Activity repository dirty state"),
     observedAt: validateTimestamp(value.observedAt as string, "Activity observedAt"),
   };
+}
+
+function normalizeJournalActivityOrigin(value: unknown): ActivityRecordOrigin {
+  if (!isStrictPlainObject(value) || typeof value.kind !== "string") {
+    throw validationError("Activity origin is invalid.");
+  }
+  if (value.kind === "custom") {
+    assertOnlyKeys(value, ["kind"], "Activity custom origin");
+    return { kind: "custom" };
+  }
+  if (value.kind === "workflow") {
+    assertOnlyKeys(value, ["kind", "operation"], "Activity workflow origin");
+    const operation = validateBoundedAuditText(
+      value.operation,
+      "Activity workflow operation",
+      128,
+    );
+    if (!/^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/.test(operation)) {
+      throw validationError("Activity workflow operation is invalid.");
+    }
+    return { kind: "workflow", operation };
+  }
+  throw validationError("Activity origin kind is unsupported.");
 }
 
 function normalizeJournalSubjects(value: unknown): readonly ActivitySubjectRef[] {

@@ -18,6 +18,7 @@ import { MexPortError } from "../../contracts/shared.js";
 import type { MexErrorCode } from "../../contracts/shared.js";
 import {
   canonicalActorKey,
+  normalizeTeamWorkflowJournalEffects,
   TeamLocalState,
 } from "../index.js";
 
@@ -1303,6 +1304,42 @@ describe("TeamLocalState", () => {
         },
       } as never],
     }), "VALIDATION_FAILED");
+  });
+
+  it("normalizes both legacy and provenance-aware Activity recovery effects exactly", () => {
+    const legacyEffect = {
+      kind: "activity" as const,
+      id: "activity_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      path: ".mex/events/activity/2026-08/activity_01ARZ3NDEKTSV4RRFFQ69G5FAV.md",
+      revision: "e".repeat(64),
+      action: "relay.closed",
+      actor: { kind: "member" as const, memberId: MEMBER_A },
+      occurredAt: NOW,
+      repoState: { branch: "main", head: HEAD_A, dirty: false, observedAt: NOW },
+      subjects: [],
+    };
+    expect(normalizeTeamWorkflowJournalEffects([legacyEffect])).toEqual([legacyEffect]);
+
+    const provenanceAwareEffect = {
+      ...legacyEffect,
+      schemaVersion: 2 as const,
+      origin: { kind: "workflow" as const, operation: "relay.close" },
+    };
+    expect(normalizeTeamWorkflowJournalEffects([provenanceAwareEffect])).toEqual([
+      provenanceAwareEffect,
+    ]);
+    expectCode(() => normalizeTeamWorkflowJournalEffects([{
+      ...provenanceAwareEffect,
+      origin: { kind: "custom", operation: "relay.close" },
+    }]), "VALIDATION_FAILED");
+    expectCode(() => normalizeTeamWorkflowJournalEffects([{
+      ...provenanceAwareEffect,
+      label: "Activity labels stay out of recovery journals",
+    }]), "VALIDATION_FAILED");
+    expectCode(() => normalizeTeamWorkflowJournalEffects([{
+      ...legacyEffect,
+      schemaVersion: 3,
+    }]), "VALIDATION_FAILED");
   });
 
   it("retains no more than 256 terminal workflow rows per scaffold", () => {

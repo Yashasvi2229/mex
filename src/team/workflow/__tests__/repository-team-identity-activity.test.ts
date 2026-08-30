@@ -96,6 +96,12 @@ describe("RepositoryTeamWorkflowPort identity and Activity contract", () => {
       events: [{ id: EVENT_IDS[0], action: "member.added" }],
     });
     expect(activityFiles(root)).toEqual([`${EVENT_IDS[0]}.md`]);
+    await expect(applier.getActivity(EVENT_IDS[0])).resolves.toMatchObject({
+      schemaVersion: 2,
+      action: "member.added",
+      origin: { kind: "workflow", operation: "member.add" },
+      label: "Ada Lovelace",
+    });
   });
 
   it("keeps generic previews and reads noninitializing while C preview or Hub startup prepares only the signer", async () => {
@@ -749,7 +755,7 @@ describe("RepositoryTeamWorkflowPort identity and Activity contract", () => {
       action: {
         kind: "activity.record",
         activity: {
-          action: "activity.recorded",
+          action: "relay.closed",
           subjects: [{ kind: "file", path: "src/index.ts" }],
         },
       },
@@ -777,7 +783,15 @@ describe("RepositoryTeamWorkflowPort identity and Activity contract", () => {
     expect(activity.nextCursor).not.toBeNull();
     expect(await service.getActivity(EVENT_IDS[3])).toMatchObject({
       id: EVENT_IDS[3],
-      action: "activity.recorded",
+      schemaVersion: 2,
+      action: "relay.closed",
+      origin: { kind: "custom" },
+    });
+    expect(await service.getActivity(EVENT_IDS[0])).toMatchObject({
+      schemaVersion: 2,
+      action: "member.added",
+      origin: { kind: "workflow", operation: "member.add" },
+      label: "Ada Lovelace",
     });
   });
 

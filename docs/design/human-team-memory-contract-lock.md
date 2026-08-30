@@ -196,6 +196,14 @@ the package root:
 - selecting or clearing the current member is checkout-local and emits no
   Activity; each successful canonical member mutation and direct record emits
   exactly one immutable canonical Activity event;
+- new canonical Activity is schema v2. The service records either the exact
+  governed workflow operation that emitted the event or `custom` for an
+  explicit direct record, plus an optional bounded human label. The stored
+  action remains authoritative; a custom action that resembles a workflow
+  action does not acquire workflow semantics;
+- existing schema-v1 Activity remains byte-preserving. Reads project its
+  creation origin as `unknown` and its label as `null`; neither ordinary reads
+  nor later workflow mutations rewrite historical events;
 - the service captures actor, timestamp, branch, HEAD, and dirty state. A
   repository-local 32-byte HMAC key authenticates cross-process preview
   receipts. The first explicit identity/Activity preview, or Hub startup,
@@ -208,9 +216,11 @@ the package root:
   aggregate, 4,096 directory entries, and 100 diagnostics. Requested corrupt
   events are typed failures rather than false `not found` results;
 - the authenticated private Hub adds member/current-actor reads, exact Team
-  preview/apply routes, a lazy Members workbench, and explicit Activity append.
-  No Workstream, Inbox, Relay, Playbook, Catch Up, or Wiki editing route is made
-  available.
+  preview/apply routes, a lazy Members workbench, and a bounded read-only
+  Activity timeline. Direct Activity recording remains available through the
+  structured CLI and exact private API contract, but the browser does not
+  expose a manual recorder. No Workstream, Inbox, Relay, Playbook, Catch Up, or
+  Wiki editing route is made available by this checkpoint.
 
 ## Workstream and read-only Spec product boundary
 

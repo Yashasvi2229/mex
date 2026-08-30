@@ -88,19 +88,26 @@ if (initialChunks.has(relayRuntimeKey) || homeChunks.has(relayRuntimeKey)) {
   throw new Error("The strict Relay runtime contracts or transport leaked into the application shell or Home workbench.");
 }
 const activityEntry = workbenchEntries.find((entry) => entry.source === "src/pages/ActivityPage.tsx");
-const activityRecorderKey = Object.keys(manifest).find((candidate) => (
-  candidate === "src/pages/ActivityRecordDialog.tsx"
-  || manifest[candidate].src === "src/pages/ActivityRecordDialog.tsx"
+const activityContextKey = Object.keys(manifest).find((candidate) => (
+  candidate === "src/pages/ActivityEntryContext.tsx"
+  || manifest[candidate].src === "src/pages/ActivityEntryContext.tsx"
 ));
-if (!activityEntry || !activityRecorderKey) {
-  throw new Error("The production Hub manifest has no lazy Activity recorder chunk.");
+if (!activityEntry || !activityContextKey) {
+  throw new Error("The production Hub manifest has no expansion-only Activity context chunk.");
 }
 if (
-  !manifest[activityRecorderKey].isDynamicEntry
-  || !(manifest[activityEntry.key].dynamicImports ?? []).includes(activityRecorderKey)
-  || staticImportClosure(activityEntry.key).has(activityRecorderKey)
+  !manifest[activityContextKey].isDynamicEntry
+  || !(manifest[activityEntry.key].dynamicImports ?? []).includes(activityContextKey)
+  || staticImportClosure(activityEntry.key).has(activityContextKey)
 ) {
-  throw new Error("The production Hub Activity recorder is not isolated behind its open-on-demand boundary.");
+  throw new Error("Detailed Activity context is not isolated behind its explicit expansion boundary.");
+}
+if (Object.entries(manifest).some(([key, record]) => (
+  [key, record?.src, record?.name].some((value) => (
+    typeof value === "string" && /(?:^|\/)ActivityRecordDialog(?:\.tsx)?$/u.test(value)
+  ))
+))) {
+  throw new Error("The read-only production Activity workbench still contains a browser recorder chunk.");
 }
 for (const key of homeChunks) {
   const record = manifest[key] ?? {};
@@ -115,7 +122,7 @@ const forbiddenFixtureData = [
   "Three knowledge pages lost grounding",
   "scf_mex",
   "event_01K36WVM6H7JK8M9NPQRSTVVWX",
-  "Keep activity immutable and preserve legacy history",
+  "Keep activity immutable and preserve Project notes",
   "Project Hub read boundaries",
   "mx_01K36WVM6H7JK8M9NPQRSTVVWX",
   "member_01K36WVM6H7JK8M9NPQRSTVVWX",

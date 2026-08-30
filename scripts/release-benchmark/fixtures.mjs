@@ -537,11 +537,13 @@ function activityDocument({ id, index, timestamp }) {
   const suffix = String(index).padStart(4, "0");
   return [
     "---",
-    "schema_version: 1",
+    "schema_version: 2",
     `id: ${JSON.stringify(id)}`,
     `timestamp: ${JSON.stringify(timestamp)}`,
     "actor: {\"email\":\"release-benchmark@example.invalid\",\"kind\":\"git\",\"name\":\"MEX Release Benchmark\"}",
     `action: ${JSON.stringify(`benchmark.read.${suffix}`)}`,
+    "origin: {\"kind\":\"custom\"}",
+    `label: ${JSON.stringify(`Release benchmark event ${suffix}`)}`,
     `subjects: [{\"kind\":\"file\",\"path\":\"src/module-${suffix}.ts\"}]`,
     "repo_state: {\"branch\":\"benchmark\",\"dirty\":false,\"head\":null,\"observedAt\":\"2026-08-01T00:00:00.000Z\"}",
     "metadata: {}",

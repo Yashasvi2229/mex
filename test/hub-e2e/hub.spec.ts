@@ -33,7 +33,7 @@ async function expectAccessible(page: Page): Promise<void> {
 
 async function normalizeEstablishedVisualGolden(
   page: Page,
-  surface?: "home" | "activity",
+  surface?: "home",
 ): Promise<void> {
   if (surface === "home") {
     const summary = page.getByRole("region", { name: "Project summary" });
@@ -72,20 +72,11 @@ async function normalizeEstablishedVisualGolden(
       element.replaceWith(badge);
     });
   }
-  if (surface === "activity") {
-    await page.getByRole("button", { name: "Record Activity" }).evaluate((element) => element.remove());
-    await page.getByText("Append only", { exact: true }).evaluate((element) => {
-      const text = [...element.childNodes].find((node) => node.nodeType === Node.TEXT_NODE);
-      if (text) text.textContent = " Read only";
-      element.parentElement?.replaceWith(element);
-    });
-  }
 }
 
 async function expectLoadedActivity(page: Page, count: number): Promise<void> {
   const liveRegion = page.locator('[aria-live="polite"]');
-  await expect(liveRegion.getByText(String(count), { exact: true })).toBeVisible();
-  await expect(liveRegion.getByText(count === 1 ? "event loaded" : "events loaded", { exact: true })).toBeVisible();
+  await expect(liveRegion.getByText(`${count} ${count === 1 ? "event" : "events"} shown`, { exact: true })).toBeVisible();
 }
 
 test.describe("populated development fixture", () => {
@@ -493,101 +484,114 @@ test.describe("populated development fixture", () => {
     await page.goto("/activity?fixture=populated");
 
     await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
-    await expect(page.getByText("Append only", { exact: true })).toBeVisible();
+    await expect(page.locator('[data-activity-workbench="ready"]')).toBeVisible();
+    await expect(page.getByText(/Shared MEX changes are recorded automatically and cannot be edited here/)).toBeVisible();
     await expectLoadedActivity(page, 4);
-    await expect(page.getByText("Some history could not be trusted.")).toBeVisible();
-    await expect(page.getByText("Hub activity view connected", { exact: true })).toBeVisible();
-    await expect(page.getByText("Recorded as Daksh Jaitly", { exact: true })).toBeVisible();
+    await expect(page.getByText("Some activity needs attention")).toBeVisible();
+    const proposal = page.getByRole("article", { name: "Proposed a Spec change" });
+    await expect(proposal).toBeVisible();
+    await expect(proposal.getByText("Ada Lovelace", { exact: true })).toBeVisible();
+    await expect(proposal.getByRole("link", { name: /Keep approval consequences explicit/ })).toHaveAttribute(
+      "href",
+      "/inbox?view=review&proposal=proposal_01000000000000000000001721",
+    );
+    await expect(page.getByRole("article", { name: "Took a handoff" })).toBeVisible();
+    await expect(page.getByRole("article", { name: "Updated a teammate" })).toBeVisible();
+    await expect(page.getByText("event_01K36WVM6H7JK8M9NPQRSTVVWX", { exact: true })).toBeHidden();
+    await expect(page.getByRole("button", { name: "Record Activity" })).toHaveCount(0);
 
-    const firstDisclosure = page.getByRole("button", { name: "Show details" }).first();
+    const firstDisclosure = proposal.getByRole("button", { name: /^View context for Proposed a Spec change:/ });
     await firstDisclosure.focus();
     await page.keyboard.press("Enter");
-    await expect(page.getByRole("button", { name: "Hide details" }).first()).toBeFocused();
-    await expect(page.getByText("event_01K36WVM6H7JK8M9NPQRSTVVWX", { exact: true })).toBeVisible();
-    await expect(page.getByRole("region", { name: "Recorded repository state" })).toBeVisible();
+    await expect(proposal.getByRole("button", { name: /^Hide context for Proposed a Spec change:/ })).toBeFocused();
+    await expect(proposal.getByRole("heading", { name: "Repository when recorded" })).toBeVisible();
+    await expect(proposal.getByText("Local changes existed. MEX recorded that fact, not their paths, diff, or contents.")).toBeVisible();
+    await expect(proposal.getByText("event_01K36WVM6H7JK8M9NPQRSTVVWX", { exact: true })).toBeHidden();
 
     await expectAccessible(page);
     expect(errors).toEqual([]);
-    // Keep the long-lived timeline visual golden focused on history layout.
-    // The append controls have dedicated keyboard, axe, and interaction coverage below.
-    await normalizeEstablishedVisualGolden(page, "activity");
     await expect(page).toHaveScreenshot("hub-activity.png", { fullPage: true });
   });
 
-  test("records Activity only after preview and a separate explicit apply", async ({ page }) => {
+  test("keeps Activity read-only and refreshes only after explicit intent", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     await page.goto("/activity?fixture=populated");
     await expectLoadedActivity(page, 4);
 
-    const trigger = page.getByRole("button", { name: "Record Activity" });
-    await trigger.click();
-    let dialog = page.getByRole("dialog", { name: "Record Activity" });
-    await expect(dialog.getByRole("textbox", { name: /Action/ })).toBeFocused();
-    await expect(dialog.getByText(/service captures actor, timestamp, branch, HEAD, and dirty state/i)).toBeVisible();
-    await expectAccessible(page);
-    await page.keyboard.press("Escape");
-    await expect(dialog).toBeHidden();
-    await expect(trigger).toBeFocused();
-
-    await trigger.click();
-    dialog = page.getByRole("dialog", { name: "Record Activity" });
-    await dialog.getByRole("textbox", { name: /Action/ }).fill("review.approved");
-    await dialog.getByRole("textbox", { name: /Subject references/ }).fill("file:src/review.ts");
-    await dialog.getByRole("button", { name: "Preview append" }).click();
-    await expect(dialog.getByRole("heading", { name: "Operation preview" })).toBeVisible();
-    await dialog.getByRole("button", { name: "Review apply" }).click();
-    await expect(page.getByText("Apply this exact preview?")).toBeVisible();
-    await page.getByRole("button", { name: "Apply approved preview" }).click();
-
-    await expect(page.getByText(/was appended as an immutable canonical record/)).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Review approved" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Record Activity" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(page.getByText("Activity refreshed.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Proposed a Spec change" })).toBeVisible();
     await expectLoadedActivity(page, 4);
     await expectAccessible(page);
     expect(errors).toEqual([]);
+  });
+
+  test("renders empty, Project-note-only, and partial Activity fixtures honestly", async ({ page }) => {
+    await page.goto("/activity?fixture=populated&activityFixture=empty");
+    await expect(page.getByRole("heading", { name: "No team activity yet" })).toBeVisible();
+    await expect(page.getByText(/Shared MEX changes will appear here automatically/)).toBeVisible();
+    await expect(page.locator('[role="article"][data-source]')).toHaveCount(0);
+
+    await page.goto("/activity?fixture=populated&activityFixture=legacy");
+    await expect(page.locator('[role="article"][data-source="legacy"]')).toHaveCount(2);
+    await expect(page.locator('[role="article"][data-source="activity"]')).toHaveCount(0);
+    await expect(page.getByText("Keep activity immutable and preserve Project notes as a read-only projection.")).toBeVisible();
+
+    await page.goto("/activity?fixture=populated&activityFixture=partial");
+    await expect(page.getByText("This activity view is incomplete", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Proposed a Spec change" })).toBeVisible();
+    await expectAccessible(page);
   });
 
   test("keeps Activity filters in history and paginates without mixing disclosures", async ({ page }) => {
     await page.goto("/activity?fixture=populated");
     await expectLoadedActivity(page, 4);
 
-    await page.getByRole("button", { name: "Show details" }).first().click();
+    await page.getByRole("button", { name: /^View context for Proposed a Spec change:/ }).click();
     await page.getByRole("button", { name: "Load older activity" }).click();
-    await expectLoadedActivity(page, 6);
-    await expect(page.getByText("End of trustworthy history", { exact: true })).toBeVisible();
+    await expectLoadedActivity(page, 7);
+    await expect(page.getByRole("heading", { name: "Recorded “relay.closed”" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Recorded “repository.initialized”" })).toBeVisible();
+    await expect(page.getByText("You’ve reached the oldest available activity.", { exact: true })).toBeVisible();
 
-    await page.getByRole("button", { name: "Legacy", exact: true }).click();
+    await page.getByRole("tab", { name: "Project notes", exact: true }).click();
     await expect(page).toHaveURL(/fixture=populated/);
     await expect(page).toHaveURL(/source=legacy/);
-    await expect(page.locator('article[data-source="legacy"]')).toHaveCount(2);
-    await expect(page.locator('article[data-source="activity"]')).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Hide details" })).toHaveCount(0);
+    await expect(page.locator('[role="article"][data-source="legacy"]')).toHaveCount(2);
+    await expect(page.locator('[role="article"][data-source="activity"]')).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /Hide context/ })).toHaveCount(0);
 
-    await page.getByLabel("Since").fill("2026-08-23");
+    await page.getByLabel("From").fill("2026-08-23");
     await expect(page).toHaveURL(/since=2026-08-23/);
-    await expect(page.locator('article[data-source="legacy"]')).toHaveCount(1);
+    await expect(page.locator('[role="article"][data-source="legacy"]')).toHaveCount(1);
     await page.getByRole("button", { name: "Clear date" }).click();
     await expect(page).not.toHaveURL(/since=/);
 
     await page.goBack();
-    await expect(page.getByLabel("Since")).toHaveValue("2026-08-23");
+    await expect(page.getByLabel("From")).toHaveValue("2026-08-23");
     await page.goBack();
-    await expect(page.getByRole("button", { name: "Legacy", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("tab", { name: "Project notes", exact: true })).toHaveAttribute("aria-selected", "true");
     await page.goBack();
-    await expect(page.getByRole("button", { name: "All", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("tab", { name: "All activity", exact: true })).toHaveAttribute("aria-selected", "true");
   });
 
-  for (const width of [1440, 1024] as const) {
+  for (const width of [390, 768, 1024, 1440] as const) {
     test(`keeps Activity accessible and overflow-free at ${width}px`, async ({ page }) => {
       await page.emulateMedia({ reducedMotion: "reduce" });
       await page.setViewportSize({ width, height: 900 });
       await page.goto("/activity?fixture=populated");
-      await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
-
-      const disclosure = page.getByRole("button", { name: "Show details" }).first();
-      const transitionDuration = await disclosure.evaluate(
-        (element) => getComputedStyle(element).transitionDuration,
-      );
-      expect(Number.parseFloat(transitionDuration)).toBeLessThanOrEqual(0.00001);
+      if (width < 1024) {
+        await expect(page.getByRole("heading", { name: "A wider workbench is required" })).toBeVisible();
+        await expect(page.getByRole("navigation", { name: "Primary" })).toBeHidden();
+      } else {
+        await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
+        const disclosure = page.getByRole("button", { name: /^View context for Proposed a Spec change:/ });
+        const transitionDuration = await disclosure.evaluate(
+          (element) => getComputedStyle(element).transitionDuration,
+        );
+        expect(Number.parseFloat(transitionDuration)).toBeLessThanOrEqual(0.00001);
+      }
       const geometry = await page.evaluate(() => ({
         viewportWidth: window.innerWidth,
         documentClientWidth: document.documentElement.clientWidth,
@@ -1631,14 +1635,14 @@ test.describe("populated development fixture", () => {
       await expect(page).toHaveURL(/\/\?fixture=populated$/);
     }
 
-    await page.goto("/activity?fixture=populated");
-    await page.getByRole("button", { name: "Record Activity" }).click();
-    const dialog = page.getByRole("dialog", { name: "Record Activity" });
+    await page.goto("/members?fixture=populated");
+    await page.getByRole("button", { name: "Add member" }).click();
+    const dialog = page.getByRole("dialog", { name: "Add member" });
     const cancel = dialog.getByRole("button", { name: "Cancel" });
     await cancel.focus();
     await page.keyboard.press("/");
     await expect(dialog).toBeVisible();
-    await expect(page).toHaveURL(/\/activity\?fixture=populated$/);
+    await expect(page).toHaveURL(/\/members\?fixture=populated$/);
   });
 
   test("exposes neutral queue counts, team identity, and exact locality guidance", async ({ page }) => {
@@ -1750,12 +1754,27 @@ test.describe("populated development fixture", () => {
     await expect(page.getByText("404", { exact: true })).toBeVisible();
   });
 
-  test("uses the desktop guard at 1023px", async ({ page }) => {
-    await page.setViewportSize({ width: 1023, height: 800 });
-    await page.goto("/?fixture=populated");
-    await expect(page.getByRole("heading", { name: "A wider workbench is required" })).toBeVisible();
-    await expect(page.getByRole("navigation", { name: "Primary" })).toBeHidden();
-  });
+  for (const width of [390, 768, 1023] as const) {
+    test(`uses the desktop guard at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await page.goto("/?fixture=populated");
+      await expect(page.getByRole("heading", { name: "A wider workbench is required" })).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "Primary" })).toBeHidden();
+      const geometry = await page.evaluate(() => ({
+        viewportWidth: window.innerWidth,
+        documentClientWidth: document.documentElement.clientWidth,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        bodyScrollWidth: document.body.scrollWidth,
+      }));
+      expect(geometry).toEqual({
+        viewportWidth: width,
+        documentClientWidth: width,
+        documentScrollWidth: width,
+        bodyScrollWidth: width,
+      });
+      await expectAccessible(page);
+    });
+  }
 
   for (const viewport of [
     { width: 1440, height: 900 },
@@ -1833,9 +1852,6 @@ test.describe("populated development fixture", () => {
     await expect(page.getByRole("heading", { name: "Overview", exact: true })).toBeVisible();
     await page.goto("/activity?fixture=populated");
     await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Record Activity" }).click();
-    await expect(page.getByRole("dialog", { name: "Record Activity" })).toBeVisible();
-    await page.keyboard.press("Escape");
     await page.goto("/members?fixture=populated");
     await expect(page.getByRole("heading", { name: "Members", exact: true })).toBeVisible();
     await page.goto("/knowledge?fixture=populated");
@@ -1943,10 +1959,10 @@ test.describe("built production Hub", () => {
 
     await page.goto(`${new URL(bootstrapUrl).origin}/activity?fixture=populated`);
     await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
-    await expect(page.getByText("Production real read", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Recorded “production.real_read”", exact: true })).toBeVisible();
     await expect(page.getByText("Production legacy decision", { exact: true })).toBeVisible();
-    await expect(page.getByText("Hub activity view connected", { exact: true })).toHaveCount(0);
-    await expect(page.getByText("Keep activity immutable and preserve legacy history", { exact: false })).toHaveCount(0);
+    await expect(page.getByText("Proposed a Spec change", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Keep activity immutable and preserve Project notes", { exact: false })).toHaveCount(0);
     await expect(page.getByText("production metadata sentinel", { exact: true })).toHaveCount(0);
     await expect(page.getByText("/private/production/path", { exact: true })).toHaveCount(0);
     await expect(page.getByText(".mex/traces/production-private.md", { exact: true })).toHaveCount(0);

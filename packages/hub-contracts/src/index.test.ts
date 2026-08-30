@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import * as IdRuntime from "./ids.js";
 import * as RelayRuntime from "./relay.js";
 import {
   ActivityRequestSchema,
@@ -36,6 +37,7 @@ import {
   SpecListRequestSchema,
   SpecListResponseSchema,
   TeamCurrentActorResponseSchema,
+  TeamActivityEventSchema,
   TeamMemberListRequestSchema,
   TeamMemberListResponseSchema,
   TeamMemberSchema,
@@ -53,6 +55,7 @@ import {
 
 describe("Hub API contracts", () => {
   it("keeps the private Relay runtime entry on the canonical schema instances", () => {
+    expect(IdRuntime.RelayIdSchema).toBe(RelayIdSchema);
     expect(RelayRuntime.RelayDetailSchema).toBe(RelayDetailSchema);
     expect(RelayRuntime.RelayDraftDetailSchema).toBe(RelayDraftDetailSchema);
     expect(RelayRuntime.RelayDraftIdSchema).toBe(RelayDraftIdSchema);
@@ -61,6 +64,10 @@ describe("Hub API contracts", () => {
     expect(RelayRuntime.RelayListResponseSchema).toBe(RelayListResponseSchema);
     expect(RelayRuntime.RelayOperationApplyResponseSchema).toBe(RelayOperationApplyResponseSchema);
     expect(RelayRuntime.RelayOperationPreviewResponseSchema).toBe(RelayOperationPreviewResponseSchema);
+    expect(RelayRuntime.RelayIdSchema).toBe(IdRuntime.RelayIdSchema);
+    expect(IdRuntime.RelayIdSchema.parse("relay_01000000000000000000000001"))
+      .toBe("relay_01000000000000000000000001");
+    expect(IdRuntime.RelayIdSchema.safeParse("relay-not-portable").success).toBe(false);
   });
 
   it("rejects unknown request fields and oversized queries", () => {
@@ -639,6 +646,15 @@ describe("Hub API contracts", () => {
       ...relayApply,
       events: [{
         ...relayApply.events[0],
+        schemaVersion: 2,
+        origin: { kind: "workflow", operation: "relay.publish" },
+        label: "Authentication handoff",
+      }],
+    }).success).toBe(true);
+    expect(RelayOperationApplyResponseSchema.safeParse({
+      ...relayApply,
+      events: [{
+        ...relayApply.events[0],
         actor: { ...maximumServiceMember, displayName: "S".repeat(513) },
       }],
     }).success).toBe(false);
@@ -1037,6 +1053,51 @@ describe("Hub API contracts", () => {
     }).success).toBe(false);
   });
 
+  it("accepts strict schema-v1 and provenance-aware schema-v2 Activity events", () => {
+    const base = {
+      id: "event_01ARZ3NDEKTSV4RRFFQ69G5FAB",
+      timestamp: "2026-08-27T04:05:06.000Z",
+      actor: { kind: "unknown" as const },
+      action: "relay.closed",
+      subjects: [],
+      workstream: null,
+      repoState: {
+        branch: "main",
+        head: "b".repeat(40),
+        dirty: false,
+        observedAt: "2026-08-27T04:05:06.000Z",
+      },
+    };
+    const v1 = { schemaVersion: 1 as const, ...base };
+    const workflow = {
+      schemaVersion: 2 as const,
+      ...base,
+      origin: { kind: "workflow" as const, operation: "relay.close" },
+      label: "Authentication handoff",
+    };
+    const custom = {
+      schemaVersion: 2 as const,
+      ...base,
+      origin: { kind: "custom" as const },
+    };
+
+    expect(TeamActivityEventSchema.parse(v1)).toEqual(v1);
+    expect(TeamActivityEventSchema.parse(workflow)).toEqual(workflow);
+    expect(TeamActivityEventSchema.parse(custom)).toEqual(custom);
+    expect(TeamActivityEventSchema.safeParse({
+      ...v1,
+      origin: { kind: "custom" },
+    }).success).toBe(false);
+    expect(TeamActivityEventSchema.safeParse({
+      ...workflow,
+      origin: { kind: "custom", operation: "relay.close" },
+    }).success).toBe(false);
+    expect(TeamActivityEventSchema.safeParse({
+      ...workflow,
+      label: "é".repeat(257),
+    }).success).toBe(false);
+  });
+
   it("locks the portable preview/apply golden and its byte bounds", () => {
     const envelope = teamPreviewGolden();
     expect(TeamOperationPreviewResponseSchema.parse(envelope)).toEqual(envelope);
@@ -1355,6 +1416,8 @@ describe("Hub API contracts", () => {
         displayName: "Daksh",
       },
       actorDiagnostics: [],
+      recordOrigin: { kind: "unknown" },
+      label: null,
       workstream: null,
       repository: {
         branch: "feat/activity",
@@ -1393,6 +1456,21 @@ describe("Hub API contracts", () => {
       diagnosticsTruncated: false,
     };
     expect(ActivityResponseSchema.safeParse(response).success).toBe(true);
+    expect(ActivityResponseSchema.safeParse({
+      ...response,
+      items: [{
+        ...canonical,
+        recordOrigin: { kind: "workflow", operation: "member.update" },
+        label: "Daksh",
+      }, legacy],
+    }).success).toBe(true);
+    expect(ActivityResponseSchema.safeParse({
+      ...response,
+      items: [{
+        ...canonical,
+        recordOrigin: { kind: "custom", operation: "member.update" },
+      }, legacy],
+    }).success).toBe(false);
     expect(ActivityResponseSchema.safeParse({
       ...response,
       items: [{ ...canonical, metadata: { secret: "must-not-cross" } }],

@@ -113,6 +113,12 @@ describe("RepositoryTeamWorkflowPort Workstream contract", () => {
     });
     expect(result.events).toHaveLength(1);
     expect(activityFiles(root)).toEqual([`${EVENT_IDS[0]}.md`]);
+    await expect(applier.getActivity(EVENT_IDS[0])).resolves.toMatchObject({
+      schemaVersion: 2,
+      action: "workstream.created",
+      origin: { kind: "workflow", operation: "workstream.create" },
+      label: "Human-team release",
+    });
   });
 
   it("enforces exact revisions, lifecycle transitions, and real blockers without failed writes", async () => {

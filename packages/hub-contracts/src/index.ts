@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { RelayIdSchema } from "./ids.js";
+
+export { RelayIdSchema } from "./ids.js";
 
 export const HUB_API_VERSION = "v1" as const;
 
@@ -749,8 +752,15 @@ export const TeamOperationPreviewResponseSchema = z.object({
 
 export const TeamOperationApplyRequestSchema = TeamOperationPreviewResponseSchema;
 
-export const TeamActivityEventSchema = z.object({
-  schemaVersion: z.literal(1),
+const TeamPersistedActivityOriginSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("workflow"),
+    operation: teamActivityAction,
+  }).strict(),
+  z.object({ kind: z.literal("custom") }).strict(),
+]);
+
+const teamActivityEventFields = {
   id: teamEventId,
   timestamp: isoTimestamp,
   actor: TeamActorRefSchema,
@@ -758,7 +768,17 @@ export const TeamActivityEventSchema = z.object({
   subjects: z.array(TeamActivitySubjectInputSchema).max(64),
   workstream: teamWorkstreamRef.nullable(),
   repoState: teamRepositoryState,
-}).strict();
+} as const;
+
+export const TeamActivityEventSchema = z.union([z.object({
+  schemaVersion: z.literal(1),
+  ...teamActivityEventFields,
+}).strict(), z.object({
+  schemaVersion: z.literal(2),
+  ...teamActivityEventFields,
+  origin: TeamPersistedActivityOriginSchema,
+  label: teamText(512).optional(),
+}).strict()]);
 
 export const TeamOperationApplyResponseSchema = z.object({
   operationId: teamOperationId,
@@ -1312,8 +1332,6 @@ export const InboxOperationApplyResponseSchema = z.object({
 const relayContracts = /* @__PURE__ */ (() => {
 const RelayStateSchema = z.enum(["published", "acknowledged", "closed"]);
 const RelayPerspectiveSchema = z.enum(["mine", "sent", "all"]);
-const RelayIdSchema = z.string()
-  .regex(/^relay_[0-7][0-9A-HJKMNP-TV-Z]{25}$/, "Invalid Relay ID.");
 const RelayDraftIdSchema = z.string().min(1).refine(
   (value) => new TextEncoder().encode(value).byteLength <= 128
     && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value),
@@ -1960,8 +1978,7 @@ const RelayOperationApplyRequestSchema = z.union([
   relayLegacyPublishEnvelope,
 ]);
 
-const relayActivityEventSchema = z.object({
-  schemaVersion: z.literal(1),
+const relayActivityEventFields = {
   id: teamEventId,
   timestamp: isoTimestamp,
   actor: relayServiceActorRef,
@@ -1969,7 +1986,16 @@ const relayActivityEventSchema = z.object({
   subjects: z.array(TeamActivitySubjectInputSchema).max(64),
   workstream: teamWorkstreamRef.nullable(),
   repoState: teamRepositoryState,
-}).strict();
+} as const;
+const relayActivityEventSchema = z.union([z.object({
+  schemaVersion: z.literal(1),
+  ...relayActivityEventFields,
+}).strict(), z.object({
+  schemaVersion: z.literal(2),
+  ...relayActivityEventFields,
+  origin: TeamPersistedActivityOriginSchema,
+  label: teamText(512).optional(),
+}).strict()]);
 
 const RelayOperationApplyResponseSchema = z.object({
   operationId: teamOperationId,
@@ -1985,7 +2011,6 @@ const RelayOperationApplyResponseSchema = z.object({
 return {
   RelayStateSchema,
   RelayPerspectiveSchema,
-  RelayIdSchema,
   RelayDraftIdSchema,
   RelayEvidenceRefSchema,
   RelayDraftInputSchema,
@@ -2009,7 +2034,6 @@ return {
 export const {
   RelayStateSchema,
   RelayPerspectiveSchema,
-  RelayIdSchema,
   RelayDraftIdSchema,
   RelayEvidenceRefSchema,
   RelayDraftInputSchema,
@@ -2808,6 +2832,15 @@ export const ActivityDiagnosticSchema = z.object({
   path: activityDisplayPath.optional(),
 }).strict();
 
+export const ActivityRecordOriginSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("workflow"),
+    operation: teamActivityAction,
+  }).strict(),
+  z.object({ kind: z.literal("custom") }).strict(),
+  z.object({ kind: z.literal("unknown") }).strict(),
+]);
+
 const activityItemBase = {
   timestamp: isoTimestamp,
   action: utf8Text(128),
@@ -2824,6 +2857,8 @@ export const CanonicalActivityItemSchema = z.object({
   recordedActor: ActivityActorSchema,
   effectiveActor: ActivityActorSchema,
   actorDiagnostics: z.array(ActivityDiagnosticSchema).max(2),
+  recordOrigin: ActivityRecordOriginSchema,
+  label: teamText(512).nullable(),
   workstream: ActivityEntityRefSchema.nullable(),
   repository: ActivityRepositorySnapshotSchema,
   revision,
@@ -3196,6 +3231,7 @@ export type ActivityEntityRef = z.infer<typeof ActivityEntityRefSchema>;
 export type ActivitySubject = z.infer<typeof ActivitySubjectSchema>;
 export type ActivityRepositorySnapshot = z.infer<typeof ActivityRepositorySnapshotSchema>;
 export type ActivityDiagnostic = z.infer<typeof ActivityDiagnosticSchema>;
+export type ActivityRecordOrigin = z.infer<typeof ActivityRecordOriginSchema>;
 export type CanonicalActivityItem = z.infer<typeof CanonicalActivityItemSchema>;
 export type LegacyActivityItem = z.infer<typeof LegacyActivityItemSchema>;
 export type ActivityItem = z.infer<typeof ActivityItemSchema>;

@@ -1695,6 +1695,8 @@ The worker drains the durable queue.
       source: "activity",
       recordedActor: { kind: "git", name: "Daksh", email: "daksh@example.test" },
       effectiveActor: { kind: "member", memberId: MEMBER, displayName: "Daksh Current" },
+      recordOrigin: { kind: "custom" },
+      label: null,
       subjectCount: 10,
       subjectsTruncated: true,
       workstream: { id: "workstream_alpha", entityKind: "workstream", title: "Alpha" },

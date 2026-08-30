@@ -47,12 +47,14 @@ const budgets = JSON.parse(readFileSync(new URL("./budgets.json", import.meta.ur
 const budgetsSchema = JSON.parse(readFileSync(new URL("./budgets.schema.json", import.meta.url), "utf8"));
 const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 const reportSchema = JSON.parse(readFileSync(new URL("./report.schema.json", import.meta.url), "utf8"));
-const PRE_RELAY_FROZEN_BUDGETS_SHA256 = "29b2cb936db33977d452ea8361e010ad6bddc1b961dd3b0897b5f793763d3328";
+const PRE_RELAY_ACTIVITY_FROZEN_BUDGETS_SHA256 = "eefed77fb3085a592f23274d55a8aaeb74e3178bbd169605bb7893af11848f67";
 
-function frozenRelayCalibrationProjection(value) {
+function frozenAllowedCalibrationProjection(value) {
   const projected = structuredClone(value);
   projected.calibration.status = "__RELAY_CALIBRATION_STATUS__";
   projected.assets.routes.relays = { jsBytes: 0, cssBytes: 0, fontBytes: 0 };
+  projected.assets.routes.activity.jsBytes = "__ACTIVITY_JS_CALIBRATION__";
+  projected.assets.routes.activity.cssBytes = "__ACTIVITY_CSS_CALIBRATION__";
   delete projected.assets.routes.catchUp;
   for (const profile of ["small", "medium", "large"]) {
     delete projected.runtime.apiLatencyMs[profile].relayDrafts;
@@ -66,15 +68,17 @@ function frozenRelayCalibrationProjection(value) {
 }
 
 describe("release benchmark contract", () => {
-  it("permits calibration to change only the Checkpoint F Relay whitelist", () => {
+  it("permits only the calibrated Relay whitelist and Activity asset budgets", () => {
     const digest = (value) => createHash("sha256")
-      .update(JSON.stringify(frozenRelayCalibrationProjection(value)))
+      .update(JSON.stringify(frozenAllowedCalibrationProjection(value)))
       .digest("hex");
-    expect(digest(budgets)).toBe(PRE_RELAY_FROZEN_BUDGETS_SHA256);
+    expect(digest(budgets)).toBe(PRE_RELAY_ACTIVITY_FROZEN_BUDGETS_SHA256);
 
     const allowed = structuredClone(budgets);
     allowed.calibration.status = "calibrated-from-pinned-run-example";
     allowed.assets.routes.relays = { jsBytes: 123, cssBytes: 45, fontBytes: 0 };
+    allowed.assets.routes.activity.jsBytes += 1;
+    allowed.assets.routes.activity.cssBytes += 1;
     for (const profile of ["small", "medium", "large"]) {
       allowed.runtime.apiLatencyMs[profile].relayDrafts = 3;
       allowed.runtime.apiLatencyMs[profile].relays = 4;
@@ -82,11 +86,11 @@ describe("release benchmark contract", () => {
       allowed.runtime.browserHeapBytes[profile].members += 1;
       allowed.runtime.browserHeapBytes[profile].relays += 1;
     }
-    expect(digest(allowed)).toBe(PRE_RELAY_FROZEN_BUDGETS_SHA256);
+    expect(digest(allowed)).toBe(PRE_RELAY_ACTIVITY_FROZEN_BUDGETS_SHA256);
 
     const forbidden = structuredClone(allowed);
     forbidden.runtime.apiLatencyMs.small.search += 1;
-    expect(digest(forbidden)).not.toBe(PRE_RELAY_FROZEN_BUDGETS_SHA256);
+    expect(digest(forbidden)).not.toBe(PRE_RELAY_ACTIVITY_FROZEN_BUDGETS_SHA256);
   });
 
   it("locks the sample counts and deterministic route budget surface", () => {

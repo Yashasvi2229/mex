@@ -27,6 +27,11 @@ import {
 } from "./contracts/team-relay-handoff.contract.js";
 import { generateArtifactId } from "../src/team/artifacts/ulid.js";
 import {
+  activityArtifactPath,
+  serializeActivityArtifact,
+} from "../src/team/artifacts/codecs.js";
+import { canonicalFileDiff } from "../src/team/artifacts/unified-diff.js";
+import {
   ActivityRepository,
 } from "../src/team/activity/repository.js";
 import {
@@ -49,6 +54,7 @@ import type {
 } from "../src/team/contracts/shared.js";
 import type {
   Relay,
+  ActivityEventV1,
   RelayDraftInput,
   TeamRelayCommand,
   TeamRelayDetail,
@@ -759,7 +765,7 @@ class RepositoryRelayHarness implements TeamRelayContractHarness {
       nextActions: content.nextActions,
       publishedAt: authority.occurredAt,
     });
-    const activity = await new ActivityRepository({
+    const issuedActivity = await new ActivityRepository({
       projectRoot: this.root,
       git: fakeGit(
         { name: "Ada Lovelace", email: "ada@example.test" },
@@ -776,6 +782,37 @@ class RepositoryRelayHarness implements TeamRelayContractHarness {
       timestamp: authority.occurredAt,
       repoState: authority.repoState,
     }, eventId);
+    if (issuedActivity.event.schemaVersion !== 2) {
+      throw new Error("Expected current Activity preview schema.");
+    }
+    const {
+      schemaVersion: _activitySchemaVersion,
+      origin: _activityOrigin,
+      label: _activityLabel,
+      ...legacyActivityFields
+    } = issuedActivity.event;
+    const legacyActivityEvent: ActivityEventV1 = {
+      schemaVersion: 1,
+      ...legacyActivityFields,
+    };
+    const legacyActivityBytes = serializeActivityArtifact(legacyActivityEvent);
+    const legacyActivityPath = activityArtifactPath(legacyActivityEvent);
+    const legacyActivityRevision = createHash("sha256")
+      .update(legacyActivityBytes)
+      .digest("hex") as Revision;
+    const activity = {
+      ...issuedActivity,
+      event: legacyActivityEvent,
+      sourcePath: legacyActivityPath,
+      revision: legacyActivityRevision,
+      changes: [{
+        kind: "create" as const,
+        path: legacyActivityPath,
+        beforeRevision: null,
+        afterRevision: legacyActivityRevision,
+        diff: canonicalFileDiff(legacyActivityPath, null, legacyActivityBytes),
+      }],
+    };
     const preview = {
       valid: true,
       scope: "mixed" as const,
@@ -831,6 +868,12 @@ class RepositoryRelayHarness implements TeamRelayContractHarness {
           repoState: activity.event.repoState,
           subjects: activity.event.subjects,
           workstream: activity.event.workstream,
+          ...(activity.event.schemaVersion === 1
+            ? {}
+            : {
+                schemaVersion: 2 as const,
+                origin: activity.event.origin,
+              }),
         },
         {
           kind: "local_cleanup",

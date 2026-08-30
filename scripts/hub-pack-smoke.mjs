@@ -327,13 +327,18 @@ try {
     });
     throw new Error(`The packaged Hub did not report the exact canonical activity count: ${detail}`);
   }
+  const packedActivity = activityBody.items?.find((item) => (
+    item.source === "activity" && item.action === "activity.packed"
+  ));
   if (
     !activity.ok
     || activityBody.items?.length !== 2
-    || !activityBody.items.some((item) => item.source === "activity" && item.action === "activity.packed")
+    || !packedActivity
+    || packedActivity.recordOrigin?.kind !== "unknown"
+    || packedActivity.label !== null
     || !activityBody.items.some((item) => item.source === "legacy" && item.message === "Packed legacy decision")
   ) {
-    throw new Error("The packaged Hub did not project real canonical and legacy activity.");
+    throw new Error("The packaged Hub did not project v1 Activity as unknown-origin beside Project notes.");
   }
   const serializedActivity = JSON.stringify(activityBody);
   for (const secret of [

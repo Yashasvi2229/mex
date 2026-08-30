@@ -122,10 +122,12 @@ export interface JobSubscription {
 
 export type InboxFixtureVariant = "empty" | "unknown" | "partial";
 export type RelayFixtureVariant = "empty" | "closed" | "missing" | "partial" | "legacy";
+export type ActivityFixtureVariant = "empty" | "legacy" | "partial";
 
 export interface FixtureApiOptions {
   inboxFixture?: InboxFixtureVariant;
   relayFixture?: RelayFixtureVariant;
+  activityFixture?: ActivityFixtureVariant;
 }
 
 export interface HubApi {
@@ -650,6 +652,13 @@ export function relayFixtureVariant(search: string): RelayFixtureVariant | undef
     : undefined;
 }
 
+export function activityFixtureVariant(search: string): ActivityFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("activityFixture");
+  return value === "empty" || value === "legacy" || value === "partial"
+    ? value
+    : undefined;
+}
+
 export async function resolveApi(): Promise<HubApi> {
   if (
     createFixtureApi !== null
@@ -657,9 +666,11 @@ export async function resolveApi(): Promise<HubApi> {
   ) {
     const inboxVariant = inboxFixtureVariant(window.location.search);
     const relayVariant = relayFixtureVariant(window.location.search);
+    const activityVariant = activityFixtureVariant(window.location.search);
     return createFixtureApi({
       ...(inboxVariant === undefined ? {} : { inboxFixture: inboxVariant }),
       ...(relayVariant === undefined ? {} : { relayFixture: relayVariant }),
+      ...(activityVariant === undefined ? {} : { activityFixture: activityVariant }),
     });
   }
   return new HttpHubApi();

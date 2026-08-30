@@ -477,8 +477,11 @@ export type ActivitySubjectRef =
   | { kind: "file"; path: RepoRelativePath }
   | { kind: "commit"; hash: string };
 
-export interface ActivityEvent {
-  schemaVersion: 1;
+export type ActivityRecordOrigin =
+  | { kind: "workflow"; operation: string }
+  | { kind: "custom" };
+
+interface ActivityEventBase {
   id: string;
   timestamp: string;
   actor: ActorRef;
@@ -489,11 +492,27 @@ export interface ActivityEvent {
   metadata?: Readonly<Record<string, JsonValue>>;
 }
 
+/** Historical Activity bytes whose creation path cannot be proven. */
+export interface ActivityEventV1 extends ActivityEventBase {
+  schemaVersion: 1;
+  origin?: never;
+  label?: never;
+}
+
+/** Activity with service-owned creation provenance and a bounded human label. */
+export interface ActivityEventV2 extends ActivityEventBase {
+  schemaVersion: 2;
+  origin: ActivityRecordOrigin;
+  label?: string;
+}
+
+export type ActivityEvent = ActivityEventV1 | ActivityEventV2;
+
 /** Canonical activity event plus its storage identity. */
-export interface StoredActivityEvent extends ActivityEvent {
+export type StoredActivityEvent = ActivityEvent & {
   sourcePath: RepoRelativePath;
   revision: Revision;
-}
+};
 
 export interface TeamMemberListRequest extends PageRequest {
   active?: boolean;

@@ -65,11 +65,71 @@ describe("development-only populated fixture", () => {
     expect(HubCapabilitiesSchema.safeParse(capabilities).success).toBe(true);
     expect(HomeResponseSchema.safeParse(home).success).toBe(true);
     expect(ActivityResponseSchema.safeParse(activity).success).toBe(true);
-    expect(home.sections.activity).toEqual({ availability: "available", count: 4 });
+    expect(home.sections.activity).toEqual({ availability: "available", count: 5 });
     expect(home.sections.inbox).toEqual({ availability: "available", count: 3 });
     expect(home.sections.relays).toEqual({ availability: "available", count: 2 });
     expect(activity.items.some((item) => item.source === "activity")).toBe(true);
     expect(activity.items.some((item) => item.source === "legacy")).toBe(true);
+    const activityTail = await api.getActivity({
+      limit: 25,
+      ...(activity.nextCursor === null ? {} : { cursor: activity.nextCursor }),
+    });
+    expect([...activity.items, ...activityTail.items]).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: "activity",
+        action: "inbox.published",
+        recordOrigin: { kind: "workflow", operation: "inbox.publish" },
+        label: "Keep approval consequences explicit",
+        subjects: [expect.objectContaining({
+          kind: "entity",
+          entity: expect.objectContaining({
+            id: "proposal_01000000000000000000001721",
+            entityKind: "proposal",
+          }),
+        })],
+        subjectCount: 1,
+      }),
+      expect.objectContaining({
+        source: "activity",
+        action: "relay.acknowledged",
+        recordOrigin: { kind: "workflow", operation: "relay.acknowledge" },
+        label: "Carry the release evidence through the final cross-platform gate.",
+        subjects: [expect.objectContaining({
+          kind: "entity",
+          entity: expect.objectContaining({
+            id: "relay_01000000000000000000000001",
+            entityKind: "relay",
+          }),
+        })],
+        subjectCount: 1,
+      }),
+      expect.objectContaining({
+        source: "activity",
+        action: "member.updated",
+        recordOrigin: { kind: "workflow", operation: "member.update" },
+        label: "Daksh Jaitly",
+        subjects: [expect.objectContaining({
+          kind: "entity",
+          entity: expect.objectContaining({
+            id: "member_01K35Z2A3B4C5D6E7FGHJKMNPQ",
+            entityKind: "member",
+          }),
+        })],
+        subjectCount: 1,
+      }),
+      expect.objectContaining({
+        source: "activity",
+        action: "relay.closed",
+        recordOrigin: { kind: "custom" },
+        label: "Imported closure note",
+      }),
+      expect.objectContaining({
+        source: "activity",
+        action: "repository.initialized",
+        recordOrigin: { kind: "unknown" },
+        label: null,
+      }),
+    ]));
     expect(SearchResponseSchema.safeParse(search).success).toBe(true);
     expect(CodeWorkspaceResponseSchema.safeParse(code).success).toBe(true);
     expect(HealthResponseSchema.safeParse(health).success).toBe(true);
@@ -151,7 +211,14 @@ describe("development-only populated fixture", () => {
     expect(TeamOperationPreviewResponseSchema.safeParse(workstreamPreview).success).toBe(true);
     expect(TeamOperationApplyResponseSchema.safeParse(workstreamApplied).success).toBe(true);
     expect(workstreamApplied.workstreams).toHaveLength(1);
-    expect(workstreamApplied.events).toHaveLength(1);
+    expect(workstreamApplied.events).toEqual([
+      expect.objectContaining({
+        schemaVersion: 2,
+        action: "workstream.created",
+        origin: { kind: "workflow", operation: "workstream.create" },
+        label: "Spec review",
+      }),
+    ]);
   });
 
   it("models the human Relay inbox across personal, sent, team, closed, and draft views", async () => {
@@ -314,7 +381,10 @@ describe("development-only populated fixture", () => {
     });
     expect(applied.events).toEqual([
       expect.objectContaining({
+        schemaVersion: 2,
         action: "relay.published",
+        origin: { kind: "workflow", operation: "relay.publish" },
+        label: draft.summary,
         workstream: null,
         repoState: preview.receipt.authority.repoState,
       }),
@@ -450,8 +520,11 @@ describe("development-only populated fixture", () => {
     expect(InboxOperationApplyResponseSchema.safeParse(applied).success).toBe(true);
     expect(applied.events).toHaveLength(1);
     expect(applied.events[0]).toMatchObject({
+      schemaVersion: 2,
       id: preview.receipt.purposeIds[0]!.id,
       action: "inbox.approved",
+      origin: { kind: "workflow", operation: "inbox.approve" },
+      label: proposal.title,
       actor: preview.receipt.authority.actor,
       repoState: preview.receipt.authority.repoState,
     });
@@ -660,6 +733,70 @@ describe("development-only populated fixture", () => {
     expect(drafts.items).toHaveLength(1);
     expect(proposals.items).toHaveLength(3);
     expect(WikiEntityListResponseSchema.safeParse(wiki).success).toBe(true);
+  });
+
+  it("projects an exact empty Activity timeline without suppressing read or record capability", async () => {
+    const api = createFixtureApi({ activityFixture: "empty" });
+    const [capability, homeResult, page] = await Promise.all([
+      api.getCapabilities(),
+      api.getHome(),
+      api.getActivity({ limit: 25 }),
+    ]);
+
+    expect(HubCapabilitiesSchema.safeParse(capability).success).toBe(true);
+    expect(HomeResponseSchema.safeParse(homeResult).success).toBe(true);
+    expect(ActivityResponseSchema.safeParse(page).success).toBe(true);
+    expect(capability.activity).toEqual({ availability: "available" });
+    expect(capability.activityRecord).toEqual({ availability: "available" });
+    expect(homeResult.sections.activity).toEqual({ availability: "available", count: 0 });
+    expect(page).toEqual({
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+      sourceTruncated: false,
+      deterministicRevision: "7".repeat(64),
+      diagnostics: [],
+      diagnosticsTruncated: false,
+    });
+  });
+
+  it("isolates valid legacy Activity without inventing canonical history or diagnostics", async () => {
+    const api = createFixtureApi({ activityFixture: "legacy" });
+    const [homeResult, all, canonical] = await Promise.all([
+      api.getHome(),
+      api.getActivity({ limit: 25 }),
+      api.getActivity({ source: "activity", limit: 25 }),
+    ]);
+
+    expect(ActivityResponseSchema.safeParse(all).success).toBe(true);
+    expect(ActivityResponseSchema.safeParse(canonical).success).toBe(true);
+    expect(homeResult.sections.activity).toEqual({ availability: "available", count: 0 });
+    expect(all.items).toHaveLength(2);
+    expect(all.items.every((item) => item.source === "legacy")).toBe(true);
+    expect(all.diagnostics).toEqual([]);
+    expect(canonical.items).toEqual([]);
+    expect(canonical.diagnostics).toEqual([]);
+  });
+
+  it("keeps trusted Activity visible beside bounded partial-source diagnostics", async () => {
+    const api = createFixtureApi({ activityFixture: "partial" });
+    const [homeResult, page] = await Promise.all([
+      api.getHome(),
+      api.getActivity({ limit: 25 }),
+    ]);
+
+    expect(ActivityResponseSchema.safeParse(page).success).toBe(true);
+    expect(homeResult.sections.activity).toEqual({ availability: "available", count: 5 });
+    expect(page.items).toHaveLength(4);
+    expect(page.nextCursor).not.toBeNull();
+    expect(page.sourceTruncated).toBe(true);
+    expect(page.diagnosticsTruncated).toBe(true);
+    expect(page.diagnostics).toEqual([{
+      code: "LEGACY_ACTIVITY_MALFORMED",
+      severity: "warning",
+      message: "One malformed legacy row was excluded while valid history was retained.",
+      path: ".mex/events/decisions.jsonl",
+    }]);
   });
 
   it("projects exact empty Relay queues and drafts without suppressing Relay reads", async () => {
@@ -880,6 +1017,44 @@ describe("development-only populated fixture", () => {
       ]);
 
       expect(variantActivity).toEqual(baselineActivity);
+      expect(variantRelays).toEqual(baselineRelays);
+      expect(variantWorkstreams).toEqual(baselineWorkstreams);
+    },
+  );
+
+  it.each(["empty", "legacy", "partial"] as const)(
+    "keeps Knowledge, Inbox, Relay, and Workstreams stable for the %s Activity variant",
+    async (activityFixture) => {
+      const baseline = createFixtureApi();
+      const variant = createFixtureApi({ activityFixture });
+      const request = { limit: 25 } as const;
+      const [
+        baselineKnowledge,
+        variantKnowledge,
+        baselineInboxDrafts,
+        variantInboxDrafts,
+        baselineInboxProposals,
+        variantInboxProposals,
+        baselineRelays,
+        variantRelays,
+        baselineWorkstreams,
+        variantWorkstreams,
+      ] = await Promise.all([
+        baseline.listWikiEntities(request),
+        variant.listWikiEntities(request),
+        baseline.getInboxDrafts(request),
+        variant.getInboxDrafts(request),
+        baseline.getInboxProposals({ states: ["pending", "stale"], limit: 25 }),
+        variant.getInboxProposals({ states: ["pending", "stale"], limit: 25 }),
+        baseline.getRelays({ perspective: "mine", states: ["published", "acknowledged"], limit: 25 }),
+        variant.getRelays({ perspective: "mine", states: ["published", "acknowledged"], limit: 25 }),
+        baseline.getWorkstreams(request),
+        variant.getWorkstreams(request),
+      ]);
+
+      expect(variantKnowledge).toEqual(baselineKnowledge);
+      expect(variantInboxDrafts).toEqual(baselineInboxDrafts);
+      expect(variantInboxProposals).toEqual(baselineInboxProposals);
       expect(variantRelays).toEqual(baselineRelays);
       expect(variantWorkstreams).toEqual(baselineWorkstreams);
     },

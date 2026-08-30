@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   HttpHubApi,
   HubApiError,
+  activityFixtureVariant,
   fixturesEnabled,
   inboxFixtureVariant,
   relayFixtureVariant,
@@ -63,6 +64,7 @@ describe("bootstrap fragment handling", () => {
     expect(fixturesEnabled(true, "?fixture=populated")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=populated&inboxFixture=empty")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=populated&relayFixture=legacy")).toBe(true);
+    expect(fixturesEnabled(true, "?fixture=populated&activityFixture=partial")).toBe(true);
     expect(fixturesEnabled(true, "?fixture=empty")).toBe(false);
   });
 
@@ -90,6 +92,18 @@ describe("bootstrap fragment handling", () => {
     ["?fixture=populated&relayFixture=../../private", undefined],
   ])("bounds the Relay fixture variant in %s", (search, expected) => {
     expect(relayFixtureVariant(search)).toBe(expected);
+  });
+
+  it.each([
+    ["?fixture=populated&activityFixture=empty", "empty"],
+    ["?fixture=populated&activityFixture=legacy", "legacy"],
+    ["?fixture=populated&activityFixture=partial", "partial"],
+    ["?fixture=populated", undefined],
+    ["?fixture=populated&activityFixture=populated", undefined],
+    ["?fixture=populated&activityFixture=PARTIAL", undefined],
+    ["?fixture=populated&activityFixture=../../private", undefined],
+  ])("bounds the Activity fixture variant in %s", (search, expected) => {
+    expect(activityFixtureVariant(search)).toBe(expected);
   });
 });
 

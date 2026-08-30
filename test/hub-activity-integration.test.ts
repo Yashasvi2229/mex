@@ -31,7 +31,10 @@ import {
   serializeActivityArtifact,
   serializeMemberArtifact,
 } from "../src/team/artifacts/codecs.js";
-import type { ActivityEvent } from "../src/team/contracts/workflow.js";
+import type {
+  ActivityEvent,
+  ActivityEventV1,
+} from "../src/team/contracts/workflow.js";
 import { TeamLocalState } from "../src/team/local-state/index.js";
 import { createRepositoryTeamWorkflowPort } from "../src/team/workflow/repository-team-workflow-port.js";
 
@@ -109,6 +112,14 @@ describe("real Project Hub activity integration", () => {
       expect(canonical.repository).toMatchObject({
         branch: "feat/hub-activity-timeline",
         dirty: true,
+      });
+      expect(canonical.recordOrigin).toEqual({ kind: "unknown" });
+      expect(canonical.label).toBeNull();
+      expect(firstBody.items[1]).toMatchObject({
+        source: "activity",
+        action: "relay.closed",
+        recordOrigin: { kind: "workflow", operation: "relay.close" },
+        label: "Authentication handoff",
       });
 
       const legacyResponse = await harness.get("/api/v1/activity?source=legacy");
@@ -322,14 +333,20 @@ function prepareProject(options: { activitySymlinkTarget?: string } = {}): strin
       }),
     );
     writeActivity(projectRoot, activityEvent());
-    writeActivity(projectRoot, activityEvent({
+    const second = activityEvent({
       id: EVENT_TWO,
       timestamp: "2026-08-23T02:00:00.000Z",
       actor: { kind: "git", name: "Grace Git", email: "grace@example.test" },
-      action: "activity.second",
+      action: "relay.closed",
       subjects: [{ kind: "file", path: "src/second.ts" }],
       metadata: undefined,
-    }));
+    });
+    writeActivity(projectRoot, {
+      ...second,
+      schemaVersion: 2,
+      origin: { kind: "workflow", operation: "relay.close" },
+      label: "Authentication handoff",
+    });
     writeFileSync(
       join(projectRoot, ".mex", "events", "activity", "2026-08", "not-an-event.md"),
       "malformed canonical secret /Users/alice/canonical\n",
@@ -360,8 +377,8 @@ function prepareProject(options: { activitySymlinkTarget?: string } = {}): strin
   return projectRoot;
 }
 
-function activityEvent(overrides: Partial<ActivityEvent> = {}): ActivityEvent {
-  const subjects: ActivityEvent["subjects"] = [
+function activityEvent(overrides: Partial<ActivityEventV1> = {}): ActivityEventV1 {
+  const subjects: ActivityEventV1["subjects"] = [
     { kind: "entity", entity: { id: MEMBER_ID, kind: "member", title: "Ada" } },
     { kind: "code", code: { kind: "symbol", symbolId: "function:activity" } },
     { kind: "code", code: { kind: "file", path: "src/activity.ts" } },

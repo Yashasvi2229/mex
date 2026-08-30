@@ -2997,8 +2997,7 @@ function projectTeamActivityEvent(event: ActivityEvent): TeamOperationApplyRespo
   ) {
     throw invalidTeamProjection();
   }
-  return {
-    schemaVersion: 1,
+  const common = {
     id: event.id,
     timestamp: event.timestamp,
     actor: cloneActor(event.actor),
@@ -3006,8 +3005,17 @@ function projectTeamActivityEvent(event: ActivityEvent): TeamOperationApplyRespo
     subjects: event.subjects.map(cloneActivitySubject),
     workstream: event.workstream === undefined
       ? null
-      : { ...event.workstream, kind: "workstream" },
+      : { ...event.workstream, kind: "workstream" as const },
     repoState: { ...event.repoState },
+  };
+  if (event.schemaVersion === 1) return { schemaVersion: 1, ...common };
+  return {
+    schemaVersion: 2,
+    ...common,
+    origin: event.origin.kind === "custom"
+      ? { kind: "custom" }
+      : { kind: "workflow", operation: event.origin.operation },
+    ...(event.label === undefined ? {} : { label: event.label }),
   };
 }
 
@@ -3388,6 +3396,12 @@ function projectTimelineEntry(item: ResolvedTimelineEntry): ActivityResponse["it
     recordedActor: projectActor(item.recordedActor ?? entry.actor),
     effectiveActor: projectActor(item.effectiveActor ?? entry.actor),
     actorDiagnostics: item.diagnostics.slice(0, 2).map(projectDiagnostic),
+    recordOrigin: entry.event.schemaVersion === 1
+      ? { kind: "unknown" }
+      : entry.event.origin.kind === "custom"
+        ? { kind: "custom" }
+        : { kind: "workflow", operation: entry.event.origin.operation },
+    label: entry.event.schemaVersion === 1 ? null : entry.event.label ?? null,
     workstream: entry.event.workstream === undefined
       ? null
       : projectEntity(entry.event.workstream),

@@ -2,23 +2,25 @@ import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
-  Box,
-  Braces,
   CalendarDays,
   ChevronDown,
-  ChevronUp,
+  ChevronRight,
   CircleDot,
-  FileText,
-  GitBranch,
-  GitCommitHorizontal,
   History,
-  Plus,
-  RotateCcw,
+  Link2,
+  LockKeyhole,
+  RefreshCw,
   ScrollText,
-  ShieldCheck,
+  UserRound,
 } from "lucide-react";
-import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState } from "react";
-import { useOutletContext, useSearchParams } from "react-router-dom";
+import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link, useOutletContext, useSearchParams } from "react-router-dom";
+import {
+  GraphSymbolIdSchema,
+  InboxProposalIdSchema,
+  WikiEntityIdSchema,
+} from "@mex/hub-contracts";
+import { RelayIdSchema } from "@mex/hub-contracts/ids";
 import { HubApiError } from "../api/client";
 import { useHubApi } from "../api/context";
 import type {
@@ -29,15 +31,28 @@ import type {
   ActivitySubject,
   CapabilitiesResponse,
 } from "../api/types";
-import {
-  ErrorState,
-  PageHeader,
-  StatePanel,
-  StatusPill,
-} from "../components/ui";
+import { Alert, AlertDescription, AlertTitle } from "../components/primitives/alert";
 import { Badge } from "../components/primitives/badge";
 import { Button } from "../components/primitives/button";
 import { Card } from "../components/primitives/card";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "../components/primitives/collapsible";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "../components/primitives/empty";
+import { Input } from "../components/primitives/input";
+import { Separator } from "../components/primitives/separator";
+import { Skeleton } from "../components/primitives/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/primitives/tabs";
+import { ErrorState, PageHeader, StatePanel } from "../components/ui";
 import {
   boundedNextCursor,
   MAX_ACCUMULATED_WORKBENCH_ITEMS,
@@ -46,9 +61,40 @@ import {
 import styles from "../styles/activity.module.css";
 
 type ActivityFilter = "all" | ActivitySource;
+type CanonicalActivityItem = Extract<ActivityItem, { source: "activity" }>;
+
+interface WorkflowNarration {
+  action: string;
+  headline: string;
+}
+
+interface ContextReference {
+  label: string;
+  subject: ActivitySubject | null;
+}
 
 const ACTIVITY_PAGE_SIZE = 25;
-const ActivityRecordDialog = lazy(() => import("./ActivityRecordDialog"));
+const ACTIVITY_FILTERS: readonly ActivityFilter[] = ["all", "activity", "legacy"];
+const ActivityEntryContext = lazy(() => import("./ActivityEntryContext").then((module) => ({
+  default: module.ActivityEntryContext,
+})));
+const WORKFLOW_NARRATION: Readonly<Record<string, WorkflowNarration>> = {
+  "inbox.publish": { action: "inbox.published", headline: "Proposed a Spec change" },
+  "inbox.approve": { action: "inbox.approved", headline: "Approved and applied a Spec change" },
+  "inbox.reject": { action: "inbox.rejected", headline: "Rejected a Spec change" },
+  "inbox.withdraw": { action: "inbox.withdrawn", headline: "Withdrew a Spec change" },
+  "inbox.mark-stale": { action: "inbox.marked-stale", headline: "Marked a Spec proposal stale" },
+  "inbox.repair": { action: "inbox.repaired", headline: "Repaired a Spec proposal" },
+  "relay.publish": { action: "relay.published", headline: "Published a handoff" },
+  "relay.acknowledge": { action: "relay.acknowledged", headline: "Took a handoff" },
+  "relay.close": { action: "relay.closed", headline: "Closed a handoff" },
+  "member.add": { action: "member.added", headline: "Added a teammate" },
+  "member.update": { action: "member.updated", headline: "Updated a teammate" },
+  "member.deactivate": { action: "member.deactivated", headline: "Deactivated a teammate" },
+  "workstream.create": { action: "workstream.created", headline: "Created a Workstream" },
+  "workstream.update": { action: "workstream.updated", headline: "Updated a Workstream" },
+  "workstream.archive": { action: "workstream.archived", headline: "Archived a Workstream" },
+};
 
 function validDate(value: string | null): value is string {
   if (value === null || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -60,16 +106,39 @@ function toSinceTimestamp(value: string): string {
   return new Date(`${value}T00:00:00.000Z`).toISOString();
 }
 
-function prettyAction(value: string): string {
+function humanizeIdentifier(value: string): string {
   return value
     .replaceAll(/[._-]+/g, " ")
     .replace(/^./, (character) => character.toUpperCase());
 }
 
-function actorLabel(actor: ActivityActor): string {
-  if (actor.kind === "member") return actor.displayName ?? actor.memberId;
-  if (actor.kind === "git") return actor.name ?? actor.email ?? "Git identity";
-  return "Unknown actor";
+function activityFilterLabel(value: ActivityFilter): string {
+  if (value === "activity") return "MEX records";
+  if (value === "legacy") return "Project notes";
+  return "All activity";
+}
+
+function projectNoteKind(value: string): string {
+  if (["decision", "risk", "note", "todo"].includes(value)) return humanizeIdentifier(value);
+  return "Project note";
+}
+
+function actorLabel(actor: ActivityActor, technical = false): string {
+  if (actor.kind === "member") {
+    if (technical) {
+      return actor.displayName
+        ? `${actor.displayName} (${actor.memberId})`
+        : actor.memberId;
+    }
+    return actor.displayName ?? "Recorded team member";
+  }
+  if (actor.kind === "git") {
+    if (technical) {
+      return [actor.name, actor.email].filter((value): value is string => value !== null).join(" · ");
+    }
+    return actor.name ?? actor.email ?? "Recorded Git identity";
+  }
+  return technical ? "Unknown actor" : "Actor not recorded";
 }
 
 function sameActor(left: ActivityActor, right: ActivityActor): boolean {
@@ -84,18 +153,73 @@ function sameActor(left: ActivityActor, right: ActivityActor): boolean {
   return false;
 }
 
+function verifiedWorkflowNarration(item: CanonicalActivityItem): (WorkflowNarration & { operation: string }) | null {
+  if (item.recordOrigin.kind !== "workflow") return null;
+  const narration = WORKFLOW_NARRATION[item.recordOrigin.operation];
+  if (narration === undefined || narration.action !== item.action) return null;
+  return { ...narration, operation: item.recordOrigin.operation };
+}
+
+function activityHeadline(item: ActivityItem): string {
+  if (item.source === "legacy") return item.message || `${projectNoteKind(item.action)} recorded`;
+  return verifiedWorkflowNarration(item)?.headline ?? `Recorded “${item.action}”`;
+}
+
 function subjectLabel(subject: ActivitySubject): string {
-  if (subject.kind === "entity") return subject.entity.title ?? subject.entity.id;
+  if (subject.kind === "entity") {
+    return subject.entity.title ?? humanizeIdentifier(subject.entity.entityKind);
+  }
   if (subject.kind === "symbol") return subject.symbolId;
   if (subject.kind === "file") return subject.path;
   return subject.hash.slice(0, 12);
 }
 
-function SubjectIcon({ subject }: { subject: ActivitySubject }) {
-  if (subject.kind === "entity") return <Box aria-hidden="true" />;
-  if (subject.kind === "symbol") return <Braces aria-hidden="true" />;
-  if (subject.kind === "file") return <FileText aria-hidden="true" />;
-  return <GitCommitHorizontal aria-hidden="true" />;
+function primarySubjectRoute(subject: ActivitySubject, item: ActivityItem): string | null {
+  if (subject.kind === "symbol") {
+    const parsed = GraphSymbolIdSchema.safeParse(subject.symbolId);
+    return parsed.success
+      ? `/code/symbols/${encodeURIComponent(parsed.data)}?view=overview`
+      : null;
+  }
+  if (subject.kind !== "entity") return null;
+
+  const { entity } = subject;
+  if (entity.entityKind === "proposal") {
+    const parsed = InboxProposalIdSchema.safeParse(entity.id);
+    return parsed.success
+      ? `/inbox?view=review&proposal=${encodeURIComponent(parsed.data)}`
+      : null;
+  }
+  if (entity.entityKind === "relay") {
+    const parsed = RelayIdSchema.safeParse(entity.id);
+    if (!parsed.success || item.source !== "activity") return null;
+    const operation = verifiedWorkflowNarration(item)?.operation;
+    const state = operation === "relay.close" ? "closed" : null;
+    return state === null
+      ? null
+      : `/relays?view=all&state=${state}&relay=${encodeURIComponent(parsed.data)}`;
+  }
+
+  const wikiId = WikiEntityIdSchema.safeParse(entity.id);
+  if (!wikiId.success) return null;
+  return entity.entityKind === "spec"
+    ? `/specs/${encodeURIComponent(wikiId.data)}`
+    : `/knowledge/${encodeURIComponent(wikiId.data)}`;
+}
+
+function primaryContext(item: ActivityItem): ContextReference | null {
+  const titledEntity = item.subjects.find((subject) => (
+    subject.kind === "entity" && subject.entity.title !== null
+  ));
+  if (item.source === "activity" && item.label) {
+    return {
+      label: item.label,
+      subject: item.subjects.find((subject) => subject.kind === "entity") ?? titledEntity ?? null,
+    };
+  }
+  if (titledEntity) return { label: subjectLabel(titledEntity), subject: titledEntity };
+  const contextual = item.subjects.find((subject) => subject.kind === "symbol" || subject.kind === "file");
+  return contextual ? { label: subjectLabel(contextual), subject: contextual } : null;
 }
 
 function formatDay(timestamp: string): string {
@@ -117,162 +241,106 @@ function formatClock(timestamp: string): string {
   }).format(new Date(timestamp))} UTC`;
 }
 
-function repositoryLabel(item: Extract<ActivityItem, { source: "activity" }>): string {
-  if (item.repository.branch) return item.repository.branch;
-  if (item.repository.head) return "Detached HEAD";
-  return "Unborn repository";
+function formatAccessibleTimestamp(timestamp: string): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "UTC",
+    timeZoneName: "short",
+  }).format(new Date(timestamp));
 }
 
-function SubjectChips({ item }: { item: ActivityItem }) {
-  const visibleSubjects = item.subjects.slice(0, 3);
-  const remaining = Math.max(0, item.subjectCount - visibleSubjects.length);
-  if (visibleSubjects.length === 0) {
-    if (item.subjectCount > 0) {
-      return (
-        <p
-          aria-label={`${item.subjectCount} linked ${item.subjectCount === 1 ? "subject" : "subjects"}; previews omitted`}
-          className={styles.activityNoSubjects}
-        >
-          {item.subjectCount} linked {item.subjectCount === 1 ? "subject" : "subjects"}; previews omitted
-        </p>
-      );
-    }
-    return <p className={styles.activityNoSubjects}>No linked subjects</p>;
+function PrimaryContext({ context, item }: { context: ContextReference; item: ActivityItem }) {
+  const href = context.subject ? primarySubjectRoute(context.subject, item) : null;
+  if (href) {
+    return (
+      <Link
+        className={styles.primaryContext}
+        to={href}
+      >
+        <Link2 aria-hidden="true" data-icon="inline-start" />
+        <span>{context.label}</span>
+        <ChevronRight aria-hidden="true" data-icon="inline-end" />
+      </Link>
+    );
   }
   return (
-    <div className={styles.activitySubjectChips} aria-label={`${item.subjectCount} linked ${item.subjectCount === 1 ? "subject" : "subjects"}`}>
-      {visibleSubjects.map((subject, index) => (
-        <span className={styles.activitySubjectChip} key={`${subject.kind}-${subjectLabel(subject)}-${index}`}>
-          <SubjectIcon subject={subject} />
-          <span>{subjectLabel(subject)}</span>
-        </span>
-      ))}
-      {remaining > 0 ? <span className={styles.activitySubjectMore}>+{remaining} more</span> : null}
-    </div>
+    <span className={styles.primaryContextPlain}>
+      <Link2 aria-hidden="true" />
+      <span>{context.label}</span>
+    </span>
   );
 }
 
-function DetailValue({ children, mono = false }: { children: React.ReactNode; mono?: boolean }) {
-  return <dd className={mono ? styles.mono : undefined}>{children}</dd>;
-}
-
-function ActivityDetails({ item }: { item: ActivityItem }) {
+function ActivityEntry({
+  item,
+  position,
+  expanded,
+  onToggle,
+}: {
+  item: ActivityItem;
+  position: number;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const headingId = useId();
+  const contextId = useId();
   const canonical = item.source === "activity" ? item : null;
-  const legacy = item.source === "legacy" ? item : null;
-  return (
-    <div className={styles.activityDetails}>
-      <div className={styles.activityEvidenceHeader}>
-        <p>Event evidence</p>
-        <span>{canonical ? "Canonical record" : "Legacy record"}</span>
-      </div>
-      <dl className={styles.activityDetailGrid}>
-        <div><dt>Action</dt><DetailValue mono>{item.action}</DetailValue></div>
-        <div><dt>Event ID</dt><DetailValue mono>{item.id}</DetailValue></div>
-        <div><dt>Source</dt><DetailValue mono>{item.sourcePath}</DetailValue></div>
-        {canonical ? (
-          <>
-            <div><dt>Effective actor</dt><DetailValue>{actorLabel(canonical.effectiveActor)}</DetailValue></div>
-            <div><dt>Recorded actor</dt><DetailValue>{actorLabel(canonical.recordedActor)}</DetailValue></div>
-            <div><dt>Workstream</dt><DetailValue>{canonical.workstream?.title ?? canonical.workstream?.id ?? "Not linked"}</DetailValue></div>
-            <div><dt>Revision</dt><DetailValue mono>{canonical.revision.slice(0, 12)}</DetailValue></div>
-          </>
-        ) : (
-          <>
-            <div><dt>Source line</dt><DetailValue>{legacy?.sourceLine ?? "Not recorded"}</DetailValue></div>
-            <div><dt>Actor</dt><DetailValue>Not recorded</DetailValue></div>
-            <div><dt>Repository state</dt><DetailValue>Not recorded</DetailValue></div>
-          </>
-        )}
-      </dl>
-
-      {canonical ? (
-        <section className={styles.activityRepository} aria-label="Recorded repository state">
-          <div>
-            <GitBranch aria-hidden="true" />
-            <span><small>Checkpoint</small><strong>{repositoryLabel(canonical)}</strong></span>
-          </div>
-          <div>
-            <GitCommitHorizontal aria-hidden="true" />
-            <span><small>HEAD</small><strong className={styles.mono}>{canonical.repository.head?.slice(0, 12) ?? "No HEAD yet"}</strong></span>
-          </div>
-          <StatusPill tone={canonical.repository.dirty ? "warning" : "success"}>
-            {canonical.repository.dirty ? "Dirty tree" : "Clean tree"}
-          </StatusPill>
-          <time dateTime={canonical.repository.observedAt}>{formatClock(canonical.repository.observedAt)}</time>
-        </section>
-      ) : null}
-
-      {item.subjectCount > 0 ? (
-        <section className={styles.activitySubjectDetail} aria-label="Subject references">
-          <p className={styles.sectionLabel}>Bounded subject references</p>
-          {item.subjects.length > 0 ? (
-            <>
-              <ul>
-                {item.subjects.map((subject, index) => (
-                  <li key={`${subject.kind}-${subjectLabel(subject)}-${index}`}>
-                    <span><SubjectIcon subject={subject} /></span>
-                    <div><small>{subject.kind === "entity" ? subject.entity.entityKind : subject.kind}</small><strong className={subject.kind === "file" || subject.kind === "symbol" || subject.kind === "commit" ? styles.mono : undefined}>{subjectLabel(subject)}</strong></div>
-                  </li>
-                ))}
-              </ul>
-              {item.subjectsTruncated ? <p className={styles.activityBoundedNote}>Only {item.subjects.length} of {item.subjectCount} subject references are included in this bounded response.</p> : null}
-            </>
-          ) : (
-            <p className={styles.activityBoundedNote}>
-              {item.subjectCount} {item.subjectCount === 1 ? "subject reference was" : "subject references were"} recorded; previews were omitted by the response safety limits.
-            </p>
-          )}
-        </section>
-      ) : null}
-
-      {canonical?.actorDiagnostics.length ? (
-        <section className={styles.activityActorDiagnostics} aria-label="Actor resolution diagnostics">
-          <p className={styles.sectionLabel}>Identity resolution</p>
-          <ul>{canonical.actorDiagnostics.map((diagnostic) => <li key={`${diagnostic.code}-${diagnostic.message}`}><strong>{diagnostic.code}</strong><span>{diagnostic.message}</span></li>)}</ul>
-        </section>
-      ) : null}
-    </div>
-  );
-}
-
-function ActivityEntry({ item, expanded, onToggle }: { item: ActivityItem; expanded: boolean; onToggle: () => void }) {
-  const detailsId = useId();
-  const canonical = item.source === "activity" ? item : null;
-  const legacy = item.source === "legacy" ? item : null;
-  const effectiveActor = canonical ? actorLabel(canonical.effectiveActor) : "Not recorded";
+  const headline = activityHeadline(item);
+  const context = primaryContext(item);
   const actorRemapped = canonical ? !sameActor(canonical.recordedActor, canonical.effectiveActor) : false;
+  const contextControlLabel = context?.label
+    ?? (canonical ? actorLabel(canonical.recordedActor) : "actor not recorded");
+  const contextAccessibleName = `${headline}: ${contextControlLabel}, timeline entry ${position}, recorded ${formatAccessibleTimestamp(item.timestamp)}`;
   const EntryIcon = canonical ? Activity : ScrollText;
   return (
     <li className={styles.activityEntry}>
-      <time className={styles.activityEntryTime} dateTime={item.timestamp}>{formatClock(item.timestamp)}</time>
+      <time aria-hidden="true" className={styles.activityEntryTime} dateTime={item.timestamp}>{formatClock(item.timestamp)}</time>
       <span className={styles.activityEntryMarker} data-source={item.source}><EntryIcon aria-hidden="true" /></span>
-      <article className={styles.activityEntryCard} data-source={item.source}>
+      <Card aria-labelledby={headingId} className={styles.activityEntryCard} data-source={item.source} role="article" size="sm">
         <div className={styles.activityEntryTopline}>
-          <Badge className={styles.activitySourceBadge} data-source={item.source} variant="outline">{canonical ? "Canonical" : "Legacy"}</Badge>
-          {canonical?.workstream ? <span className={styles.activityWorkstream}>{canonical.workstream.title ?? canonical.workstream.id}</span> : null}
-          {canonical?.actorDiagnostics.length ? <span className={styles.activityIdentityFlag}><CircleDot aria-hidden="true" /> Identity note</span> : null}
+          {item.source === "legacy" ? (
+            <Badge variant={item.action === "risk" ? "destructive" : item.action === "note" ? "outline" : "secondary"}>
+              {projectNoteKind(item.action)}
+            </Badge>
+          ) : null}
+          {canonical?.actorDiagnostics.length ? <Badge variant="outline">Identity note</Badge> : null}
         </div>
-        <h3>{canonical ? prettyAction(item.action) : legacy?.message || prettyAction(item.action)}</h3>
-        {legacy?.messageTruncated ? <p className={styles.activityBoundedNote}>Legacy message shortened by the response safety limit.</p> : null}
+        <h3 id={headingId}>{headline}</h3>
         <p className={styles.activityActorLine}>
-          {canonical ? <><strong>{effectiveActor}</strong><span>performed this recorded action</span></> : <><strong>{prettyAction(item.action)}</strong><span>Actor and repository state were not recorded</span></>}
+          <UserRound aria-hidden="true" />
+          <span>{canonical ? actorLabel(canonical.recordedActor) : "Actor not recorded"}</span>
+          <span aria-hidden="true">·</span>
+          <time dateTime={item.timestamp}>{formatClock(item.timestamp)}</time>
         </p>
-        {actorRemapped && canonical ? <p className={styles.activityRemap}>Recorded as {actorLabel(canonical.recordedActor)}</p> : null}
-        <SubjectChips item={item} />
-        <Button
-          aria-controls={detailsId}
-          aria-expanded={expanded}
-          className={styles.activityDisclosure}
-          onClick={onToggle}
-          size="sm"
-          type="button"
-          variant="ghost"
-        >
-          {expanded ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />}
-          {expanded ? "Hide details" : "Show details"}
-        </Button>
-        {expanded ? <div id={detailsId}><ActivityDetails item={item} /></div> : null}
-      </article>
+        {actorRemapped && canonical ? (
+          <p className={styles.activityRemap}>Currently matched to {actorLabel(canonical.effectiveActor)}</p>
+        ) : null}
+        {item.source === "legacy" && item.messageTruncated ? (
+          <p className={styles.activityBoundedNote}>This project-note message was shortened by the safe response limit.</p>
+        ) : null}
+        {context ? <PrimaryContext context={context} item={item} /> : null}
+        <Collapsible className={styles.entryCollapsible} onOpenChange={onToggle} open={expanded}>
+          <CollapsibleTrigger
+            aria-label={`${expanded ? "Hide" : "View"} context for ${contextAccessibleName}`}
+            render={<Button className={styles.activityDisclosure} size="sm" type="button" variant="ghost" />}
+          >
+            <ChevronDown data-icon="inline-start" />
+            {expanded ? "Hide context" : "View context"}
+          </CollapsibleTrigger>
+          {expanded ? (
+            <CollapsibleContent id={contextId}>
+              <Suspense fallback={<div className={styles.contextLoading} role="status">Loading recorded context…</div>}>
+                <ActivityEntryContext accessibleName={contextAccessibleName} item={item} />
+              </Suspense>
+            </CollapsibleContent>
+          ) : null}
+        </Collapsible>
+      </Card>
     </li>
   );
 }
@@ -280,33 +348,84 @@ function ActivityEntry({ item, expanded, onToggle }: { item: ActivityItem; expan
 function DiagnosticsNotice({
   diagnostics,
   hasTrustedItems,
-  truncated,
+  sourceTruncated,
+  diagnosticsTruncated,
 }: {
   diagnostics: ActivityDiagnostic[];
   hasTrustedItems: boolean;
-  truncated: boolean;
+  sourceTruncated: boolean;
+  diagnosticsTruncated: boolean;
 }) {
-  if (diagnostics.length === 0 && !truncated) return null;
+  if (diagnostics.length === 0 && !sourceTruncated && !diagnosticsTruncated) return null;
   return (
-    <details className={styles.activityDiagnostics}>
-      <summary>
-        <AlertTriangle aria-hidden="true" />
-        <span>
-          <strong>Some history could not be trusted.</strong>{" "}
-          {hasTrustedItems ? "Valid events remain visible." : "No trusted events are available in this result."}
-        </span>
-        <ChevronDown aria-hidden="true" />
-      </summary>
-      <ul>
-        {diagnostics.map((diagnostic) => (
-          <li data-severity={diagnostic.severity} key={`${diagnostic.code}-${diagnostic.path ?? ""}-${diagnostic.message}`}>
-            <strong>{diagnostic.code}</strong>
-            <span>{diagnostic.message}{diagnostic.path ? <small className={styles.mono}>{diagnostic.path}</small> : null}</span>
-          </li>
-        ))}
-      </ul>
-      {truncated ? <p>Additional diagnostics were omitted by the response safety limit.</p> : null}
-    </details>
+    <Alert className={styles.activityDiagnostics}>
+      <AlertTriangle aria-hidden="true" />
+      <AlertTitle>{sourceTruncated ? "This activity view is incomplete" : "Some activity needs attention"}</AlertTitle>
+      <AlertDescription>
+        <p>
+          {hasTrustedItems
+            ? sourceTruncated
+              ? "The trustworthy records below remain available, but a source reached its safe read limit."
+              : "Trustworthy records remain visible while MEX excludes or flags damaged source data."
+            : "MEX could not assemble a trusted record from this result."}
+        </p>
+        <details className={styles.trustDetails}>
+          <summary><ChevronDown aria-hidden="true" /> View trust details</summary>
+          <div data-slot="collapsible-content">
+            <ul>
+              {diagnostics.map((diagnostic) => (
+                <li data-severity={diagnostic.severity} key={`${diagnostic.code}-${diagnostic.path ?? ""}-${diagnostic.message}`}>
+                  <strong className={styles.mono}>{diagnostic.code}</strong>
+                  <span>{diagnostic.message}{diagnostic.path ? <code>{diagnostic.path}</code> : null}</span>
+                </li>
+              ))}
+            </ul>
+            {sourceTruncated ? <p>A source scan stopped at its bounded safety limit.</p> : null}
+            {diagnosticsTruncated ? <p>Additional diagnostic entries were omitted by the response safety limit.</p> : null}
+          </div>
+        </details>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+function ActivityLoading() {
+  return (
+    <div aria-label="Loading team activity" className={styles.activityLoading} role="status">
+      <p className={styles.loadingLabel}>Loading team activity</p>
+      {[0, 1, 2].map((index) => (
+        <div className={styles.loadingRow} key={index}>
+          <Skeleton className={styles.loadingTime} />
+          <Skeleton className={styles.loadingMarker} />
+          <div>
+            <Skeleton className={styles.loadingHeadline} />
+            <Skeleton className={styles.loadingMeta} />
+            <Skeleton className={styles.loadingContext} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ActivityEmpty({ filtered, onClear }: { filtered: boolean; onClear: () => void }) {
+  return (
+    <Empty className={styles.activityEmpty} role="status">
+      <EmptyMedia variant="icon"><History aria-hidden="true" /></EmptyMedia>
+      <EmptyHeader>
+        <EmptyTitle><h2>{filtered ? "No activity matches these filters" : "No team activity yet"}</h2></EmptyTitle>
+        <EmptyDescription>
+          {filtered
+            ? "Clear the source and date filters to return to the complete newest view."
+            : "Shared MEX changes will appear here automatically after they are recorded. Refresh after an agent writes locally or you pull changes through Git."}
+        </EmptyDescription>
+      </EmptyHeader>
+      {filtered ? (
+        <EmptyContent>
+          <Button onClick={onClear} size="sm" type="button" variant="outline">Clear filters</Button>
+        </EmptyContent>
+      ) : null}
+    </Empty>
   );
 }
 
@@ -316,10 +435,8 @@ export function ActivityPage() {
   const { capabilities } = useOutletContext<{ capabilities?: CapabilitiesResponse }>();
   const [params, setParams] = useSearchParams();
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [recordOpen, setRecordOpen] = useState(false);
-  const [recordStatus, setRecordStatus] = useState("");
-  const recordTriggerRef = useRef<HTMLButtonElement>(null);
-  const recordWasOpen = useRef(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshStatus, setRefreshStatus] = useState("");
   const focusAfterLoad = useRef(false);
   const resultStatusRef = useRef<HTMLDivElement>(null);
   const paramsString = params.toString();
@@ -330,15 +447,7 @@ export function ActivityPage() {
   const sinceValues = params.getAll("since");
   const since = sinceValues.length === 1 && validDate(sinceValues[0]) ? sinceValues[0] : "";
   const activityAvailable = capabilities?.activity.availability === "available";
-  const recordAvailable = capabilities?.activityRecord.availability === "available";
   const queryKey = ["activity", source, since] as const;
-
-  useEffect(() => {
-    if (recordWasOpen.current && !recordOpen) {
-      recordTriggerRef.current?.focus({ preventScroll: true });
-    }
-    recordWasOpen.current = recordOpen;
-  }, [recordOpen]);
 
   useEffect(() => {
     const normalized = new URLSearchParams(paramsString);
@@ -408,197 +517,214 @@ export function ActivityPage() {
     }
     return [...grouped.entries()];
   }, [items]);
+  const itemPositions = useMemo(() => new Map(items.map((item, index) => (
+    [`${item.source}:${item.id}`, index + 1]
+  ))), [items]);
 
   useEffect(() => {
-    if (focusAfterLoad.current && !timeline.isFetching && timeline.data !== undefined) {
+    if (focusAfterLoad.current && !timeline.isFetching && (timeline.data !== undefined || timeline.isError)) {
       focusAfterLoad.current = false;
       resultStatusRef.current?.focus({ preventScroll: true });
     }
-  }, [timeline.data, timeline.isFetching]);
+  }, [timeline.data, timeline.isError, timeline.isFetching]);
 
-  const updateSource = (value: ActivityFilter) => {
-    focusAfterLoad.current = true;
+  const updateSource = (value: string) => {
+    if (!ACTIVITY_FILTERS.includes(value as ActivityFilter)) return;
     const next = new URLSearchParams(params);
     if (value === "all") next.delete("source");
     else next.set("source", value);
     setParams(next);
   };
-  const updateSince = (value: string) => {
-    focusAfterLoad.current = true;
+  const updateSince = (value: string, focusResult = false) => {
+    focusAfterLoad.current = focusResult;
     const next = new URLSearchParams(params);
     if (value) next.set("since", value);
     else next.delete("since");
     setParams(next);
   };
+  const clearFilters = () => {
+    focusAfterLoad.current = true;
+    const next = new URLSearchParams(params);
+    next.delete("source");
+    next.delete("since");
+    setParams(next);
+  };
   const reloadNewest = () => {
     focusAfterLoad.current = true;
     setExpanded(new Set());
-    void queryClient.resetQueries({ queryKey, exact: true });
+    void queryClient.resetQueries({ queryKey: ["activity"] });
   };
+  const refreshActivity = async () => {
+    setRefreshing(true);
+    setRefreshStatus("");
+    setExpanded(new Set());
+    try {
+      await queryClient.resetQueries(
+        { queryKey: ["activity"] },
+        { throwOnError: true },
+      );
+      setRefreshStatus("Activity refreshed.");
+    } catch {
+      setRefreshStatus("Activity could not be refreshed. Try again.");
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  let result: ReactNode;
+  if (timeline.isPending) {
+    result = <ActivityLoading />;
+  } else if (timeline.isError && timeline.data === undefined) {
+    result = <div className={styles.activityState}><ErrorState error={timeline.error} retry={() => void timeline.refetch()} /></div>;
+  } else if (items.length === 0) {
+    result = (
+      <div className={styles.activityStateStack}>
+        <DiagnosticsNotice
+          diagnostics={diagnostics}
+          diagnosticsTruncated={diagnosticsTruncated}
+          hasTrustedItems={false}
+          sourceTruncated={sourceTruncated}
+        />
+        {sourceTruncated ? (
+          <div className={styles.incompleteEmpty}>
+            <StatePanel
+              compact
+              detail="The source scan is incomplete, so this result cannot confirm that no matching activity exists."
+              state="empty"
+              title="No trusted activity available"
+            />
+            {source !== "all" || since ? (
+              <Button onClick={clearFilters} size="sm" type="button" variant="outline">Clear filters</Button>
+            ) : null}
+          </div>
+        ) : <ActivityEmpty filtered={source !== "all" || Boolean(since)} onClear={clearFilters} />}
+      </div>
+    );
+  } else {
+    result = (
+      <>
+        <DiagnosticsNotice
+          diagnostics={diagnostics}
+          diagnosticsTruncated={diagnosticsTruncated}
+          hasTrustedItems
+          sourceTruncated={sourceTruncated}
+        />
+        <div className={styles.activityFeed}>
+          {groups.map(([day, dayItems]) => (
+            <section className={styles.activityDay} key={day} aria-labelledby={`activity-day-${day}`}>
+              <header className={styles.activityDayHeader}>
+                <span aria-hidden="true">UTC</span>
+                <h2 id={`activity-day-${day}`}>{formatDay(dayItems[0]!.timestamp)}</h2>
+              </header>
+              <ol className={styles.activityEntries} aria-label={`Activity for ${formatDay(dayItems[0]!.timestamp)}`}>
+                {dayItems.map((item) => {
+                  const key = `${item.source}:${item.id}`;
+                  return (
+                    <ActivityEntry
+                      expanded={expanded.has(key)}
+                      item={item}
+                      key={key}
+                      position={itemPositions.get(key) ?? 1}
+                      onToggle={() => setExpanded((current) => {
+                        const next = new Set(current);
+                        if (next.has(key)) next.delete(key);
+                        else next.add(key);
+                        return next;
+                      })}
+                    />
+                  );
+                })}
+              </ol>
+            </section>
+          ))}
+        </div>
+
+        <div className={styles.activityPagination}>
+          {paginationConflict ? (
+            <Alert className={styles.paginationAlert}>
+              <RefreshCw aria-hidden="true" />
+              <AlertTitle>New activity arrived while you were browsing</AlertTitle>
+              <AlertDescription>Reload to keep this timeline consistent.</AlertDescription>
+              <Button onClick={reloadNewest} size="sm" type="button" variant="outline">Reload newest</Button>
+            </Alert>
+          ) : timeline.isFetchNextPageError ? (
+            <Alert className={styles.paginationAlert}>
+              <AlertTriangle aria-hidden="true" />
+              <AlertTitle>Older activity could not be loaded</AlertTitle>
+              <AlertDescription>The records already on screen remain trustworthy.</AlertDescription>
+              <Button onClick={() => void timeline.fetchNextPage()} size="sm" type="button" variant="outline">Try again</Button>
+            </Alert>
+          ) : timeline.hasNextPage ? (
+            <Button className={styles.activityLoadMore} disabled={timeline.isFetchingNextPage} onClick={() => void timeline.fetchNextPage()} type="button" variant="outline">
+              {timeline.isFetchingNextPage ? "Loading older activity…" : "Load older activity"}
+            </Button>
+          ) : pageBoundReached ? (
+            <p><AlertTriangle aria-hidden="true" /> This browser view reached its safe page limit. Choose a From date to narrow the feed.</p>
+          ) : (
+            <p><CircleDot aria-hidden="true" /> You’ve reached the oldest available activity.</p>
+          )}
+          {pageBoundReached ? <span className="sr-only">The browser retained at most {MAX_ACCUMULATED_WORKBENCH_ITEMS} activity records.</span> : null}
+        </div>
+      </>
+    );
+  }
 
   return (
     <div className={styles.page}>
-      <PageHeader
-        title="Activity"
-        actions={(
-          <div className={styles.activityHeaderActions}>
-            <Badge className={styles.appendOnlyBadge} variant="outline"><ShieldCheck aria-hidden="true" /> Append only</Badge>
-            {recordAvailable ? (
-              <Button ref={recordTriggerRef} onClick={() => setRecordOpen(true)} size="sm" type="button">
-                <Plus aria-hidden="true" /> Record Activity
-              </Button>
-            ) : null}
-          </div>
-        )}
-      />
-      <div className="sr-only" aria-live="polite" role="status">{recordStatus}</div>
+        <PageHeader
+          eyebrow="Team history"
+          title="Activity"
+          description="See what changed across shared memory, who changed it, and the context MEX recorded."
+          actions={(
+            <Button disabled={!activityAvailable || refreshing} onClick={() => void refreshActivity()} size="sm" type="button" variant="outline">
+              <RefreshCw className={refreshing ? styles.refreshingIcon : undefined} data-icon="inline-start" />
+              {refreshing ? "Refreshing…" : "Refresh"}
+            </Button>
+          )}
+        />
+        <div className="sr-only" aria-live="polite" role="status">{refreshStatus}</div>
 
-      {capabilities === undefined ? (
-        <StatePanel state="loading" title="Checking activity capability" detail="Confirming that the local timeline reader is connected." />
-      ) : !activityAvailable ? (
-        <StatePanel state="unavailable" title="Activity is unavailable" detail={capabilities.activity.reason ?? "The read-only activity reader is not connected in this Hub process."} />
-      ) : (
-        <section aria-label="Activity timeline">
-          <Card className={styles.activityWorkbench}>
-            <header className={styles.activityToolbar}>
-            <div className={styles.activitySourceControl}>
-              <p className={styles.sectionLabel}>Timeline source</p>
-              <div className={styles.segmented} aria-label="Filter activity source" role="group">
-                {(["all", "activity", "legacy"] as const).map((value) => (
-                  <Button
-                    aria-pressed={source === value}
-                    className={styles.sourceButton}
-                    key={value}
-                    onClick={() => updateSource(value)}
-                    size="sm"
-                    type="button"
-                    variant="ghost"
-                  >
-                    {value === "all" ? "All" : value === "activity" ? "Canonical" : "Legacy"}
-                  </Button>
+        {capabilities === undefined ? (
+          <StatePanel state="loading" title="Checking activity capability" detail="Confirming that the local timeline reader is connected." />
+        ) : !activityAvailable ? (
+          <StatePanel state="unavailable" title="Activity is unavailable" detail={capabilities.activity.reason ?? "The read-only activity reader is not connected in this Hub process."} />
+        ) : (
+          <section aria-label="Team activity timeline">
+            <Card className={styles.activityWorkbench} data-activity-workbench="ready">
+              <div className={styles.activityBoundary}>
+                <LockKeyhole aria-hidden="true" />
+                <p><strong>Shared MEX changes are recorded automatically and cannot be edited here.</strong> They travel between teammates through Git. Refresh after an agent writes locally or after you pull new changes.</p>
+              </div>
+              <Separator />
+              <Tabs className={styles.activityTabs} onValueChange={updateSource} value={source}>
+                <header className={styles.activityToolbar}>
+                  <div className={styles.activitySourceControl}>
+                    <span>Source</span>
+                    <TabsList aria-label="Activity source" className={styles.sourceTabs} variant="line">
+                      {ACTIVITY_FILTERS.map((value) => (
+                        <TabsTrigger key={value} value={value}>{activityFilterLabel(value)}</TabsTrigger>
+                      ))}
+                    </TabsList>
+                  </div>
+                  <div className={styles.activityDateControl}>
+                    <label htmlFor="activity-from-date"><span><CalendarDays aria-hidden="true" /> From</span></label>
+                    <Input id="activity-from-date" onChange={(event) => updateSince(event.currentTarget.value)} type="date" value={since} />
+                    {since ? <Button onClick={() => updateSince("", true)} size="sm" type="button" variant="ghost">Clear date</Button> : null}
+                  </div>
+                </header>
+                <div className="sr-only" aria-live="polite" ref={resultStatusRef} role="status" tabIndex={-1}>
+                  {items.length} {items.length === 1 ? "event" : "events"} shown
+                </div>
+                <Separator />
+                {ACTIVITY_FILTERS.map((value) => (
+                  <TabsContent className={styles.activityResult} key={value} value={value}>
+                    {source === value ? result : null}
+                  </TabsContent>
                 ))}
-              </div>
-            </div>
-            <div className={styles.activityDateControl}>
-              <label className={styles.activityDateField}>
-                <span><CalendarDays aria-hidden="true" /> Since</span>
-                <input onChange={(event) => updateSince(event.currentTarget.value)} type="date" value={since} />
-              </label>
-              {since ? <Button className={styles.activityClearFilter} onClick={() => updateSince("")} size="sm" type="button" variant="ghost">Clear date</Button> : null}
-            </div>
-            <div className={styles.activityLoadedCount} aria-live="polite" ref={resultStatusRef} role="status" tabIndex={-1}>
-              <strong>{items.length}</strong>
-              <span>{items.length === 1 ? "event loaded" : "events loaded"}</span>
-            </div>
-            </header>
-
-            <div className={styles.activityResult}>
-            {timeline.isPending ? (
-              <div className={styles.activityState}>
-                <StatePanel compact state="loading" title="Reading immutable history" detail="Combining bounded canonical activity and legacy rows." />
-              </div>
-            ) : timeline.isError && timeline.data === undefined ? (
-              <div className={styles.activityState}>
-                <ErrorState error={timeline.error} retry={() => void timeline.refetch()} />
-              </div>
-            ) : items.length === 0 ? (
-              <div className={styles.activityStateStack}>
-                <DiagnosticsNotice diagnostics={diagnostics} hasTrustedItems={false} truncated={diagnosticsTruncated} />
-                {sourceTruncated ? (
-                  <div className={styles.activitySafetyNotice} role="status">
-                    <History aria-hidden="true" />
-                    <span><strong>The source scan reached a safety limit.</strong> No complete trusted result could be assembled from this scan.</span>
-                  </div>
-                ) : null}
-                <StatePanel
-                  compact
-                  state="empty"
-                  title={sourceTruncated
-                    ? "No trusted rows available"
-                    : source !== "all" || since
-                      ? "No activity matches these filters"
-                      : "No activity recorded"}
-                  detail={sourceTruncated
-                    ? "The source scan is incomplete, so this result cannot confirm that no matching activity exists."
-                    : source !== "all" || since
-                      ? "Clear or adjust the source and date filters to widen the timeline."
-                      : "Canonical events and valid legacy rows will appear here when they exist."}
-                />
-              </div>
-            ) : (
-              <>
-                <DiagnosticsNotice diagnostics={diagnostics} hasTrustedItems truncated={diagnosticsTruncated} />
-                {sourceTruncated ? (
-                  <div className={styles.activitySafetyNotice} role="status">
-                    <History aria-hidden="true" />
-                    <span><strong>The source scan reached a safety limit.</strong> This is a trustworthy partial timeline, not a complete history.</span>
-                  </div>
-                ) : null}
-                <div className={styles.activityFeed}>
-                  {groups.map(([day, dayItems]) => (
-                    <section className={styles.activityDay} key={day} aria-labelledby={`activity-day-${day}`}>
-                      <header className={styles.activityDayHeader}>
-                        <h2 id={`activity-day-${day}`}>{formatDay(dayItems[0].timestamp)}</h2>
-                        <span>{dayItems.length} {dayItems.length === 1 ? "event" : "events"}</span>
-                      </header>
-                      <ol className={styles.activityEntries} aria-label={`Activity for ${formatDay(dayItems[0].timestamp)}`}>
-                        {dayItems.map((item) => (
-                          <ActivityEntry
-                            expanded={expanded.has(item.id)}
-                            item={item}
-                            key={`${item.source}:${item.id}`}
-                            onToggle={() => setExpanded((current) => {
-                              const next = new Set(current);
-                              if (next.has(item.id)) next.delete(item.id);
-                              else next.add(item.id);
-                              return next;
-                            })}
-                          />
-                        ))}
-                      </ol>
-                    </section>
-                  ))}
-                </div>
-
-                <div className={styles.activityPagination}>
-                  {paginationConflict ? (
-                    <div className={styles.activityPaginationProblem} role="alert">
-                      <RotateCcw aria-hidden="true" />
-                      <span><strong>Activity changed while you were reading.</strong> Loaded rows were not mixed with the newer revision.</span>
-                      <Button className={styles.paginationAction} onClick={reloadNewest} size="sm" type="button" variant="outline">Reload newest</Button>
-                    </div>
-                  ) : timeline.isFetchNextPageError ? (
-                    <div className={styles.activityPaginationProblem} role="alert">
-                      <AlertTriangle aria-hidden="true" />
-                      <span><strong>Older activity could not be loaded.</strong> The events already on screen remain trustworthy.</span>
-                      <Button className={styles.paginationAction} onClick={() => void timeline.fetchNextPage()} size="sm" type="button" variant="outline">Try again</Button>
-                    </div>
-                  ) : timeline.hasNextPage ? (
-                    <Button className={styles.activityLoadMore} disabled={timeline.isFetchingNextPage} onClick={() => void timeline.fetchNextPage()} type="button">
-                      {timeline.isFetchingNextPage ? "Loading older activity…" : "Load older activity"}
-                    </Button>
-                  ) : (
-                    <p><CircleDot aria-hidden="true" /> {pageBoundReached
-                      ? `Browser safety limit reached at ${MAX_ACCUMULATED_WORKBENCH_ITEMS} events`
-                      : sourceTruncated ? "End of available history" : "End of trustworthy history"}</p>
-                  )}
-                </div>
-              </>
-            )}
-            </div>
-          </Card>
-        </section>
-      )}
-
-      {recordOpen ? (
-        <Suspense fallback={<span className="sr-only" role="status">Opening Activity recorder</span>}>
-          <ActivityRecordDialog
-            onApplied={setRecordStatus}
-            onOpenChange={setRecordOpen}
-            open={recordOpen}
-          />
-        </Suspense>
-      ) : null}
+              </Tabs>
+            </Card>
+          </section>
+        )}
     </div>
   );
 }

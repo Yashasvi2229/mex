@@ -4,6 +4,7 @@ import type { GitHealth, MigrationHealth } from "../health.js";
 import type { FileChange } from "../shared.js";
 import type {
   ActivityEvent,
+  ActivityEventV1,
   PortableWikiOperation,
   TeamWorkflowApplyRequest,
   TeamWorkflowCommand,
@@ -80,7 +81,7 @@ type ImpossibleReadyMigration = {
   toVersion: null;
 };
 
-type ActivityWithFileAndCommitSubjects = Omit<ActivityEvent, "subjects"> & {
+type ActivityWithFileAndCommitSubjects = Omit<ActivityEventV1, "subjects"> & {
   subjects: readonly [
     { kind: "file"; path: "src/index.ts" },
     { kind: "commit"; hash: "48da30c" },

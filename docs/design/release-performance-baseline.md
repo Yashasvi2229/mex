@@ -127,9 +127,15 @@ initial static import closure and the incremental JavaScript, CSS, and font
 bytes for every registered route. Fonts referenced from global CSS are counted
 as initial assets even when Vite does not attach them to a manifest entry.
 The initial shell and Home must not statically close over Code, Knowledge,
-Workstreams, Specs, Inbox, Relay, either mutation editor, Members, Activity, its
-nested recorder, or setup code, and the largest JavaScript chunk is checked
-explicitly.
+Workstreams, Specs, Inbox, Relay, Members, Activity, or setup code, and the
+largest JavaScript chunk is checked explicitly. The Activity route is a
+read-only workbench and has no nested manual-recorder chunk. Its source
+controls, default feed, and accessible shadcn Collapsible controls remain in
+the eager route closure; only explicitly expanded context and technical
+evidence load on demand. The redesigned eager Activity closure measured
+63,488 JavaScript bytes and 18,511 CSS bytes, so its 66,663-byte JavaScript and
+19,437-byte CSS limits use the same deterministic measured-plus-five-percent
+rule; the initial-shell limits did not change.
 Production assets are also scanned for exact development-fixture sentinels.
 
 ## Enforcement
