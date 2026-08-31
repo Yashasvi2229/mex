@@ -148,12 +148,38 @@ export class WikiWriteRecoveryError extends Error {
   constructor(cause: unknown, recoveryPaths: readonly string[] = []) {
     super(
       "The Wiki write failed and its exact prior bytes could not be fully restored; manual recovery is required."
-      + (recoveryPaths.length === 0 ? "" : ` Recovery artifacts: ${recoveryPaths.join(", ")}.`),
+      + (recoveryPaths.length === 0 ? "" : ` Recovery artifacts: ${recoveryPaths.join(", ")}.`)
+      // The write that started this is the only thing that says *why*, and it
+      // was being retained as `cause` and printed nowhere: every log line, test
+      // failure and user-facing report said only that recovery was incomplete.
+      // A cause nobody prints is a cause nobody reads.
+      + causeSummary(cause),
     );
     this.name = "WikiWriteRecoveryError";
     this.cause = cause;
     this.recoveryPaths = recoveryPaths;
   }
+}
+
+/** The `{ writeError, recoveryErrors }` cause, rendered for the message. */
+function causeSummary(cause: unknown): string {
+  if (!isPlainRecord(cause)) return cause === undefined ? "" : ` Cause: ${messageOf(cause)}.`;
+  const parts: string[] = [];
+  if ("writeError" in cause) parts.push(`the write failed with ${messageOf(cause.writeError)}`);
+  const recoveryErrors = "recoveryErrors" in cause ? cause.recoveryErrors : undefined;
+  if (Array.isArray(recoveryErrors) && recoveryErrors.length > 0) {
+    parts.push(`recovery then failed with ${recoveryErrors.map(messageOf).join("; ")}`);
+  }
+  return parts.length === 0 ? "" : ` Cause: ${parts.join(", and ")}.`;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function messageOf(value: unknown): string {
+  if (value instanceof Error) return `${value.name}: ${value.message}`;
+  return String(value);
 }
 
 export interface ApplyResult {
