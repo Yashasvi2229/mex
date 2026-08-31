@@ -27,7 +27,7 @@ import { diagnostic, hasBlockingDiagnostic, type WikiDiagnostic } from "../model
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { isEntityId, type EntityId } from "../model/ids.js";
+import { ENTITY_ID_LENGTH, ENTITY_ID_PREFIX, isEntityId, type EntityId } from "../model/ids.js";
 import type { AbsorbableRootKey, WikiActor, WikiOperation } from "../model/operation.js";
 import type { WikiEntityType } from "../model/entity.js";
 import type { EntityTypeRegistry } from "../model/entity.js";
@@ -345,6 +345,34 @@ function migrationReportFromInventory(
   return report;
 }
 
+/** Crockford Base32, so a stand-in has the shape of the id it stands in for. */
+const PLACEHOLDER_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/**
+ * A distinct stand-in for the nth entity this run would mint.
+ *
+ * **Distinct is the whole point.** One shared placeholder made every projected
+ * entity equal to every other, and `planLegacyEdges` returns early on an edge
+ * whose target resolves to its own source — a real guard, for a file that edges
+ * to itself. With a single placeholder that guard fired on *every* edge between
+ * two files that both gain an entity, so the dry run dropped them silently:
+ * neither converted nor reported. The apply path never showed it, because real
+ * ULIDs differ, and no test compared the two counts.
+ *
+ * Counting from zero keeps the first stand-in byte-identical to the single
+ * placeholder this replaced, and the counter runs over the inventory, whose
+ * order is already deterministic — so two dry runs of one tree still agree.
+ */
+function placeholderId(ordinal: number): EntityId {
+  let body = "";
+  let value = ordinal;
+  do {
+    body = PLACEHOLDER_ALPHABET[value % 32] + body;
+    value = Math.floor(value / 32);
+  } while (value > 0);
+  return `${ENTITY_ID_PREFIX}${body.padStart(ENTITY_ID_LENGTH - ENTITY_ID_PREFIX.length, "0")}` as EntityId;
+}
+
 /**
  * The outcomes an apply will produce, without minting anything.
  *
@@ -352,6 +380,9 @@ function migrationReportFromInventory(
  * dry-run report can say which edges resolve. `mint` supplies real ids on the
  * apply path, and the shape of the answer is identical either way — which is
  * what keeps the dry run's ambiguity report honest about the apply's.
+ *
+ * The stand-ins never leave this function's answer: section 13.3 says a dry run
+ * promises no ids, and the report is asserted to carry none.
  */
 function projectedOutcomes(
   inventory: ScaffoldInventory,
@@ -359,7 +390,7 @@ function projectedOutcomes(
   minted: Map<string, EntityId[]> | null,
 ): Map<string, FileOutcome> {
   const outcomes = new Map<string, FileOutcome>();
-  const placeholder = "mx_00000000000000000000000000" as EntityId;
+  let projected = 0;
 
   for (const file of inventory.files) {
     const classification = classifications.get(file.path)!;
@@ -372,7 +403,11 @@ function projectedOutcomes(
     const entities = [...existing];
 
     candidates.forEach((candidate, index) => {
-      const id = ids[index] ?? placeholder;
+      // Advanced for every candidate, minted or not, so a stand-in's ordinal is
+      // a function of position in the plan rather than of which branch ran.
+      const ordinal = projected;
+      projected += 1;
+      const id = ids[index] ?? placeholderId(ordinal);
       entities.push(id);
       if (candidate.target.at === "file") fileEntity = id;
     });
@@ -618,7 +653,14 @@ export function renderMigrationReport(report: MigrationReport): string {
   const types = Object.keys(report.entitiesByType).sort();
   lines.push(`  entities ${report.dryRun ? "proposed" : "created"}:  ${types.length === 0 ? 0 : ""}`);
   for (const type of types) lines.push(`    ${type}: ${report.entitiesByType[type]}`);
-  lines.push(`  ids generated:      ${report.idsGenerated.length}`);
+  // A dry run mints nothing by design (section 13.3), so `0` here beside a
+  // non-zero proposal count reads as a contradiction unless it says why. The
+  // number is unchanged; only the label is.
+  lines.push(
+    report.dryRun
+      ? `  ids generated:      ${report.idsGenerated.length} (a dry run mints none; ids are generated on apply)`
+      : `  ids generated:      ${report.idsGenerated.length}`,
+  );
   lines.push(`  ids preserved:      ${report.idsPreserved.length}`);
   lines.push(`  edges converted:    ${report.edgesConverted}`);
   lines.push(`  edges ambiguous:    ${report.edgesAmbiguous}`);

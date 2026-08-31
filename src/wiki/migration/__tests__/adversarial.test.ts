@@ -254,9 +254,40 @@ describe("generated views", () => {
 });
 
 describe("a dry run over the adversarial set", () => {
+  it("skips a Team-owned path with a reason, and never abstains on one", () => {
+    // A member file and an activity event are canonical Team artifacts. They
+    // were being offered for classification, which meant migration printed them
+    // under "left for a human to classify" while the operation layer would have
+    // refused any plan that touched one — asking for a decision it would then
+    // reject. Skipped with a reason is the honest outcome: an abstention says
+    // nobody could decide, and here nobody was supposed to.
+    const root = scaffoldOf({
+      "team/members/member_x.md": FRONT() + "# A member\n\nProse.\n",
+      "events/activity/2026-08/event_x.md": FRONT() + "# An event\n\nProse.\n",
+      "playbooks/thing.md": FRONT() + "# A playbook\n\nProse.\n",
+      "context/architecture.md": FRONT() + "# Architecture\n\nProse enough for a claim here.\n",
+    });
+    const report = planMigration({ scaffoldRoot: root });
+
+    const skipped = new Map(report.filesSkipped.map((entry) => [entry.file, entry.reason]));
+    for (const path of ["team/members/member_x.md", "events/activity/2026-08/event_x.md", "playbooks/thing.md"]) {
+      expect(skipped.has(path), `${path} was not skipped`).toBe(true);
+      expect(skipped.get(path)).toContain("Team-owned");
+      expect(report.abstentions.some((entry) => entry.file === path), `${path} was abstained on`).toBe(false);
+      expect(report.planned.some((entry) => entry.file === path), `${path} was planned`).toBe(false);
+    }
+    // Not vacuous: the ordinary file in the same scaffold still migrates, so a
+    // classifier that refused everything would fail here.
+    expect(report.planned.map((entry) => entry.file)).toEqual(["context/architecture.md"]);
+  });
+
   it("writes nothing and reports every abstention", () => {
     const root = scaffoldOf({
-      "context/stack.md": FRONT() + "# Stack\n\nProse.\n",
+      // A whole-file abstention needs a path no rule reaches. `context/stack.md`
+      // used to be one and is not any more: a direct child of `context/` now
+      // takes the directory default. One segment deeper is still nobody's
+      // convention but the author's, so migration still declines it.
+      "context/nested/deeper.md": FRONT() + "# Deeper\n\nProse.\n",
       "context/architecture.md":
         FRONT() + "# Architecture\n\nIntro.\n\n## Thin\n\nOne line.\n",
     });

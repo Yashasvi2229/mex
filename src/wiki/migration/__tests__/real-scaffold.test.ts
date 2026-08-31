@@ -54,54 +54,61 @@ describe("the real-scaffold gate", () => {
         inventoryScaffold({ scaffoldRoot: source }).files.map((file) => [file.path, file.text]),
       );
       const work = mkdtempSync(join(tmpdir(), "mex-real-scaffold-"));
-      cpSync(source, work, { recursive: true });
+      // Everything from here down runs inside a `finally` that removes the
+      // copy. It used to end with a bare `rmSync`, so any failing assertion
+      // below left a complete copy of somebody's private knowledge base sitting
+      // in the system temp directory — and a failing assertion is the whole
+      // reason to point this gate at a real scaffold.
+      try {
+        cpSync(source, work, { recursive: true });
 
-      const dry = planMigration({ scaffoldRoot: work });
-      const report = migrateScaffold({ scaffoldRoot: work });
+        const dry = planMigration({ scaffoldRoot: work });
+        const report = migrateScaffold({ scaffoldRoot: work });
 
-      const byType = Object.entries(report.entitiesByType)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([type, count]) => `${type}=${count}`)
-        .join(" ");
+        const byType = Object.entries(report.entitiesByType)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([type, count]) => `${type}=${count}`)
+          .join(" ");
 
-      // Counts only. No path, no file name, no heading, no prose.
-      const lines = [
-        "--- mex migration, real-scaffold gate -------------------------------",
-        `files scanned          ${report.filesScanned}`,
-        `files skipped          ${report.filesSkipped.length}`,
-        `files unchanged        ${report.filesUnchanged.length}`,
-        `entities proposed(dry) ${dry.planned.length}`,
-        `entities created       ${report.idsGenerated.length}`,
-        `by type                ${byType === "" ? "(none)" : byType}`,
-        `edges converted        ${report.edgesConverted}`,
-        `edges ambiguous        ${report.edgesAmbiguous}`,
-        `groundings moved       ${report.groundingsMoved}`,
-        `groundings ambiguous   ${report.groundingsAmbiguous}`,
-        `abstentions            ${report.abstentions.length}`,
-        `AMBIGUOUS_MIGRATION    ${report.diagnostics.filter((entry) => entry.code === "AMBIGUOUS_MIGRATION").length}`,
-        `blocking errors        ${report.diagnostics.filter((entry) => entry.severity === "error").length}`,
-        "---------------------------------------------------------------------",
-      ];
-      // eslint-disable-next-line no-console
-      console.log(lines.join("\n"));
+        // Counts only. No path, no file name, no heading, no prose.
+        const lines = [
+          "--- mex migration, real-scaffold gate -------------------------------",
+          `files scanned          ${report.filesScanned}`,
+          `files skipped          ${report.filesSkipped.length}`,
+          `files unchanged        ${report.filesUnchanged.length}`,
+          `entities proposed(dry) ${dry.planned.length}`,
+          `entities created       ${report.idsGenerated.length}`,
+          `by type                ${byType === "" ? "(none)" : byType}`,
+          `edges converted        ${report.edgesConverted}`,
+          `edges ambiguous        ${report.edgesAmbiguous}`,
+          `groundings moved       ${report.groundingsMoved}`,
+          `groundings ambiguous   ${report.groundingsAmbiguous}`,
+          `abstentions            ${report.abstentions.length}`,
+          `AMBIGUOUS_MIGRATION    ${report.diagnostics.filter((entry) => entry.code === "AMBIGUOUS_MIGRATION").length}`,
+          `blocking errors        ${report.diagnostics.filter((entry) => entry.severity === "error").length}`,
+          "---------------------------------------------------------------------",
+        ];
+        // eslint-disable-next-line no-console
+        console.log(lines.join("\n"));
 
-      // The scaffold it was pointed at is byte-for-byte as it was.
-      for (const file of inventoryScaffold({ scaffoldRoot: source }).files) {
-        expect(file.text, `the gate wrote into ${file.path}`).toBe(before.get(file.path));
+        // The scaffold it was pointed at is byte-for-byte as it was.
+        for (const file of inventoryScaffold({ scaffoldRoot: source }).files) {
+          expect(file.text, `the gate wrote into ${file.path}`).toBe(before.get(file.path));
+        }
+
+        // And the copy holds only inserted metadata: prose is byte-identical.
+        for (const [path, text] of before) {
+          const migrated = join(work, path);
+          if (!existsSync(migrated)) continue;
+          expect(proseOf(readFileSync(migrated, "utf-8")), `prose changed in ${path}`).toBe(proseOf(text));
+        }
+
+        // A migration that produced nothing is a gate that proved nothing.
+        expect(report.filesScanned).toBeGreaterThan(0);
+        expect(report.diagnostics.filter((entry) => entry.severity === "error")).toEqual([]);
+      } finally {
+        rmSync(work, { recursive: true, force: true });
       }
-
-      // And the copy holds only inserted metadata: prose is byte-identical.
-      for (const [path, text] of before) {
-        const migrated = join(work, path);
-        if (!existsSync(migrated)) continue;
-        expect(proseOf(readFileSync(migrated, "utf-8")), `prose changed in ${path}`).toBe(proseOf(text));
-      }
-
-      // A migration that produced nothing is a gate that proved nothing.
-      expect(report.filesScanned).toBeGreaterThan(0);
-      expect(report.diagnostics.filter((entry) => entry.severity === "error")).toEqual([]);
-
-      rmSync(work, { recursive: true, force: true });
     },
     600_000,
   );

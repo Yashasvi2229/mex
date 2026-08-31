@@ -8,7 +8,7 @@
  * identical. So the entity count is asserted in the same test.
  */
 import { describe, it, expect, beforeAll } from "vitest";
-import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { migrateScaffold, planMigration, renderMigrationReport, type MigrationReport } from "../migrate.js";
@@ -76,14 +76,14 @@ describe("migrating the tier-1 corpus", () => {
   it("creates the entities the classifier proposed, and reports no error", () => {
     const errors = report.diagnostics.filter((entry) => entry.severity === "error");
     expect(errors.map((entry) => `${entry.code}: ${entry.message}`)).toEqual([]);
-    expect(report.idsGenerated.length).toBe(42);
+    expect(report.idsGenerated.length).toBe(50);
     expect(report.idsGenerated.every((id) => isEntityId(id))).toBe(true);
-    expect(new Set(report.idsGenerated).size).toBe(42);
+    expect(new Set(report.idsGenerated).size).toBe(50);
   });
 
   it("leaves every character of prose byte-identical", () => {
     const after = allProse(root);
-    // Not a vacuous comparison: the run above created 42 entities across these
+    // Not a vacuous comparison: the run above created 50 entities across these
     // files, so the metadata blocks being stripped are real.
     expect(report.idsGenerated.length).toBeGreaterThan(0);
     expect([...after.keys()].sort()).toEqual([...before.keys()].sort());
@@ -95,7 +95,7 @@ describe("migrating the tier-1 corpus", () => {
   it("puts a `mex:` key or a comment block where the classifier said, and nowhere else", () => {
     const inventory = inventoryScaffold({ scaffoldRoot: root });
     const entities = inventory.files.flatMap((file) => file.parsed.entities);
-    expect(entities.length).toBe(42);
+    expect(entities.length).toBe(50);
     // Parsing the migrated tree produces no diagnostic at all: the metadata
     // migration wrote is metadata the codec reads back.
     expect(inventory.files.flatMap((file) => file.parsed.diagnostics)).toEqual([]);
@@ -152,7 +152,7 @@ describe("the dry run", () => {
 
     const report = planMigration({ scaffoldRoot: root });
     expect(report.dryRun).toBe(true);
-    expect(report.planned.length).toBe(42);
+    expect(report.planned.length).toBe(50);
     expect(report.idsGenerated).toEqual([]);
 
     // Asserted against the log's *contents*, not its existence.
@@ -172,6 +172,47 @@ describe("the dry run", () => {
     expect(dry.edgesAmbiguous).toBe(wet.edgesAmbiguous);
     expect(dry.groundingsAmbiguous).toBe(wet.groundingsAmbiguous);
     expect(dry.planned.length).toBe(wet.planned.length);
+    // The half this test was named for was the half that was right. It compared
+    // the two ambiguity counts and the plan size, and never `edgesConverted` —
+    // which was 0 on every dry run of this corpus and 23 on every apply of it,
+    // for four phases, with this test green throughout.
+    expect(dry.edgesConverted).toBe(wet.edgesConverted);
+  });
+
+  it("says why it minted no ids, instead of leaving a reader to work it out", () => {
+    // `entities proposed: 29` above `ids generated: 0` is not a contradiction —
+    // section 13.3 mints on apply — but it reads as one, and it cost a reader a
+    // source dive. Presentation only: the number is untouched.
+    const root = scaffold();
+    const rendered = renderMigrationReport(planMigration({ scaffoldRoot: root }));
+    expect(rendered).toContain("Migration dry run");
+    expect(rendered).toMatch(/ids generated: {6}0 \(a dry run mints none; ids are generated on apply\)/);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("counts a converted edge rather than mistaking it for a self-edge", () => {
+    // Two files that each gain a file-level entity, one edging to the other.
+    // Every projected entity used to share a single placeholder id, so
+    // `planLegacyEdges`'s self-edge guard — `target === source`, which is there
+    // for a file that edges to itself — fired on this edge and returned early:
+    // not converted, and not reported either. The narrowest scaffold that
+    // provokes it, so a failure names the mechanism rather than a corpus count.
+    const root = mkdtempSync(join(tmpdir(), "mig-dry-edge-"));
+    mkdirSync(join(root, "patterns"), { recursive: true });
+    writeFileSync(
+      join(root, "patterns", "a.md"),
+      ["---", "name: a", "edges:", "  - target: patterns/b.md", "    condition: when b matters", "---", "", "# A", "", "Prose.", ""].join("\n"),
+    );
+    writeFileSync(
+      join(root, "patterns", "b.md"),
+      ["---", "name: b", "---", "", "# B", "", "Prose.", ""].join("\n"),
+    );
+
+    const dry = planMigration({ scaffoldRoot: root });
+    expect(dry.planned.length).toBe(2);
+    expect(dry.edgesConverted).toBe(1);
+    expect(dry.edgesAmbiguous).toBe(0);
+    rmSync(root, { recursive: true, force: true });
   });
 });
 
@@ -182,8 +223,8 @@ describe("opIds", () => {
     const idsBefore = first.files.flatMap((file) =>
       orderForAdoption(classifyFile(file).candidates).map((candidate) => opIdForCandidate(file, candidate)),
     );
-    expect(idsBefore.length).toBe(42);
-    expect(new Set(idsBefore).size).toBe(42);
+    expect(idsBefore.length).toBe(50);
+    expect(new Set(idsBefore).size).toBe(50);
 
     migrateScaffold({ scaffoldRoot: root });
 
@@ -255,8 +296,8 @@ describe("restartability", () => {
 
     const after = inventoryScaffold({ scaffoldRoot: root });
     const ids = after.files.flatMap((file) => file.parsed.entities.map((entry) => entry.entity.id));
-    expect(ids.length).toBe(42);
-    expect(new Set(ids).size, "a resumed run minted a second entity for the same prose").toBe(42);
+    expect(ids.length).toBe(50);
+    expect(new Set(ids).size, "a resumed run minted a second entity for the same prose").toBe(50);
     expect(after.files.flatMap((file) => file.parsed.diagnostics)).toEqual([]);
 
     // And the prose is still untouched after a crash and a resume.
