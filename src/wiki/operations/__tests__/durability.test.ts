@@ -1,4 +1,14 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,8 +18,23 @@ import {
   syncDirectory,
   syncDirectoryUnconditionally,
 } from "../durability.js";
+import { appendAudit, readOperationLogExact, type AuditEntry } from "../audit.js";
 
 const roots: string[] = [];
+
+const ENTRY: AuditEntry = {
+  v: 1,
+  phase: "complete",
+  opId: "op_durability_probe",
+  type: "create-entry",
+  entityIds: [],
+  createdIds: [],
+  actor: { kind: "human", id: "durability-probe" },
+  timestamp: "2026-09-01T00:00:00.000Z",
+  files: [],
+  payloadHash: "0".repeat(64),
+  revisions: [],
+};
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -74,4 +99,48 @@ describe("directory fsync", () => {
       expect((caught as Error).message).toContain("EPERM");
     },
   );
+});
+
+describe("the exact ledger read's file identity check", () => {
+  it("compares inode identity at full width, not through a double", () => {
+    // A plain `lstatSync` reports `ino` as a JavaScript number. An NTFS file id
+    // is a 64-bit value far past 2^53 — a measured one on this machine is
+    // 73183493944776897, which comes back from a non-bigint stat as
+    // 73183493944776900 and converts to 73183493944776896n. Widening a rounded
+    // double to a BigInt cannot recover the bits the double dropped, so
+    // `readOperationLogExact` compared an inexact id against the exact one from
+    // `fstatSync(fd, { bigint: true })` and threw on every read.
+    //
+    // Asserted about the platform's own stat rather than about the wiki, so it
+    // says what actually went wrong. Where a file id fits in a double the two
+    // agree and the check was merely lucky; here it never could.
+    const root = temporaryDirectory();
+    const probe = join(root, "identity-probe");
+    writeFileSync(probe, "{}\n", "utf-8");
+    const fd = openSync(probe, constants.O_RDONLY);
+    try {
+      const opened = fstatSync(fd, { bigint: true });
+      expect(lstatSync(probe, { bigint: true }).ino).toBe(opened.ino);
+      if (opened.ino > BigInt(Number.MAX_SAFE_INTEGER)) {
+        expect(BigInt(lstatSync(probe).ino)).not.toBe(opened.ino);
+      }
+    } finally {
+      closeSync(fd);
+    }
+  });
+
+  it("reads back a ledger it has just written", () => {
+    // The end of the failure this caused: every exact read threw
+    // `OperationLogPathError`, the write path rolled back, the rollback's own
+    // read threw the same way, and the caller got `WikiWriteRecoveryError` with
+    // no reason attached. Twenty-nine tests in `src/wiki` failed as that.
+    const root = temporaryDirectory();
+    mkdirSync(join(root, "events"), { recursive: true });
+    expect(readOperationLogExact(root)).toEqual({ exists: false, text: "" });
+
+    appendAudit(root, ENTRY);
+    const read = readOperationLogExact(root);
+    expect(read.exists).toBe(true);
+    expect(read.text).toBe(`${JSON.stringify(ENTRY)}\n`);
+  });
 });

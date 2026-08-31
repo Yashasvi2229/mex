@@ -552,12 +552,20 @@ export function readOperationLogExact(scaffoldRoot: string): ExactOperationLog {
     const opened = fstatSync(fd, { bigint: true });
     if (opened.size > BigInt(OPERATION_LOG_MAX_BYTES)) throw new OperationLogPathError(path);
     assertOperationLogBinding(binding, path);
-    const current = lstatSync(path);
+    // `{ bigint: true }`, and not by taste. A plain `lstatSync` reports `ino`
+    // as a double, and an NTFS file id is a 64-bit value well past 2^53 — a
+    // measured one here is 73183493944776897, which survives the round trip
+    // through a double as 73183493944776896. Widening the rounded number back
+    // to a BigInt cannot undo the rounding, so `BigInt(current.ino)` never
+    // equalled the exact `opened.ino` from `fstatSync(fd, { bigint: true })`,
+    // and every exact ledger read on Windows threw. Both sides are now exact.
+    // (The `leafAfter` read below already did this; this line did not.)
+    const current = lstatSync(path, { bigint: true });
     if (
       !opened.isFile()
       || current.isSymbolicLink()
-      || BigInt(current.dev) !== opened.dev
-      || BigInt(current.ino) !== opened.ino
+      || current.dev !== opened.dev
+      || current.ino !== opened.ino
     ) throw new OperationLogPathError(path);
     const text = readFileSync(fd, "utf-8");
     assertOperationLogBounds(text, path);
