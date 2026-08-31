@@ -4268,11 +4268,17 @@ export async function createRepositoryTeamWorkflowPort(
     path: ".mex/config.json",
     maxBytes: 64 * 1024,
   });
-  if (
-    trackedConfig === null
-    || trackedConfig.truncated
-    || !Buffer.from(trackedConfig.content).equals(Buffer.from(config.bytes))
-  ) {
+  // Compared by identity, not byte for byte. Git's `core.autocrlf` defaults to
+  // true on Windows: it stores LF and writes CRLF into the working tree, so on
+  // a freshly cloned repository these two differ by one byte per line while
+  // `git diff` is empty and Git itself considers the file unmodified. Byte
+  // equality therefore rejected every teammate who cloned, and never the person
+  // who ran `mex setup`, whose working copy Git never rewrote. What this has to
+  // establish is that the scaffold identity is committed.
+  const trackedScaffoldId = trackedConfig === null || trackedConfig.truncated
+    ? null
+    : scaffoldIdentityOf(trackedConfig.content);
+  if (trackedScaffoldId === null || trackedScaffoldId !== scaffoldIdentityOf(config.bytes)) {
     throw missingScaffoldIdentity();
   }
 
@@ -4290,19 +4296,8 @@ export async function createRepositoryTeamWorkflowPort(
   ) {
     throw repositoryChanged();
   }
-  let scaffoldId: unknown;
-  try {
-    const parsed = JSON.parse(Buffer.from(confirmedConfig.bytes).toString("utf8")) as unknown;
-    scaffoldId = isPlainObject(parsed) ? parsed.scaffold_id : undefined;
-  } catch {
-    throw missingScaffoldIdentity();
-  }
-  if (
-    typeof scaffoldId !== "string"
-    || scaffoldId.length === 0
-    || scaffoldId.length > 512
-    || /[\0-\x1f\x7f]/u.test(scaffoldId)
-  ) {
+  const scaffoldId = scaffoldIdentityOf(confirmedConfig.bytes);
+  if (scaffoldId === null) {
     throw missingScaffoldIdentity();
   }
   return new RepositoryTeamWorkflowPort(root.path, {
@@ -6652,6 +6647,32 @@ function repositoryChanged() {
 
 function previewConflict() {
   return artifactError("REVISION_CONFLICT", "Workflow preview is unavailable", "The exact workflow preview is unavailable or no longer matches the approved command.");
+}
+
+/**
+ * The bounded `scaffold_id` in a `.mex/config.json` body, or `null` when the
+ * body is unparseable or the id is absent or malformed.
+ *
+ * One definition, used for both the tracked copy and the working copy, so the
+ * two cannot drift into disagreeing about what a well-formed identity is.
+ */
+function scaffoldIdentityOf(bytes: Uint8Array): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown;
+  } catch {
+    return null;
+  }
+  const value = isPlainObject(parsed) ? parsed.scaffold_id : undefined;
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 512
+    || /[\0-\x1f\x7f]/u.test(value)
+  ) {
+    return null;
+  }
+  return value;
 }
 
 function missingScaffoldIdentity() {
