@@ -2622,32 +2622,24 @@ async function inspectTeamAvailability(
         "Team workflows require .mex/config.json to be tracked at the current repository HEAD.",
       );
     }
-    if (tracked.truncated || !Buffer.from(tracked.content).equals(Buffer.from(config.bytes))) {
+    // Compared by identity, not byte for byte. Git's `core.autocrlf` defaults
+    // to true on Windows: it stores LF and writes CRLF into the working tree,
+    // so on a cloned repository these differ by one byte per line while
+    // `git diff` is empty. Byte equality reported all eight Team capabilities
+    // as TEAM_SCAFFOLD_IDENTITY_CHANGED — "the working copy must match HEAD" —
+    // to every teammate who cloned, and never to the person who ran `mex setup`.
+    const scaffoldId = scaffoldIdentityOf(config.bytes);
+    if (scaffoldId === null) {
+      return fixedReason(
+        "TEAM_SCAFFOLD_IDENTITY_MISSING",
+        "Team workflows require one bounded scaffold identity in .mex/config.json.",
+      );
+    }
+    const trackedScaffoldId = tracked.truncated ? null : scaffoldIdentityOf(tracked.content);
+    if (trackedScaffoldId === null || trackedScaffoldId !== scaffoldId) {
       return fixedReason(
         "TEAM_SCAFFOLD_IDENTITY_CHANGED",
         "Team workflows require the working .mex/config.json to match the current repository HEAD.",
-      );
-    }
-
-    let scaffoldId: unknown;
-    try {
-      const parsed = JSON.parse(Buffer.from(config.bytes).toString("utf8")) as unknown;
-      scaffoldId = isRecord(parsed) ? parsed.scaffold_id : undefined;
-    } catch {
-      return fixedReason(
-        "TEAM_SCAFFOLD_IDENTITY_MISSING",
-        "Team workflows require one bounded scaffold identity in .mex/config.json.",
-      );
-    }
-    if (
-      typeof scaffoldId !== "string"
-      || scaffoldId.length === 0
-      || scaffoldId.length > 512
-      || /[\0-\x1f\x7f]/u.test(scaffoldId)
-    ) {
-      return fixedReason(
-        "TEAM_SCAFFOLD_IDENTITY_MISSING",
-        "Team workflows require one bounded scaffold identity in .mex/config.json.",
       );
     }
 
@@ -2680,6 +2672,32 @@ async function inspectTeamAvailability(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The bounded `scaffold_id` in a `.mex/config.json` body, or `null` when the
+ * body is unparseable or the id is absent or malformed.
+ *
+ * One definition for the tracked copy and the working copy, so the two cannot
+ * drift into disagreeing about what a well-formed identity is.
+ */
+function scaffoldIdentityOf(bytes: Uint8Array): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown;
+  } catch {
+    return null;
+  }
+  const value = isRecord(parsed) ? parsed.scaffold_id : undefined;
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 512
+    || /[\0-\x1f\x7f]/u.test(value)
+  ) {
+    return null;
+  }
+  return value;
 }
 
 function errorCode(error: unknown): string | undefined {
