@@ -75,6 +75,7 @@ import { WikiCorpusLimitError } from "../index/corpus-policy.js";
 import { readContainedSource } from "../index/source-read.js";
 import { acquireWikiMaintenanceLease, type WikiMaintenanceLease } from "../index/dbfile.js";
 import { assertWritablePath, checkContainment, isReadOnlyPath, readOnlyDiagnostic, WritePathError } from "./paths.js";
+import { syncDirectory } from "./durability.js";
 import {
   attestEntityClaimants,
   locateEntity,
@@ -1402,12 +1403,10 @@ function writeAtomically(scaffoldRoot: string, file: PlannedFileEdit, options: A
     } finally {
       if (verifyFd !== undefined) closeSync(verifyFd);
     }
-    const parentFd = openSync(binding.parent, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0));
-    try {
-      fsyncSync(parentFd);
-    } finally {
-      closeSync(parentFd);
-    }
+    // The rename above is only durable once the directory entry that names the
+    // target reaches stable storage. See `durability.ts` for the one platform
+    // where that cannot be asked for, and what is given up there.
+    syncDirectory(binding.parent);
   } catch (error) {
     if (tempFd !== undefined) closeSync(tempFd);
     if (ourTemp) {

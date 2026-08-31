@@ -58,6 +58,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
+import { DirectorySyncError, syncDirectory } from "./durability.js";
 import type { WikiActor } from "../model/operation.js";
 import { insideRoot } from "../index/discover.js";
 import type { RevisionChange, WikiPatchPlan } from "./plan.js";
@@ -191,18 +192,6 @@ function readFdText(fd: number, path: string): string {
   }
 }
 
-function fsyncDirectory(path: string, errorPath: string): void {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, constants.O_RDONLY | (constants.O_DIRECTORY ?? 0));
-    fsyncSync(fd);
-  } catch {
-    throw new OperationLogPathError(errorPath);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
 /** Build the record for one phase of a plan. Field by field, deliberately. */
 export function auditRecord(plan: Omit<WikiPatchPlan, "audit">, phase: AuditPhase): AuditEntry {
   const entry: AuditEntry = {
@@ -262,8 +251,12 @@ export function appendAudit(
     assertFdText(fd, `${expectedBefore}${line}`, path);
     fsyncSync(fd);
     assertFdText(fd, `${expectedBefore}${line}`, path);
-    fsyncDirectory(binding.directory, path);
+    syncDirectory(binding.directory);
   } catch (error) {
+    // A failed directory flush is a durability failure, not a bad path.
+    // Relabelling it sends a reader to their scaffold layout for a problem
+    // that is in the filesystem; let it out carrying its own errno.
+    if (error instanceof DirectorySyncError) throw error;
     if (error instanceof OperationLogPathError) throw error;
     throw new OperationLogPathError(path);
   } finally {
@@ -288,7 +281,7 @@ function bindOperationLog(
     mkdirSync(directory, { recursive: false, mode: 0o700 });
     // Persist the new `events` directory entry before an operation can rely on
     // its ledger for crash recovery.
-    fsyncDirectory(root, path);
+    syncDirectory(root);
   }
   const directoryLexical = lstatSync(directory);
   if (!directoryLexical.isDirectory() || directoryLexical.isSymbolicLink()) throw new OperationLogPathError(path);
@@ -409,8 +402,12 @@ export function restoreOperationLogExact(
       assertOperationLogBinding(binding, path);
       assertFdText(fd, expectedCurrentText, path);
       rmSync(path);
-      fsyncDirectory(binding.directory, path);
+      syncDirectory(binding.directory);
     } catch (error) {
+      // A failed directory flush is a durability failure, not a bad path.
+      // Relabelling it sends a reader to their scaffold layout for a problem
+      // that is in the filesystem; let it out carrying its own errno.
+      if (error instanceof DirectorySyncError) throw error;
       if (error instanceof OperationLogPathError) throw error;
       throw new OperationLogPathError(path);
     } finally {
@@ -457,8 +454,12 @@ export function restoreOperationLogExact(
     closeSync(fd);
     fd = undefined;
     created = false;
-    fsyncDirectory(binding.directory, path);
+    syncDirectory(binding.directory);
   } catch (error) {
+    // A failed directory flush is a durability failure, not a bad path.
+    // Relabelling it sends a reader to their scaffold layout for a problem
+    // that is in the filesystem; let it out carrying its own errno.
+    if (error instanceof DirectorySyncError) throw error;
     if (error instanceof OperationLogPathError) throw error;
     throw new OperationLogPathError(path);
   } finally {
