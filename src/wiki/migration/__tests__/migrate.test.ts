@@ -8,7 +8,7 @@
  * identical. So the entity count is asserted in the same test.
  */
 import { describe, it, expect, beforeAll } from "vitest";
-import { cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { migrateScaffold, planMigration, renderMigrationReport, type MigrationReport } from "../migrate.js";
@@ -172,6 +172,36 @@ describe("the dry run", () => {
     expect(dry.edgesAmbiguous).toBe(wet.edgesAmbiguous);
     expect(dry.groundingsAmbiguous).toBe(wet.groundingsAmbiguous);
     expect(dry.planned.length).toBe(wet.planned.length);
+    // The half this test was named for was the half that was right. It compared
+    // the two ambiguity counts and the plan size, and never `edgesConverted` —
+    // which was 0 on every dry run of this corpus and 23 on every apply of it,
+    // for four phases, with this test green throughout.
+    expect(dry.edgesConverted).toBe(wet.edgesConverted);
+  });
+
+  it("counts a converted edge rather than mistaking it for a self-edge", () => {
+    // Two files that each gain a file-level entity, one edging to the other.
+    // Every projected entity used to share a single placeholder id, so
+    // `planLegacyEdges`'s self-edge guard — `target === source`, which is there
+    // for a file that edges to itself — fired on this edge and returned early:
+    // not converted, and not reported either. The narrowest scaffold that
+    // provokes it, so a failure names the mechanism rather than a corpus count.
+    const root = mkdtempSync(join(tmpdir(), "mig-dry-edge-"));
+    mkdirSync(join(root, "patterns"), { recursive: true });
+    writeFileSync(
+      join(root, "patterns", "a.md"),
+      ["---", "name: a", "edges:", "  - target: patterns/b.md", "    condition: when b matters", "---", "", "# A", "", "Prose.", ""].join("\n"),
+    );
+    writeFileSync(
+      join(root, "patterns", "b.md"),
+      ["---", "name: b", "---", "", "# B", "", "Prose.", ""].join("\n"),
+    );
+
+    const dry = planMigration({ scaffoldRoot: root });
+    expect(dry.planned.length).toBe(2);
+    expect(dry.edgesConverted).toBe(1);
+    expect(dry.edgesAmbiguous).toBe(0);
+    rmSync(root, { recursive: true, force: true });
   });
 });
 
