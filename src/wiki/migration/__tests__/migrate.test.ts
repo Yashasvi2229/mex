@@ -179,6 +179,17 @@ describe("the dry run", () => {
     expect(dry.edgesConverted).toBe(wet.edgesConverted);
   });
 
+  it("says why it minted no ids, instead of leaving a reader to work it out", () => {
+    // `entities proposed: 29` above `ids generated: 0` is not a contradiction —
+    // section 13.3 mints on apply — but it reads as one, and it cost a reader a
+    // source dive. Presentation only: the number is untouched.
+    const root = scaffold();
+    const rendered = renderMigrationReport(planMigration({ scaffoldRoot: root }));
+    expect(rendered).toContain("Migration dry run");
+    expect(rendered).toMatch(/ids generated: {6}0 \(a dry run mints none; ids are generated on apply\)/);
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("counts a converted edge rather than mistaking it for a self-edge", () => {
     // Two files that each gain a file-level entity, one edging to the other.
     // Every projected entity used to share a single placeholder id, so

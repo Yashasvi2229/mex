@@ -653,7 +653,14 @@ export function renderMigrationReport(report: MigrationReport): string {
   const types = Object.keys(report.entitiesByType).sort();
   lines.push(`  entities ${report.dryRun ? "proposed" : "created"}:  ${types.length === 0 ? 0 : ""}`);
   for (const type of types) lines.push(`    ${type}: ${report.entitiesByType[type]}`);
-  lines.push(`  ids generated:      ${report.idsGenerated.length}`);
+  // A dry run mints nothing by design (section 13.3), so `0` here beside a
+  // non-zero proposal count reads as a contradiction unless it says why. The
+  // number is unchanged; only the label is.
+  lines.push(
+    report.dryRun
+      ? `  ids generated:      ${report.idsGenerated.length} (a dry run mints none; ids are generated on apply)`
+      : `  ids generated:      ${report.idsGenerated.length}`,
+  );
   lines.push(`  ids preserved:      ${report.idsPreserved.length}`);
   lines.push(`  edges converted:    ${report.edgesConverted}`);
   lines.push(`  edges ambiguous:    ${report.edgesAmbiguous}`);
