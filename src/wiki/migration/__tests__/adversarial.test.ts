@@ -256,7 +256,11 @@ describe("generated views", () => {
 describe("a dry run over the adversarial set", () => {
   it("writes nothing and reports every abstention", () => {
     const root = scaffoldOf({
-      "context/stack.md": FRONT() + "# Stack\n\nProse.\n",
+      // A whole-file abstention needs a path no rule reaches. `context/stack.md`
+      // used to be one and is not any more: a direct child of `context/` now
+      // takes the directory default. One segment deeper is still nobody's
+      // convention but the author's, so migration still declines it.
+      "context/nested/deeper.md": FRONT() + "# Deeper\n\nProse.\n",
       "context/architecture.md":
         FRONT() + "# Architecture\n\nIntro.\n\n## Thin\n\nOne line.\n",
     });
