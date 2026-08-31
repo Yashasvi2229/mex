@@ -29,6 +29,7 @@
 import type { WikiEntityType } from "./../model/entity.js";
 import type { RawHeading } from "../markdown/parse.js";
 import type { InventoryFile } from "./inventory.js";
+import { isTeamOwnedReadOnlyPath } from "../model/team-owned-paths.js";
 
 /** A section must have at least this many non-blank prose lines to be an entity. */
 export const SUBSTANTIAL_SECTION_LINES = 3;
@@ -262,6 +263,22 @@ function targetOf(heading: RawHeading, ordinal: number): AdoptionTarget {
  */
 export function classifyFile(file: InventoryFile): FileClassification {
   const result: FileClassification = { file: file.path, candidates: [], abstentions: [], skipped: false };
+
+  // Ownership outranks every other question, including whether the file already
+  // carries entity metadata. A Team-owned root belongs to the Team workflow:
+  // `operations/paths.ts` refuses at plan time any operation that touches one,
+  // so offering these for classification asked a human to make a decision
+  // migration would then reject. Reported as skipped with a reason — "not our
+  // business" is a decision, and an abstention says the opposite, that nobody
+  // could decide. The predicate is the one the operation and query layers
+  // already share; a second copy here would drift from it silently.
+  if (isTeamOwnedReadOnlyPath(file.path)) {
+    return {
+      ...result,
+      skipped: true,
+      skipReason: "a Team-owned path: the Team workflow owns these files and migration never writes into them",
+    };
+  }
 
   const nonKnowledge = NON_KNOWLEDGE_FILES[file.path];
   if (nonKnowledge !== undefined) {
