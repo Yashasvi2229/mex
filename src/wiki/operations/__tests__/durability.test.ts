@@ -111,9 +111,18 @@ describe("the exact ledger read's file identity check", () => {
     // `readOperationLogExact` compared an inexact id against the exact one from
     // `fstatSync(fd, { bigint: true })` and threw on every read.
     //
-    // Asserted about the platform's own stat rather than about the wiki, so it
-    // says what actually went wrong. Where a file id fits in a double the two
-    // agree and the check was merely lucky; here it never could.
+    // The rounding is demonstrated on the id that was actually measured when
+    // this was diagnosed, not on whichever id the filesystem hands this run.
+    // `> Number.MAX_SAFE_INTEGER` is NOT the predicate for "will be rounded":
+    // a value past 2^53 is still exact if its low bits are zero, and NTFS hands
+    // those out often — measured here, 54 of 143 ids above 2^53 round-tripped
+    // exactly. An earlier version of this test asserted the negative arm on the
+    // live id and was therefore red on roughly a third of runs.
+    const MEASURED = 73183493944776897n;
+    expect(BigInt(Number(MEASURED))).not.toBe(MEASURED);
+
+    // The property the code actually depends on, on this machine's real ids:
+    // two exact reads of the same file agree at full width.
     const root = temporaryDirectory();
     const probe = join(root, "identity-probe");
     writeFileSync(probe, "{}\n", "utf-8");
@@ -121,9 +130,6 @@ describe("the exact ledger read's file identity check", () => {
     try {
       const opened = fstatSync(fd, { bigint: true });
       expect(lstatSync(probe, { bigint: true }).ino).toBe(opened.ino);
-      if (opened.ino > BigInt(Number.MAX_SAFE_INTEGER)) {
-        expect(BigInt(lstatSync(probe).ino)).not.toBe(opened.ino);
-      }
     } finally {
       closeSync(fd);
     }
