@@ -12,7 +12,7 @@ import {
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RepoRelativePath } from "../../contracts/shared.js";
 import {
@@ -267,6 +267,63 @@ describe("contained atomic artifact I/O", () => {
     )).toThrow(/repository-relative/);
   });
 });
+
+describe("Git's checkout line-ending conversion", () => {
+  const CANONICAL = "---\nschema_version: 1\nid: \"member_00000000000000000000000000\"\n---\n";
+  const path = ".mex/team/members/member_00000000000000000000000000.md" as RepoRelativePath;
+
+  it("is undone on read, so a Windows clone sees the bytes that were committed", () => {
+    // A `.mex/**` artifact is canonical: written with LF, parsed with any `\r`
+    // refused, and revisioned by the SHA-256 of its bytes. `core.autocrlf`
+    // defaults to true on Windows, so a repository authored on macOS or Linux
+    // checks out as CRLF and every artifact in it stops parsing — on a tree Git
+    // reports as clean. Measured on a real cross-platform repository: Members,
+    // Activity and the Inbox were all empty or in error.
+    const root = temporaryRoot();
+    git(root, ["init", "--quiet", "-b", "main"]);
+    git(root, ["config", "user.email", "artifacts@example.invalid"]);
+    git(root, ["config", "user.name", "Artifacts Contract"]);
+    git(root, ["config", "core.autocrlf", "true"]);
+    mkdirSync(dirname(join(root, ...path.split("/"))), { recursive: true });
+    writeFileSync(join(root, ...path.split("/")), CANONICAL);
+    git(root, ["add", "--", path]);
+    git(root, ["commit", "--quiet", "-m", "canonical artifact"]);
+
+    // Let Git write the working copy, exactly as a clone would. This is the
+    // whole point: the CRLF is Git's, not the test's.
+    rmSync(join(root, ...path.split("/")));
+    git(root, ["checkout", "--", path]);
+
+    const onDisk = readFileSync(join(root, ...path.split("/")));
+    expect(onDisk.includes(Buffer.from("\r\n"))).toBe(true);
+    expect(onDisk.equals(Buffer.from(CANONICAL, "utf8"))).toBe(false);
+
+    const read = readContainedArtifact(root, path, 64 * 1024);
+    expect(Buffer.from(read.bytes).toString("utf8")).toBe(CANONICAL);
+    // And the revision is the committed artifact's, not this platform's — the
+    // same artifact hashed differently on Windows and macOS before this.
+    expect(read.revision).toBe(revisionOf(CANONICAL));
+  });
+
+  it("leaves a lone carriage return alone, because Git never wrote it", () => {
+    // The conversion undone here is CRLF only. A bare `\r` is not something a
+    // checkout produces, so it is genuinely non-canonical content and the
+    // parsers must still reject it. Narrowing this to CRLF is what keeps the
+    // canonical guarantee intact rather than merely relaxed.
+    const root = temporaryRoot();
+    const lone = "---\rschema_version: 1\n---\n";
+    mkdirSync(dirname(join(root, ...path.split("/"))), { recursive: true });
+    writeFileSync(join(root, ...path.split("/")), lone);
+
+    const read = readContainedArtifact(root, path, 64 * 1024);
+    expect(Buffer.from(read.bytes).toString("utf8")).toBe(lone);
+    expect(read.revision).toBe(revisionOf(lone));
+  });
+});
+
+function git(root: string, args: readonly string[]): void {
+  execFileSync("git", [...args], { cwd: root, stdio: ["ignore", "ignore", "pipe"] });
+}
 
 function temporaryRoot(): string {
   const root = mkdtempSync(join(tmpdir(), "mex-lane-c-artifacts-"));

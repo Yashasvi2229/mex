@@ -966,6 +966,60 @@ describe("mex capabilities manifest", () => {
     });
   });
 
+  it("keeps Team available when Git itself rewrote the working copy's line endings", async () => {
+    // `core.autocrlf` defaults to true on Windows: Git stores LF and writes
+    // CRLF into the working tree, so the working copy and the blob at HEAD
+    // differ by one byte per line on a tree Git reports as unmodified. The
+    // old byte-for-byte comparison reported all eight Team capabilities as
+    // TEAM_SCAFFOLD_IDENTITY_CHANGED to everyone who cloned the repository —
+    // and never to the person who ran `mex setup`, whose working copy Git
+    // never rewrote.
+    //
+    // `git checkout -- <path>` puts a checkout into the state a clone produces
+    // in one line, which is what makes this testable here rather than only
+    // against a real clone.
+    const root = temporaryRoot();
+    mkdirSync(join(root, ".mex"));
+    writeFileSync(join(root, ".mex", "ROUTER.md"), "# Router\n");
+    execFileSync("git", ["init", "--quiet"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "capabilities@example.invalid"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "Capabilities Contract"], { cwd: root });
+    execFileSync("git", ["config", "core.autocrlf", "true"], { cwd: root });
+    // Multi-line on purpose: a single-line file has no line ending to convert
+    // and the defect does not reproduce.
+    writeFileSync(
+      join(root, ".mex", "config.json"),
+      `${JSON.stringify({ scaffold_id: "scaffold-capabilities-crlf", version: 1 }, null, 2)}\n`,
+    );
+    execFileSync("git", ["add", ".mex/ROUTER.md", ".mex/config.json"], { cwd: root });
+    execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: root });
+
+    // Let Git write the working copy, exactly as a clone would.
+    rmSync(join(root, ".mex", "config.json"));
+    execFileSync("git", ["checkout", "--", ".mex/config.json"], { cwd: root });
+
+    const working = readFileSync(join(root, ".mex", "config.json"));
+    const blob = execFileSync("git", ["cat-file", "blob", "HEAD:.mex/config.json"], { cwd: root });
+    // Not vacuous: the bytes genuinely differ and Git still calls the tree clean.
+    expect(working.includes(Buffer.from("\r\n"))).toBe(true);
+    expect(blob.equals(working)).toBe(false);
+    expect(execFileSync("git", ["diff", "--name-only"], { cwd: root }).toString()).toBe("");
+
+    const envelope = await inspectCapabilities(root, {
+      inspectGraphIndex: async () => inspection("fresh"),
+      inspectWikiIndex: async () => inspection("fresh"),
+    });
+
+    for (const entry of envelope.data.capabilities) {
+      expect(entry.unavailableReason?.code).not.toBe("TEAM_SCAFFOLD_IDENTITY_CHANGED");
+    }
+    for (const id of ["project_hub", "team_identity", "activity_read", "activity_record"] as const) {
+      expect(envelope.data.capabilities.find((entry) => entry.id === id)).toMatchObject({
+        availability: "available",
+      });
+    }
+  });
+
   it("does not advertise Wiki rebuild for degraded, migration, corrupt, or unavailable states", async () => {
     const root = readyRoot();
     for (const state of ["degraded", "migration_required", "corrupt"] as const) {
