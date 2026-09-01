@@ -8,9 +8,11 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleDashed,
+  ExternalLink,
   GitBranch,
   Inbox,
   LoaderCircle,
+  Mail,
   RadioTower,
   RefreshCw,
   ScrollText,
@@ -558,6 +560,82 @@ function ActivityRow({ item }: { item: ActivityItem }) {
   );
 }
 
+/**
+ * Where the signup lives, and why the Hub never sees the address.
+ *
+ * The form is hosted; this card only opens it. That is not a shortcut — the Hub
+ * serves itself under a policy that permits neither an outbound `fetch` nor a
+ * cross-origin form post (`src/hub/app.ts`, `connect-src 'self'`,
+ * `form-action 'self'`), so an input here could not submit anywhere without
+ * loosening the rule that makes "Runs locally" in the sidebar true. Opening a
+ * link is a navigation rather than a connection, so it stays inside the policy.
+ *
+ * The consequence worth stating: **no email address ever passes through mex.**
+ */
+const UPDATES_FORM = "https://tally.so/r/KYjv4k";
+
+/** Dismissal is a preference of this browser, so it is stored in this browser. */
+const UPDATES_DISMISSED_KEY = "mex.hub.updatesSignupDismissed";
+
+function readDismissed(): boolean {
+  // Storage throws outright in some contexts rather than returning null — a
+  // private window, or a browser set to block site data. A card that cannot
+  // remember a dismissal is a much smaller problem than an Overview that will
+  // not render, so the failure resolves to "not dismissed" and moves on.
+  try {
+    return window.localStorage.getItem(UPDATES_DISMISSED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function UpdatesSignupCard() {
+  const [dismissed, setDismissed] = useState(readDismissed);
+
+  if (dismissed) return null;
+
+  function dismiss() {
+    setDismissed(true);
+    try {
+      window.localStorage.setItem(UPDATES_DISMISSED_KEY, "true");
+    } catch {
+      // Dismissed for this session even where the preference cannot outlive it.
+    }
+  }
+
+  return (
+    <Card className={homeStyles.updatesCard} role="region" aria-labelledby="overview-updates-heading">
+      <CardHeader className={homeStyles.panelHeader}>
+        <div>
+          <CardTitle><h2 id="overview-updates-heading">Heads-up before something breaks</h2></CardTitle>
+        </div>
+      </CardHeader>
+      <CardContent className={homeStyles.updatesContent}>
+        <p className={homeStyles.updatesBody}>
+          MEX is pre-1.0 and the scaffold format is still moving. Leave an email and we
+          will tell you before a change needs action from you.
+        </p>
+        <div className={homeStyles.updatesActions}>
+          <Button
+            nativeButton={false}
+            render={<a href={UPDATES_FORM} rel="noopener noreferrer" target="_blank" />}
+            size="sm"
+            variant="outline"
+          >
+            <Mail aria-hidden="true" data-icon="inline-start" />
+            Leave your email
+            <ExternalLink aria-hidden="true" data-icon="inline-end" />
+          </Button>
+          <Button onClick={dismiss} size="sm" variant="ghost">Not now</Button>
+        </div>
+        <p className={homeStyles.updatesFootnote}>
+          Opens in your browser. Nothing is sent from this machine.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 function LatestActivityCard({ activity, onRetry }: { activity: OverviewResponse["activity"]; onRetry: () => void }) {
   return (
     <Card className={homeStyles.activityCard} role="region" aria-labelledby="overview-activity-heading">
@@ -1003,7 +1081,10 @@ export function HomeOverview() {
           <FocusCard data={data} onRetry={() => void refresh()} />
           <ContextReadinessCard context={data.context} onRetry={() => void refresh()} repository={data.shell.repository} />
         </div>
-        <LatestActivityCard activity={data.activity} onRetry={() => void refresh()} />
+        <div className={homeStyles.asideColumn}>
+          <LatestActivityCard activity={data.activity} onRetry={() => void refresh()} />
+          <UpdatesSignupCard />
+        </div>
         <OperationCard operation={data.operation} />
       </div>
     </div>

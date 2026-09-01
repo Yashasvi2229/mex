@@ -44,18 +44,69 @@
   min-width: 0;
 }
 
-.activityCard {
+/*
+ * The right-hand column. Activity used to be the only card here and placed
+ * itself; now that something sits beneath it, the column is explicit — stacking
+ * a second `span 4` card by auto-placement would drop it to the next row's
+ * first column rather than under the one above it.
+ */
+.asideColumn {
+  display: grid;
   grid-column: span 4;
+  gap: 14px;
+  min-width: 0;
+  align-content: start;
+}
+
+.activityCard {
   min-width: 0;
 }
 
 .focusCard,
 .readinessCard,
 .activityCard,
+.updatesCard,
 .operationCard {
   --card-spacing: 18px;
   min-width: 0;
   border-radius: 14px;
+}
+
+/*
+ * The only card here that asks for something rather than reporting something,
+ * so it is drawn quieter than the panels above it: no fill of its own, a
+ * dimmer border, and body copy at secondary weight. It should read as a note at
+ * the foot of the column, never as a status the reader has to resolve.
+ */
+.updatesCard {
+  background: transparent;
+  border-color: color-mix(in oklch, var(--border) 70%, transparent);
+}
+
+.updatesContent {
+  display: grid;
+  gap: 12px;
+}
+
+.updatesBody {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.updatesActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.updatesFootnote {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  line-height: 1.4;
 }
 
 .focusCard {
