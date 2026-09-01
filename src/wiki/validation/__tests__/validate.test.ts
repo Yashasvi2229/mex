@@ -387,9 +387,30 @@ Body with an anchor: [the code](mex://function:0123456789abcdef).
   it("degrades to unverified with no code graph, rather than failing", () => {
     const report = validateScaffold({ scaffoldRoot: scaffold({ "context/g.md": grounded }) });
     expect(report.groundingsUnverified).toBe(true);
+    expect(report.codeGraphAvailable).toBe(false);
     const found = report.diagnostics.map((entry) => entry.code);
     expect(found).not.toContain("GROUNDING_MISSING");
     expect(found).not.toContain("GROUNDING_UNRESOLVED");
+  });
+
+  it("separates the two causes of unverified, because they send a reader to different places", () => {
+    // `groundingsUnverified` means "nothing produced a verdict", and there are
+    // two ways to get there. A graph that is present and fresh, holding the
+    // node but no fingerprint to compare the committed one against, reaches it
+    // just as a missing graph does — and telling that reader to go and look at
+    // their code graph sends them to inspect something with nothing wrong.
+    const presentButUncomparable: GroundingGraph = {
+      getNode: () => ({ id: "function:deadbeefdeadbeef", bodyHash: null, filePath: "src/a.ts", startLine: 1, endLine: 2 }),
+      getFingerprint: () => null,
+      reconcile: () => null,
+      getBaselineSource: () => null,
+    } as unknown as GroundingGraph;
+    const report = validateScaffold({
+      scaffoldRoot: scaffold({ "context/g.md": grounded }),
+      graph: presentButUncomparable,
+    });
+    expect(report.groundingsUnverified).toBe(true);
+    expect(report.codeGraphAvailable).toBe(true);
   });
 
   it("reports a grounding with no body hash, which is otherwise blind to drift", () => {

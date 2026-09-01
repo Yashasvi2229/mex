@@ -110,12 +110,28 @@ export interface ValidationReport {
   /** True when a bound stopped the diagnostic list. Data, never a diagnostic. */
   truncated: boolean;
   /**
-   * True when no code graph was available, so every grounding check degraded.
+   * True when there were groundings and not one of them produced a verdict.
    *
    * Distinct from "every grounding is fine": the caller has to be able to tell
    * a clean bill of health from an unread one.
+   *
+   * **It has two causes, and this flag does not say which.** Either no code
+   * graph was available, or the graph was there and nothing could be compared
+   * against it — an undecodable committed fingerprint, a node the graph holds
+   * no fingerprint for, a rebind onto a node it cannot produce. Pair it with
+   * {@link codeGraphAvailable} to tell them apart before telling a user where
+   * to look.
    */
   groundingsUnverified: boolean;
+  /**
+   * Whether a code graph was supplied for this pass.
+   *
+   * The discriminator for {@link groundingsUnverified}, and it has to be
+   * carried rather than inferred: the grounding diagnostics that would hint at
+   * it are subject to the same bound as every other diagnostic, so a truncated
+   * report could lose the evidence and leave a reader guessing.
+   */
+  codeGraphAvailable: boolean;
 }
 
 /** Commit shape: a hex object name, abbreviated or full. */
@@ -186,6 +202,7 @@ export function validateScaffold(options: ValidateOptions): ValidationReport {
     counts,
     truncated: ordered.length > kept.length,
     groundingsUnverified: groundingResults.unverified,
+    codeGraphAvailable: graph !== null,
   };
 }
 
