@@ -33,7 +33,21 @@ export function makeGroundingChecker(
       const current = graph.getNode(grounding.node);
       const baselineSource = capabilities.getGroundedSource?.(scaffoldFile, grounding.node) ?? null;
       if (current) {
-        if (baselineSource && current.bodyHash !== baselineSource.bodyHash) {
+        // **The committed hash wins, and the cached one is only a fallback.**
+        //
+        // `_mex_grounded_source` lives in `.mex/graph.db`, which is gitignored
+        // and disposable by invariant — `mex graph rebuild` is offered as a
+        // routine repair. Reading the baseline only from there meant a rebuild
+        // silently ended drift detection for every grounding in the scaffold:
+        // `baselineSource` came back null, this branch reported nothing, and
+        // the grounding went on looking healthy forever. A teammate who cloned
+        // never had a baseline in the first place.
+        //
+        // So prefer `grounding.bodyHash`, which is in Git. The cache still
+        // answers for a grounding authored before that field existed, which is
+        // exactly the pre-existing behaviour and no worse than it was.
+        const baselineBodyHash = grounding.bodyHash ?? baselineSource?.bodyHash;
+        if (baselineBodyHash !== undefined && current.bodyHash !== baselineBodyHash) {
           issues.push(issue("GROUNDING_DRIFT", "warning", source,
             `Grounded node body changed: ${grounding.node}`));
         }

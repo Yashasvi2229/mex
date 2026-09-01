@@ -210,13 +210,36 @@ export interface DriftReport {
  * grounds_to:
  *   - node: "function:a3f8...c21"
  *     fingerprint: "mh:64:9f2a..."
+ *     bodyHash: "sha256:7c1d..."
  * ```
  */
 export interface Grounding {
   /** The grounded node's Tier-1 id, `${kind}:sha256(filePath:kind:name)[:32]`. */
   node: string;
-  /** Serialized Tier-2 fingerprint (`mh:<K>:<hex>`) captured when grounded. */
+  /**
+   * Serialized Tier-2 fingerprint (`mh:<K>:<hex>`) captured when grounded.
+   *
+   * An **identity** signal, not a change signal: it is what finds the symbol
+   * again after it moves. It is deliberately insensitive to an edited constant
+   * or a renamed local, so it must never be asked "did this change?".
+   */
   fingerprint: string;
+  /**
+   * The grounded node's body hash when the baseline was captured.
+   *
+   * **The change signal, and canonical because it is committed in Markdown.**
+   * The same value is cached in `_mex_grounded_source` inside `.mex/graph.db`,
+   * but that index is gitignored and disposable by invariant — a rebuild
+   * re-captures it from the current code, so comparing against the cache
+   * compares current against current and drift disappears. Only the copy in
+   * Git survives a rebuild and reaches a teammate who clones.
+   *
+   * Optional, and it has to be: every grounding written before this field
+   * existed lacks it, and requiring it would turn each of those scaffolds into
+   * a parse error. A grounding without it still resolves, through the coarser
+   * structural comparator, and `mex sync` backfills it on the next capture.
+   */
+  bodyHash?: string;
 }
 
 export interface ScaffoldFrontmatter {
