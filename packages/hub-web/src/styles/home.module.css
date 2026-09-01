@@ -102,13 +102,6 @@
   align-items: center;
 }
 
-.updatesFootnote {
-  margin: 0;
-  color: var(--muted-foreground);
-  font-size: 10.5px;
-  line-height: 1.4;
-}
-
 .focusCard {
   background: var(--card);
 }

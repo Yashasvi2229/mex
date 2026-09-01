@@ -12,7 +12,6 @@ import {
   GitBranch,
   Inbox,
   LoaderCircle,
-  Mail,
   RadioTower,
   RefreshCw,
   ScrollText,
@@ -585,29 +584,28 @@ function UpdatesSignupCard() {
     <Card className={homeStyles.updatesCard} role="region" aria-labelledby="overview-updates-heading">
       <CardHeader className={homeStyles.panelHeader}>
         <div>
-          <CardTitle><h2 id="overview-updates-heading">Heads-up before something breaks</h2></CardTitle>
+          <CardTitle><h2 id="overview-updates-heading">Help make MEX better</h2></CardTitle>
         </div>
       </CardHeader>
       <CardContent className={homeStyles.updatesContent}>
         <p className={homeStyles.updatesBody}>
-          MEX is pre-1.0 and the scaffold format is still moving. Leave an email and we
-          will tell you before a change needs action from you.
+          A short form about how you&rsquo;re using it. Your answers help shape mex :)
         </p>
         <div className={homeStyles.updatesActions}>
+          {/*
+            * The trailing arrow is the only remaining cue that this leaves the
+            * Hub for a new tab, so it stays where the mail glyph did not.
+            */}
           <Button
             nativeButton={false}
             render={<a href={UPDATES_FORM} rel="noopener noreferrer" target="_blank" />}
             size="sm"
             variant="outline"
           >
-            <Mail aria-hidden="true" data-icon="inline-start" />
-            Leave your email
+            Open the form
             <ExternalLink aria-hidden="true" data-icon="inline-end" />
           </Button>
         </div>
-        <p className={homeStyles.updatesFootnote}>
-          Opens in your browser. Nothing is sent from this machine.
-        </p>
       </CardContent>
     </Card>
   );
