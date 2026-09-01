@@ -424,6 +424,28 @@
   height: 13px;
 }
 
+/*
+ * The one outbound link in the Hub. It sits with the repository facts because
+ * that strip is already the bar's secondary information, but it is styled a
+ * step quieter than they are and only reaches full contrast on hover — it is an
+ * invitation, not a fact about this repository.
+ */
+.discordLink {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 120ms ease;
+}
+
+.discordLink:hover,
+.discordLink:focus-visible {
+  color: var(--foreground);
+}
+
 .mono {
   font-family: var(--font-mono);
 }
@@ -554,6 +576,15 @@
 
   .repoFacts > span > span {
     max-width: 170px;
+  }
+
+  /*
+   * The mark alone below this width. The repository facts are what the bar is
+   * for, so the invitation gives up its label first rather than crowding them —
+   * the `title` still names it, and so does the accessible name.
+   */
+  .discordLink > span {
+    display: none;
   }
 
   .sessionMeta {
