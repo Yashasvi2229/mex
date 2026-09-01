@@ -421,6 +421,22 @@ Body with an anchor: [the code](mex://function:0123456789abcdef).
     expect(blind?.severity).toBe("warning");
   });
 
+  it("tells that grounding what is actually missing, not what the shared code's remediation says", () => {
+    // `MALFORMED_GROUNDING` is one code over six problems, and its registry
+    // remediation is written for a missing node id or fingerprint. This
+    // grounding has both. Handing a reader that text sends them to look for a
+    // field already in their file — measured on a real scaffold where all
+    // sixteen warnings carried advice that applied to none of them.
+    const report = validateScaffold({ scaffoldRoot: scaffold({ "context/g.md": grounded }) });
+    const blind = report.diagnostics.find(
+      (entry) => entry.code === "MALFORMED_GROUNDING" && entry.message.includes("body hash"),
+    );
+    expect(blind?.remediation).not.toContain("needs both a code-graph node id and a fingerprint");
+    expect(blind?.remediation).toContain("body hash");
+    // And it names something the reader can actually run.
+    expect(blind?.remediation).toMatch(/mex graph ground|mex sync/);
+  });
+
   it("reports a node the graph no longer has", () => {
     const graph: GroundingGraph = {
       getNode: () => null,

@@ -456,7 +456,21 @@ function groundingChecks(
           diagnostic(
             "MALFORMED_GROUNDING",
             `The grounding on ${entity.id} for ${grounding.node} carries no body hash, so drift in the grounded code cannot be detected — only a change to its structure.`,
-            { file, entityId: entity.id, path, severity: "warning" },
+            {
+              file,
+              entityId: entity.id,
+              path,
+              severity: "warning",
+              // `MALFORMED_GROUNDING` covers six different problems and its
+              // registry remediation is written for the first two — a missing
+              // node id or fingerprint. This case has both, and telling a
+              // reader to supply them sends them looking for a field that is
+              // already in the file. Say what is actually absent and what
+              // writes it. Reported on a real scaffold where all sixteen
+              // warnings carried advice that did not apply to any of them.
+              remediation:
+                "The node id and fingerprint are present; only the baseline body hash is missing, and nothing you can hand-write supplies it. A grounding capture records it from the graph — `mex graph ground` on an existing scaffold, or `mex sync`. Until then drift is compared structurally.",
+            },
           ),
         );
       }
