@@ -574,35 +574,13 @@ function ActivityRow({ item }: { item: ActivityItem }) {
  */
 const UPDATES_FORM = "https://tally.so/r/KYjv4k";
 
-/** Dismissal is a preference of this browser, so it is stored in this browser. */
-const UPDATES_DISMISSED_KEY = "mex.hub.updatesSignupDismissed";
-
-function readDismissed(): boolean {
-  // Storage throws outright in some contexts rather than returning null — a
-  // private window, or a browser set to block site data. A card that cannot
-  // remember a dismissal is a much smaller problem than an Overview that will
-  // not render, so the failure resolves to "not dismissed" and moves on.
-  try {
-    return window.localStorage.getItem(UPDATES_DISMISSED_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
+/**
+ * The card is permanent and carries no dismissal, which is why it has to stay
+ * quiet. Anything that cannot be put away has to be worth living with on every
+ * visit, so this one states its offer once and never asks twice — no badge, no
+ * count, nothing that reads as unresolved work.
+ */
 function UpdatesSignupCard() {
-  const [dismissed, setDismissed] = useState(readDismissed);
-
-  if (dismissed) return null;
-
-  function dismiss() {
-    setDismissed(true);
-    try {
-      window.localStorage.setItem(UPDATES_DISMISSED_KEY, "true");
-    } catch {
-      // Dismissed for this session even where the preference cannot outlive it.
-    }
-  }
-
   return (
     <Card className={homeStyles.updatesCard} role="region" aria-labelledby="overview-updates-heading">
       <CardHeader className={homeStyles.panelHeader}>
@@ -626,7 +604,6 @@ function UpdatesSignupCard() {
             Leave your email
             <ExternalLink aria-hidden="true" data-icon="inline-end" />
           </Button>
-          <Button onClick={dismiss} size="sm" variant="ghost">Not now</Button>
         </div>
         <p className={homeStyles.updatesFootnote}>
           Opens in your browser. Nothing is sent from this machine.
