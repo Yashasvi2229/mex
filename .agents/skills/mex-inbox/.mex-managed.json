@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "owner": "mex-agent",
+  "skill": "mex-inbox",
+  "packageVersion": "0.7.3",
+  "files": {
+    "SKILL.md": "ec0e61b45c9f2e2d70074bd613c0d294dd4d88ec73964e6187f0ac8d51de1505",
+    "agents/openai.yaml": "4dbdf205a76ba17d9fd8984c8d546b1d6628f0e135bbaf0c16c773f8fa6fc765",
+    "references/cli-workflows.md": "5147aa68c8fea7a96dd5c569c23570238e2a32a46655fd14267e31a7c5d12c30"
+  }
+}

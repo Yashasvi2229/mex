@@ -17,6 +17,10 @@ import {
   RELAY_CONTRACT_COMMAND,
   RELAY_CONTRACT_DESCRIPTOR_ID,
 } from "./team/relay/cli/contract-catalog.js";
+import {
+  projectLocalSchemaClosure,
+  projectSchemaDefinition,
+} from "./team/cli/contract-projection.js";
 import type { ContractWikiIndexState } from "./wiki/query/contract-session.js";
 import { VERSION } from "./version.js";
 
@@ -1528,6 +1532,55 @@ export interface InboxContractCatalogData {
   exitCodes: TeamCliContract["exitCodes"];
 }
 
+export const INBOX_CONTRACT_ACTIONS = Object.freeze([
+  "inbox.draft.save",
+  "inbox.draft.delete",
+  "inbox.publish",
+  "inbox.proposal.approve",
+  "inbox.proposal.reject",
+  "inbox.proposal.withdraw",
+  "inbox.proposal.mark-stale",
+  "inbox.proposal.repair",
+] as const);
+
+export type InboxContractAction = (typeof INBOX_CONTRACT_ACTIONS)[number];
+
+/** A focused resolver stays materially below the already-bounded full catalog. */
+export const INBOX_ACTION_CONTRACT_MAX_BYTES = 32 * 1024;
+
+export interface InboxActionContractData {
+  catalogVersion: 1;
+  contractId: typeof INBOX_CONTRACT_CATALOG_ID;
+  action: InboxContractAction;
+  mediaType: "application/schema+json";
+  encoding: "utf-8";
+  commands: {
+    preview: CapabilityCommandDescriptor;
+    apply: CapabilityCommandDescriptor;
+  };
+  requestFile: Omit<
+    InboxContractCatalogData["requestFile"],
+    "schemaRef" | "runtimeConstraints" | "examples"
+  > & {
+    schemaRef: string;
+    mediaType: "application/json";
+    encoding: "utf-8";
+    maxBytes: number;
+    maxDepth: 32;
+    maxNodes: 4_096;
+    schema: Readonly<Record<string, unknown>>;
+    runtimeConstraints: InboxContractCatalogData["requestFile"]["runtimeConstraints"];
+    examples: InboxContractCatalogData["requestFile"]["examples"];
+  };
+  applyFile: InboxContractCatalogData["applyFile"] & {
+    mediaType: "application/json";
+    encoding: "utf-8";
+    maxBytes: number;
+    maxAgeSeconds: 1_800;
+  };
+  exitCodes: TeamCliContract["exitCodes"];
+}
+
 const INBOX_REQUEST_EXAMPLES = [
   {
     command: "inbox.draft.save",
@@ -1563,6 +1616,42 @@ const INBOX_REQUEST_EXAMPLES = [
 const INBOX_APPLY_REQUIREMENT =
   "Pass the exact complete successful schemaVersion 1 Team JSON preview emitted for the same command; fragments, altered envelopes, and reconstructed receipts are rejected.";
 
+const INBOX_REQUEST_RUNTIME_CONSTRAINTS = Object.freeze([
+  {
+    id: "dependency-expectation-target-equality",
+    enforcedBy: "request-parser",
+    requirement: "targetRevisions must contain exactly one current expectation for every unique topic/relation endpoint on create, or exactly the updated target on update, with no unrelated targets.",
+  },
+  {
+    id: "action-expectation-target-equality",
+    enforcedBy: "request-parser",
+    requirement: "The single local/proposal expectedRevisions target must exactly equal the draftId/proposalId selected by the action.",
+  },
+  {
+    id: "external-evidence-url-validity",
+    enforcedBy: "request-parser",
+    requirement: "External evidence URIs must parse under WHATWG URL rules as lower-case absolute http:// or https:// URLs with a host and without credentials.",
+  },
+] as const satisfies InboxContractCatalogData["requestFile"]["runtimeConstraints"]);
+
+const INBOX_APPLY_RUNTIME_CONSTRAINTS = Object.freeze([
+  {
+    id: "command-action-equality",
+    enforcedBy: "preview-parser",
+    requirement: "The wrapper command must select the exact request action encoded by the same command surface.",
+  },
+  {
+    id: "diagnostic-projection-equality",
+    enforcedBy: "preview-parser",
+    requirement: "Wrapper diagnostics must be byte-equivalent under stable JSON ordering to data.preview.diagnostics.",
+  },
+  {
+    id: "signed-revision-equality",
+    enforcedBy: "signed-apply-service",
+    requirement: "Request, presentation, preview, repository, and expected target revisions must match the exact emitted signed preview at apply time.",
+  },
+] as const satisfies InboxContractCatalogData["applyFile"]["runtimeConstraints"]);
+
 const INBOX_SCHEMA_CATALOG: Readonly<Record<string, unknown>> = Object.freeze({
   $schema: "https://json-schema.org/draft/2020-12/schema",
   $id: "urn:mex:team.inbox:contract-catalog:v1",
@@ -1585,50 +1674,126 @@ export function inboxContractCatalogData(): InboxContractCatalogData {
       contractId: INBOX_REQUEST_CONTRACT_ID,
       schemaRef: INBOX_REQUEST_SCHEMA_REF,
       schemaScope: "The JSON Schema closes every field shape and action-specific cardinality; the named cross-field invariants below are additionally enforced before repository access.",
-      runtimeConstraints: [
-        {
-          id: "dependency-expectation-target-equality",
-          enforcedBy: "request-parser",
-          requirement: "targetRevisions must contain exactly one current expectation for every unique topic/relation endpoint on create, or exactly the updated target on update, with no unrelated targets.",
-        },
-        {
-          id: "action-expectation-target-equality",
-          enforcedBy: "request-parser",
-          requirement: "The single local/proposal expectedRevisions target must exactly equal the draftId/proposalId selected by the action.",
-        },
-        {
-          id: "external-evidence-url-validity",
-          enforcedBy: "request-parser",
-          requirement: "External evidence URIs must parse under WHATWG URL rules as lower-case absolute http:// or https:// URLs with a host and without credentials.",
-        },
-      ],
+      runtimeConstraints: INBOX_REQUEST_RUNTIME_CONSTRAINTS,
       examples: INBOX_REQUEST_EXAMPLES,
     },
     applyFile: {
       contractId: INBOX_PREVIEW_CONTRACT_ID,
       schemaRef: INBOX_PREVIEW_SCHEMA_REF,
       schemaScope: "The JSON Schema closes the complete preview envelope, action-specific receipt purpose shapes, and file-change invariants; parser constraints run before repository access, while signed/replanned revision checks run in the apply service before effects.",
-      runtimeConstraints: [
-        {
-          id: "command-action-equality",
-          enforcedBy: "preview-parser",
-          requirement: "The wrapper command must select the exact request action encoded by the same command surface.",
-        },
-        {
-          id: "diagnostic-projection-equality",
-          enforcedBy: "preview-parser",
-          requirement: "Wrapper diagnostics must be byte-equivalent under stable JSON ordering to data.preview.diagnostics.",
-        },
-        {
-          id: "signed-revision-equality",
-          enforcedBy: "signed-apply-service",
-          requirement: "Request, presentation, preview, repository, and expected target revisions must match the exact emitted signed preview at apply time.",
-        },
-      ],
+      runtimeConstraints: INBOX_APPLY_RUNTIME_CONSTRAINTS,
       requirement: INBOX_APPLY_REQUIREMENT,
     },
     exitCodes: TEAM_CLI_CONTRACT.exitCodes,
   };
+}
+
+function focusedInboxRequestSchema(action: InboxContractAction): Readonly<Record<string, unknown>> {
+  const command = projectSchemaDefinition(
+    INBOX_REQUEST_SCHEMA_SOURCE,
+    "command",
+  ) as Record<string, unknown>;
+  const actionUnion = projectSchemaDefinition(
+    INBOX_REQUEST_SCHEMA_SOURCE,
+    "action",
+  ) as Record<string, unknown>;
+  const actionBranches = actionUnion.oneOf as Record<string, unknown>[];
+  const commandBranches = command.oneOf as Record<string, unknown>[];
+  const properties = command.properties as Record<string, unknown>;
+  const selection = inboxActionSchemaSelection(action);
+  const selectedAction = structuredClone(actionBranches[selection.actionBranch]!);
+  const selectedActionProperties = selectedAction.properties as Record<string, unknown>;
+  selectedActionProperties.kind = { const: selection.runtimeAction };
+
+  properties.operationId = { $ref: "#/$defs/operationId" };
+  properties.action = {
+    type: actionUnion.type,
+    unevaluatedProperties: actionUnion.unevaluatedProperties,
+    ...selectedAction,
+  };
+  properties.expectedRevisions = {
+    type: "array",
+    maxItems: 1,
+    items: { $ref: `#/$defs/${selection.expectationDefinition}` },
+  };
+  command.oneOf = selection.commandBranches.map((index) => structuredClone(commandBranches[index]!));
+
+  return projectLocalSchemaClosure({
+    id: `${INBOX_REQUEST_SCHEMA_ID}?action=${encodeURIComponent(action)}`,
+    source: INBOX_REQUEST_SCHEMA_SOURCE,
+    root: command,
+    additionalDefinitions: {
+      operationId: projectSchemaDefinition(COMPACT_TEAM_REQUEST_SCHEMA_SOURCE, "operationId"),
+    },
+  });
+}
+
+function inboxActionSchemaSelection(action: InboxContractAction): {
+  actionBranch: number;
+  commandBranches: readonly number[];
+  expectationDefinition: "localExpectation" | "proposalExpectation";
+  runtimeAction:
+    | "inbox.draft.save"
+    | "inbox.draft.delete"
+    | "inbox.publish"
+    | "inbox.approve"
+    | "inbox.reject"
+    | "inbox.withdraw"
+    | "inbox.mark-stale"
+    | "inbox.repair";
+} {
+  switch (action) {
+    case "inbox.draft.save":
+      return {
+        actionBranch: 0,
+        commandBranches: [0, 2],
+        expectationDefinition: "localExpectation",
+        runtimeAction: action,
+      };
+    case "inbox.draft.delete":
+    case "inbox.publish":
+      return {
+        actionBranch: 1,
+        commandBranches: [0],
+        expectationDefinition: "localExpectation",
+        runtimeAction: action,
+      };
+    case "inbox.proposal.approve":
+      return {
+        actionBranch: 2,
+        commandBranches: [1],
+        expectationDefinition: "proposalExpectation",
+        runtimeAction: "inbox.approve",
+      };
+    case "inbox.proposal.reject":
+      return {
+        actionBranch: 3,
+        commandBranches: [1],
+        expectationDefinition: "proposalExpectation",
+        runtimeAction: "inbox.reject",
+      };
+    case "inbox.proposal.withdraw":
+      return {
+        actionBranch: 4,
+        commandBranches: [1],
+        expectationDefinition: "proposalExpectation",
+        runtimeAction: "inbox.withdraw",
+      };
+    case "inbox.proposal.mark-stale":
+      return {
+        actionBranch: 3,
+        commandBranches: [1],
+        expectationDefinition: "proposalExpectation",
+        runtimeAction: "inbox.mark-stale",
+      };
+    case "inbox.proposal.repair":
+      return {
+        actionBranch: 5,
+        commandBranches: [1],
+        expectationDefinition: "proposalExpectation",
+        runtimeAction: "inbox.repair",
+      };
+  }
 }
 
 const INBOX_CLI_CONTRACT: InboxCliContract = {
@@ -1991,6 +2156,103 @@ const COMMANDS = {
   specList: command("spec.list", "mex spec list", "mex spec list --json", "json"),
   specShow: command("spec.show", "mex spec show", "mex spec show <spec-id> --json", "json"),
 } as const;
+
+export function isInboxContractAction(value: string): value is InboxContractAction {
+  return (INBOX_CONTRACT_ACTIONS as readonly string[]).includes(value);
+}
+
+/** Static action-scoped Inbox contract; does not construct the full catalog. */
+export function inboxActionContractData(action: InboxContractAction): InboxActionContractData {
+  const schema = focusedInboxRequestSchema(action);
+  const schemaRef = schema.$id as string;
+  const descriptors = inboxActionCommandDescriptors(action);
+  const requestConstraintIds = action === "inbox.draft.save"
+    || action === "inbox.proposal.repair"
+    ? new Set(INBOX_REQUEST_RUNTIME_CONSTRAINTS.map((constraint) => constraint.id))
+    : new Set(["action-expectation-target-equality"]);
+
+  return {
+    catalogVersion: 1,
+    contractId: INBOX_CONTRACT_CATALOG_ID,
+    action,
+    mediaType: "application/schema+json",
+    encoding: "utf-8",
+    commands: {
+      preview: {
+        ...descriptors.preview,
+        id: `${action}.preview`,
+        inputContract: schemaRef,
+      },
+      apply: { ...descriptors.apply, id: `${action}.apply` },
+    },
+    requestFile: {
+      contractId: INBOX_REQUEST_CONTRACT_ID,
+      schemaRef,
+      schemaScope: `This self-contained closure accepts only ${action}; named runtime invariants are enforced before repository access.`,
+      mediaType: "application/json",
+      encoding: "utf-8",
+      maxBytes: TEAM_INBOX_SPEC_LIMITS.maxEnvelopeBytes,
+      maxDepth: 32,
+      maxNodes: 4_096,
+      schema,
+      runtimeConstraints: INBOX_REQUEST_RUNTIME_CONSTRAINTS.filter(
+        (constraint) => requestConstraintIds.has(constraint.id),
+      ),
+      examples: INBOX_REQUEST_EXAMPLES.filter((example) => example.command === action),
+    },
+    applyFile: {
+      contractId: INBOX_PREVIEW_CONTRACT_ID,
+      schemaRef: INBOX_PREVIEW_SCHEMA_REF,
+      schemaScope: "Apply consumes the complete action-matched preview envelope; its schema remains available from the backward-compatible full contract catalog for diagnosis.",
+      mediaType: "application/json",
+      encoding: "utf-8",
+      maxBytes: TEAM_INBOX_SPEC_LIMITS.maxEnvelopeBytes,
+      maxAgeSeconds: 1_800,
+      runtimeConstraints: INBOX_APPLY_RUNTIME_CONSTRAINTS,
+      requirement: INBOX_APPLY_REQUIREMENT,
+    },
+    exitCodes: TEAM_CLI_CONTRACT.exitCodes,
+  };
+}
+
+function inboxActionCommandDescriptors(action: InboxContractAction): {
+  preview: CapabilityCommandDescriptor;
+  apply: CapabilityCommandDescriptor;
+} {
+  switch (action) {
+    case "inbox.draft.save":
+      return { preview: COMMANDS.inboxDraftSavePreview, apply: COMMANDS.inboxDraftSaveApply };
+    case "inbox.draft.delete":
+      return { preview: COMMANDS.inboxDraftDeletePreview, apply: COMMANDS.inboxDraftDeleteApply };
+    case "inbox.publish":
+      return { preview: COMMANDS.inboxPublishPreview, apply: COMMANDS.inboxPublishApply };
+    case "inbox.proposal.approve":
+      return {
+        preview: COMMANDS.inboxProposalApprovePreview,
+        apply: COMMANDS.inboxProposalApproveApply,
+      };
+    case "inbox.proposal.reject":
+      return {
+        preview: COMMANDS.inboxProposalRejectPreview,
+        apply: COMMANDS.inboxProposalRejectApply,
+      };
+    case "inbox.proposal.withdraw":
+      return {
+        preview: COMMANDS.inboxProposalWithdrawPreview,
+        apply: COMMANDS.inboxProposalWithdrawApply,
+      };
+    case "inbox.proposal.mark-stale":
+      return {
+        preview: COMMANDS.inboxProposalMarkStalePreview,
+        apply: COMMANDS.inboxProposalMarkStaleApply,
+      };
+    case "inbox.proposal.repair":
+      return {
+        preview: COMMANDS.inboxProposalRepairPreview,
+        apply: COMMANDS.inboxProposalRepairApply,
+      };
+  }
+}
 
 /** All paths a manifest can advertise, exported for the registration contract. */
 export const CAPABILITY_COMMAND_CATALOG: readonly CapabilityCommandDescriptor[] = Object.freeze(

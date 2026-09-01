@@ -1,5 +1,9 @@
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it } from "vitest";
+import {
+  INBOX_ACTION_CONTRACT_MAX_BYTES,
+  INBOX_CONTRACT_ACTIONS,
+} from "../../../../capabilities.js";
 import { TEAM_INBOX_SPEC_LIMITS } from "../../../contracts/workflow.js";
 import { runInboxContract } from "../contract.js";
 
@@ -109,5 +113,91 @@ describe("Inbox contract resolver CLI", () => {
     expect(lines).toEqual([
       "Run mex inbox contract --json to emit the versioned machine contract catalog.",
     ]);
+  });
+
+  it("projects every supported action into a strict self-contained request closure", () => {
+    for (const action of INBOX_CONTRACT_ACTIONS) {
+      const lines: string[] = [];
+      let exit = -1;
+      runInboxContract(
+        { action, json: true },
+        { write: (line) => lines.push(line), setExitCode: (code) => { exit = code; } },
+      );
+
+      expect(exit, action).toBe(0);
+      expect(lines, action).toHaveLength(1);
+      expect(Buffer.byteLength(lines[0]!, "utf8"), action)
+        .toBeLessThanOrEqual(INBOX_ACTION_CONTRACT_MAX_BYTES);
+      const envelope = JSON.parse(lines[0]!) as {
+        data: {
+          action: string;
+          catalog?: unknown;
+          commands: {
+            preview: { id: string; usage: string; inputContract: string };
+            apply: { id: string; usage: string; inputContract: string };
+          };
+          requestFile: {
+            schemaRef: string;
+            schema: Record<string, unknown>;
+            examples: Array<{ request: unknown }>;
+          };
+        };
+      };
+      expect(envelope.data.action).toBe(action);
+      expect(envelope.data).not.toHaveProperty("catalog");
+      expect(envelope.data.commands.preview.id).toBe(`${action}.preview`);
+      expect(envelope.data.commands.apply.id).toBe(`${action}.apply`);
+      expect(envelope.data.commands.preview.inputContract)
+        .toBe(envelope.data.requestFile.schemaRef);
+      expect(JSON.stringify(envelope.data.requestFile.schema)).not.toContain("previewEnvelope");
+
+      const ajv = new Ajv2020({ strict: true });
+      const validate = ajv.compile(envelope.data.requestFile.schema);
+      for (const example of envelope.data.requestFile.examples) {
+        expect(validate(example.request), `${action}: ${JSON.stringify(validate.errors)}`).toBe(true);
+      }
+    }
+  });
+
+  it("keeps the draft selector smaller than the full catalog and rejects other actions", () => {
+    const full: string[] = [];
+    const focused: string[] = [];
+    runInboxContract(
+      { json: true },
+      { write: (line) => full.push(line), setExitCode: () => {} },
+    );
+    runInboxContract(
+      { action: "inbox.draft.save", json: true },
+      { write: (line) => focused.push(line), setExitCode: () => {} },
+    );
+    expect(Buffer.byteLength(focused[0]!, "utf8"))
+      .toBeLessThan(Buffer.byteLength(full[0]!, "utf8"));
+
+    const data = (JSON.parse(focused[0]!) as any).data;
+    const validate = new Ajv2020({ strict: true }).compile(data.requestFile.schema);
+    const save = structuredClone(data.requestFile.examples[0].request);
+    expect(validate(save), JSON.stringify(validate.errors)).toBe(true);
+    save.action = {
+      kind: "inbox.approve",
+      proposalId: "proposal_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    };
+    expect(validate(save)).toBe(false);
+  });
+
+  it("uses the typed Team usage exit for an invalid selector", () => {
+    const lines: string[] = [];
+    let exit = -1;
+    runInboxContract(
+      { action: "inbox.not-real", json: true },
+      { write: (line) => lines.push(line), setExitCode: (code) => { exit = code; } },
+    );
+    expect(exit).toBe(2);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      command: "inbox.contract",
+      mode: "read",
+      ok: false,
+      data: null,
+      problem: { code: "INVALID_REQUEST" },
+    });
   });
 });

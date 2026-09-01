@@ -34,7 +34,7 @@ last_updated: [YYYY-MM-DD]
      - Build: `npm run build` -->
 
 ## Code Graph
-Before using MEX commands, run `mex capabilities --json` and prefer the structured reads it reports. Preview mutations first, then wait for explicit human approval before running an apply command.
+Use the smallest relevant structured resolver. For Inbox or Relay mutations, resolve only the intended action with `mex inbox contract --action <command-id> --json` or `mex relay contract --action <command-id> --json`; use `mex capabilities --json` only for broader capability discovery. If the user explicitly asks to create, save, or draft a checkout-local Inbox or Relay draft, preview and apply that exact draft without asking for redundant confirmation. Deleting a local draft, or publishing, approving, rejecting, withdrawing, marking stale, repairing, taking or acknowledging, or closing, requires fresh explicit confirmation after semantic preview. Treat Git commit, push, and pull as separate actions requiring their own authorization.
 
 The repo is indexed into `.mex/graph.db`. Use it to avoid re-reading code you already have — it is one tool alongside Grep/Glob, not a replacement for them.
 - If you know the symbol name, go straight to it: `mex graph query <who-calls|what-calls|where-defined> <symbol>` and `mex graph get <id>` are exact and cheap. This is the strongest part of the graph. Give it exact names — an approximate name can return a confident wrong match.
@@ -56,3 +56,12 @@ After meaningful work, run GROW:
 ## Navigation
 At the start of every session, read `.mex/ROUTER.md` before doing anything else.
 For full project context, patterns, and task guidance — everything is there.
+
+<!-- mex-agent:skills:start -->
+## MEX agent skills
+- Use `/mex-inbox` for durable governed Spec proposals and `/mex-relay` for durable team handoffs. Invoke them automatically when intent clearly matches; explicit invocation remains available.
+- When MEX context materially influences an answer or implementation, include one concise acknowledgement: `MEX context used: <specific records/files/entities consulted>.`
+- Do not claim an author, date, or historical event unless the retrieved data actually provides it.
+- After a MEX write, say exactly what changed and its sharing boundary: a local draft is checkout-only and nothing is shared; a canonical artifact is written to the working tree and requires commit/push to share.
+- Skill activation is not approval for canonical actions.
+<!-- mex-agent:skills:end -->

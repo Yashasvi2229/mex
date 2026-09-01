@@ -1,3 +1,8 @@
+import {
+  projectLocalSchemaClosure,
+  projectSchemaDefinition,
+} from "../../cli/contract-projection.js";
+
 /** Repository-independent Checkpoint F Relay contract identifiers. */
 export const RELAY_REQUEST_CONTRACT_ID = "team.relay.request.v1" as const;
 export const RELAY_PREVIEW_CONTRACT_ID = "team.relay.preview-envelope.v1" as const;
@@ -11,6 +16,17 @@ export const RELAY_PREVIEW_SCHEMA_ID =
 
 export const RELAY_CLI_MAX_ENVELOPE_BYTES = 64 * 1024;
 export const RELAY_CLI_MAX_RECIPIENTS = 32;
+export const RELAY_ACTION_CONTRACT_MAX_BYTES = 32 * 1024;
+
+export const RELAY_CONTRACT_ACTIONS = Object.freeze([
+  "relay.draft.save",
+  "relay.draft.delete",
+  "relay.publish",
+  "relay.acknowledge",
+  "relay.close",
+] as const);
+
+export type RelayContractAction = (typeof RELAY_CONTRACT_ACTIONS)[number];
 
 const MEMBER_ID = "member_01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const RELAY_ID = "relay_01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -528,6 +544,110 @@ const REQUEST_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
     },
   },
 });
+
+function focusedRelayRequestSchema(action: RelayContractAction): Readonly<Record<string, unknown>> {
+  const command = projectSchemaDefinition(REQUEST_SCHEMA, "command") as Record<string, unknown>;
+  const commandProperties = command.properties as Record<string, unknown>;
+  const commandConditions = command.allOf as Record<string, unknown>[];
+  const selection = relayActionSchemaSelection(action);
+  const selectedAction = projectSchemaDefinition(
+    REQUEST_SCHEMA,
+    selection.actionDefinition,
+  ) as Record<string, unknown>;
+
+  if (selection.runtimeAction === "relay.acknowledge" || selection.runtimeAction === "relay.close") {
+    const properties = selectedAction.properties as Record<string, unknown>;
+    properties.kind = { const: selection.runtimeAction };
+  }
+  commandProperties.action = selectedAction;
+  commandProperties.expectedRevisions = selection.expectedRevisions;
+  if (selection.conditionIndexes.length === 0) delete command.allOf;
+  else {
+    command.allOf = selection.conditionIndexes.map(
+      (index) => structuredClone(commandConditions[index]!),
+    );
+  }
+
+  return projectLocalSchemaClosure({
+    id: `${RELAY_REQUEST_SCHEMA_ID}?action=${encodeURIComponent(action)}`,
+    source: REQUEST_SCHEMA,
+    root: command,
+  });
+}
+
+function relayActionSchemaSelection(action: RelayContractAction): {
+  actionDefinition: "saveAction" | "deleteAction" | "publishAction" | "relayAction";
+  conditionIndexes: readonly number[];
+  runtimeAction: RelayContractAction;
+  expectedRevisions: Readonly<Record<string, unknown>>;
+} {
+  switch (action) {
+    case "relay.draft.save":
+      return {
+        actionDefinition: "saveAction",
+        conditionIndexes: [0, 1],
+        runtimeAction: action,
+        expectedRevisions: {
+          type: "array",
+          maxItems: 1,
+          uniqueItems: true,
+          items: { $ref: "#/$defs/localExpectation" },
+        },
+      };
+    case "relay.draft.delete":
+      return {
+        actionDefinition: "deleteAction",
+        conditionIndexes: [],
+        runtimeAction: action,
+        expectedRevisions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 1,
+          uniqueItems: true,
+          items: { $ref: "#/$defs/localExpectation" },
+        },
+      };
+    case "relay.publish":
+      return {
+        actionDefinition: "publishAction",
+        conditionIndexes: [],
+        runtimeAction: action,
+        expectedRevisions: {
+          type: "array",
+          minItems: 2,
+          maxItems: 33,
+          uniqueItems: true,
+          items: { $ref: "#/$defs/publishExpectation" },
+          allOf: [
+            {
+              contains: { $ref: "#/$defs/localExpectation" },
+              minContains: 1,
+              maxContains: 1,
+            },
+            {
+              contains: { $ref: "#/$defs/memberExpectation" },
+              minContains: 1,
+              maxContains: 32,
+            },
+          ],
+        },
+      };
+    case "relay.acknowledge":
+    case "relay.close":
+      return {
+        actionDefinition: "relayAction",
+        conditionIndexes: [],
+        runtimeAction: action,
+        expectedRevisions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 1,
+          uniqueItems: true,
+          items: { $ref: "#/$defs/relayExpectation" },
+        },
+      };
+  }
+}
 
 const PREVIEW_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze({
   $id: RELAY_PREVIEW_SCHEMA_ID,
@@ -1189,6 +1309,83 @@ export interface RelayContractCatalogData {
   exitCodes: typeof EXIT_CODES;
 }
 
+export interface RelayActionContractData {
+  catalogVersion: 1;
+  contractId: typeof RELAY_CONTRACT_CATALOG_ID;
+  action: RelayContractAction;
+  mediaType: "application/schema+json";
+  encoding: "utf-8";
+  commands: {
+    preview: { id: string; usage: string; inputContract: string };
+    apply: { id: string; usage: string; inputContract: string };
+  };
+  requestFile: Omit<
+    RelayContractCatalogData["requestFile"],
+    "schemaRef" | "runtimeConstraints" | "examples"
+  > & {
+    schemaRef: string;
+    schema: Readonly<Record<string, unknown>>;
+    runtimeConstraints: RelayContractCatalogData["requestFile"]["runtimeConstraints"];
+    examples: ReadonlyArray<(typeof EXAMPLES)[number]>;
+  };
+  applyFile: RelayContractCatalogData["applyFile"];
+  exitCodes: typeof EXIT_CODES;
+}
+
+const REQUEST_RUNTIME_CONSTRAINTS = Object.freeze([
+  {
+    id: "canonical-text-path-uri-and-set-policy",
+    enforcedBy: "request-parser",
+    requirement: "All strings obey the declared UTF-8 ceilings and canonical Unicode/control policy; paths are repository-relative, external evidence is a credential-free HTTP(S) URL, and structured sets are unique and canonicalized.",
+  },
+  {
+    id: "recipient-member-id-uniqueness",
+    enforcedBy: "request-parser",
+    requirement: `Recipients contain 1-${RELAY_CLI_MAX_RECIPIENTS} Member references with unique memberIds; the sender may be included.`,
+  },
+  {
+    id: "action-expectation-target-equality",
+    enforcedBy: "request-parser",
+    requirement: "Draft update/delete and Relay acknowledge/close require exactly their selected target revision; new drafts accept none.",
+  },
+  {
+    id: "publish-dependency-expectation-equality",
+    enforcedBy: "preview-service",
+    requirement: "Publish requires exactly the selected local draft and every unique recipient Member revision, with no Workstream, unrelated, or semantic expectations.",
+  },
+  {
+    id: "publish-live-authority-and-dependencies",
+    enforcedBy: "preview-service",
+    requirement: "Publish revalidates an active canonical sender and every active recipient Member under the workflow lease.",
+  },
+] as const satisfies RelayContractCatalogData["requestFile"]["runtimeConstraints"]);
+
+const APPLY_RUNTIME_CONSTRAINTS = Object.freeze([
+  {
+    id: "command-action-equality",
+    enforcedBy: "preview-parser",
+    requirement: "The wrapper command, request action, and exact action-specific purpose set must agree.",
+  },
+  {
+    id: "service-issued-git-authority-domain",
+    enforcedBy: "preview-parser",
+    requirement: "Git authority name/email fields exactly preserve ActorResolver fallback identity: trimmed NFC non-empty strings reject C0/DEL, allow C1 and internal U+2028/U+2029, use 200/320 UTF-8 byte ceilings respectively, and require at least one non-null field.",
+  },
+  {
+    id: "diagnostic-projection-equality",
+    enforcedBy: "preview-parser",
+    requirement: "Wrapper diagnostics must be byte-equivalent under stable JSON ordering to data.preview.diagnostics.",
+  },
+  {
+    id: "signed-replan-and-revision-equality",
+    enforcedBy: "signed-apply-service",
+    requirement: "Request, presentation, authority, repository, target revisions, and the fresh plan must match the exact unexpired signed preview before effects.",
+  },
+] as const satisfies RelayContractCatalogData["applyFile"]["runtimeConstraints"]);
+
+const APPLY_REQUIREMENT =
+  "Pass the exact complete successful schemaVersion 1 Relay JSON preview emitted for the same Relay command; fragments, altered envelopes, and reconstructed receipts are rejected.";
+
 /** Full static Relay catalog; safe before Git, Home, or `.mex` exists. */
 export function relayContractCatalogData(): RelayContractCatalogData {
   return {
@@ -1208,33 +1405,7 @@ export function relayContractCatalogData(): RelayContractCatalogData {
       maxNodes: 4_096,
       maxRecipients: RELAY_CLI_MAX_RECIPIENTS,
       maxLocalIdBytes: 128,
-      runtimeConstraints: [
-        {
-          id: "canonical-text-path-uri-and-set-policy",
-          enforcedBy: "request-parser",
-          requirement: "All strings obey the declared UTF-8 ceilings and canonical Unicode/control policy; paths are repository-relative, external evidence is a credential-free HTTP(S) URL, and structured sets are unique and canonicalized.",
-        },
-        {
-          id: "recipient-member-id-uniqueness",
-          enforcedBy: "request-parser",
-          requirement: `Recipients contain 1-${RELAY_CLI_MAX_RECIPIENTS} Member references with unique memberIds; the sender may be included.`,
-        },
-        {
-          id: "action-expectation-target-equality",
-          enforcedBy: "request-parser",
-          requirement: "Draft update/delete and Relay acknowledge/close require exactly their selected target revision; new drafts accept none.",
-        },
-        {
-          id: "publish-dependency-expectation-equality",
-          enforcedBy: "preview-service",
-          requirement: "Publish requires exactly the selected local draft and every unique recipient Member revision, with no Workstream, unrelated, or semantic expectations.",
-        },
-        {
-          id: "publish-live-authority-and-dependencies",
-          enforcedBy: "preview-service",
-          requirement: "Publish revalidates an active canonical sender and every active recipient Member under the workflow lease.",
-        },
-      ],
+      runtimeConstraints: REQUEST_RUNTIME_CONSTRAINTS,
       examples: EXAMPLES,
     },
     applyFile: {
@@ -1251,31 +1422,103 @@ export function relayContractCatalogData(): RelayContractCatalogData {
       maxReceiptDepth: 8,
       maxReceiptNodes: 128,
       maxPurposeIds: 2,
-      runtimeConstraints: [
-        {
-          id: "command-action-equality",
-          enforcedBy: "preview-parser",
-          requirement: "The wrapper command, request action, and exact action-specific purpose set must agree.",
-        },
-        {
-          id: "service-issued-git-authority-domain",
-          enforcedBy: "preview-parser",
-          requirement: "Git authority name/email fields exactly preserve ActorResolver fallback identity: trimmed NFC non-empty strings reject C0/DEL, allow C1 and internal U+2028/U+2029, use 200/320 UTF-8 byte ceilings respectively, and require at least one non-null field.",
-        },
-        {
-          id: "diagnostic-projection-equality",
-          enforcedBy: "preview-parser",
-          requirement: "Wrapper diagnostics must be byte-equivalent under stable JSON ordering to data.preview.diagnostics.",
-        },
-        {
-          id: "signed-replan-and-revision-equality",
-          enforcedBy: "signed-apply-service",
-          requirement: "Request, presentation, authority, repository, target revisions, and the fresh plan must match the exact unexpired signed preview before effects.",
-        },
-      ],
-      requirement:
-        "Pass the exact complete successful schemaVersion 1 Relay JSON preview emitted for the same Relay command; fragments, altered envelopes, and reconstructed receipts are rejected.",
+      runtimeConstraints: APPLY_RUNTIME_CONSTRAINTS,
+      requirement: APPLY_REQUIREMENT,
     },
     exitCodes: EXIT_CODES,
   };
+}
+
+export function isRelayContractAction(value: string): value is RelayContractAction {
+  return (RELAY_CONTRACT_ACTIONS as readonly string[]).includes(value);
+}
+
+/** Static action-scoped Relay contract; does not construct the full catalog. */
+export function relayActionContractData(action: RelayContractAction): RelayActionContractData {
+  const schema = focusedRelayRequestSchema(action);
+  const schemaRef = schema.$id as string;
+  const preview = relayCommandDescriptor("preview", `${action}.preview`);
+  const apply = relayCommandDescriptor("apply", `${action}.apply`);
+  const constraintIds = relayRequestConstraintIds(action);
+
+  return {
+    catalogVersion: 1,
+    contractId: RELAY_CONTRACT_CATALOG_ID,
+    action,
+    mediaType: "application/schema+json",
+    encoding: "utf-8",
+    commands: {
+      preview: { ...preview, inputContract: schemaRef },
+      apply,
+    },
+    requestFile: {
+      contractId: RELAY_REQUEST_CONTRACT_ID,
+      schemaRef,
+      mediaType: "application/json",
+      encoding: "utf-8",
+      maxBytes: RELAY_CLI_MAX_ENVELOPE_BYTES,
+      maxDepth: 32,
+      maxNodes: 4_096,
+      maxRecipients: RELAY_CLI_MAX_RECIPIENTS,
+      maxLocalIdBytes: 128,
+      schema,
+      runtimeConstraints: REQUEST_RUNTIME_CONSTRAINTS.filter(
+        (constraint) => constraintIds.has(constraint.id),
+      ),
+      examples: EXAMPLES.filter((example) => example.command === action),
+    },
+    applyFile: {
+      contractId: RELAY_PREVIEW_CONTRACT_ID,
+      schemaRef: RELAY_PREVIEW_SCHEMA_ID,
+      mediaType: "application/json",
+      encoding: "utf-8",
+      maxBytes: RELAY_CLI_MAX_ENVELOPE_BYTES,
+      maxAgeSeconds: 1_800,
+      maxFutureSkewSeconds: 5,
+      maxDepth: 32,
+      maxNodes: 4_096,
+      maxReceiptBytes: 8_192,
+      maxReceiptDepth: 8,
+      maxReceiptNodes: 128,
+      maxPurposeIds: 2,
+      runtimeConstraints: APPLY_RUNTIME_CONSTRAINTS,
+      requirement: APPLY_REQUIREMENT,
+    },
+    exitCodes: EXIT_CODES,
+  };
+}
+
+function relayCommandDescriptor(
+  mode: "preview" | "apply",
+  id: string,
+): { id: string; usage: string; inputContract: string } {
+  const descriptor = COMMANDS[mode].find((candidate) => candidate.id === id);
+  if (descriptor === undefined) {
+    throw new Error(`Relay action contract is missing the ${mode} descriptor for ${id}.`);
+  }
+  return descriptor;
+}
+
+function relayRequestConstraintIds(action: RelayContractAction): ReadonlySet<string> {
+  switch (action) {
+    case "relay.draft.save":
+      return new Set([
+        "canonical-text-path-uri-and-set-policy",
+        "recipient-member-id-uniqueness",
+        "action-expectation-target-equality",
+      ]);
+    case "relay.draft.delete":
+    case "relay.acknowledge":
+    case "relay.close":
+      return new Set([
+        "canonical-text-path-uri-and-set-policy",
+        "action-expectation-target-equality",
+      ]);
+    case "relay.publish":
+      return new Set([
+        "canonical-text-path-uri-and-set-policy",
+        "publish-dependency-expectation-equality",
+        "publish-live-authority-and-dependencies",
+      ]);
+  }
 }

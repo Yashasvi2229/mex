@@ -14,8 +14,15 @@ result
 # OS
 Thumbs.db
 
-# Per-user Claude Code config
-.claude/
+# Per-user Claude Code config. Keep personal settings and unrelated skills
+# ignored while allowing MEX's two official project skills to be committed.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/mex-inbox/
+!.claude/skills/mex-inbox/**
+!.claude/skills/mex-relay/
+!.claude/skills/mex-relay/**
 
 # Code graph build artifact (rebuilt by `mex graph`)
 .mex/graph.db*

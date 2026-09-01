@@ -38,6 +38,11 @@ import {
   buildRelayCommand,
   type TeamRelayCliServiceFactory,
 } from "./team/relay/cli/index.js";
+import {
+  renderInstructionChangePreview,
+  type AgentAssetsReport,
+  type AgentSkillClient,
+} from "./agent-skills/index.js";
 
 /**
  * Load config for a CLI command and backfill scaffold identity on the way.
@@ -81,6 +86,47 @@ export function parsePortArg(raw: string): number {
   return port;
 }
 
+function isAgentSkillClient(value: string): value is AgentSkillClient {
+  return value === "claude" || value === "codex";
+}
+
+function collectAgentSkillClient(
+  raw: string,
+  previous: AgentSkillClient[],
+): AgentSkillClient[] {
+  const normalized = raw.trim().toLowerCase();
+  if (!isAgentSkillClient(normalized)) {
+    throw new InvalidArgumentError(
+      `Unknown agent tool "${raw}". Use claude or codex.`,
+    );
+  }
+  return [...previous, normalized];
+}
+
+function renderAgentSkillSyncReport(report: AgentAssetsReport): void {
+  for (const action of report.actions) {
+    if (action.action === "conflict") continue;
+    const prefix = action.action === "noop" ? "→" : "✓";
+    console.log(`${prefix} ${action.message}`);
+    if (report.dryRun) {
+      const preview = renderInstructionChangePreview(action);
+      if (preview !== null) console.log(preview);
+    }
+  }
+  for (const warning of report.warnings) {
+    console.warn(`! ${warning.message}`);
+    if (warning.resolution) console.warn(`  ${warning.resolution}`);
+  }
+  const clients = report.clients.map((client) => client === "claude" ? "Claude Code" : "Codex");
+  const clientList = clients.length === 2 ? `${clients[0]} and ${clients[1]}` : clients[0]!;
+  const newSession = `a new ${clientList} session to guarantee the synced skills and project instructions are loaded.`;
+  if (report.conflicted) {
+    console.warn(`Resolve the reported conflicts and rerun mex skills sync. Then start ${newSession}`);
+  } else {
+    console.log(`Start ${newSession}`);
+  }
+}
+
 /** Pure Hub bootstrap projection so CLI and production wiring share Wiki scope. */
 export function createHubRunOptions(
   config: Pick<MexConfig, "projectRoot" | "wiki">,
@@ -113,6 +159,7 @@ export function isTelemetryExemptCommand(
     || parentName === "relay"
     || actionCommandHasAncestor(parentName, "relay")
     || parentName === "spec"
+    || parentName === "skills"
     || commandName === "hub"
     || commandName === "capabilities";
 }
@@ -126,7 +173,8 @@ export function isFirstRunNoticeExemptCommand(commandName?: string): boolean {
     || commandName === "workstream"
     || commandName === "inbox"
     || commandName === "relay"
-    || commandName === "spec";
+    || commandName === "spec"
+    || commandName === "skills";
 }
 
 function actionCommandHasAncestor(parentName: string | undefined, expected: string): boolean {
@@ -300,6 +348,59 @@ program
     } catch (err) {
       console.error((err as Error).message);
       process.exit(1);
+    }
+  });
+
+// ── Official agent skills ──
+const skillsCommand = program
+  .command("skills")
+  .description("Install or safely update official MEX project skills");
+
+skillsCommand
+  .command("sync")
+  .description("Sync packaged MEX skills for the agents selected during setup")
+  .option("--dry-run", "Show the exact actions and warnings without writing")
+  .option("--json", "Emit one machine-readable sync report")
+  .option(
+    "--tool <tool>",
+    "Sync one supported client (claude or codex); repeat to select both",
+    collectAgentSkillClient,
+    [],
+  )
+  .action(async (opts: { dryRun?: boolean; json?: boolean; tool: AgentSkillClient[] }) => {
+    try {
+      // Deliberately use the read-only resolver. In particular, --dry-run must
+      // not backfill scaffold identity or mutate config.json.
+      const config = findConfig();
+      const configured = config.aiTools.filter(isAgentSkillClient);
+      const clients = [...new Set(opts.tool.length > 0 ? opts.tool : configured)];
+      if (clients.length === 0) {
+        throw new Error(
+          "No supported agent is selected. Run mex setup or pass --tool claude and/or --tool codex.",
+        );
+      }
+      const { syncAgentAssets } = await import("./agent-skills/index.js");
+      const report = syncAgentAssets({
+        projectRoot: config.projectRoot,
+        packageVersion: VERSION,
+        clients,
+        dryRun: opts.dryRun,
+      });
+      if (opts.json) console.log(JSON.stringify(report));
+      else renderAgentSkillSyncReport(report);
+      if (report.conflicted) process.exitCode = 1;
+    } catch (err) {
+      const message = (err as Error).message;
+      if (opts.json) {
+        console.log(JSON.stringify({
+          schemaVersion: 1,
+          ok: false,
+          error: { code: "SKILL_SYNC_FAILED", message },
+        }));
+      } else {
+        console.error(message);
+      }
+      process.exitCode = 1;
     }
   });
 
@@ -1029,6 +1130,8 @@ program
     console.log(chalk.bold("\nCLI Commands") + chalk.dim("  (run from project root)\n"));
     console.log("  mex setup              First-time setup — create .mex/ scaffold");
     console.log("  mex setup --dry-run    Preview setup without making changes");
+    console.log("  mex skills sync        Install/update official skills for configured agents");
+    console.log("  mex skills sync --dry-run --json  Preview skill and instruction changes as JSON");
     console.log("  mex capabilities --json  Discover structured agent capabilities");
     console.log("  mex member list --json  List canonical team members");
     console.log("  mex member current --json  Show the effective local/Git actor");
@@ -1037,6 +1140,8 @@ program
     console.log("  mex activity record <request.json> --json  Preview canonical Activity recording");
     console.log("  mex workstream list --json  List canonical team Workstreams");
     console.log("  mex workstream <create|update|archive> <request.json> --json  Preview a Workstream change");
+    console.log("  mex inbox contract --action <command-id> --json  Resolve one bounded Inbox action contract");
+    console.log("  mex relay contract --action <command-id> --json  Resolve one bounded Relay action contract");
     console.log("  mex relay contract --json  Resolve the complete static Relay agent contract");
     console.log("  mex relay draft <list|show|save|delete> ... --json  Read or preview local Relay drafts");
     console.log("  mex relay list --json  List canonical team handoffs");
@@ -1100,16 +1205,23 @@ if (isMainModule) {
   if (!isFirstRunNoticeExemptCommand(process.argv[2])) showFirstRunNotice();
   const commandArgv = process.argv.slice(2);
   const teamJsonContext = inspectTeamJsonInvocation(commandArgv);
+  const skillsSyncJsonInvocation = isSkillsSyncJsonInvocation(commandArgv);
   if (teamJsonContext !== null && hasMissingTeamApplyValue(commandArgv)) {
     emitTeamJsonParseProblem(teamJsonContext);
   } else if (isInvalidCapabilitiesJsonInvocation(commandArgv)) {
     console.log(JSON.stringify(capabilitiesInvalidRequestEnvelope()));
     process.exitCode = 2;
   } else {
-    if (teamJsonContext !== null) configureTeamJsonParseErrors(program);
+    if (teamJsonContext !== null || skillsSyncJsonInvocation) {
+      configureTeamJsonParseErrors(program);
+    }
     program.parseAsync().catch((err: Error) => {
       if (teamJsonContext !== null) {
         emitTeamJsonParseProblem(teamJsonContext);
+        return;
+      }
+      if (skillsSyncJsonInvocation) {
+        emitSkillsSyncJsonParseProblem();
         return;
       }
       console.error(err.message);
@@ -1235,6 +1347,26 @@ function configureTeamJsonParseErrors(root: Command): void {
   visit(root);
 }
 
+function isSkillsSyncJsonInvocation(argv: readonly string[]): boolean {
+  return argv[0] === "skills"
+    && argv[1] === "sync"
+    && argv.includes("--json")
+    && !argv.includes("--help")
+    && !argv.includes("-h");
+}
+
+function emitSkillsSyncJsonParseProblem(): void {
+  console.log(JSON.stringify({
+    schemaVersion: 1,
+    ok: false,
+    error: {
+      code: "SKILL_SYNC_FAILED",
+      message: "The skills sync arguments are invalid. Review mex skills sync --help and retry.",
+    },
+  }));
+  process.exitCode = 2;
+}
+
 function hasMissingTeamApplyValue(argv: readonly string[]): boolean {
   return argv.some((value, index) => (
     value === "--apply"
@@ -1262,7 +1394,7 @@ function isInvalidCapabilitiesJsonInvocation(argv: readonly string[]): boolean {
 
 function buildCompletion(shell: string): string {
   const commands = [
-    "setup", "capabilities", "member", "activity", "workstream", "inbox", "relay", "spec", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
+    "setup", "skills", "capabilities", "member", "activity", "workstream", "inbox", "relay", "spec", "check", "init", "graph", "wiki", "impact", "sync", "pattern", "log", "timeline",
     "heartbeat", "doctor", "watch", "tui", "commands", "completion",
     "telemetry", "config", "feedback", "hub",
   ];

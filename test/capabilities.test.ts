@@ -1181,6 +1181,7 @@ describe("mex capabilities manifest", () => {
     expect(isTelemetryExemptCommand("approve", "proposal")).toBe(true);
     expect(isTelemetryExemptCommand("list", "relay")).toBe(true);
     expect(isTelemetryExemptCommand("list", "spec")).toBe(true);
+    expect(isTelemetryExemptCommand("sync", "skills")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("capabilities")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("member")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("activity")).toBe(true);
@@ -1188,6 +1189,7 @@ describe("mex capabilities manifest", () => {
     expect(isFirstRunNoticeExemptCommand("inbox")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("relay")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("spec")).toBe(true);
+    expect(isFirstRunNoticeExemptCommand("skills")).toBe(true);
     expect(isFirstRunNoticeExemptCommand("check")).toBe(false);
   });
 });

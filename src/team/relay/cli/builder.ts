@@ -13,7 +13,7 @@ import {
   runRelayShow,
   type RelayListFlags,
 } from "./commands.js";
-import { runRelayContract } from "./contract.js";
+import { runRelayContract, type RelayContractFlags } from "./contract.js";
 import type { RelayMutationCommandName } from "./request-file.js";
 import type { TeamRelayCliServiceFactory } from "./service.js";
 
@@ -29,8 +29,9 @@ export function buildRelayCommand(options: RelayCommandBuilderOptions): Command 
 
   relay.command("contract")
     .description("Resolve the bounded versioned Relay JSON Schema catalog")
+    .option("--action <command-id>", "Resolve only one supported mutation command contract")
     .option("--json", "Emit the schema v1 Team envelope")
-    .action((flags: TeamOutputFlags) => runRelayContract(flags, options.io));
+    .action((flags: RelayContractFlags) => runRelayContract(flags, options.io));
 
   const draft = relay.command("draft").description("Manage checkout-local Relay drafts");
   draft.command("list")

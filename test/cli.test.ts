@@ -266,6 +266,46 @@ describe("built CLI main-module guard", () => {
     }
   });
 
+  it("emits one strict JSON error for malformed skills sync JSON arguments", () => {
+    const project = mkdtempSync(join(tmpdir(), "mex-skills-sync-cli-invalid-"));
+    const userHome = mkdtempSync(join(tmpdir(), "mex-skills-sync-cli-home-"));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [cliPath, "skills", "sync", "--json", "--tool", "invalid"],
+        {
+          cwd: project,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            HOME: userHome,
+            MEX_TELEMETRY: "0",
+            DO_NOT_TRACK: "1",
+            NO_COLOR: "1",
+          },
+        },
+      );
+      const expected = {
+        schemaVersion: 1,
+        ok: false,
+        error: {
+          code: "SKILL_SYNC_FAILED",
+          message: "The skills sync arguments are invalid. Review mex skills sync --help and retry.",
+        },
+      };
+
+      expect(result.status).toBe(2);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(`${JSON.stringify(expected)}\n`);
+      expect(JSON.parse(result.stdout)).toEqual(expected);
+      expect(readdirSync(project)).toEqual([]);
+      expect(readdirSync(userHome)).toEqual([]);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(userHome, { recursive: true, force: true });
+    }
+  });
+
   it("emits the capability golden without writing project or global state", () => {
     const project = mkdtempSync(join(tmpdir(), "mex-capability-cli-"));
     const userHome = mkdtempSync(join(tmpdir(), "mex-capability-home-"));
@@ -372,12 +412,39 @@ describe("built CLI main-module guard", () => {
           applyFile: { schemaRef: "https://mex.dev/contracts/team-inbox-preview-envelope-v1.json" },
         },
       });
+      const focused = spawnSync(
+        process.execPath,
+        [cliPath, "inbox", "contract", "--action", "inbox.draft.save", "--json"],
+        { cwd: project, encoding: "utf8", env: environment },
+      );
+      expect(focused.status, focused.stderr).toBe(0);
+      expect(Buffer.byteLength(focused.stdout, "utf8")).toBeLessThanOrEqual(32 * 1024);
+      expect(Buffer.byteLength(focused.stdout, "utf8"))
+        .toBeLessThan(Buffer.byteLength(resolved.stdout, "utf8"));
+      expect(JSON.parse(focused.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "inbox.contract",
+        mode: "read",
+        ok: true,
+        data: {
+          action: "inbox.draft.save",
+          commands: {
+            preview: { usage: "mex inbox draft save <request-file> --json" },
+            apply: { usage: "mex inbox draft save --apply <preview-envelope> --json" },
+          },
+          requestFile: { schema: { $defs: expect.any(Object) } },
+        },
+      });
+      const focusedData = JSON.parse(focused.stdout).data;
+      expect(focusedData).not.toHaveProperty("catalog");
+      expect(JSON.stringify(focusedData.requestFile.schema)).not.toContain("previewEnvelope");
       expect(snapshotProcessTree(project)).toEqual(projectBefore);
       expect(snapshotProcessTree(userHome)).toEqual(homeBefore);
 
       for (const args of [
         ["inbox", "contract", "--json", "unexpected"],
         ["inbox", "contract", "--json", "--unknown"],
+        ["inbox", "contract", "--action", "inbox.not-real", "--json"],
       ] as const) {
         const malformed = spawnSync(process.execPath, [cliPath, ...args], {
           cwd: project,
@@ -447,6 +514,32 @@ describe("built CLI main-module guard", () => {
         expect.objectContaining({ kind: "commit" }),
         expect.objectContaining({ kind: "external" }),
       ]));
+      const focused = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "contract", "--action", "relay.draft.save", "--json"],
+        { cwd: project, encoding: "utf8", env: environment },
+      );
+      expect(focused.status, focused.stderr).toBe(0);
+      expect(Buffer.byteLength(focused.stdout, "utf8")).toBeLessThanOrEqual(32 * 1024);
+      expect(Buffer.byteLength(focused.stdout, "utf8"))
+        .toBeLessThan(Buffer.byteLength(resolved.stdout, "utf8"));
+      expect(JSON.parse(focused.stdout)).toMatchObject({
+        schemaVersion: 1,
+        command: "relay.contract",
+        mode: "read",
+        ok: true,
+        data: {
+          action: "relay.draft.save",
+          commands: {
+            preview: { usage: "mex relay draft save <request-file> --json" },
+            apply: { usage: "mex relay draft save --apply <preview-envelope> --json" },
+          },
+          requestFile: { schema: { $defs: expect.any(Object) } },
+        },
+      });
+      const focusedData = JSON.parse(focused.stdout).data;
+      expect(focusedData).not.toHaveProperty("catalog");
+      expect(JSON.stringify(focusedData.requestFile.schema)).not.toContain("previewEnvelope");
       expect(snapshotProcessTree(project)).toEqual(beforeProject);
       expect(snapshotProcessTree(userHome)).toEqual(beforeHome);
 
@@ -458,6 +551,20 @@ describe("built CLI main-module guard", () => {
       expect(malformed.status).toBe(2);
       expect(malformed.stderr).toBe("");
       expect(JSON.parse(malformed.stdout)).toMatchObject({
+        command: "relay.contract",
+        mode: "read",
+        ok: false,
+        problem: { code: "INVALID_REQUEST" },
+      });
+
+      const invalidSelector = spawnSync(
+        process.execPath,
+        [cliPath, "relay", "contract", "--action", "relay.not-real", "--json"],
+        { cwd: project, encoding: "utf8", env: environment },
+      );
+      expect(invalidSelector.status).toBe(2);
+      expect(invalidSelector.stderr).toBe("");
+      expect(JSON.parse(invalidSelector.stdout)).toMatchObject({
         command: "relay.contract",
         mode: "read",
         ok: false,

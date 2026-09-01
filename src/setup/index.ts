@@ -15,6 +15,13 @@ import {
 import { saveAiTools, ensureScaffoldIdentity } from "../config.js";
 import { isCliAvailable } from "../cli-tools.js";
 import { captureGroundingBaselines } from "../graph/runtime.js";
+import { VERSION } from "../version.js";
+import {
+  renderInstructionChangePreview,
+  syncAgentAssets,
+  type AgentAssetsReport,
+  type AgentSkillClient,
+} from "../agent-skills/index.js";
 import type { AiTool } from "../types.js";
 
 // ── Constants ──
@@ -50,12 +57,10 @@ const AGENT_MEMORY_FILES = [
 ];
 
 const TOOL_CONFIGS: Record<string, { src: string; dest: string }> = {
-  "1": { src: ".tool-configs/CLAUDE.md", dest: "CLAUDE.md" },
   "2": { src: ".tool-configs/.cursorrules", dest: ".cursorrules" },
   "3": { src: ".tool-configs/.windsurfrules", dest: ".windsurfrules" },
   "4": { src: ".tool-configs/copilot-instructions.md", dest: ".github/copilot-instructions.md" },
   "5": { src: ".tool-configs/opencode.json", dest: ".opencode/opencode.json" },
-  "6": { src: ".tool-configs/CLAUDE.md", dest: "AGENTS.md" },  // Codex reads AGENTS.md at root
 };
 
 // ── Helpers ──
@@ -201,15 +206,36 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
 
   // ── Step 3: Tool config selection ──
 
-  let selectedClaude = false;
+  let selectedTools: AiTool[] = [];
 
   const rl = createInterface({ input: stdin, output: stdout });
   try {
-    selectedClaude = await selectToolConfig(rl, projectRoot, dryRun);
+    selectedTools = await selectToolConfig(rl, projectRoot, dryRun);
   } finally {
     rl.close();
   }
   console.log();
+
+  const selectedAgentClients = selectedTools.filter(
+    (tool): tool is AgentSkillClient => tool === "claude" || tool === "codex",
+  );
+  if (selectedAgentClients.length > 0) {
+    header("Installing official MEX agent skills...");
+    console.log();
+    const agentAssets = installSetupAgentAssets({ projectRoot, selectedTools, dryRun })!;
+    renderAgentAssetsReport(agentAssets);
+    console.log();
+    const sessionSummary = `a new ${formatAgentClientList(agentAssets.clients)} session `
+      + "to guarantee the new skills and project instructions are loaded.";
+    if (agentAssets.conflicted) {
+      warn(`Resolve the reported conflicts and rerun setup or mex skills sync. Then start ${sessionSummary}`);
+    } else if (dryRun) {
+      info(`After applying this setup, start ${sessionSummary}`);
+    } else {
+      info(`Start ${sessionSummary}`);
+    }
+    console.log();
+  }
 
   // Mint a stable scaffold identity. Independent of tool selection so a setup
   // that picks no AI tool still gets a scaffold_id written to config.json.
@@ -273,7 +299,7 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
 
   const hasClaude = hasClaudeCli();
 
-  if (selectedClaude && hasClaude) {
+  if (selectedTools.includes("claude") && hasClaude) {
     header("Launching Claude Code to populate the scaffold...");
     console.log();
     info("An interactive Claude Code session will open with the population prompt.");
@@ -382,7 +408,7 @@ async function selectToolConfig(
   rl: ReturnType<typeof createInterface>,
   projectRoot: string,
   dryRun: boolean,
-): Promise<boolean> {
+): Promise<AiTool[]> {
   header("Which AI tool do you use?");
   console.log();
   console.log("  1) Claude Code");
@@ -397,16 +423,20 @@ async function selectToolConfig(
 
   const choice = (await rl.question("Choice [1-8] (default: 1): ")).trim() || "1";
 
-  let selectedClaude = false;
   const selectedTools: AiTool[] = [];
 
   const copyConfig = (key: string) => {
+    const tool = TOOL_CHOICE_MAP[key];
+    if (!tool) return;
+    selectedTools.push(tool);
+
+    // Claude Code and Codex receive a short managed instruction block plus
+    // packaged project skills. The reusable agent-assets installer owns those
+    // paths so setup never overwrites a hand-written root instruction file.
+    if (tool === "claude" || tool === "codex") return;
+
     const config = TOOL_CONFIGS[key];
     if (!config) return;
-
-    if (key === "1") selectedClaude = true;
-    const tool = TOOL_CHOICE_MAP[key];
-    if (tool) selectedTools.push(tool);
 
     const src = resolve(TEMPLATES_DIR, config.src);
     const dest = resolve(projectRoot, config.dest);
@@ -462,7 +492,60 @@ async function selectToolConfig(
     saveAiTools(mexDir, selectedTools);
   }
 
-  return selectedClaude;
+  return [...new Set(selectedTools)];
+}
+
+function renderAgentAssetsReport(report: AgentAssetsReport): void {
+  for (const action of report.actions) {
+    if (action.action === "conflict") continue;
+    if (action.action === "noop") info(action.message);
+    else ok(action.message);
+    if (report.dryRun) {
+      const preview = renderInstructionChangePreview(action);
+      if (preview !== null) console.log(preview);
+    }
+  }
+  for (const warning of report.warnings) {
+    warn(warning.message);
+    if (warning.resolution) info(warning.resolution);
+  }
+}
+
+export interface InstallSetupAgentAssetsOptions {
+  projectRoot: string;
+  selectedTools: readonly AiTool[];
+  dryRun?: boolean;
+  /** Injectable only for source tests; production resolves the published payload. */
+  packagedSkillsRoot?: string;
+  /** Injectable only for package-version upgrade tests. */
+  packageVersion?: string;
+}
+
+/** The noninteractive installation seam used by the normal setup flow. */
+export function installSetupAgentAssets(
+  options: InstallSetupAgentAssetsOptions,
+): AgentAssetsReport | null {
+  const clients = options.selectedTools.filter(
+    (tool): tool is AgentSkillClient => tool === "claude" || tool === "codex",
+  );
+  if (clients.length === 0) return null;
+  return syncAgentAssets({
+    projectRoot: options.projectRoot,
+    packageVersion: options.packageVersion ?? VERSION,
+    clients,
+    ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
+    ...(options.packagedSkillsRoot === undefined
+      ? {}
+      : { packagedSkillsRoot: options.packagedSkillsRoot }),
+  });
+}
+
+function formatAgentClientList(clients: readonly AgentSkillClient[]): string {
+  const labels = [...new Set(clients)].map((client) => (
+    client === "claude" ? "Claude Code" : "Codex"
+  ));
+  if (labels.length === 1) return labels[0]!;
+  return `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
 }
 
 function printPromptForManualPaste(prompt: string): void {
