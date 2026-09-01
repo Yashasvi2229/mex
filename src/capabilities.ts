@@ -2622,24 +2622,27 @@ async function inspectTeamAvailability(
         "Team workflows require .mex/config.json to be tracked at the current repository HEAD.",
       );
     }
-    // Compared by identity, not byte for byte. Git's `core.autocrlf` defaults
-    // to true on Windows: it stores LF and writes CRLF into the working tree,
-    // so on a cloned repository these differ by one byte per line while
-    // `git diff` is empty. Byte equality reported all eight Team capabilities
-    // as TEAM_SCAFFOLD_IDENTITY_CHANGED — "the working copy must match HEAD" —
-    // to every teammate who cloned, and never to the person who ran `mex setup`.
+    // Byte equality, deliberately: this attests the **whole** tracked config,
+    // not just its identity. A local edit to any field — `scaffold_name`, say —
+    // means teammates are reading something this checkout is not, and Team
+    // workflows are correctly unavailable until it is committed.
+    //
+    // This compares cleanly across platforms because `tryReadContainedArtifact`
+    // undoes Git's checkout line-ending conversion, so a CRLF working copy and
+    // its LF blob agree here. Comparing `scaffold_id` alone would also have
+    // survived that, and was tried — it silently dropped the attestation above,
+    // which `test/cli.test.ts` asserts and Windows could not have caught.
+    if (tracked.truncated || !Buffer.from(tracked.content).equals(Buffer.from(config.bytes))) {
+      return fixedReason(
+        "TEAM_SCAFFOLD_IDENTITY_CHANGED",
+        "Team workflows require the working .mex/config.json to match the current repository HEAD.",
+      );
+    }
     const scaffoldId = scaffoldIdentityOf(config.bytes);
     if (scaffoldId === null) {
       return fixedReason(
         "TEAM_SCAFFOLD_IDENTITY_MISSING",
         "Team workflows require one bounded scaffold identity in .mex/config.json.",
-      );
-    }
-    const trackedScaffoldId = tracked.truncated ? null : scaffoldIdentityOf(tracked.content);
-    if (trackedScaffoldId === null || trackedScaffoldId !== scaffoldId) {
-      return fixedReason(
-        "TEAM_SCAFFOLD_IDENTITY_CHANGED",
-        "Team workflows require the working .mex/config.json to match the current repository HEAD.",
       );
     }
 

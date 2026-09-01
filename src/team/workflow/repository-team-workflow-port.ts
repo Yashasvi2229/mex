@@ -4268,17 +4268,20 @@ export async function createRepositoryTeamWorkflowPort(
     path: ".mex/config.json",
     maxBytes: 64 * 1024,
   });
-  // Compared by identity, not byte for byte. Git's `core.autocrlf` defaults to
-  // true on Windows: it stores LF and writes CRLF into the working tree, so on
-  // a freshly cloned repository these two differ by one byte per line while
-  // `git diff` is empty and Git itself considers the file unmodified. Byte
-  // equality therefore rejected every teammate who cloned, and never the person
-  // who ran `mex setup`, whose working copy Git never rewrote. What this has to
-  // establish is that the scaffold identity is committed.
-  const trackedScaffoldId = trackedConfig === null || trackedConfig.truncated
-    ? null
-    : scaffoldIdentityOf(trackedConfig.content);
-  if (trackedScaffoldId === null || trackedScaffoldId !== scaffoldIdentityOf(config.bytes)) {
+  // Byte equality, deliberately: this attests the whole tracked config, not
+  // just its identity, and a local edit to any field means teammates are
+  // reading something this checkout is not.
+  //
+  // It compares cleanly across platforms because `tryReadContainedArtifact`
+  // undoes Git's checkout line-ending conversion — without that, `core.autocrlf`
+  // (true by default on Windows) made the working copy and its blob differ by
+  // one byte per line on a tree `git diff` calls clean, and the Hub refused to
+  // start for everyone who cloned.
+  if (
+    trackedConfig === null
+    || trackedConfig.truncated
+    || !Buffer.from(trackedConfig.content).equals(Buffer.from(config.bytes))
+  ) {
     throw missingScaffoldIdentity();
   }
 
