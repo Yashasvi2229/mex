@@ -115,7 +115,11 @@ export function readContainedArtifact(
         path,
       );
     }
-    return { bytes, revision: revisionOf(bytes), canonicalPath };
+    // Git's checkout conversion is undone here, at the one boundary every
+    // canonical artifact is read through, so that parsing, the canonical-form
+    // assertion and the revision hash all see the bytes the author committed.
+    const canonicalBytes = undoCheckoutLineEndings(bytes);
+    return { bytes: canonicalBytes, revision: revisionOf(canonicalBytes), canonicalPath };
   } catch (error) {
     if (isNotFound(error)) {
       throw artifactError("NOT_FOUND", "Artifact not found", `Artifact ${path} does not exist.`, path);
@@ -878,6 +882,72 @@ function unsafePath(path: RepoRelativePath, detail: string): Error {
 
 function asBytes(value: string | Uint8Array): Uint8Array {
   return typeof value === "string" ? Buffer.from(value, "utf8") : value;
+}
+
+const CARRIAGE_RETURN = 0x0d;
+const LINE_FEED = 0x0a;
+
+/**
+ * Undo Git's checkout line-ending conversion on a canonical artifact.
+ *
+ * ## Why this exists
+ *
+ * Every `.mex/**` artifact is a byte-exact canonical document: it is written
+ * with `\n`, its parser refuses any `\r`, and its revision is the SHA-256 of
+ * its bytes. Git does not honour any of that. `core.autocrlf` defaults to true
+ * on Windows, so a repository authored on macOS or Linux is checked out with
+ * CRLF, and the result is a working tree that Git reports as **clean** while
+ * every artifact in it fails to parse:
+ *
+ *     mex member list  →  VALIDATION_FAILED: Artifact must use LF line endings.
+ *
+ * Measured on a real cross-platform repository: the Hub started, and Members,
+ * Activity and the Inbox were all empty or in error, because the Mac author's
+ * artifacts could not be read at all on the Windows clone.
+ *
+ * ## Why a `.gitattributes` is not the fix on its own
+ *
+ * The obvious answer is `.mex/** text eol=lf`, and it is worth shipping — but
+ * it is prevention, not a fix, and it does not reach the repositories that
+ * already exist. The repository this was diagnosed on **already had that exact
+ * line**, and was still entirely CRLF on disk: an attribute added after a
+ * checkout does not rewrite the working tree, and because Git normalizes on
+ * comparison, `git status` stays clean and nothing ever tells the user. A tool
+ * that only works when every clone was made in the right order is not portable.
+ *
+ * ## Why normalizing here does not weaken the canonical guarantee
+ *
+ * The same reasoning as the scaffold-identity check: **Git's line-ending
+ * conversion is a working-tree presentation, not a change to the content.** The
+ * canonical form is a property of the committed artifact, and undoing the
+ * conversion at the read boundary is what lets every platform see that one
+ * canonical form. What mex writes is unchanged — still `\n`, still canonical —
+ * and the parsers still reject genuinely non-canonical input, including a lone
+ * `\r`, which Git never produces and which this deliberately leaves alone.
+ *
+ * It also removes a divergence that was there before any parse: `revisionOf` is
+ * the hash of the exact bytes, so the same artifact hashed to **different
+ * revisions on Windows and macOS**. Revisions travel between machines inside
+ * other artifacts. They now agree.
+ *
+ * Byte-level on purpose: `0x0D` and `0x0A` cannot occur inside a multi-byte
+ * UTF-8 sequence, so this is safe to do before decoding, and it runs before the
+ * artifact is measured against its size bound rather than after.
+ */
+function undoCheckoutLineEndings(bytes: Uint8Array): Uint8Array {
+  let converted = 0;
+  for (let index = 0; index + 1 < bytes.length; index += 1) {
+    if (bytes[index] === CARRIAGE_RETURN && bytes[index + 1] === LINE_FEED) converted += 1;
+  }
+  if (converted === 0) return bytes;
+  const canonical = new Uint8Array(bytes.length - converted);
+  let cursor = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] === CARRIAGE_RETURN && bytes[index + 1] === LINE_FEED) continue;
+    canonical[cursor] = bytes[index]!;
+    cursor += 1;
+  }
+  return canonical;
 }
 
 function isErrno(error: unknown, code: string): boolean {
