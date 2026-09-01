@@ -425,25 +425,42 @@
 }
 
 /*
- * The one outbound link in the Hub. It sits with the repository facts because
- * that strip is already the bar's secondary information, but it is styled a
- * step quieter than they are and only reaches full contrast on hover — it is an
- * invitation, not a fact about this repository.
+ * The one outbound link in the Hub, and the only control in this bar — the
+ * repository facts beside it are readouts. It is drawn as a button so that
+ * difference is visible before it is read, borrowing the pill's metrics so it
+ * sits on the same optical line, with a squarer radius so it does not read as
+ * one more status.
+ *
+ * The mark keeps Discord's own colour and the label does not: the glyph is what
+ * identifies the destination, while a fully branded button would outrank the
+ * repository state, which is what the bar is actually for.
  */
 .discordLink {
-  display: flex;
-  gap: 5px;
+  display: inline-flex;
+  min-height: 21px;
+  gap: 6px;
   align-items: center;
+  padding: 2px 9px;
   color: var(--muted-foreground);
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
   font-size: 10.5px;
+  font-weight: 520;
   text-decoration: none;
   white-space: nowrap;
-  transition: color 120ms ease;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.discordLink svg {
+  color: var(--discord);
 }
 
 .discordLink:hover,
 .discordLink:focus-visible {
   color: var(--foreground);
+  background: color-mix(in oklch, var(--discord) 12%, var(--muted));
+  border-color: color-mix(in oklch, var(--discord) 42%, transparent);
 }
 
 .mono {
@@ -581,8 +598,14 @@
   /*
    * The mark alone below this width. The repository facts are what the bar is
    * for, so the invitation gives up its label first rather than crowding them —
-   * the `title` still names it, and so does the accessible name.
+   * the `title` still names it, and so does the accessible name. The button
+   * keeps its box and squares up around the glyph rather than collapsing to a
+   * bare icon, so it still reads as something to press.
    */
+  .discordLink {
+    padding: 2px 6px;
+  }
+
   .discordLink > span {
     display: none;
   }
