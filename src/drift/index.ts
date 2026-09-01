@@ -24,7 +24,7 @@ import {
   type GroundingRuntime,
   type ReadOnlyGroundingRuntimeResult,
 } from "../graph/runtime.js";
-import { findMexAnchors } from "../markdown.js";
+import { extractGroundings, findMexAnchors } from "../markdown.js";
 import type { GraphStatus } from "../team/contracts/graph.js";
 
 let graphUpgradeNudgeShown = false;
@@ -109,10 +109,15 @@ export async function runDriftCheckWithGraphStatus(
   const pendingGroundingIssues: DriftIssue[] = [];
   const pendingGroundingIssueCounts: Array<[string, number]> = [];
   const usesInjectedGroundingRuntime = opts.groundingRuntimeLoader !== undefined;
+  // Read the key the same way the checker and the writer do. Asking only for a
+  // root `grounds_to` missed every migrated scaffold, where §13.4 has moved the
+  // key under the `mex` map — so `groundingRelevant` came out false, the
+  // grounding runtime was never opened, and the checker that would have found
+  // the groundings was never constructed. `extractGroundings` resolves the path.
   const hasGroundings = scaffoldFiles.some((filePath) => {
-    const groundsTo = parseFrontmatter(filePath)?.grounds_to;
-    if (Array.isArray(groundsTo) && groundsTo.length > 0) return true;
-    try { return findMexAnchors(readFileSync(filePath, "utf-8")).length > 0; } catch { return false; }
+    let content: string;
+    try { content = readFileSync(filePath, "utf-8"); } catch { return false; }
+    return extractGroundings(content).length > 0 || findMexAnchors(content).length > 0;
   });
   const needsGroundingMigration = !hasGroundings && scaffoldFiles.some(isPopulatedGroundingCandidate);
   const groundingRelevant = hasGroundings || needsGroundingMigration;

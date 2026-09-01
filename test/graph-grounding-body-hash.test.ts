@@ -170,6 +170,32 @@ describe("the grounding body hash is committed to Markdown", () => {
     expect(await groundingIssueCodes(config)).toEqual(["GROUNDING_DRIFT"]);
   }, 60_000);
 
+  it("backfills a migrated file-level entity, whose grounding lives under the mex map", async () => {
+    // The population that surfaced this: a scaffold `wiki migrate` has adopted
+    // keeps its groundings under `mex.grounds_to` rather than at the root, and
+    // migration's own `backfill` only adds a body hash when it is handed a
+    // graph — which the wiki CLI does not do. So the capture pass has to reach
+    // this shape too, and it has to splice the one key without disturbing the
+    // rest of the map.
+    const { root, source, scaffold, config } = fixture();
+    writeFileSync(
+      scaffold,
+      "---\nname: architecture\nmex:\n  id: mx_01ARZ3NDEKTSV4RRFFQ69G5FAA\n  type: pattern\n---\n\n# Architecture\n",
+    );
+    await buildGraph(root);
+    await authorGrounding(config, scaffold, "calculateOrderTotal");
+    await captureBaselines(config, scaffold);
+
+    const after = readFileSync(scaffold, "utf-8");
+    expect(after).toContain("mex:");
+    expect(after).toContain("id: mx_01ARZ3NDEKTSV4RRFFQ69G5FAA");
+    expect(extractGroundings(after)[0]!.bodyHash).toBeTypeOf("string");
+
+    writeFileSync(source, EDITED);
+    await rebuildGraphFromScratch(root);
+    expect(await groundingIssueCodes(config)).toEqual(["GROUNDING_DRIFT"]);
+  }, 60_000);
+
   it("does not overwrite a committed hash that has drifted, which would erase the finding", async () => {
     const { root, source, scaffold, config } = fixture();
     await buildGraph(root);
