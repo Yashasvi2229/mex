@@ -79,10 +79,20 @@ async function authorGrounding(
   }
 }
 
+/**
+ * Capture in the posture `mex ground` and setup use.
+ *
+ * `captureGroundingBaselines` normalizes a missing `updateFingerprints` to
+ * `false` before it reaches `refreshGroundingBaselines`, so passing it
+ * explicitly is what makes these tests exercise the real command path rather
+ * than the looser default a direct caller gets. It matters: `false` is the
+ * read-only posture that must never overwrite a hash that has drifted, while
+ * `mex sync` passes `true` after an agent pass and re-baselines deliberately.
+ */
 async function captureBaselines(config: MexConfig, scaffold: string): Promise<void> {
   const runtime = await loadGroundingRuntime(config);
   try {
-    refreshGroundingBaselines(config, [scaffold], runtime!);
+    refreshGroundingBaselines(config, [scaffold], runtime!, { updateFingerprints: false });
   } finally {
     runtime!.close();
   }

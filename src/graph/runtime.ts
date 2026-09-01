@@ -443,7 +443,6 @@ export function refreshGroundingBaselines(
     ]);
     for (const nodeId of nodeIds) {
       const grounding = groundingByNode.get(nodeId);
-      let rebaselined = false;
       const fingerprint = runtime.reconciler.getFingerprint(nodeId);
       if (!fingerprint || !runtime.graph.getNode(nodeId)) {
         skipped += 1;
@@ -458,7 +457,6 @@ export function refreshGroundingBaselines(
           continue;
         }
         grounding.fingerprint = serialized;
-        rebaselined = true;
         dirty = true;
       }
       const bodyHash = saveCurrentBaseline(config, scaffoldFile, nodeId, serialized, runtime);
@@ -476,14 +474,26 @@ export function refreshGroundingBaselines(
       //    nothing new — the `_mex_grounded_source` row written a line above
       //    already records exactly this value, from exactly this moment. It
       //    only makes it durable.
-      //  - **re-baseline**, when the fingerprint was just updated under an
-      //    explicit `updateFingerprints`. The grounding is being re-pointed at
-      //    the current code by an authorized caller, so both signals move.
+      //  - **re-baseline**, when the caller has not forbidden updates. That is
+      //    the post-authoring routine `mex sync` runs after an agent repairs
+      //    the prose: the entity now describes the current code, so the
+      //    baseline has to move with it or drift never clears.
       //
-      // A hash that is merely *different* is left alone, deliberately. That
-      // difference is drift — it is the finding — and quietly overwriting it
-      // here would erase the evidence and report `fresh` on the next run.
-      if (grounding && (grounding.bodyHash === undefined || rebaselined) && grounding.bodyHash !== bodyHash) {
+      // `updateFingerprints === false` — what `mex ground` and setup pass — is
+      // the read-only posture, and there a hash that merely *differs* is left
+      // alone. That difference is drift, it is the finding, and overwriting it
+      // would erase the evidence and report `fresh` on the next run.
+      //
+      // **The authorization is the caller's flag, never whether the
+      // fingerprint moved.** Gating this on a fingerprint change was the first
+      // attempt and it was wrong in the one case that matters: editing a
+      // constant changes the body and leaves the fingerprint identical, by
+      // construction, which is the entire reason a body hash exists. The
+      // re-baseline then never fired and drift was permanent. Using the
+      // identity signal to decide a change question is the coupling this field
+      // exists to break — including here, in the writer.
+      const mayRebaseline = options.updateFingerprints !== false;
+      if (grounding && (grounding.bodyHash === undefined || mayRebaseline) && grounding.bodyHash !== bodyHash) {
         grounding.bodyHash = bodyHash;
         dirty = true;
       }
