@@ -65,6 +65,17 @@ export function extractGroundings(content: string): Grounding[] {
   return isGroundingArray(value) ? value : [];
 }
 
+/**
+ * Accept a `grounds_to` value.
+ *
+ * The check names the two required keys and deliberately does not enumerate the
+ * optional ones. That is what lets `bodyHash` — and the wiki lane's `file`,
+ * `commit`, `verifiedAt` and `reason` — survive a read/write cycle: the parsed
+ * entries are handed to {@link writeGroundings} unchanged, so every key the
+ * author put in the file is rendered back out. Tightening this into an
+ * exact-shape check would silently strip whichever keys this lane's type had
+ * not yet heard of, which is the failure it exists to avoid.
+ */
 export function isGroundingArray(value: unknown): value is Grounding[] {
   return Array.isArray(value) && value.every((entry) => {
     if (!entry || typeof entry !== "object") return false;

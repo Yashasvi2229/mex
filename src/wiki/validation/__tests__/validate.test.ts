@@ -387,9 +387,30 @@ Body with an anchor: [the code](mex://function:0123456789abcdef).
   it("degrades to unverified with no code graph, rather than failing", () => {
     const report = validateScaffold({ scaffoldRoot: scaffold({ "context/g.md": grounded }) });
     expect(report.groundingsUnverified).toBe(true);
+    expect(report.codeGraphAvailable).toBe(false);
     const found = report.diagnostics.map((entry) => entry.code);
     expect(found).not.toContain("GROUNDING_MISSING");
     expect(found).not.toContain("GROUNDING_UNRESOLVED");
+  });
+
+  it("separates the two causes of unverified, because they send a reader to different places", () => {
+    // `groundingsUnverified` means "nothing produced a verdict", and there are
+    // two ways to get there. A graph that is present and fresh, holding the
+    // node but no fingerprint to compare the committed one against, reaches it
+    // just as a missing graph does — and telling that reader to go and look at
+    // their code graph sends them to inspect something with nothing wrong.
+    const presentButUncomparable: GroundingGraph = {
+      getNode: () => ({ id: "function:deadbeefdeadbeef", bodyHash: null, filePath: "src/a.ts", startLine: 1, endLine: 2 }),
+      getFingerprint: () => null,
+      reconcile: () => null,
+      getBaselineSource: () => null,
+    } as unknown as GroundingGraph;
+    const report = validateScaffold({
+      scaffoldRoot: scaffold({ "context/g.md": grounded }),
+      graph: presentButUncomparable,
+    });
+    expect(report.groundingsUnverified).toBe(true);
+    expect(report.codeGraphAvailable).toBe(true);
   });
 
   it("reports a grounding with no body hash, which is otherwise blind to drift", () => {
@@ -398,6 +419,22 @@ Body with an anchor: [the code](mex://function:0123456789abcdef).
     expect(blind).toBeDefined();
     expect(blind?.message).toContain("body hash");
     expect(blind?.severity).toBe("warning");
+  });
+
+  it("tells that grounding what is actually missing, not what the shared code's remediation says", () => {
+    // `MALFORMED_GROUNDING` is one code over six problems, and its registry
+    // remediation is written for a missing node id or fingerprint. This
+    // grounding has both. Handing a reader that text sends them to look for a
+    // field already in their file — measured on a real scaffold where all
+    // sixteen warnings carried advice that applied to none of them.
+    const report = validateScaffold({ scaffoldRoot: scaffold({ "context/g.md": grounded }) });
+    const blind = report.diagnostics.find(
+      (entry) => entry.code === "MALFORMED_GROUNDING" && entry.message.includes("body hash"),
+    );
+    expect(blind?.remediation).not.toContain("needs both a code-graph node id and a fingerprint");
+    expect(blind?.remediation).toContain("body hash");
+    // And it names something the reader can actually run.
+    expect(blind?.remediation).toMatch(/mex graph ground|mex sync/);
   });
 
   it("reports a node the graph no longer has", () => {

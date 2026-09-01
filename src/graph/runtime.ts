@@ -261,6 +261,22 @@ export function findChangedSourceFiles(projectRoot: string, db: SqliteDatabase):
   return [...new Set(changed)].sort();
 }
 
+/**
+ * Move a grounding's body hash onto the node it was just rebound to.
+ *
+ * Only called on a confirmed rebind, where identity has already been
+ * re-established by fingerprint and the entity now points at a different node.
+ * The old hash describes a symbol this grounding no longer names, so carrying
+ * it forward would report drift on every rename — a symbol's name is part of
+ * its body. Dropping the key instead would be worse: the grounding would fall
+ * back to the structural comparator and stop detecting content drift for good.
+ *
+ * A node the graph cannot produce a hash for leaves the grounding as it was.
+ */
+function rebindBodyHash(grounding: Grounding, bodyHash: string | null): void {
+  if (bodyHash !== null) grounding.bodyHash = bodyHash;
+}
+
 /** Persist only high-confidence MOVED repairs. AMBIGUOUS/GONE remain for the agent. */
 export function persistMovedGroundings(
   config: MexConfig,
@@ -281,7 +297,7 @@ export function persistMovedGroundings(
         grounding.node = aliasedNode.id;
         const fingerprint = runtime.reconciler.getFingerprint(aliasedNode.id);
         if (fingerprint) grounding.fingerprint = serializeFingerprint(fingerprint);
-        saveCurrentBaseline(config, scaffoldFile, grounding.node, grounding.fingerprint, runtime);
+        rebindBodyHash(grounding, saveCurrentBaseline(config, scaffoldFile, grounding.node, grounding.fingerprint, runtime));
         runtime.fingerprints.deleteGroundedSource(scaffoldFile, oldId);
         dirty = true;
         moved += 1;
@@ -297,7 +313,7 @@ export function persistMovedGroundings(
       grounding.node = resolution.nodeId;
       const fingerprint = runtime.reconciler.getFingerprint(resolution.nodeId);
       if (fingerprint) grounding.fingerprint = serializeFingerprint(fingerprint);
-      saveCurrentBaseline(config, scaffoldFile, grounding.node, grounding.fingerprint, runtime);
+      rebindBodyHash(grounding, saveCurrentBaseline(config, scaffoldFile, grounding.node, grounding.fingerprint, runtime));
       runtime.fingerprints.deleteGroundedSource(scaffoldFile, oldId);
       dirty = true;
       moved += 1;
@@ -443,11 +459,43 @@ export function refreshGroundingBaselines(
         grounding.fingerprint = serialized;
         dirty = true;
       }
-      if (saveCurrentBaseline(config, scaffoldFile, nodeId, serialized, runtime)) {
-        captured += 1;
-      } else {
+      const bodyHash = saveCurrentBaseline(config, scaffoldFile, nodeId, serialized, runtime);
+      if (bodyHash === null) {
         skipped += 1;
         options.warn?.(`Skipped grounding baseline for non-body node ${nodeId} in ${scaffoldFile}.`);
+        continue;
+      }
+      captured += 1;
+
+      // Commit the change signal alongside the identity signal, so it survives
+      // a `graph rebuild` and travels to a teammate who clones. Two cases only:
+      //
+      //  - **backfill**, when Markdown carries no hash at all. This asserts
+      //    nothing new — the `_mex_grounded_source` row written a line above
+      //    already records exactly this value, from exactly this moment. It
+      //    only makes it durable.
+      //  - **re-baseline**, when the caller has not forbidden updates. That is
+      //    the post-authoring routine `mex sync` runs after an agent repairs
+      //    the prose: the entity now describes the current code, so the
+      //    baseline has to move with it or drift never clears.
+      //
+      // `updateFingerprints === false` — what `mex ground` and setup pass — is
+      // the read-only posture, and there a hash that merely *differs* is left
+      // alone. That difference is drift, it is the finding, and overwriting it
+      // would erase the evidence and report `fresh` on the next run.
+      //
+      // **The authorization is the caller's flag, never whether the
+      // fingerprint moved.** Gating this on a fingerprint change was the first
+      // attempt and it was wrong in the one case that matters: editing a
+      // constant changes the body and leaves the fingerprint identical, by
+      // construction, which is the entire reason a body hash exists. The
+      // re-baseline then never fired and drift was permanent. Using the
+      // identity signal to decide a change question is the coupling this field
+      // exists to break — including here, in the writer.
+      const mayRebaseline = options.updateFingerprints !== false;
+      if (grounding && (grounding.bodyHash === undefined || mayRebaseline) && grounding.bodyHash !== bodyHash) {
+        grounding.bodyHash = bodyHash;
+        dirty = true;
       }
     }
     if (dirty) writeFileSync(filePath, writeGroundings(content, groundings), "utf-8");
@@ -473,15 +521,30 @@ export function groundingPromptContext(
   };
 }
 
+/**
+ * Cache the node's current body beside its hash, and hand the hash back.
+ *
+ * The row it writes into `_mex_grounded_source` is a **cache of a canonical
+ * value, not a second store of a fact.** `.mex/graph.db` is gitignored and
+ * disposable by invariant — `mex graph rebuild` is offered as a routine repair
+ * — so anything held only here is gone on the next rebuild and never reaches a
+ * teammate who clones. The durable copy of `bodyHash` is the one the callers
+ * write into the Markdown grounding, which is why this returns it rather than a
+ * bare boolean. Keep the row: it also carries the body *text*, which drift
+ * review needs for a diff and Markdown has no business holding.
+ *
+ * Returns the body hash on success, or null for a node the graph does not hold
+ * or that has no body — the same condition the boolean used to report.
+ */
 function saveCurrentBaseline(
   config: MexConfig,
   scaffoldFile: string,
   nodeId: string,
   fingerprint: string,
   runtime: GroundingRuntime,
-): boolean {
+): string | null {
   const node = runtime.graph.getNode(nodeId);
-  if (!node?.bodyHash) return false;
+  if (!node?.bodyHash) return null;
   const source: GroundedSource = {
     scaffoldFile,
     nodeId: node.id,
@@ -490,7 +553,7 @@ function saveCurrentBaseline(
     fingerprint,
   };
   runtime.fingerprints.saveGroundedSource(source);
-  return true;
+  return node.bodyHash;
 }
 
 function readNodeBody(root: string, filePath: string, startLine: number, endLine: number): string {
