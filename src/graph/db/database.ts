@@ -47,6 +47,33 @@ function configureReadOnlyConnection(db: SqliteDatabase): void {
 }
 
 /**
+ * Probe for FTS5 support and fail fast with an actionable message if it's missing.
+ *
+ * `node:sqlite`'s bundled SQLite is not guaranteed to be built with FTS5 on every
+ * Node build/version, even within the range `package.json`'s `engines` documents
+ * as supported (issue #110). Without this check, the first FTS5 statement in
+ * `schema.sql` throws SQLite's raw `no such module: fts5`, which reads like a mex
+ * bug rather than a Node/SQLite build limitation. Create-and-drop a throwaway
+ * virtual table rather than querying `pragma_module_list`, since that pragma is
+ * unavailable on some `node:sqlite` builds too and FTS5 usage is what actually
+ * needs to work.
+ */
+export function assertFts5Available(db: SqliteDatabase): void {
+  try {
+    db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS __mex_fts5_probe USING fts5(x)");
+    db.exec("DROP TABLE IF EXISTS __mex_fts5_probe");
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (!/fts5/i.test(msg)) throw error; // a different problem; surface it unchanged
+    throw new Error(
+      `Your Node (${process.version}) has SQLite built without FTS5 support, which mex's code graph ` +
+        "requires. Try a different Node build/version - see COMPATIBILITY.md for which versions are " +
+        `known to work. Underlying error: ${msg}`,
+    );
+  }
+}
+
+/**
  * Open the graph DB at `dbPath`, creating the file + parent dir and applying the
  * schema when absent. Idempotent: re-opening an existing DB re-applies PRAGMAs
  * and re-asserts the schema (all statements are `IF NOT EXISTS`).
@@ -66,6 +93,7 @@ export function openGraphDatabase(
   }
   const db = openSqlite(dbPath);
   configureConnection(db);
+  assertFts5Available(db);
 
   const schema = readFileSync(schemaPath(), "utf-8");
   const hasVersions = tableExists(db, "schema_versions");
