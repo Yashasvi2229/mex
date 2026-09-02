@@ -64,6 +64,22 @@ describe("events", () => {
     expect(readEvents(config)).toHaveLength(1);
   });
 
+  it("bounds legacy timeline projection to the newest 10,000 records", () => {
+    mkdirSync(join(tmpDir, ".mex/events"), { recursive: true });
+    const lines = Array.from({ length: 10_001 }, (_, index) => JSON.stringify({
+      timestamp: "2026-05-14T00:00:00.000Z",
+      kind: "note",
+      message: String(index),
+      files: [],
+    }));
+    writeFileSync(join(tmpDir, ".mex/events/decisions.jsonl"), `${lines.join("\n")}\n`);
+
+    const events = readEvents(config);
+    expect(events).toHaveLength(10_000);
+    expect(events[0]?.message).toBe("1");
+    expect(events.at(-1)?.message).toBe("10000");
+  });
+
   it("timeline can emit JSON", async () => {
     await runLog(config, "hello", {});
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});

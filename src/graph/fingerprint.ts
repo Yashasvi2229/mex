@@ -112,7 +112,8 @@ export function bandHashes(fingerprint: Fingerprint): string[] {
 }
 
 /**
- * Schema-v3 LSH band hashes: the first 8 bytes of the same per-band sha256
+ * Compact schema-v4 LSH band hashes (retained from main-v3): the first 8 bytes
+ * of the same per-band sha256
  * that {@link bandHashes} hex-encodes, as a signed 64-bit integer for compact
  * INTEGER storage. Derivation input is identical, so two fingerprints share an
  * int64 band hash exactly when they share the hex band hash (modulo a ~2^-64
@@ -133,14 +134,14 @@ export function bandHashInts(fingerprint: Fingerprint): bigint[] {
   });
 }
 
-/** Encode a K=64 uint32 minhash as a 256-byte big-endian BLOB (schema v3). */
+/** Encode a K=64 uint32 minhash as a 256-byte big-endian BLOB (schema v4). */
 export function encodeMinhash(minhash: readonly number[]): Buffer {
   const buffer = Buffer.allocUnsafe(minhash.length * 4);
   minhash.forEach((value, index) => buffer.writeUInt32BE(value, index * 4));
   return buffer;
 }
 
-/** Decode a schema-v3 minhash BLOB back to the uint32 array it encodes. */
+/** Decode a schema-v4 minhash BLOB back to the uint32 array it encodes. */
 export function decodeMinhash(blob: Uint8Array): number[] {
   const buffer = Buffer.isBuffer(blob) ? blob : Buffer.from(blob.buffer, blob.byteOffset, blob.byteLength);
   const values: number[] = [];

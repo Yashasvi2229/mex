@@ -11,6 +11,11 @@ import { captureGroundingBaselines, loadGroundingRuntime, persistMovedGroundings
 
 const INTERACTIVE_AI_TIMEOUT_MS = 15 * 60_000;
 
+export interface RunToolInteractiveOptions {
+  /** Sync keeps its bounded default; setup passes null for a user-driven session. */
+  timeoutMs?: number | null;
+}
+
 function askUser(question: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => {
@@ -21,7 +26,12 @@ function askUser(question: string): Promise<string> {
   });
 }
 
-export function runToolInteractive(tool: AiTool, brief: string, cwd: string): boolean {
+export function runToolInteractive(
+  tool: AiTool,
+  brief: string,
+  cwd: string,
+  options: RunToolInteractiveOptions = {},
+): boolean {
   const meta = AI_TOOLS[tool];
   if (!meta.cli) return false;
 
@@ -32,7 +42,9 @@ export function runToolInteractive(tool: AiTool, brief: string, cwd: string): bo
   const result = crossSpawn.sync(meta.cli, args, {
     cwd,
     stdio: "inherit",
-    timeout: INTERACTIVE_AI_TIMEOUT_MS,
+    ...(options.timeoutMs === null
+      ? {}
+      : { timeout: options.timeoutMs ?? INTERACTIVE_AI_TIMEOUT_MS }),
   });
   // A spawn failure (ENOENT, etc.) sets `error` and leaves `status` null — don't
   // mistake that for success, or launch problems get silently swallowed.

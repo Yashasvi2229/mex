@@ -14,8 +14,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MexConfig } from "../src/types.js";
 import { createGraphEngine } from "../src/graph/engine-impl.js";
 import { openSqlite } from "../src/graph/db/sqlite.js";
-import { loadGroundingRuntime } from "../src/graph/runtime.js";
+import { loadReadOnlyGroundingRuntime } from "../src/graph/runtime.js";
 import { runGraphRepair } from "../src/graph/cli-graph.js";
+import {
+  GRAPH_SNAPSHOT_METADATA_KEY,
+  parseGraphSnapshot,
+  serializeGraphSnapshot,
+} from "../src/graph/snapshot.js";
 
 const roots: string[] = [];
 
@@ -90,15 +95,15 @@ describe("read-only grounding runtime (#140 observation 2)", () => {
     engine.close();
     const before = createHash("sha256").update(readFileSync(dbPath)).digest("hex");
 
-    const fresh = await loadGroundingRuntime(config, { readOnly: true });
-    expect(fresh).not.toBeNull();
-    expect(fresh!.staleSourceFiles).toBe(0);
-    fresh!.close();
+    const fresh = await loadReadOnlyGroundingRuntime(config, { loadRuntime: true });
+    expect(fresh.graphStatus.status).toBe("fresh");
+    expect(fresh.runtime).not.toBeNull();
+    fresh.runtime!.close();
 
     writeFileSync(source, readFileSync(source, "utf-8").replace(": 12", ": 15"));
-    const stale = await loadGroundingRuntime(config, { readOnly: true });
-    expect(stale!.staleSourceFiles).toBe(1);
-    stale!.close();
+    const stale = await loadReadOnlyGroundingRuntime(config, { loadRuntime: true });
+    expect(stale.graphStatus.status).toBe("stale");
+    expect(stale.runtime).toBeNull();
 
     const after = createHash("sha256").update(readFileSync(dbPath)).digest("hex");
     expect(after).toBe(before);
@@ -132,7 +137,7 @@ describe("mex graph repair (#140 observation 3)", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       expect(await runGraphRepair(root)).toBe(0);
-      expect(log.mock.calls.flat().join("\n")).toContain("integrity ok");
+      expect(log.mock.calls.flat().join("\n")).toContain("Graph store repaired");
     } finally {
       log.mockRestore();
     }
@@ -154,13 +159,16 @@ describe("mex graph repair (#140 observation 3)", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       expect(await runGraphRepair(root)).toBe(1);
+      const rendered = error.mock.calls.flat().join("\n");
+      expect(rendered).toContain("mex graph rebuild");
+      expect(rendered).not.toContain(root);
     } finally {
       error.mockRestore();
     }
   });
 });
 
-describe("schema v3 fingerprint re-encode (#140 storage follow-up)", () => {
+describe("schema v4 fingerprint re-encode (#140 storage follow-up)", () => {
   it("migrates a v2-encoded store losslessly without marking rebuild-required", async () => {
     const { root, dbPath } = fixture("mex-140-v3-migrate-");
     const engine = createGraphEngine({ rootDir: root });
@@ -169,7 +177,13 @@ describe("schema v3 fingerprint re-encode (#140 storage follow-up)", () => {
 
     const { FingerprintStore } = await import("../src/graph/fingerprint-store.js");
     const { bandHashes, decodeMinhash } = await import("../src/graph/fingerprint.js");
-    const { openGraphDatabase, readSchemaVersion, graphRequiresRebuild, DB_SCHEMA_VERSION } =
+    const {
+      openGraphDatabase,
+      readSchemaVersion,
+      graphRequiresRebuild,
+      upgradeGraphDatabase,
+      DB_SCHEMA_VERSION,
+    } =
       await import("../src/graph/db/database.js");
 
     // Snapshot the real fingerprints, then hand-downgrade the store to the
@@ -204,9 +218,30 @@ describe("schema v3 fingerprint re-encode (#140 storage follow-up)", () => {
     }
     db.exec("DELETE FROM schema_versions");
     db.prepare("INSERT INTO schema_versions (version, applied_at, description) VALUES (2, 0, 'v2 fixture')").run();
+    const snapshotRow = db.prepare("SELECT value FROM project_metadata WHERE key = ?")
+      .get(GRAPH_SNAPSHOT_METADATA_KEY) as { value: string };
+    const snapshot = parseGraphSnapshot(snapshotRow.value);
+    expect(snapshot).not.toBeNull();
+    db.prepare("UPDATE project_metadata SET value = ? WHERE key = ?").run(
+      serializeGraphSnapshot({ ...snapshot!, schemaVersion: 2 }),
+      GRAPH_SNAPSHOT_METADATA_KEY,
+    );
     db.close();
 
-    // A writer open migrates in place; the graph must stay ready (lossless).
+    // Ordinary opens never upgrade. Explicit repair owns the isolated
+    // candidate boundary and performs this recognized lossless conversion.
+    expect(() => openGraphDatabase(dbPath)).toThrow(/expects graph schema 4/u);
+    const unchanged = openSqlite(dbPath, { readOnly: true });
+    expect(readSchemaVersion(unchanged)).toBe(2);
+    unchanged.close();
+    expect(upgradeGraphDatabase(dbPath)).toMatchObject({
+      fromVersion: 2,
+      toVersion: DB_SCHEMA_VERSION,
+      lineage: "v2",
+      changed: true,
+      requiresRebuild: false,
+    });
+
     const migrated = openGraphDatabase(dbPath);
     try {
       expect(readSchemaVersion(migrated)).toBe(DB_SCHEMA_VERSION);

@@ -6,15 +6,30 @@ import { extractGroundings, findMexAnchors, rewriteMexAnchor, writeGroundings } 
 import { createGroundingChecker, type GroundingChecker, type GroundedSource } from "./grounding.js";
 import { createGraphEngine } from "./engine-impl.js";
 import type { GraphEngine } from "./engine.js";
-import { SUPPORTED_SOURCE_GLOB } from "./extraction/grammars.js";
+import {
+  GRAPH_CORPUS_GLOB_OPTIONS,
+  GRAPH_CORPUS_IGNORE_GLOBS,
+  GRAPH_SUPPORTED_SOURCE_GLOB,
+} from "./corpus-policy.js";
 import { openGraphDatabase } from "./db/database.js";
 import type { SqliteDatabase } from "./db/sqlite.js";
 import { FingerprintStore } from "./fingerprint-store.js";
 import { deserializeFingerprint, serializeFingerprint } from "./fingerprint.js";
+import { acquireGraphMaintenanceLease } from "./maintenance.js";
 import { MinHashReconciler } from "./reconcile-engine.js";
 import type { Fingerprint, Reconciler } from "./reconcile.js";
-
-const SOURCE_IGNORE = ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.mex/**", "**/coverage/**", "**/.next/**", "**/out/**"];
+import {
+  inspectGraphSidecars,
+  inspectGraphStatus,
+  inspectGraphStatusWithFreshObservation,
+  type InternalGraphStatusInspection,
+} from "./status.js";
+import {
+  loadFreshGraphReadSession,
+  openImmutableGraphReadSessionSync,
+  type InternalGraphReadSession,
+} from "./read-session.js";
+import type { GraphStatus } from "../team/contracts/graph.js";
 
 export interface GroundingRuntime {
   graph: GraphEngine;
@@ -23,20 +38,7 @@ export interface GroundingRuntime {
   fingerprints: FingerprintStore;
   /** Pre-sync fingerprints for inline ids that may disappear during a rename. */
   anchorFingerprints: ReadonlyMap<string, Fingerprint>;
-  /** Source files that changed since the graph was last built (read-only loads). */
-  staleSourceFiles?: number;
   close(): void;
-}
-
-export interface LoadGroundingRuntimeOptions {
-  /**
-   * Open the last published graph without synchronizing it. `mex check` MUST
-   * use this: synchronizing re-stages the whole corpus in-process (TypeScript
-   * programs included), which turned a drift check into a full rebuild's worth
-   * of wall clock and RSS (issue #140 observation 2). Read-only consumers see
-   * `staleSourceFiles` instead and report staleness rather than paying it.
-   */
-  readOnly?: boolean;
 }
 
 export interface GroundingBaselineCaptureResult {
@@ -50,43 +52,163 @@ export interface GroundingBaselineCaptureOptions {
   warn?: (message: string) => void;
 }
 
-export async function loadGroundingRuntime(
+export interface ReadOnlyGroundingRuntimeResult {
+  graphStatus: GraphStatus;
+  runtime: GroundingRuntime | null;
+}
+
+export interface LoadReadOnlyGroundingRuntimeOptions {
+  /** Internal seam for status/error-path tests. */
+  inspectStatus?: typeof inspectGraphStatus;
+  /** Internal seam for deterministic reader-handshake tests. */
+  inspectSidecars?: typeof inspectGraphSidecars;
+  /** Inspect status without opening graph readers when grounding is irrelevant. */
+  loadRuntime?: boolean;
+}
+
+interface ReadOnlyGroundingRuntimeInternalHooks {
+  inspectObservation?: typeof inspectGraphStatusWithFreshObservation;
+  afterStatusInspection?: (
+    inspection: InternalGraphStatusInspection,
+  ) => void | Promise<void>;
+  afterDatabaseIdentityRead?: () => void | Promise<void>;
+  afterDatabaseOpen?: (database: SqliteDatabase) => void | Promise<void>;
+  afterDatabaseDescriptorClose?: () => void;
+}
+
+type LoadReadOnlyGroundingRuntimeInternalOptions = LoadReadOnlyGroundingRuntimeOptions & {
+  /** Module-private deterministic race seams; deliberately absent from declarations. */
+  __internal?: ReadOnlyGroundingRuntimeInternalHooks;
+};
+
+/**
+ * Load grounding readers without synchronizing or otherwise repairing the
+ * graph. A non-fresh snapshot is reported to the caller and never used for
+ * grounding, because doing so could incorrectly present stale facts as clean.
+ */
+export async function loadReadOnlyGroundingRuntime(
   config: MexConfig,
-  options: LoadGroundingRuntimeOptions = {},
-): Promise<GroundingRuntime | null> {
+  options: LoadReadOnlyGroundingRuntimeOptions = {},
+): Promise<ReadOnlyGroundingRuntimeResult> {
   const dbPath = resolve(config.projectRoot, ".mex", "graph.db");
-  if (!existsSync(dbPath)) return null;
-  const readOnly = options.readOnly ?? false;
-  const graph = createGraphEngine({ rootDir: config.projectRoot, dbPath, readOnly });
-  let db: SqliteDatabase | null = null;
+  const internal = (options as LoadReadOnlyGroundingRuntimeInternalOptions).__internal;
+  const statusOptions = { projectRoot: config.projectRoot, dbPath };
+  const inspectObservation = options.inspectStatus
+    ? async (): Promise<InternalGraphStatusInspection> => ({
+        graphStatus: await options.inspectStatus!(statusOptions),
+        freshObservation: null,
+      })
+    : internal?.inspectObservation ?? inspectGraphStatusWithFreshObservation;
+  const loaded = await loadFreshGraphReadSession(config.projectRoot, {
+    dbPath,
+    loadSession: options.loadRuntime,
+    inspectObservation,
+    inspectSidecars: options.inspectSidecars,
+    afterStatusInspection: internal?.afterStatusInspection,
+    hooks: {
+      afterDatabaseIdentityRead: internal?.afterDatabaseIdentityRead,
+      afterDatabaseOpen: internal?.afterDatabaseOpen,
+      afterDatabaseDescriptorClose: internal?.afterDatabaseDescriptorClose,
+    },
+  });
+  if (!loaded.session) return { graphStatus: loaded.graphStatus, runtime: null };
+
+  const session = loaded.session;
   try {
-    db = openGraphDatabase(dbPath, { readOnly });
-    const fingerprints = new FingerprintStore(db);
+    const fingerprints = new FingerprintStore(session.db);
     const anchorFingerprints = snapshotAnchorFingerprints(config, fingerprints);
-    const changed = findChangedSourceFiles(config.projectRoot, db);
-    if (!readOnly) {
-      // sync also checks the persisted compiler/config/grammar manifest, so it
-      // must run even when source mtimes are unchanged.
-      await graph.sync(changed);
-    }
-    const reconciler = new MinHashReconciler(fingerprints);
-    const checkerReconciler: Reconciler & GroundingReconcilerCapabilities = {
-      reconcile: (nodeId, baseline) => reconciler.reconcile(nodeId, baseline),
-      getFingerprint: (nodeId) => anchorFingerprints.get(nodeId) ?? reconciler.getFingerprint(nodeId),
-      getGroundedSource: (file, nodeId) => reconciler.getGroundedSource(file, nodeId),
+    const guard: GroundingRuntimeGuard = {
+      validate: () => session.validate().valid,
+      invalidate: () => {
+        if (loaded.graphStatus.diagnostics.some((entry) => entry.code === "GRAPH_INDEX_READER_DATABASE_CHANGED")) {
+          return;
+        }
+        loaded.graphStatus.status = "degraded";
+        loaded.graphStatus.diagnostics = [
+          ...loaded.graphStatus.diagnostics,
+          {
+            code: "GRAPH_INDEX_READER_DATABASE_CHANGED",
+            severity: "warning",
+            message: "The graph changed while grounding checks were running; graph-derived results were discarded.",
+            remediation: [{ label: "Retry after graph maintenance finishes" }],
+          },
+        ];
+      },
     };
     return {
-      graph,
-      reconciler,
-      checker: createGroundingChecker(graph, checkerReconciler),
-      fingerprints,
-      anchorFingerprints,
-      staleSourceFiles: readOnly ? changed.length : 0,
-      close: () => { graph.close(); db?.close(); db = null; },
+      graphStatus: loaded.graphStatus,
+      runtime: assembleGroundingRuntime(
+        session.graph,
+        null,
+        fingerprints,
+        anchorFingerprints,
+        guard,
+      ),
+    };
+  } catch {
+    session.close();
+    return {
+      graphStatus: {
+        ...loaded.graphStatus,
+        status: "degraded",
+        diagnostics: [
+          ...loaded.graphStatus.diagnostics,
+          {
+            code: "GRAPH_INDEX_READER_OPEN_FAILED",
+            severity: "warning",
+            message: "The graph changed or became unavailable while immutable grounding readers were opening; grounding was skipped.",
+            remediation: [{ label: "Retry after graph maintenance finishes" }],
+          },
+        ],
+      },
+      runtime: null,
+    };
+  }
+}
+
+/**
+ * Load and synchronize grounding state for explicitly mutating setup/sync
+ * workflows. Ordinary reads must use {@link loadReadOnlyGroundingRuntime}.
+ */
+export async function loadGroundingRuntime(config: MexConfig): Promise<GroundingRuntime | null> {
+  const lease = acquireGraphMaintenanceLease(config.projectRoot, "refresh");
+  let priorSession: InternalGraphReadSession | null = null;
+  let graph: GraphEngine | null = null;
+  let db: SqliteDatabase | null = null;
+  try {
+    // Preserve fingerprints for inline ids before refresh can replace them.
+    // The maintenance lease prevents a cooperating publisher from changing the
+    // old snapshot between this read and the isolated refresh publication.
+    priorSession = openImmutableGraphReadSessionSync(config.projectRoot, lease.databasePath);
+    const anchorFingerprints = snapshotAnchorFingerprints(config, new FingerprintStore(priorSession.db));
+    priorSession.close();
+    priorSession = null;
+
+    await lease.refresh();
+    graph = createGraphEngine({ rootDir: config.projectRoot, dbPath: lease.databasePath });
+    db = openGraphDatabase(lease.databasePath);
+    const fingerprints = new FingerprintStore(db);
+    const assembled = assembleGroundingRuntime(graph, db, fingerprints, anchorFingerprints);
+    graph = null;
+    db = null;
+    let closed = false;
+    return {
+      ...assembled,
+      close: () => {
+        if (closed) return;
+        closed = true;
+        try {
+          assembled.close();
+        } finally {
+          lease.release();
+        }
+      },
     };
   } catch (error) {
-    graph.close();
-    db?.close();
+    try { priorSession?.close(); } catch { /* preserve the maintenance failure */ }
+    try { graph?.close(); } catch { /* preserve the maintenance failure */ }
+    try { db?.close(); } catch { /* preserve the maintenance failure */ }
+    lease.release();
     throw error;
   }
 }
@@ -122,7 +244,11 @@ export function findChangedSourceFiles(projectRoot: string, db: SqliteDatabase):
     path: string; size: number; modified_at: number;
   }>;
   const tracked = new Map(rows.map((row) => [row.path, row]));
-  const current = globSync(SUPPORTED_SOURCE_GLOB, { cwd: projectRoot, ignore: SOURCE_IGNORE, nodir: true })
+  const current = globSync(GRAPH_SUPPORTED_SOURCE_GLOB, {
+    ...GRAPH_CORPUS_GLOB_OPTIONS,
+    cwd: projectRoot,
+    ignore: [...GRAPH_CORPUS_IGNORE_GLOBS],
+  })
     .map((path) => path.replaceAll("\\", "/"));
   const changed: string[] = [];
   for (const path of current) {
@@ -133,6 +259,22 @@ export function findChangedSourceFiles(projectRoot: string, db: SqliteDatabase):
   }
   changed.push(...tracked.keys());
   return [...new Set(changed)].sort();
+}
+
+/**
+ * Move a grounding's body hash onto the node it was just rebound to.
+ *
+ * Only called on a confirmed rebind, where identity has already been
+ * re-established by fingerprint and the entity now points at a different node.
+ * The old hash describes a symbol this grounding no longer names, so carrying
+ * it forward would report drift on every rename — a symbol's name is part of
+ * its body. Dropping the key instead would be worse: the grounding would fall
+ * back to the structural comparator and stop detecting content drift for good.
+ *
+ * A node the graph cannot produce a hash for leaves the grounding as it was.
+ */
+function rebindBodyHash(grounding: Grounding, bodyHash: string | null): void {
+  if (bodyHash !== null) grounding.bodyHash = bodyHash;
 }
 
 /** Persist only high-confidence MOVED repairs. AMBIGUOUS/GONE remain for the agent. */
@@ -155,7 +297,7 @@ export function persistMovedGroundings(
         grounding.node = aliasedNode.id;
         const fingerprint = runtime.reconciler.getFingerprint(aliasedNode.id);
         if (fingerprint) grounding.fingerprint = serializeFingerprint(fingerprint);
-        saveCurrentBaseline(config, scaffoldFile, grounding.node, grounding.fingerprint, runtime);
+        rebindBodyHash(grounding, saveCurrentBaseline(config, scaffoldFile, grounding.node, grounding.fingerprint, runtime));
         runtime.fingerprints.deleteGroundedSource(scaffoldFile, oldId);
         dirty = true;
         moved += 1;
@@ -171,7 +313,7 @@ export function persistMovedGroundings(
       grounding.node = resolution.nodeId;
       const fingerprint = runtime.reconciler.getFingerprint(resolution.nodeId);
       if (fingerprint) grounding.fingerprint = serializeFingerprint(fingerprint);
-      saveCurrentBaseline(config, scaffoldFile, grounding.node, grounding.fingerprint, runtime);
+      rebindBodyHash(grounding, saveCurrentBaseline(config, scaffoldFile, grounding.node, grounding.fingerprint, runtime));
       runtime.fingerprints.deleteGroundedSource(scaffoldFile, oldId);
       dirty = true;
       moved += 1;
@@ -204,6 +346,59 @@ export function persistMovedGroundings(
 interface GroundingReconcilerCapabilities {
   getGroundedSource(scaffoldFile: string, nodeId: string): GroundedSource | null;
   getFingerprint(nodeId: string): Fingerprint | null;
+}
+
+interface GroundingRuntimeGuard {
+  validate(): boolean;
+  invalidate(): void;
+}
+
+function assembleGroundingRuntime(
+  graph: GraphEngine,
+  database: SqliteDatabase | null,
+  fingerprints: FingerprintStore,
+  anchorFingerprints: ReadonlyMap<string, Fingerprint>,
+  guard?: GroundingRuntimeGuard,
+): GroundingRuntime {
+  const reconciler = new MinHashReconciler(fingerprints);
+  const checkerReconciler: Reconciler & GroundingReconcilerCapabilities = {
+    reconcile: (nodeId, baseline) => reconciler.reconcile(nodeId, baseline),
+    getFingerprint: (nodeId) => anchorFingerprints.get(nodeId) ?? reconciler.getFingerprint(nodeId),
+    getGroundedSource: (file, nodeId) => reconciler.getGroundedSource(file, nodeId),
+  };
+  const rawChecker = createGroundingChecker(graph, checkerReconciler);
+  const checker: GroundingChecker = guard
+    ? (...args) => {
+        if (!guard.validate()) {
+          guard.invalidate();
+          return [];
+        }
+        let issues;
+        try {
+          issues = rawChecker(...args);
+        } catch (error) {
+          if (!guard.validate()) {
+            guard.invalidate();
+            return [];
+          }
+          throw error;
+        }
+        if (!guard.validate()) {
+          guard.invalidate();
+          return [];
+        }
+        return issues;
+      }
+    : rawChecker;
+  let db: SqliteDatabase | null = database;
+  return {
+    graph,
+    reconciler,
+    checker,
+    fingerprints,
+    anchorFingerprints,
+    close: () => { graph.close(); db?.close(); db = null; },
+  };
 }
 
 function snapshotAnchorFingerprints(config: MexConfig, store: FingerprintStore): Map<string, Fingerprint> {
@@ -264,11 +459,43 @@ export function refreshGroundingBaselines(
         grounding.fingerprint = serialized;
         dirty = true;
       }
-      if (saveCurrentBaseline(config, scaffoldFile, nodeId, serialized, runtime)) {
-        captured += 1;
-      } else {
+      const bodyHash = saveCurrentBaseline(config, scaffoldFile, nodeId, serialized, runtime);
+      if (bodyHash === null) {
         skipped += 1;
         options.warn?.(`Skipped grounding baseline for non-body node ${nodeId} in ${scaffoldFile}.`);
+        continue;
+      }
+      captured += 1;
+
+      // Commit the change signal alongside the identity signal, so it survives
+      // a `graph rebuild` and travels to a teammate who clones. Two cases only:
+      //
+      //  - **backfill**, when Markdown carries no hash at all. This asserts
+      //    nothing new — the `_mex_grounded_source` row written a line above
+      //    already records exactly this value, from exactly this moment. It
+      //    only makes it durable.
+      //  - **re-baseline**, when the caller has not forbidden updates. That is
+      //    the post-authoring routine `mex sync` runs after an agent repairs
+      //    the prose: the entity now describes the current code, so the
+      //    baseline has to move with it or drift never clears.
+      //
+      // `updateFingerprints === false` — what `mex ground` and setup pass — is
+      // the read-only posture, and there a hash that merely *differs* is left
+      // alone. That difference is drift, it is the finding, and overwriting it
+      // would erase the evidence and report `fresh` on the next run.
+      //
+      // **The authorization is the caller's flag, never whether the
+      // fingerprint moved.** Gating this on a fingerprint change was the first
+      // attempt and it was wrong in the one case that matters: editing a
+      // constant changes the body and leaves the fingerprint identical, by
+      // construction, which is the entire reason a body hash exists. The
+      // re-baseline then never fired and drift was permanent. Using the
+      // identity signal to decide a change question is the coupling this field
+      // exists to break — including here, in the writer.
+      const mayRebaseline = options.updateFingerprints !== false;
+      if (grounding && (grounding.bodyHash === undefined || mayRebaseline) && grounding.bodyHash !== bodyHash) {
+        grounding.bodyHash = bodyHash;
+        dirty = true;
       }
     }
     if (dirty) writeFileSync(filePath, writeGroundings(content, groundings), "utf-8");
@@ -294,15 +521,30 @@ export function groundingPromptContext(
   };
 }
 
+/**
+ * Cache the node's current body beside its hash, and hand the hash back.
+ *
+ * The row it writes into `_mex_grounded_source` is a **cache of a canonical
+ * value, not a second store of a fact.** `.mex/graph.db` is gitignored and
+ * disposable by invariant — `mex graph rebuild` is offered as a routine repair
+ * — so anything held only here is gone on the next rebuild and never reaches a
+ * teammate who clones. The durable copy of `bodyHash` is the one the callers
+ * write into the Markdown grounding, which is why this returns it rather than a
+ * bare boolean. Keep the row: it also carries the body *text*, which drift
+ * review needs for a diff and Markdown has no business holding.
+ *
+ * Returns the body hash on success, or null for a node the graph does not hold
+ * or that has no body — the same condition the boolean used to report.
+ */
 function saveCurrentBaseline(
   config: MexConfig,
   scaffoldFile: string,
   nodeId: string,
   fingerprint: string,
   runtime: GroundingRuntime,
-): boolean {
+): string | null {
   const node = runtime.graph.getNode(nodeId);
-  if (!node?.bodyHash) return false;
+  if (!node?.bodyHash) return null;
   const source: GroundedSource = {
     scaffoldFile,
     nodeId: node.id,
@@ -311,7 +553,7 @@ function saveCurrentBaseline(
     fingerprint,
   };
   runtime.fingerprints.saveGroundedSource(source);
-  return true;
+  return node.bodyHash;
 }
 
 function readNodeBody(root: string, filePath: string, startLine: number, endLine: number): string {

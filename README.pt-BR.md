@@ -30,7 +30,7 @@ mex mapeia seu código, transforma o que os agentes aprendem em Markdown estrutu
 
 Cada sessão de programação começa com o contexto arquitetural relevante, e não com mais uma varredura completa do repositório.
 
-> **Novidade na v0.7.3:** as construções do grafo mantêm um programa do compilador por vez, os armazenamentos são 36-40% menores, o `mex check` não reconstrói mais o grafo e o `mex graph repair` recupera um armazenamento interrompido sem reconstruí-lo.
+> **Novidade na v0.8.0:** o `mex setup` agora prepara o grafo e a wiki de ponta a ponta, instala as habilidades oficiais do Claude Code e do Codex, protege os armazenamentos locais do Git e inicia automaticamente o primeiro agente disponível entre os selecionados.
 
 💬 **Entre na comunidade do mex no Discord** — discuta ideias, peça ajuda, compartilhe feedback e contribua com o projeto.
 
@@ -296,7 +296,7 @@ O pacote MCP ainda não foi publicado. Para desenvolvimento local:
 npm run build --workspace mex-mcp
 ```
 
-O lançamento principal da v0.7.3 continua sendo a CLI `mex-agent`.
+O lançamento principal da v0.8.0 continua sendo a CLI `mex-agent`.
 
 ## Modo de memória do agente
 

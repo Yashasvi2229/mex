@@ -4,6 +4,68 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-02
+
+### Added
+- A bounded release-performance gate for local Hub startup, idle CPU/RAM,
+  browser heap, API latency, maintenance working sets, asset closure, and
+  Graph/Wiki database ratios, plus `mex capabilities --json` for agent-safe
+  discovery of installed and currently available commands.
+- An internal repository TeamWorkflowPort with strict canonical repositories,
+  checkout-local state, leases, operation recovery, and conformance coverage
+  for members, Activity, Workstreams, Inbox, Relays, Playbooks, and manual runs.
+- Bounded Member and canonical Activity CLI/private Hub workflows with signed
+  preview/apply, local actor selection, exact revisions, and immutable Activity
+  emission for accepted canonical mutations.
+- Bounded canonical Workstream CLI and private Hub surfaces with signed
+  preview/apply for create, update, and one-way archive; each successful
+  canonical mutation emits exactly one immutable Activity event.
+- Fresh-index, read-only Spec CLI and Hub views over explicit Wiki hierarchy,
+  provenance, sources, and grounding without implicit index maintenance.
+- A governed Team Inbox and Spec-authoring workflow for local drafts, portable
+  canonical proposals, explicit approval/rejection/withdrawal/repair, and exact
+  single-Spec create or update through the real Wiki preview/apply boundary.
+- Official `mex-inbox` and `mex-relay` project skills for Claude Code and Codex,
+  installed by `mex setup` and safely refreshed with `mex skills sync` without
+  overwriting user instructions, modified managed copies, or unrelated skills.
+
+### Changed
+- `mex setup` now preserves existing scaffold files, launches the first selected
+  available Claude Code or Codex CLI from the project root, completes Wiki
+  migration/indexing after population, and stops at an explicit Git commit
+  checkpoint before Hub.
+- The integration graph uses schema v4: v0.7.3's compact BLOB fingerprints and
+  integer-reference LSH storage combined with subject-generalized Wiki
+  grounding. The v0.7.3 sequential compiler, crash isolation, fallback, and
+  WASM-tree cleanup run inside the existing immutable freshness and atomic
+  publication boundaries.
+- `mex graph repair` now uses the graph maintenance lease and a validated
+  same-directory candidate instead of mutating the published database in place.
+- Inbox and Relay contracts now support bounded action-scoped discovery while
+  preserving the existing complete contract catalogs for compatibility.
+
+### Fixed
+- Fresh setup now installs and verifies ignore protection for Graph/Wiki
+  databases and `.mex/local/`, refuses broad rules that hide canonical config,
+  and no longer overwrites authored files merely because they contain template
+  examples or date placeholders.
+- Setup now refuses malformed or redirected canonical config, publishes config
+  updates atomically, honors Wiki exclude/read-only scope, and blocks readiness
+  when authored grounding cannot be verified.
+- Claude Code and Codex population now uses an ignored prompt file with a short
+  launcher argument, avoiding Windows command-line length limits.
+- New Claude Code and Codex root instructions bootstrap `.mex/AGENTS.md` and
+  `.mex/ROUTER.md` on later sessions instead of installing only skill policy.
+
+### Compatibility
+- Explicit graph maintenance recognizes v1, v2, released-main v3,
+  integration-grounding v3, and complete hybrid v3 stores structurally. v2 and
+  complete v3 lineages upgrade losslessly to schema v4; v1, partial, or
+  ambiguous stores require a safe rebuild. Ordinary reads never migrate.
+- Installing or upgrading the npm package only delivers the skill payload; it
+  does not mutate a repository. Activation remains an explicit `mex setup` or
+  `mex skills sync` action, and no plugin package is required.
+
 ## [0.7.3] - 2026-08-27
 
 ### Added

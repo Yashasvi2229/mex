@@ -30,7 +30,7 @@ mex crea un mapa de tu código, convierte lo que aprenden los agentes en Markdow
 
 Cada sesión de programación comienza con el contexto arquitectónico relevante, no con otro escaneo completo del repositorio.
 
-> **Nuevo en v0.7.3:** las construcciones del grafo mantienen un solo programa del compilador a la vez, los almacenes son entre un 36 y un 40 % más pequeños, `mex check` ya no reconstruye el grafo y `mex graph repair` recupera un almacén interrumpido sin reconstruirlo.
+> **Nuevo en v0.8.0:** `mex setup` ahora prepara el grafo y la wiki de principio a fin, instala las habilidades oficiales para Claude Code y Codex, protege los almacenes locales frente a Git e inicia automáticamente el primer agente disponible entre los seleccionados.
 
 💬 **Únete a la comunidad de mex en Discord** — comenta ideas, obtén ayuda, comparte tus opiniones y contribuye al proyecto.
 
@@ -296,7 +296,7 @@ El paquete MCP todavía no está publicado. Para desarrollo local:
 npm run build --workspace mex-mcp
 ```
 
-La publicación principal de v0.7.3 sigue siendo la CLI `mex-agent`.
+La publicación principal de v0.8.0 sigue siendo la CLI `mex-agent`.
 
 ## Modo de memoria del agente
 

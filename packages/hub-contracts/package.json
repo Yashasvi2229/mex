@@ -1,0 +1,32 @@
+{
+  "name": "@mex/hub-contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./relay": {
+      "types": "./dist/relay.d.ts",
+      "import": "./dist/relay.js"
+    },
+    "./ids": {
+      "types": "./dist/ids.d.ts",
+      "import": "./dist/ids.js"
+    },
+    "./overview": {
+      "types": "./dist/overview.d.ts",
+      "import": "./dist/overview.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.25.76"
+  }
+}

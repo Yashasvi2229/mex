@@ -1,9 +1,35 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
-import { relative, resolve } from "node:path";
-import { globSync } from "glob";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { toPosix } from "../paths.js";
 import type { BuildResult, GraphEngine, NodeSearchOptions } from "./engine.js";
+import {
+  GRAPH_CONFIG_GLOBS,
+  GRAPH_CORPUS_GLOB_OPTIONS,
+  GRAPH_CORPUS_IGNORE_GLOBS,
+  GRAPH_CORPUS_LIMITS,
+  GRAPH_CORPUS_POLICY_HASH,
+  GRAPH_SUPPORTED_SOURCE_GLOB,
+  GraphCorpusLimitError,
+  addGraphCompilerSourceBytes,
+  addGraphCorpusBytes,
+  addGraphSemanticInput,
+  createGraphSemanticInputLedger,
+  discoverBoundedGraphPaths,
+} from "./corpus-policy.js";
 import { DB_SCHEMA_VERSION, markGraphReady, openGraphDatabase } from "./db/database.js";
 import {
   GraphStore,
@@ -23,13 +49,14 @@ import {
   loadGrammars,
   normalizedAstTokens,
   normalizedCompilerTokens,
-  SUPPORTED_SOURCE_GLOB,
   TYPESCRIPT_COMPILER_EXTRACTOR_VERSION,
   TYPESCRIPT_COMPILER_VERSION,
   type CompilerExtractedNode,
   type CompilerExtractionOptions,
   type CompilerExtractionResult,
   type CompilerFileExtraction,
+  type CompilerSemanticInput,
+  type CompilerStagedInput,
 } from "./extraction/index.js";
 import { FingerprintStore } from "./fingerprint-store.js";
 import { createFingerprintBuilder } from "./fingerprint.js";
@@ -39,13 +66,18 @@ import type { Fingerprint } from "./reconcile.js";
 import { createStagedResolutionContext } from "./resolution/context.js";
 import { FRAMEWORK_RESOLVERS } from "./resolution/frameworks/index.js";
 import { resolveReferences } from "./resolution/resolver.js";
+import {
+  GRAPH_SNAPSHOT_METADATA_KEY,
+  GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUTS,
+  createGraphSnapshot,
+  parseGraphSnapshot,
+  readGraphGitProvenance,
+  serializeGraphSnapshot,
+  type GraphGitProvenance,
+  type GraphSnapshotSemanticInput,
+} from "./snapshot.js";
 import { getCallees, getCallers, getIncoming, getOutgoing } from "./traversal/traversal.js";
 import type { GraphEdge, GraphNode, Language, ReferenceKind } from "./types.js";
-
-const IGNORE_GLOBS = [
-  "**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**", "**/.mex/**",
-  "**/coverage/**", "**/.next/**", "**/out/**",
-];
 
 const BODY_KINDS = new Set<GraphNode["kind"]>([
   "function", "method", "class", "interface", "enum", "type_alias", "struct",
@@ -68,6 +100,22 @@ export interface GraphEngineOptions {
   compilerExtraction?: CompilerExtractionOptions;
 }
 
+interface GraphEngineInternalHooks {
+  afterSemanticInputsStaged?: () => void;
+  afterCompilerExtraction?: () => void;
+  afterFinalSemanticInputRead?: (path: string) => void;
+  /** Final path/cancellation seam immediately before SQLite opens or creates the database. */
+  beforeDatabaseOpen?: () => void;
+  /** Final cancellation/fault seam before any publication continuity reads. */
+  beforePublication?: () => void;
+}
+
+interface GraphEngineInternalOptions {
+  /** Deliberately absent from GraphEngineOptions and generated declarations. */
+  __internalGraphEngineHooks?: GraphEngineInternalHooks;
+  immutable?: boolean;
+}
+
 export interface GraphSourceFileAccess {
   stat(absolutePath: string): { size: number; mtimeMs: number };
   read(absolutePath: string): string;
@@ -75,7 +123,7 @@ export interface GraphSourceFileAccess {
 
 export interface GraphSourceStagingFailure {
   filePath: string;
-  operation: "stat" | "read" | "discover";
+  operation: "stat" | "read" | "discover" | "parse";
   code?: string;
   message: string;
 }
@@ -83,10 +131,94 @@ export interface GraphSourceStagingFailure {
 /** A structural sync never publishes a corpus whose source discovery was incomplete. */
 export class GraphSourceStagingError extends Error {
   readonly code = "GRAPH_SOURCE_STAGING_FAILED";
+  readonly failures: GraphSourceStagingFailure[];
 
-  constructor(readonly failures: GraphSourceStagingFailure[]) {
-    super(`Could not stage ${failures.length} source file(s): ${failures.map((failure) => failure.filePath).join(", ")}`);
+  constructor(failures: GraphSourceStagingFailure[]) {
+    const boundedFailures = failures.slice(0, GRAPH_CORPUS_LIMITS.maxDiagnostics);
+    const omitted = failures.length - boundedFailures.length;
+    super(`Could not stage ${failures.length} source file(s): ${boundedFailures.map((failure) => failure.filePath).join(", ")}${omitted > 0 ? ` (${omitted} more omitted)` : ""}`);
     this.name = "GraphSourceStagingError";
+    this.failures = boundedFailures;
+  }
+}
+
+/**
+ * Immutable, process-private source staging on disk.
+ *
+ * Tree-sitter languages are read and extracted one file at a time from this
+ * spool. TypeScript/JavaScript sources are loaded only for the compiler's
+ * separately bounded semantic batch. The complete repository corpus is never
+ * retained as strings in the maintenance process.
+ */
+class GraphSourceSpool {
+  private readonly directory = mkdtempSync(join(tmpdir(), "mex-graph-stage-"));
+  private readonly entries = new Map<string, string>();
+  private disposed = false;
+
+  stage(relPath: string, source: string): void {
+    if (this.disposed) throw new Error("The graph source spool is closed.");
+    if (this.entries.has(relPath)) throw new Error(`Duplicate staged source: ${relPath}`);
+    const stagedPath = join(this.directory, `${String(this.entries.size).padStart(8, "0")}.source`);
+    writeFileSync(stagedPath, source, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    this.entries.set(relPath, stagedPath);
+  }
+
+  read(file: DiscoveredFile): string {
+    const stagedPath = this.entries.get(file.relPath);
+    if (this.disposed || !stagedPath) {
+      throw new GraphSourceStagingError([{
+        filePath: file.relPath,
+        operation: "read",
+        message: "The immutable graph source spool is unavailable.",
+      }]);
+    }
+    let fd: number | null = null;
+    try {
+      const before = lstatSync(stagedPath);
+      if (!before.isFile()
+        || before.isSymbolicLink()
+        || !Number.isSafeInteger(before.size)
+        || before.size < 0
+        || before.size > GRAPH_CORPUS_LIMITS.maxSourceFileBytes) {
+        throw new Error("The immutable staged source is not a bounded regular file.");
+      }
+      const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
+      fd = openSync(stagedPath, constants.O_RDONLY | noFollow);
+      const opened = fstatSync(fd);
+      if (!opened.isFile() || !sameFileIdentity(before, opened)) {
+        throw new Error("The immutable staged source changed before it could be opened.");
+      }
+      const source = readFileSync(fd, "utf8");
+      const after = fstatSync(fd);
+      const pathAfter = lstatSync(stagedPath);
+      if (!sameFileIdentity(opened, after)
+        || !pathAfter.isFile()
+        || pathAfter.isSymbolicLink()
+        || !sameFileIdentity(opened, pathAfter)) {
+        throw new Error("The immutable staged source changed while it was being read.");
+      }
+      const bytes = Buffer.byteLength(source, "utf8");
+      if (bytes > GRAPH_CORPUS_LIMITS.maxSourceFileBytes || sha256(source) !== file.contentHash) {
+        throw new Error("The immutable staged source failed its content check.");
+      }
+      return source;
+    } catch (error) {
+      if (error instanceof GraphSourceStagingError) throw error;
+      throw new GraphSourceStagingError([sourceStagingFailure(file.relPath, "read", error)]);
+    } finally {
+      if (fd !== null) closeSync(fd);
+    }
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    try {
+      rmSync(this.directory, { recursive: true, force: true });
+    } catch {
+      // Cleanup must not replace the result/error from the explicit graph job.
+    }
+    this.entries.clear();
   }
 }
 
@@ -97,7 +229,7 @@ const NODE_SOURCE_FILE_ACCESS: GraphSourceFileAccess = {
 
 interface DiscoveredFile {
   relPath: string;
-  source: string;
+  contentHash: string;
   size: number;
   modifiedAt: number;
 }
@@ -114,11 +246,13 @@ interface StagedFile {
 
 interface StagedCorpus {
   files: StagedFile[];
-  compiler: CompilerExtractionResult;
+  compiler: Pick<CompilerExtractionResult, "compilerVersion" | "semanticInputs">;
+  semanticInputs: CompilerSemanticInput[];
   fingerprints: Array<{ nodeId: string; fingerprint: Fingerprint }>;
   manifestHash: string;
   configHash: string;
   grammarHash: string;
+  sourceSpool: GraphSourceSpool;
 }
 
 export interface GraphManifest {
@@ -131,22 +265,44 @@ class GraphEngineImpl implements GraphEngine {
   private readonly rootDir: string;
   private readonly dbPath: string;
   private readonly readOnly: boolean;
+  private readonly immutable: boolean;
   private readonly sourceFileAccess: GraphSourceFileAccess;
+  private readonly internal: GraphEngineInternalHooks;
   private readonly compilerExtraction?: CompilerExtractionOptions;
   private db: SqliteDatabase | null = null;
   private store: GraphStore | null = null;
 
-  constructor(options: GraphEngineOptions) {
+  constructor(options: GraphEngineOptions & GraphEngineInternalOptions, database?: SqliteDatabase) {
+    if (options.immutable && options.readOnly !== true) {
+      throw new TypeError("Immutable graph access requires readOnly: true.");
+    }
+    if (database && (options.readOnly !== true || options.immutable !== true)) {
+      throw new TypeError("An adopted graph database must be an immutable read-only connection.");
+    }
     this.rootDir = resolve(options.rootDir);
     this.dbPath = options.dbPath ?? resolve(this.rootDir, ".mex", "graph.db");
     this.readOnly = options.readOnly ?? false;
-    this.sourceFileAccess = { ...NODE_SOURCE_FILE_ACCESS, ...options.sourceFileAccess };
+    this.immutable = options.immutable ?? false;
+    this.sourceFileAccess = options.sourceFileAccess
+      ? { ...NODE_SOURCE_FILE_ACCESS, ...options.sourceFileAccess }
+      : NODE_SOURCE_FILE_ACCESS;
+    this.internal = (options as GraphEngineOptions & GraphEngineInternalOptions)
+      .__internalGraphEngineHooks ?? {};
     this.compilerExtraction = options.compilerExtraction;
+    if (database) {
+      this.db = database;
+      this.store = new GraphStore(database);
+    }
   }
 
   private getStore(allowRebuild = false): GraphStore {
     if (!this.store) {
-      this.db = openGraphDatabase(this.dbPath, { allowRebuild, readOnly: this.readOnly });
+      this.internal.beforeDatabaseOpen?.();
+      this.db = openGraphDatabase(this.dbPath, {
+        allowRebuild,
+        readOnly: this.readOnly,
+        immutable: this.immutable,
+      });
       this.store = new GraphStore(this.db);
     }
     return this.store;
@@ -156,9 +312,22 @@ class GraphEngineImpl implements GraphEngine {
     if (this.readOnly) throw new Error("A read-only graph engine cannot build an index.");
     const started = Date.now();
     const root = rootDir ? resolve(rootDir) : this.rootDir;
-    const staged = await stageCorpus(root, undefined, this.sourceFileAccess, this.compilerExtraction);
-    const result = this.publish(staged);
-    return { ...result, durationMs: Date.now() - started };
+    const gitBeforeStaging = readGraphGitProvenance(root);
+    const manifest = graphManifest(root);
+    const staged = await stageCorpus(
+      root,
+      manifest,
+      this.sourceFileAccess,
+      this.internal,
+      this.compilerExtraction,
+    );
+    try {
+      this.assertNoNewParseFailures(staged);
+      const result = this.publish(staged, root, gitBeforeStaging);
+      return { ...result, durationMs: Date.now() - started };
+    } finally {
+      staged.sourceSpool.dispose();
+    }
   }
 
   async sync(changedFiles: string[]): Promise<BuildResult> {
@@ -169,41 +338,73 @@ class GraphEngineImpl implements GraphEngine {
     ).filter((file) => file && !file.startsWith("..")))].sort();
     const changedSources = changed.filter(isSupportedSourceFile);
     const deletedChangedSources = inspectChangedSources(this.rootDir, changedSources, this.sourceFileAccess);
+    const gitBeforeStaging = readGraphGitProvenance(this.rootDir);
     const manifest = graphManifest(this.rootDir);
-    const manifestChanged = this.getStore(true).getMetadata("manifest_hash") !== manifest.manifestHash;
+    const store = this.getStore(true);
+    const manifestChanged = store.getMetadata("manifest_hash") !== manifest.manifestHash;
     if (changedSources.length === 0 && !manifestChanged) {
-      return { filesIndexed: 0, nodesCreated: 0, edgesCreated: 0, durationMs: Date.now() - started };
+      const currentCorpus = discoverSourceFiles(this.rootDir, this.sourceFileAccess);
+      const snapshot = parseGraphSnapshot(store.getMetadata(GRAPH_SNAPSHOT_METADATA_KEY));
+      if (snapshot?.manifestHash === manifest.manifestHash
+        && snapshot.indexedBranch === gitBeforeStaging.branch
+        && sourceCorpusMatchesFileRecords(currentCorpus, store.getAllFileRecords())
+        && semanticInputsMatchSnapshot(this.rootDir, snapshot.semanticInputs)) {
+        return { filesIndexed: 0, nodesCreated: 0, edgesCreated: 0, durationMs: Date.now() - started };
+      }
     }
 
     // Re-stage the whole semantic corpus. This makes an arbitrary sync sequence
     // converge to the same graph as a clean build and re-resolves cross-file refs.
-    const staged = await stageCorpus(this.rootDir, manifest, this.sourceFileAccess, this.compilerExtraction);
-    const stagedByPath = new Map(staged.files.map((file) => [file.record.path, file]));
-    const unstagedExisting = changedSources.filter((file) => (
-      !deletedChangedSources.has(file) && !stagedByPath.has(file)
-    ));
-    if (unstagedExisting.length > 0) {
-      throw new GraphSourceStagingError(unstagedExisting.map((filePath) => ({
-        filePath,
-        operation: "discover",
-        message: "The changed source still exists but was absent from the staged corpus.",
-      })));
+    const staged = await stageCorpus(
+      this.rootDir,
+      manifest,
+      this.sourceFileAccess,
+      this.internal,
+      this.compilerExtraction,
+    );
+    try {
+      const stagedByPath = new Map(staged.files.map((file) => [file.record.path, file]));
+      const unstagedExisting = changedSources.filter((file) => (
+        !deletedChangedSources.has(file) && !stagedByPath.has(file)
+      ));
+      if (unstagedExisting.length > 0) {
+        throw new GraphSourceStagingError(unstagedExisting.map((filePath) => ({
+          filePath,
+          operation: "discover",
+          message: "The changed source still exists but was absent from the staged corpus.",
+        })));
+      }
+      this.assertNoNewParseFailures(staged);
+      const result = this.publish(staged, this.rootDir, gitBeforeStaging);
+      return { ...result, durationMs: Date.now() - started };
+    } finally {
+      staged.sourceSpool.dispose();
     }
-    const failedChanged = changedSources.filter((file) => stagedByPath.get(file)?.record.parseStatus === "failed");
-    if (failedChanged.length > 0) {
-      // Preserve the previous structural snapshot. Scope notices changed hashes
-      // and can still return the live files as explicitly text-only evidence.
-      const health = healthCounts(staged.files);
-      return {
-        filesIndexed: 0, nodesCreated: 0, edgesCreated: 0,
-        durationMs: Date.now() - started, health,
-      };
-    }
-    const result = this.publish(staged);
-    return { ...result, durationMs: Date.now() - started };
   }
 
-  private publish(staged: StagedCorpus): Omit<BuildResult, "durationMs"> {
+  private assertNoNewParseFailures(staged: StagedCorpus): void {
+    const store = this.getStore(true);
+    const previousFiles = store.getAllFileRecords();
+    if (previousFiles.length === 0) return;
+    const previous = new Map(previousFiles.map((file) => [file.path, file.parseStatus ?? "ok"]));
+    const newlyFailed = staged.files.filter((file) => (
+      file.record.parseStatus === "failed" && previous.get(file.record.path) !== "failed"
+    ));
+    if (newlyFailed.length === 0) return;
+    throw new GraphSourceStagingError(newlyFailed.map((file) => ({
+      filePath: file.record.path,
+      operation: "parse",
+      code: "GRAPH_SOURCE_PARSE_FAILED",
+      message: "The source no longer parses; the last trustworthy graph snapshot was preserved.",
+    })));
+  }
+
+  private publish(
+    staged: StagedCorpus,
+    root: string,
+    gitBeforeStaging: GraphGitProvenance,
+  ): Omit<BuildResult, "durationMs"> {
+    this.internal.beforePublication?.();
     const store = this.getStore(true);
     const oldNodes = store.getAllNodes();
     const oldAliases = store.getAllAliases();
@@ -213,14 +414,54 @@ class GraphEngineImpl implements GraphEngine {
       const fingerprint = priorFingerprintStore.get(node.id);
       if (fingerprint) oldFingerprints.set(node.id, fingerprint);
     }
+    // Continuity reads above may be substantial on a mature index. Re-probe
+    // only after they finish, at the final synchronous boundary before the
+    // snapshot is constructed and its publication transaction begins.
+    const git = verifyPublicationInputs(
+      root,
+      staged,
+      gitBeforeStaging,
+      this.sourceFileAccess,
+      this.internal,
+    );
     let edgeCount = 0;
     const expectedNodes = staged.files.reduce((count, file) => count + file.nodes.length, 0);
+    const semanticInputs = staged.semanticInputs
+      .map((input) => ({ path: input.filePath, contentHash: input.contentHash }));
+    if (semanticInputs.length > GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUTS) {
+      throw new GraphSourceStagingError([{
+        filePath: ".",
+        operation: "discover",
+        message: `Compiler provenance exceeds the ${GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUTS}-path safety cap.`,
+      }]);
+    }
+    const snapshot = createGraphSnapshot({
+      indexedAt: new Date().toISOString(),
+      git,
+      schemaVersion: DB_SCHEMA_VERSION,
+      compilerVersion: staged.compiler.compilerVersion,
+      extractorVersion: CORPUS_EXTRACTOR_VERSION,
+      resolverVersion: RESOLVER_VERSION,
+      grammarHash: staged.grammarHash,
+      configHash: staged.configHash,
+      manifestHash: staged.manifestHash,
+      sources: staged.files.map((file) => ({
+        path: file.record.path,
+        contentHash: file.record.contentHash,
+        parseStatus: file.record.parseStatus ?? "ok",
+      })),
+      semanticInputs,
+    });
 
     store.transaction(() => {
       store.clearDerivedGraph();
       for (const file of staged.files) {
         store.upsertFile(file.record);
-        store.replaceSourceChunks(file.record.path, file.discovered.source, file.record.contentHash);
+        store.replaceSourceChunks(
+          file.record.path,
+          staged.sourceSpool.read(file.discovered),
+          file.record.contentHash,
+        );
       }
       for (const file of staged.files) for (const node of file.nodes) store.insertNode(node);
       for (const file of staged.files) {
@@ -240,6 +481,7 @@ class GraphEngineImpl implements GraphEngine {
       store.setMetadata("resolver_version", RESOLVER_VERSION);
       store.setMetadata("config_hash", staged.configHash);
       store.setMetadata("grammar_hash", staged.grammarHash);
+      store.setMetadata(GRAPH_SNAPSHOT_METADATA_KEY, serializeGraphSnapshot(snapshot));
       markGraphReady(this.db!, staged.manifestHash);
     });
 
@@ -284,43 +526,183 @@ class GraphEngineImpl implements GraphEngine {
 }
 
 export function createGraphEngine(options: GraphEngineOptions): GraphEngine {
+  if ("immutable" in (options as GraphEngineOptions & { immutable?: unknown })) {
+    throw new TypeError("Immutable graph access is internal to the validated grounding runtime.");
+  }
   return new GraphEngineImpl(options);
+}
+
+/**
+ * @internal Adopt one validated immutable connection for all grounding reads.
+ * Ownership transfers to the returned engine and `close()` releases it.
+ */
+export function createGraphEngineFromOpenDatabase(
+  options: Pick<GraphEngineOptions, "rootDir" | "dbPath">,
+  database: SqliteDatabase,
+): GraphEngine {
+  return new GraphEngineImpl({ ...options, readOnly: true, immutable: true }, database);
 }
 
 async function stageCorpus(
   root: string,
   manifest = graphManifest(root),
   sourceFileAccess: GraphSourceFileAccess = NODE_SOURCE_FILE_ACCESS,
+  internal: GraphEngineInternalHooks = {},
   compilerExtraction?: CompilerExtractionOptions,
 ): Promise<StagedCorpus> {
-  const discovered = discoverSourceFiles(root, sourceFileAccess);
-  const compilerPaths = discovered.filter((file) => COMPILER_LANGUAGES.has(detectLanguage(file.relPath)))
-    .map((file) => file.relPath);
-  const compiler = buildTypeScriptExtraction(root, compilerPaths, compilerExtraction);
-  const compilerByPath = new Map(compiler.files.map((file) => [file.filePath, file]));
-  const treeLanguages = [...new Set(discovered.map((file) => detectLanguage(file.relPath))
-    .filter((language) => !COMPILER_LANGUAGES.has(language)))];
-  // Compiler-language files the compiler could not stage (e.g. a project whose
-  // program creation crashed) fall back to tree-sitter — load their grammars too.
-  const fallbackLanguages = [...new Set(discovered
-    .filter((file) => COMPILER_LANGUAGES.has(detectLanguage(file.relPath)) && !compilerByPath.has(file.relPath))
-    .map((file) => detectLanguage(file.relPath)))];
-  await loadGrammars([...treeLanguages, ...fallbackLanguages]);
+  const sourceSpool = new GraphSourceSpool();
+  try {
+    const discovered = discoverSourceFiles(root, sourceFileAccess, sourceSpool);
+    const configSources = discoverGraphConfigSources(root);
+    const stagedConfigHash = configHashForSources(configSources);
+    if (stagedConfigHash !== manifest.configHash) {
+      throw new GraphSourceStagingError([{
+        filePath: ".",
+        operation: "discover",
+        message: "The graph configuration (configHash) changed before semantic staging began.",
+      }]);
+    }
 
-  const files = discovered.map((file) => {
-    const compilerFile = compilerByPath.get(file.relPath);
-    return compilerFile ? stageCompilerFile(file, compilerFile) : stageTreeFile(file);
-  });
-  stageFrameworkAndFallbackResolution(root, files);
-  validateStagedCorpus(files);
-  const fingerprints = stageFingerprints(files);
-  return { files, compiler, fingerprints, ...manifest };
+    const compilerFiles = discovered.filter((file) =>
+      COMPILER_LANGUAGES.has(detectLanguage(file.relPath)));
+    const compilerPaths = compilerFiles.map((file) => file.relPath);
+    const compilerInputs: CompilerStagedInput[] = [...configSources.entries()]
+      .map(([filePath, source]) => ({ filePath, source }));
+    let compilerSourceBytes = 0;
+    for (const file of compilerFiles) {
+      const source = sourceSpool.read(file);
+      try {
+        compilerSourceBytes = addGraphCompilerSourceBytes(
+          compilerSourceBytes,
+          Buffer.byteLength(source, "utf8"),
+        );
+      } catch (error) {
+        throw new GraphSourceStagingError([sourceStagingFailure(file.relPath, "read", error)]);
+      }
+      compilerInputs.push({ filePath: file.relPath, source });
+    }
+    compilerInputs.sort((left, right) => compareCodePoints(left.filePath, right.filePath));
+    internal.afterSemanticInputsStaged?.();
+
+    let compiler: CompilerExtractionResult;
+    const semanticInputLedger = createGraphSemanticInputLedger();
+    try {
+      compiler = buildTypeScriptExtraction(root, compilerPaths, {
+        ...compilerExtraction,
+        stagedInputs: compilerInputs,
+        readProjectFile: (absolutePath) => {
+          const source = readSecureCompilerInput(root, absolutePath);
+          const relPath = toPosix(relative(resolve(root), resolve(absolutePath)));
+          try {
+            addGraphSemanticInput(
+              semanticInputLedger,
+              relPath,
+              source === undefined ? null : Buffer.byteLength(source, "utf8"),
+              source !== undefined || !negativeCompilerProbeCoveredByCorpusPolicy(relPath),
+            );
+          } catch (error) {
+            throw new GraphSourceStagingError([sourceStagingFailure(relPath, "read", error)]);
+          }
+          return source;
+        },
+      });
+    } catch (error) {
+      if (error instanceof GraphSourceStagingError) throw error;
+      throw new GraphSourceStagingError([sourceStagingFailure(".", "read", error)]);
+    } finally {
+      // Drop the compiler's source-string input batch as soon as the semantic
+      // result is materialized. The immutable disk spool remains authoritative.
+      compilerInputs.length = 0;
+    }
+    internal.afterCompilerExtraction?.();
+    const stagedInputHashes = new Map<string, string>([
+      ...[...configSources.entries()].map(([path, source]) => [path, sha256(source)] as const),
+      ...discovered.map((file) => [file.relPath, file.contentHash] as const),
+    ]);
+    validateCompilerInputs(discovered, compiler, stagedInputHashes, root);
+    const compilerByPath = new Map(compiler.files.map((file) => [file.filePath, file]));
+    const treeLanguages = [...new Set(discovered.map((file) => detectLanguage(file.relPath))
+      .filter((language) => !COMPILER_LANGUAGES.has(language)))];
+    // Compiler-language files a crashing project could not stage fall back to
+    // tree-sitter, so their grammars must be present too.
+    const fallbackLanguages = [...new Set(discovered
+      .filter((file) => COMPILER_LANGUAGES.has(detectLanguage(file.relPath))
+        && !compilerByPath.has(file.relPath))
+      .map((file) => detectLanguage(file.relPath)))];
+    await loadGrammars([...treeLanguages, ...fallbackLanguages]);
+
+    const files = discovered.map((file) => {
+      const source = sourceSpool.read(file);
+      const compilerFile = compilerByPath.get(file.relPath);
+      return compilerFile
+        ? stageCompilerFile(file, source, compilerFile)
+        : stageTreeFile(file, source);
+    });
+    compilerByPath.clear();
+    // Release project/file extraction arrays after their durable staged shape
+    // has been copied. Per-node compiler spans survive only until fingerprinting.
+    compiler.files.length = 0;
+    compiler.projects.length = 0;
+
+    stageFrameworkAndFallbackResolution(root, files, configSources, sourceSpool);
+    validateStagedCorpus(files);
+    const fingerprints = stageFingerprints(files, sourceSpool);
+    const coveredPaths = new Set([...discovered.map((file) => file.relPath), ...configSources.keys()]);
+    const semanticInputs = compiler.semanticInputs.filter((input) => !coveredPaths.has(input.filePath));
+    if (semanticInputs.length > GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUTS) {
+      throw new GraphSourceStagingError([{
+        filePath: ".",
+        operation: "discover",
+        message: `Compiler provenance exceeds the ${GRAPH_SNAPSHOT_MAX_SEMANTIC_INPUTS}-path safety cap.`,
+      }]);
+    }
+    return {
+      files,
+      compiler: {
+        compilerVersion: compiler.compilerVersion,
+        semanticInputs: [...compiler.semanticInputs],
+      },
+      semanticInputs,
+      fingerprints,
+      sourceSpool,
+      ...manifest,
+    };
+  } catch (error) {
+    sourceSpool.dispose();
+    throw error;
+  }
 }
 
-function stageFrameworkAndFallbackResolution(root: string, files: StagedFile[]): void {
-  const sourceByPath = new Map(files.map((file) => [file.record.path, file.discovered.source]));
+/** Missing source/config probes are already observed by bounded corpus walks. */
+function negativeCompilerProbeCoveredByCorpusPolicy(relPath: string): boolean {
+  if (isSupportedSourceFile(relPath)) return true;
+  const name = relPath.split("/").at(-1)?.toLowerCase() ?? "";
+  return name === "package.json"
+    || /^tsconfig(?:\.[^.]+)?\.json$/u.test(name)
+    || /^jsconfig(?:\.[^.]+)?\.json$/u.test(name);
+}
+
+function stageFrameworkAndFallbackResolution(
+  root: string,
+  files: StagedFile[],
+  configSources: ReadonlyMap<string, string>,
+  sourceSpool: GraphSourceSpool,
+): void {
   const initialNodes = files.flatMap((file) => file.nodes);
-  const detectionContext = createStagedResolutionContext(initialNodes, root, sourceByPath);
+  const fileByPath = new Map(files.map((file) => [file.record.path, file]));
+  const sourceAccess = {
+    paths: [...fileByPath.keys()],
+    readFile: (path: string) => {
+      const file = fileByPath.get(path);
+      return file ? sourceSpool.read(file.discovered) : null;
+    },
+  };
+  const detectionContext = createStagedResolutionContext(
+    initialNodes,
+    root,
+    configSources,
+    sourceAccess,
+  );
   const resolvers = FRAMEWORK_RESOLVERS.filter((resolver) => resolver.detect(detectionContext));
   const fileNodeByPath = new Map(initialNodes
     .filter((node) => node.kind === "file")
@@ -329,9 +711,12 @@ function stageFrameworkAndFallbackResolution(root: string, files: StagedFile[]):
   for (const file of files) {
     if (file.record.parseStatus !== "ok") continue;
     const language = detectLanguage(file.record.path);
-    for (const resolver of resolvers) {
-      if (!resolver.extract || (resolver.languages && !resolver.languages.includes(language))) continue;
-      const extracted = resolver.extract(file.record.path, file.discovered.source);
+    const matchingResolvers = resolvers.filter((resolver) =>
+      resolver.extract && (!resolver.languages || resolver.languages.includes(language)));
+    if (matchingResolvers.length === 0) continue;
+    const source = sourceSpool.read(file.discovered);
+    for (const resolver of matchingResolvers) {
+      const extracted = resolver.extract!(file.record.path, source);
       for (const rawNode of extracted.nodes) {
         const node: GraphNode = {
           ...rawNode,
@@ -396,7 +781,7 @@ function stageFrameworkAndFallbackResolution(root: string, files: StagedFile[]):
 
   const nodes = files.flatMap((file) => file.nodes);
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
-  const context = createStagedResolutionContext(nodes, root, sourceByPath);
+  const context = createStagedResolutionContext(nodes, root, configSources, sourceAccess);
   const refs = files.flatMap((file) => file.references).filter((ref) =>
     ref.status !== "resolved"
     && !ref.resolver?.startsWith("typescript-")
@@ -404,7 +789,6 @@ function stageFrameworkAndFallbackResolution(root: string, files: StagedFile[]):
   );
   const resolvedEdges = resolveReferences(nodes, refs, { resolvers, context });
   hydrateFallbackImportBindings(files, nodes, nodeById);
-  const fileByPath = new Map(files.map((file) => [file.record.path, file]));
   for (const edge of resolvedEdges) {
     const source = nodeById.get(edge.source);
     const stagedFile = source ? fileByPath.get(source.filePath) : undefined;
@@ -498,7 +882,10 @@ function validateStagedCorpus(files: readonly StagedFile[]): void {
   }
 }
 
-function stageFingerprints(staged: readonly StagedFile[]): Array<{ nodeId: string; fingerprint: Fingerprint }> {
+function stageFingerprints(
+  staged: readonly StagedFile[],
+  sourceSpool: GraphSourceSpool,
+): Array<{ nodeId: string; fingerprint: Fingerprint }> {
   const fingerprintBuilder = createFingerprintBuilder();
   const pending: Array<{ nodeId: string; fingerprint: Fingerprint }> = [];
   const callersByTarget = new Map<string, Set<string>>();
@@ -513,12 +900,16 @@ function stageFingerprints(staged: readonly StagedFile[]): Array<{ nodeId: strin
   }
   for (const file of staged) {
     const nodes = file.nodes.filter((node) => node.bodyHash);
-    if (nodes.length === 0) continue;
+    if (nodes.length === 0) {
+      file.compilerNodes = undefined;
+      continue;
+    }
+    const source = sourceSpool.read(file.discovered);
     const nodeIds = new Set(nodes.map((node) => node.id));
     const compilerNodes = file.compilerNodes?.filter((node) => nodeIds.has(node.id));
     const tokens = compilerNodes && compilerNodes.length > 0
-      ? normalizedCompilerTokens(file.discovered.source, compilerNodes)
-      : normalizedAstTokens(file.record.path, file.discovered.source, nodes);
+      ? normalizedCompilerTokens(source, compilerNodes)
+      : normalizedAstTokens(file.record.path, source, nodes);
     for (const node of nodes) {
       pending.push({
         nodeId: node.id,
@@ -529,13 +920,18 @@ function stageFingerprints(staged: readonly StagedFile[]): Array<{ nodeId: strin
         ),
       });
     }
+    file.compilerNodes = undefined;
   }
   return pending;
 }
 
-function stageCompilerFile(discovered: DiscoveredFile, extraction: CompilerFileExtraction): StagedFile {
+function stageCompilerFile(
+  discovered: DiscoveredFile,
+  source: string,
+  extraction: CompilerFileExtraction,
+): StagedFile {
   const now = Date.now();
-  const lines = discovered.source.split("\n");
+  const lines = source.split("\n");
   const nodes: GraphNode[] = extraction.nodes.map((node) => ({
     id: node.id,
     identityKey: node.identityKey,
@@ -618,7 +1014,7 @@ function stageCompilerFile(discovered: DiscoveredFile, extraction: CompilerFileE
     discovered,
     record: {
       path: discovered.relPath,
-      contentHash: sha256(discovered.source),
+      contentHash: discovered.contentHash,
       language: extraction.language,
       size: discovered.size,
       modifiedAt: discovered.modifiedAt,
@@ -645,9 +1041,9 @@ function stageCompilerFile(discovered: DiscoveredFile, extraction: CompilerFileE
   };
 }
 
-function stageTreeFile(discovered: DiscoveredFile): StagedFile {
+function stageTreeFile(discovered: DiscoveredFile, source: string): StagedFile {
   const now = Date.now();
-  const extraction = extractFile(discovered.relPath, discovered.source);
+  const extraction = extractFile(discovered.relPath, source);
   const language = extraction?.language ?? detectLanguage(discovered.relPath);
   const health = extraction?.health ?? {
     status: "failed" as const, diagnosticCount: 1, missingCount: 0, errorCoverage: 1,
@@ -657,7 +1053,7 @@ function stageTreeFile(discovered: DiscoveredFile): StagedFile {
   for (const edge of extraction?.edges ?? []) {
     if (edge.kind === "contains" && edge.target) containsParents.set(edge.target, edge.source);
   }
-  const lines = discovered.source.split("\n");
+  const lines = source.split("\n");
   const nodes: GraphNode[] = (extraction?.nodes ?? []).map((node) => ({
     ...node,
     containerId: containsParents.get(node.id),
@@ -718,7 +1114,7 @@ function stageTreeFile(discovered: DiscoveredFile): StagedFile {
     discovered,
     record: {
       path: discovered.relPath,
-      contentHash: sha256(discovered.source),
+      contentHash: discovered.contentHash,
       language,
       size: discovered.size,
       modifiedAt: discovered.modifiedAt,
@@ -842,9 +1238,25 @@ function inspectChangedSources(
 ): Set<string> {
   const deleted = new Set<string>();
   const failures: GraphSourceStagingFailure[] = [];
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync(root);
+  } catch (error) {
+    throw new GraphSourceStagingError([sourceStagingFailure(".", "discover", error)]);
+  }
   for (const relPath of changedSources) {
+    let canonicalPath: string;
     try {
-      sourceFileAccess.stat(resolve(root, relPath));
+      canonicalPath = resolveContainedRepoFile(root, canonicalRoot, relPath);
+    } catch (error) {
+      if (isMissingPathError(error)) deleted.add(relPath);
+      else failures.push(sourceStagingFailure(relPath, "discover", error));
+      continue;
+    }
+    try {
+      sourceFileAccess.stat(sourceFileAccess === NODE_SOURCE_FILE_ACCESS
+        ? canonicalPath
+        : resolve(root, relPath));
     } catch (error) {
       if (isMissingPathError(error)) deleted.add(relPath);
       else failures.push(sourceStagingFailure(relPath, "stat", error));
@@ -854,34 +1266,393 @@ function inspectChangedSources(
   return deleted;
 }
 
-function discoverSourceFiles(root: string, sourceFileAccess: GraphSourceFileAccess): DiscoveredFile[] {
-  const matches = globSync(SUPPORTED_SOURCE_GLOB, {
-    cwd: root, ignore: IGNORE_GLOBS, nodir: true, absolute: false, dot: false,
-  }).map(toPosix).sort();
+function discoverSourceFiles(
+  root: string,
+  sourceFileAccess: GraphSourceFileAccess,
+  sourceSpool?: GraphSourceSpool,
+): DiscoveredFile[] {
+  let matches: string[];
   const files: DiscoveredFile[] = [];
   const failures: GraphSourceStagingFailure[] = [];
+  let canonicalRoot: string;
+  try {
+    canonicalRoot = realpathSync(root);
+    matches = discoverBoundedGraphPaths(GRAPH_SUPPORTED_SOURCE_GLOB, {
+      ...GRAPH_CORPUS_GLOB_OPTIONS,
+      cwd: root,
+      ignore: [...GRAPH_CORPUS_IGNORE_GLOBS],
+    }, GRAPH_CORPUS_LIMITS.maxSourceFiles).map(toPosix);
+  } catch (error) {
+    throw new GraphSourceStagingError([sourceStagingFailure(".", "discover", error)]);
+  }
+  let sourceBytes = 0;
   for (const relPath of matches) {
     if (!isSupportedSourceFile(relPath)) continue;
-    let stat: { size: number; mtimeMs: number };
+    let canonicalPath: string;
     try {
-      stat = sourceFileAccess.stat(resolve(root, relPath));
+      canonicalPath = resolveContainedRepoFile(root, canonicalRoot, relPath);
+    } catch (error) {
+      failures.push(sourceStagingFailure(relPath, "discover", error));
+      continue;
+    }
+
+    if (sourceFileAccess === NODE_SOURCE_FILE_ACCESS) {
+      try {
+        const file = readStableUtf8File(
+          canonicalPath,
+          resolve(root, relPath),
+          GRAPH_CORPUS_LIMITS.maxSourceFileBytes,
+        );
+        sourceBytes = addGraphCorpusBytes(
+          sourceBytes,
+          Buffer.byteLength(file.source, "utf8"),
+          "source",
+        );
+        const contentHash = sha256(file.source);
+        sourceSpool?.stage(relPath, file.source);
+        files.push({ relPath, contentHash, size: file.size, modifiedAt: file.modifiedAt });
+      } catch (error) {
+        failures.push(sourceStagingFailure(relPath, "read", error));
+        if (error instanceof GraphCorpusLimitError) break;
+      }
+      continue;
+    }
+
+    let stat: { size: number; mtimeMs: number };
+    let identityBefore: ReturnType<typeof lstatSync>;
+    const callbackPath = resolve(root, relPath);
+    try {
+      identityBefore = lstatSync(canonicalPath);
+      if (!identityBefore.isFile() || identityBefore.isSymbolicLink()) {
+        throw sourceContainmentError("Resolved source path is not a stable regular file.");
+      }
+      stat = sourceFileAccess.stat(callbackPath);
     } catch (error) {
       failures.push(sourceStagingFailure(relPath, "stat", error));
       continue;
     }
     try {
+      const source = sourceFileAccess.read(callbackPath);
+      const actualBytes = Buffer.byteLength(source, "utf8");
+      sourceBytes = addGraphCorpusBytes(sourceBytes, actualBytes, "source");
+      const identityAfter = lstatSync(canonicalPath);
+      if (!sameFileIdentity(identityBefore, identityAfter)
+        || resolveContainedRepoFile(root, canonicalRoot, relPath) !== canonicalPath) {
+        throw sourceContainmentError("Source path changed while it was being read.");
+      }
       files.push({
         relPath,
-        source: sourceFileAccess.read(resolve(root, relPath)),
+        contentHash: sha256(source),
         size: stat.size,
         modifiedAt: stat.mtimeMs,
       });
+      sourceSpool?.stage(relPath, source);
     } catch (error) {
       failures.push(sourceStagingFailure(relPath, "read", error));
+      if (error instanceof GraphCorpusLimitError) break;
     }
   }
   if (failures.length > 0) throw new GraphSourceStagingError(failures);
   return files;
+}
+
+function sourceCorpusMatchesFileRecords(
+  currentCorpus: readonly DiscoveredFile[],
+  indexedFiles: readonly FileRecord[],
+): boolean {
+  if (currentCorpus.length !== indexedFiles.length) return false;
+  const indexedByPath = new Map(indexedFiles.map((file) => [file.path, file.contentHash]));
+  return indexedByPath.size === indexedFiles.length
+    && currentCorpus.every((file) => indexedByPath.get(file.relPath) === file.contentHash);
+}
+
+function semanticInputsMatchSnapshot(
+  root: string,
+  semanticInputs: readonly GraphSnapshotSemanticInput[],
+): boolean {
+  const ledger = createGraphSemanticInputLedger();
+  return semanticInputs.every((input) => {
+    const source = readSecureCompilerInput(root, resolve(root, input.path));
+    addGraphSemanticInput(
+      ledger,
+      input.path,
+      source === undefined ? null : Buffer.byteLength(source, "utf8"),
+    );
+    return input.contentHash === null
+      ? source === undefined
+      : source !== undefined && sha256(source) === input.contentHash;
+  });
+}
+
+function resolveContainedRepoFile(root: string, canonicalRoot: string, relPath: string): string {
+  const lexicalRoot = resolve(root);
+  const absolutePath = resolve(lexicalRoot, relPath);
+  if (!isContainedPath(lexicalRoot, absolutePath)) {
+    throw sourceContainmentError("Source path escapes the repository root.");
+  }
+  const canonicalPath = realpathSync(absolutePath);
+  if (!isContainedPath(canonicalRoot, canonicalPath)) {
+    throw sourceContainmentError("Resolved source path escapes the repository root.");
+  }
+  return canonicalPath;
+}
+
+function readStableUtf8File(
+  canonicalPath: string,
+  sourcePath = canonicalPath,
+  maxBytes = GRAPH_CORPUS_LIMITS.maxSourceFileBytes,
+): {
+  source: string;
+  size: number;
+  modifiedAt: number;
+} {
+  const before = lstatSync(canonicalPath);
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw sourceContainmentError("Resolved source path is not a stable regular file.");
+  }
+  const noFollow = "O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0;
+  const fd = openSync(canonicalPath, constants.O_RDONLY | noFollow);
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || !sameFileIdentity(before, opened)) {
+      throw sourceContainmentError("Source path changed before it could be opened.");
+    }
+    if (!Number.isSafeInteger(opened.size) || opened.size < 0 || opened.size > maxBytes) {
+      throw new GraphCorpusLimitError(
+        maxBytes === GRAPH_CORPUS_LIMITS.maxConfigFileBytes
+          ? "maxConfigFileBytes"
+          : "maxSourceFileBytes",
+      );
+    }
+    const source = readFileSync(fd, "utf8");
+    const after = fstatSync(fd);
+    const resolvedAfter = realpathSync(sourcePath);
+    const pathAfter = lstatSync(resolvedAfter);
+    if (!sameFileIdentity(opened, after)
+      || resolvedAfter !== canonicalPath
+      || !pathAfter.isFile()
+      || pathAfter.isSymbolicLink()
+      || !sameFileIdentity(opened, pathAfter)) {
+      throw sourceContainmentError("Source file changed while it was being read.");
+    }
+    return { source, size: opened.size, modifiedAt: opened.mtimeMs };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function sameFileIdentity(
+  left: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number },
+  right: { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number },
+): boolean {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
+function isContainedPath(root: string, candidate: string): boolean {
+  const path = relative(root, candidate);
+  return path === "" || (!isAbsolute(path) && path !== ".." && !path.startsWith("../") && !path.startsWith("..\\"));
+}
+
+function sourceContainmentError(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: "GRAPH_SOURCE_PATH_ESCAPE" });
+}
+
+function readSecureCompilerInput(root: string, absolutePath: string): string | undefined {
+  const lexicalRoot = resolve(root);
+  const resolvedPath = resolve(absolutePath);
+  const relPath = toPosix(relative(lexicalRoot, resolvedPath));
+  if (!relPath || relPath === ".." || relPath.startsWith("../") || isAbsolute(relPath)) {
+    throw new GraphSourceStagingError([sourceStagingFailure(
+      relPath || ".",
+      "read",
+      sourceContainmentError("Compiler input escapes the repository root."),
+    )]);
+  }
+  try {
+    const canonicalRoot = realpathSync(lexicalRoot);
+    const canonicalPath = resolveContainedRepoFile(lexicalRoot, canonicalRoot, relPath);
+    return readStableUtf8File(canonicalPath, resolvedPath).source;
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      try {
+        assertContainedMissingCompilerInput(lexicalRoot, relPath);
+        return undefined;
+      } catch (containmentError) {
+        throw new GraphSourceStagingError([sourceStagingFailure(relPath, "read", containmentError)]);
+      }
+    }
+    throw new GraphSourceStagingError([sourceStagingFailure(relPath, "read", error)]);
+  }
+}
+
+function assertContainedMissingCompilerInput(root: string, relPath: string): void {
+  const canonicalRoot = realpathSync(root);
+  const absolutePath = resolve(root, relPath);
+  try {
+    if (lstatSync(absolutePath).isSymbolicLink()) {
+      throw sourceContainmentError("A missing compiler input is represented by an unresolved symlink.");
+    }
+  } catch (error) {
+    if (!isMissingPathError(error)) throw error;
+  }
+  let ancestor = dirname(absolutePath);
+  for (;;) {
+    try {
+      const canonicalAncestor = realpathSync(ancestor);
+      if (!isContainedPath(canonicalRoot, canonicalAncestor)) {
+        throw sourceContainmentError("A missing compiler input's resolved ancestor escapes the repository root.");
+      }
+      return;
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+      try {
+        if (lstatSync(ancestor).isSymbolicLink()) {
+          throw sourceContainmentError("A missing compiler input has an unresolved symlink ancestor.");
+        }
+      } catch (lstatError) {
+        if (!isMissingPathError(lstatError)) throw lstatError;
+      }
+      const parent = dirname(ancestor);
+      if (parent === ancestor) {
+        throw sourceContainmentError("No stable repository ancestor exists for the missing compiler input.");
+      }
+      ancestor = parent;
+    }
+  }
+}
+
+function validateCompilerInputs(
+  discovered: readonly DiscoveredFile[],
+  compiler: CompilerExtractionResult,
+  stagedInputHashes: ReadonlyMap<string, string>,
+  root: string,
+): void {
+  const observed = new Map(compiler.semanticInputs.map((input) => [input.filePath, input.contentHash]));
+  const discoveredByPath = new Map(discovered.map((file) => [file.relPath, file]));
+  const failures: GraphSourceStagingFailure[] = [];
+  // A compiler-language file can be deliberately absent from compiler.files
+  // when program creation crashes; the engine then extracts its immutable spool
+  // bytes with tree-sitter. Exact compiler-consumption validation therefore
+  // applies to files that actually produced compiler facts.
+  for (const extraction of compiler.files) {
+    const file = discoveredByPath.get(extraction.filePath);
+    const compilerHash = observed.get(extraction.filePath);
+    if (file && compilerHash === file.contentHash) continue;
+    failures.push({
+      filePath: extraction.filePath,
+      operation: "read",
+      message: !file
+        ? "The TypeScript compiler produced facts for a file outside the staged corpus."
+        : compilerHash === undefined
+        ? "The TypeScript compiler did not consume the securely staged source."
+        : "The TypeScript compiler consumed source bytes that differ from the staged corpus.",
+    });
+  }
+  for (const input of compiler.semanticInputs) {
+    const stagedHash = stagedInputHashes.get(input.filePath);
+    if (stagedHash !== undefined) {
+      if (input.contentHash === null || stagedHash !== input.contentHash) failures.push({
+        filePath: input.filePath,
+        operation: "read",
+        message: "The compiler semantic input differs from the immutable staged bytes.",
+      });
+      continue;
+    }
+    const current = readSecureCompilerInput(root, resolve(root, input.filePath));
+    const matches = input.contentHash === null
+      ? current === undefined
+      : current !== undefined && sha256(current) === input.contentHash;
+    if (!matches) failures.push({
+      filePath: input.filePath,
+      operation: "read",
+      message: "A compiler semantic input changed while extraction was running.",
+    });
+  }
+  if (failures.length > 0) throw new GraphSourceStagingError(failures);
+}
+
+/**
+ * Publication is allowed only when the staged semantic corpus still describes
+ * the checkout. The final Git read intentionally happens after source and
+ * manifest verification so a checkout operation during either read is also
+ * observed before the transaction begins.
+ */
+function verifyPublicationInputs(
+  root: string,
+  staged: StagedCorpus,
+  gitBeforeStaging: GraphGitProvenance,
+  sourceFileAccess: GraphSourceFileAccess,
+  internal: GraphEngineInternalHooks = {},
+): GraphGitProvenance {
+  const currentFiles = discoverSourceFiles(root, sourceFileAccess);
+  const currentManifest = graphManifest(root);
+  const failures: GraphSourceStagingFailure[] = [];
+
+  const changedManifestParts = (["manifestHash", "configHash", "grammarHash"] as const)
+    .filter((key) => staged[key] !== currentManifest[key]);
+  if (changedManifestParts.length > 0) {
+    failures.push({
+      filePath: ".",
+      operation: "discover",
+      message: `The graph build manifest changed while the corpus was being staged (${changedManifestParts.join(", ")}).`,
+    });
+  }
+
+  const stagedSources = new Map(staged.files.map((file) => [file.record.path, file.record.contentHash]));
+  const currentSources = new Map(currentFiles.map((file) => [file.relPath, file.contentHash]));
+  const paths = [...new Set([...stagedSources.keys(), ...currentSources.keys()])]
+    .sort(compareCodePoints);
+  for (const filePath of paths) {
+    const stagedHash = stagedSources.get(filePath);
+    const currentHash = currentSources.get(filePath);
+    if (stagedHash === currentHash) continue;
+    const change = stagedHash === undefined ? "appeared"
+      : currentHash === undefined ? "disappeared"
+        : "changed";
+    failures.push({
+      filePath,
+      operation: "discover",
+      message: `The supported source ${change} while the graph corpus was being staged.`,
+    });
+  }
+
+  const semanticInputLedger = createGraphSemanticInputLedger();
+  for (const input of staged.semanticInputs) {
+    const source = readSecureCompilerInput(root, resolve(root, input.filePath));
+    addGraphSemanticInput(
+      semanticInputLedger,
+      input.filePath,
+      source === undefined ? null : Buffer.byteLength(source, "utf8"),
+    );
+    internal.afterFinalSemanticInputRead?.(input.filePath);
+    if (input.contentHash === null ? source === undefined : source !== undefined && sha256(source) === input.contentHash) {
+      continue;
+    }
+    failures.push({
+      filePath: input.filePath,
+      operation: "read",
+      message: "A compiler semantic input changed before graph publication.",
+    });
+  }
+
+  // Git is deliberately the last checkout observation. A checkout during any
+  // source, manifest, or indirect semantic-input verification is therefore
+  // caught before snapshot construction and the publication transaction.
+  const currentGit = readGraphGitProvenance(root);
+  if (gitBeforeStaging.branch !== currentGit.branch || gitBeforeStaging.head !== currentGit.head) {
+    failures.push({
+      filePath: ".git/HEAD",
+      operation: "discover",
+      message: "Git branch or HEAD changed while the graph corpus was being staged.",
+    });
+  }
+
+  if (failures.length > 0) throw new GraphSourceStagingError(failures);
+  return currentGit;
 }
 
 function sourceStagingFailure(
@@ -907,27 +1678,60 @@ function isMissingPathError(error: unknown): boolean {
 }
 
 export function graphManifest(root: string): GraphManifest {
-  const configPaths = [...new Set(globSync([
-    "package.json", "**/package.json", "tsconfig*.json", "**/tsconfig*.json",
-    "jsconfig*.json", "**/jsconfig*.json",
-  ], {
-    cwd: root, ignore: IGNORE_GLOBS, nodir: true,
-  }).map(toPosix))].sort();
-  const configs = configPaths.map((path) => {
-    try { return [path, sha256(readFileSync(resolve(root, path), "utf-8"))]; }
-    catch { return [path, "unreadable"]; }
-  });
-  const configHash = sha256(JSON.stringify(configs));
+  const configSources = discoverGraphConfigSources(root);
+  const configHash = configHashForSources(configSources);
   const grammarHash = grammarManifestHash();
   const manifestHash = sha256(JSON.stringify({
     db: DB_SCHEMA_VERSION,
     compiler: TYPESCRIPT_COMPILER_VERSION,
     extractor: CORPUS_EXTRACTOR_VERSION,
     resolver: RESOLVER_VERSION,
+    corpusPolicyHash: GRAPH_CORPUS_POLICY_HASH,
     grammarHash,
     configHash,
   }));
   return { manifestHash, configHash, grammarHash };
+}
+
+function discoverGraphConfigSources(root: string): Map<string, string> {
+  let canonicalRoot: string;
+  let configPaths: string[];
+  try {
+    canonicalRoot = realpathSync(root);
+    configPaths = discoverBoundedGraphPaths([...GRAPH_CONFIG_GLOBS], {
+      ...GRAPH_CORPUS_GLOB_OPTIONS,
+      cwd: root,
+      ignore: [...GRAPH_CORPUS_IGNORE_GLOBS],
+    }, GRAPH_CORPUS_LIMITS.maxConfigFiles).map(toPosix);
+  } catch (error) {
+    throw new GraphSourceStagingError([sourceStagingFailure(".", "discover", error)]);
+  }
+  let configBytes = 0;
+  const configs = configPaths.map((path) => {
+    try {
+      const canonicalPath = resolveContainedRepoFile(root, canonicalRoot, path);
+      const file = readStableUtf8File(
+        canonicalPath,
+        resolve(root, path),
+        GRAPH_CORPUS_LIMITS.maxConfigFileBytes,
+      );
+      configBytes = addGraphCorpusBytes(
+        configBytes,
+        Buffer.byteLength(file.source, "utf8"),
+        "config",
+      );
+      return [path, file.source] as const;
+    } catch (error) {
+      throw new GraphSourceStagingError([sourceStagingFailure(path, "read", error)]);
+    }
+  });
+  return new Map(configs);
+}
+
+function configHashForSources(configSources: ReadonlyMap<string, string>): string {
+  return sha256(JSON.stringify([...configSources.entries()]
+    .map(([path, source]) => [path, sha256(source)])
+    .sort(([left], [right]) => compareCodePoints(left!, right!))));
 }
 
 function healthCounts(files: StagedFile[]): { ok: number; partial: number; failed: number } {
@@ -940,6 +1744,10 @@ function healthCounts(files: StagedFile[]): { ok: number; partial: number; faile
 
 function sha256(text: string | Buffer): string {
   return createHash("sha256").update(text).digest("hex");
+}
+
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function bodyHash(sourceLines: string[], startLine: number, endLine: number): string {

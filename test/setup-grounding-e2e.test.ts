@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,8 +8,9 @@ import { runGraphScope } from "../src/graph/cli-agent.js";
 import { deserializeFingerprint } from "../src/graph/fingerprint.js";
 import { extractGroundings, findMexAnchors, writeGroundings } from "../src/markdown.js";
 import { checkBrokenLinks } from "../src/drift/checkers/broken-link.js";
-import { runDriftCheck } from "../src/drift/index.js";
+import { runDriftCheckWithGraphStatus } from "../src/drift/index.js";
 import { captureGroundingBaselines, loadGroundingRuntime } from "../src/graph/runtime.js";
+import { finalizeSetupWiki } from "../src/setup/wiki-finalize.js";
 
 const roots: string[] = [];
 
@@ -95,11 +96,24 @@ export function calculateCheckoutTotal(items: number[], member: boolean): number
       .not.toBeNull();
     runtime!.close();
 
+    // Setup then migrates the legacy frontmatter and builds the Wiki index.
+    const finalized = await finalizeSetupWiki({ projectRoot: root, scaffoldRoot: join(root, ".mex") });
+    expect(finalized.ready).toBe(true);
+    expect(existsSync(join(root, ".mex", "wiki.db"))).toBe(true);
+    expect(extractGroundings(readFileSync(pattern, "utf-8"))[0]?.bodyHash).toMatch(/^[0-9a-f]{64}$/u);
+
     writeFileSync(join(sourceDir, "checkout.ts"), readFileSync(join(sourceDir, "checkout.ts"), "utf-8")
       .replace("subtotal >= 100 ? 0 : 12", "subtotal >= 125 ? 0 : 15"));
-    // check reads the last published graph (read-only, #140); refresh first.
-    await loadGroundingRuntime(config).then((refresh) => refresh?.close());
-    const drift = await runDriftCheck(config);
+    const warnings: string[] = [];
+    let drift = await runDriftCheckWithGraphStatus(config, { graphWarning: (message) => warnings.push(message) });
+    expect(drift.graphStatus?.status).toBe("stale");
+    expect(drift.issues.some((issue) => issue.code.startsWith("GROUNDING_"))).toBe(false);
+    expect(warnings).toContainEqual(expect.stringContaining("Run `mex graph refresh`"));
+
+    const refreshRuntime = await loadGroundingRuntime(config);
+    refreshRuntime!.close();
+    drift = await runDriftCheckWithGraphStatus(config, { graphWarning: (message) => warnings.push(message) });
+    expect(drift.graphStatus?.status).toBe("fresh");
     expect(drift.issues).toContainEqual(expect.objectContaining({
       code: "GROUNDING_DRIFT",
       file: ".mex/patterns/calculate-checkout.md",
@@ -108,9 +122,10 @@ export function calculateCheckoutTotal(items: number[], member: boolean): number
     // Same shared post-authoring routine used by sync: refresh, then check clean.
     expect(await captureGroundingBaselines(config, { updateFingerprints: true }))
       .toEqual({ captured: 2, skipped: 0 });
-    const clean = await runDriftCheck(config);
+    const clean = await runDriftCheckWithGraphStatus(config, { graphWarning: (message) => warnings.push(message) });
+    expect(clean.graphStatus?.status).toBe("fresh");
     expect(clean.issues.filter((issue) => issue.code.startsWith("GROUNDING_"))).toEqual([]);
-  }, 15_000);
+  }, 30_000);
 
   it("skips and warns when authored grounding no longer resolves", async () => {
     const root = mkdtempSync(join(tmpdir(), "mex-setup-grounding-miss-"));

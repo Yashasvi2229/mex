@@ -15,6 +15,9 @@ export default defineConfig([
     splitting: false,
     sourcemap: true,
     dts: false,
+    // Hub contracts are a private workspace package and are intentionally
+    // bundled into the published CLI instead of becoming a runtime dependency.
+    noExternal: ["@mex/hub-contracts"],
     banner: {
       js: "#!/usr/bin/env node",
     },
