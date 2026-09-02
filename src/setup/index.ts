@@ -1,9 +1,8 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
-import { resolve, dirname, relative, join } from "node:path";
+import { existsSync, readFileSync, mkdirSync, copyFileSync, lstatSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { execSync } from "node:child_process";
-import crossSpawn from "cross-spawn";
 import { stdin, stdout } from "node:process";
 import { globSync } from "glob";
 import chalk from "chalk";
@@ -12,9 +11,11 @@ import {
   buildExistingWithBriefPrompt,
   buildExistingNoBriefPrompt,
 } from "./prompts.js";
-import { saveAiTools, ensureScaffoldIdentity } from "../config.js";
-import { isCliAvailable } from "../cli-tools.js";
-import { captureGroundingBaselines } from "../graph/runtime.js";
+import { saveAiTools, ensureScaffoldIdentity, findConfig, readScaffoldId } from "../config.js";
+import {
+  captureGroundingBaselines,
+  type GroundingBaselineCaptureResult,
+} from "../graph/runtime.js";
 import { VERSION } from "../version.js";
 import {
   renderInstructionChangePreview,
@@ -22,7 +23,14 @@ import {
   type AgentAssetsReport,
   type AgentSkillClient,
 } from "../agent-skills/index.js";
-import type { AiTool } from "../types.js";
+import { AI_TOOLS, type AiTool } from "../types.js";
+import { launchSetupPopulation } from "./population.js";
+import {
+  ensureSetupIgnoreProtection,
+  renderSetupIgnoreProtection,
+  verifySetupIgnoreProtection,
+} from "./ignore.js";
+import { finalizeSetupWiki } from "./wiki-finalize.js";
 
 // ── Constants ──
 
@@ -56,6 +64,42 @@ const AGENT_MEMORY_FILES = [
   "HEARTBEAT.md",
 ];
 
+export type ScaffoldFileAction = "copy" | "skip";
+
+export function ensureScaffoldFile(src: string, dest: string, dryRun = false): ScaffoldFileAction {
+  if (existsSync(dest)) return "skip";
+  if (!dryRun) {
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(src, dest);
+  }
+  return "copy";
+}
+
+/** Refuse to replace malformed or redirected canonical config during setup. */
+export function verifyExistingSetupConfig(mexDir: string): void {
+  const path = resolve(mexDir, "config.json");
+  let stats: ReturnType<typeof lstatSync>;
+  try {
+    stats = lstatSync(path);
+  } catch (error) {
+    if (error instanceof Error
+      && "code" in error
+      && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error("Could not inspect existing .mex/config.json. Fix its permissions before rerunning setup.", {
+      cause: error,
+    });
+  }
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw new Error("Existing .mex/config.json must be a regular file. Fix it before rerunning setup.");
+  }
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error();
+  } catch {
+    throw new Error("Existing .mex/config.json is not a valid JSON object. Fix it before rerunning setup.");
+  }
+}
+
 const TOOL_CONFIGS: Record<string, { src: string; dest: string }> = {
   "2": { src: ".tool-configs/.cursorrules", dest: ".cursorrules" },
   "3": { src: ".tool-configs/.windsurfrules", dest: ".windsurfrules" },
@@ -80,10 +124,6 @@ function findProjectRoot(): string {
   }
 }
 
-function isTemplateContent(content: string): boolean {
-  return content.includes("[Project Name]") || content.includes("[YYYY-MM-DD]");
-}
-
 function banner() {
   const GRN = "\x1b[38;2;91;140;90m";
   const DGR = "\x1b[38;2;74;122;73m";
@@ -106,7 +146,7 @@ function banner() {
 
 // ── Main ──
 
-type ProjectState = "existing" | "fresh" | "partial";
+export type ProjectState = "existing" | "fresh" | "partial";
 
 type SetupMode = "code-repo" | "agent-memory";
 
@@ -132,6 +172,10 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   const projectRoot = findProjectRoot();
   const mexDir = resolve(projectRoot, ".mex");
 
+  if (mode === "code-repo" && !existsSync(resolve(projectRoot, ".git"))) {
+    throw new Error("No Git repository found. Run `git init` first, then rerun mex setup.");
+  }
+
   // Guard: don't run inside the mex repo itself
   if (existsSync(resolve(projectRoot, "src", "setup", "index.ts"))) {
     const pkg = resolve(projectRoot, "package.json");
@@ -147,6 +191,7 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
 
   // ── Step 1: Detect project state ──
 
+  const scaffoldPopulatedAtStart = isScaffoldPopulated(mexDir);
   const state = detectProjectState(projectRoot, mexDir);
 
   if (mode === "agent-memory") {
@@ -163,8 +208,8 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
         info("Mode: populate scaffold from intent");
         break;
       case "partial":
-        info("Detected: existing codebase with partially populated scaffold");
-        info("Mode: will populate empty slots, skip what's already filled");
+        info("Detected: existing codebase with a populated scaffold");
+        info("Mode: preserve authored files and finish setup readiness");
         break;
     }
   }
@@ -175,6 +220,14 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   header("Creating .mex/ scaffold...");
   console.log();
 
+  const ignoreProtection = ensureSetupIgnoreProtection({ projectRoot, dryRun });
+  const ignoreMessage = renderSetupIgnoreProtection(ignoreProtection);
+  if (ignoreProtection.changed) ok(ignoreMessage);
+  else info(ignoreMessage);
+  if (mode === "code-repo" && !dryRun) verifySetupIgnoreProtection(projectRoot);
+  verifyExistingSetupConfig(mexDir);
+  console.log();
+
   const scaffoldFiles = mode === "agent-memory" ? AGENT_MEMORY_FILES : SCAFFOLD_FILES;
   for (const file of scaffoldFiles) {
     const agentMemorySrc = resolve(TEMPLATES_DIR, "agent-memory", file);
@@ -183,22 +236,15 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
       : resolve(TEMPLATES_DIR, file);
     const dest = resolve(mexDir, file);
 
-    if (existsSync(dest)) {
-      const existingContent = readFileSync(dest, "utf-8");
-      const templateContent = readFileSync(src, "utf-8");
-
-      // Skip if file has been populated (no longer matches template markers)
-      if (!isTemplateContent(existingContent) && existingContent !== templateContent) {
-        info(`Skipped .mex/${file} (already populated)`);
-        continue;
-      }
+    const action = ensureScaffoldFile(src, dest, dryRun);
+    if (action === "skip") {
+      info(`Skipped .mex/${file} (already exists)`);
+      continue;
     }
 
     if (dryRun) {
       ok(`(dry run) Would copy .mex/${file}`);
     } else {
-      mkdirSync(dirname(dest), { recursive: true });
-      copyFileSync(src, dest);
       ok(`Copied .mex/${file}`);
     }
   }
@@ -208,11 +254,17 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
 
   let selectedTools: AiTool[] = [];
 
-  const rl = createInterface({ input: stdin, output: stdout });
-  try {
-    selectedTools = await selectToolConfig(rl, projectRoot, dryRun);
-  } finally {
-    rl.close();
+  const configuredTools = scaffoldPopulatedAtStart ? findConfig(projectRoot).aiTools : [];
+  if (configuredTools.length > 0) {
+    selectedTools = configuredTools;
+    info(`Using configured AI tools: ${selectedTools.map((tool) => AI_TOOLS[tool].name).join(", ")}`);
+  } else {
+    const rl = createInterface({ input: stdin, output: stdout });
+    try {
+      selectedTools = await selectToolConfig(rl, projectRoot, dryRun);
+    } finally {
+      rl.close();
+    }
   }
   console.log();
 
@@ -222,13 +274,18 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   if (selectedAgentClients.length > 0) {
     header("Installing official MEX agent skills...");
     console.log();
-    const agentAssets = installSetupAgentAssets({ projectRoot, selectedTools, dryRun })!;
+    const agentAssets = installSetupAgentAssets({
+      projectRoot,
+      selectedTools,
+      dryRun,
+      checkIgnored: mode === "code-repo",
+    })!;
     renderAgentAssetsReport(agentAssets);
     console.log();
     const sessionSummary = `a new ${formatAgentClientList(agentAssets.clients)} session `
       + "to guarantee the new skills and project instructions are loaded.";
     if (agentAssets.conflicted) {
-      warn(`Resolve the reported conflicts and rerun setup or mex skills sync. Then start ${sessionSummary}`);
+      throw new Error("Official MEX agent assets have conflicts. Resolve the warnings above and rerun setup or mex skills sync.");
     } else if (dryRun) {
       info(`After applying this setup, start ${sessionSummary}`);
     } else {
@@ -240,7 +297,10 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   // Mint a stable scaffold identity. Independent of tool selection so a setup
   // that picks no AI tool still gets a scaffold_id written to config.json.
   if (!dryRun) {
-    ensureScaffoldIdentity(mexDir, projectRoot);
+    const identity = ensureScaffoldIdentity(mexDir, projectRoot);
+    if (readScaffoldId(mexDir) !== identity.scaffold_id) {
+      throw new Error("Could not persist .mex/config.json. Fix its permissions or contents and rerun setup.");
+    }
   }
 
   // ── Step 4: Run scanner (if not fresh) ──
@@ -270,7 +330,7 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
       ok("Code graph ready");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      warn(`Code graph unavailable — setup will continue: ${message}`);
+      throw new Error(`Code graph setup failed: ${message}. Fix the problem and rerun mex setup.`);
     }
   }
 
@@ -297,60 +357,50 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
     return;
   }
 
-  const hasClaude = hasClaudeCli();
-
-  if (selectedTools.includes("claude") && hasClaude) {
-    header("Launching Claude Code to populate the scaffold...");
+  let populationFinished = scaffoldPopulatedAtStart;
+  if (populationFinished) {
+    header("Finishing setup from the existing populated scaffold...");
     console.log();
-    info("An interactive Claude Code session will open with the population prompt.");
-    info("You'll see the agent working in real-time.");
-    console.log();
-
-    try {
-      await launchClaude(prompt);
-      if (mode === "code-repo") {
-        try {
-          const result = await captureGroundingBaselines(
-            { projectRoot, scaffoldRoot: mexDir, aiTools: [] },
-            { warn },
-          );
-          if (result.captured > 0) ok(`Captured ${result.captured} grounding baseline(s)`);
-          else warn("No grounding baselines were captured; verify the agent authored grounding.");
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          warn(`Grounding baselines unavailable — setup will continue: ${message}`);
-        }
-      }
-      console.log();
-      ok("Setup complete.");
-    } catch (err) {
-      // A launch/exit failure must not crash setup with an unhandled
-      // rejection — report it and fall back to the manual-paste prompt.
-      console.log();
-      warn(`Couldn't run Claude Code automatically: ${(err as Error).message}`);
-      info("Paste the prompt below into your AI tool to populate the scaffold instead.");
-      printPromptForManualPaste(prompt);
-      await confirmAndCaptureGrounding(projectRoot, mexDir, mode);
-    }
-    await promptGlobalInstall();
-    return;
   } else {
+    header("Launching an agent to populate the scaffold...");
+    console.log();
+    info("The first selected available Claude Code or Codex CLI will run in the project root.");
+    console.log();
+    const launched = launchSetupPopulation(selectedTools, prompt, projectRoot);
+    if (launched.completed) {
+      ok(`${AI_TOOLS[launched.tool!].name} finished the population session`);
+      populationFinished = isScaffoldPopulated(mexDir);
+      if (!populationFinished) {
+        warn("The agent exited successfully, but required scaffold placeholders remain.");
+      }
+    } else if (launched.tool !== null) {
+      warn(`${AI_TOOLS[launched.tool].name} did not complete population.`);
+    }
+  }
+
+  if (!populationFinished) {
     header("Almost done. One more step — populate the scaffold.");
     console.log();
-
-    if (hasClaude) {
-      info("You can run this directly with Claude Code:");
-      console.log();
-      console.log("  claude -p '<the prompt below>'");
-      console.log();
-      info("Or paste the prompt below into your AI tool.");
-    } else {
-      info("Paste the prompt below into your AI tool.");
-      info("The agent will read your codebase and fill every scaffold file.");
-    }
-
+    info("Paste the prompt below into your AI tool.");
+    info("The agent will read your codebase and fill every scaffold file.");
     printPromptForManualPaste(prompt);
-    await confirmAndCaptureGrounding(projectRoot, mexDir, mode);
+    populationFinished = await confirmPopulationFinished(mexDir);
+  }
+
+  if (!populationFinished || !isScaffoldPopulated(mexDir)) {
+    console.log();
+    info("Setup paused at population. After the agent finishes, rerun `mex setup` to finalize Graph and Wiki readiness.");
+    return;
+  }
+
+  if (mode === "code-repo") {
+    await finalizeCodeRepoSetup(projectRoot, mexDir);
+    console.log();
+    ok("Graph and Wiki are ready. Setup is ready to commit.");
+    printCommitCheckpoint(selectedTools);
+  } else {
+    console.log();
+    ok("Setup complete.");
   }
 
   await promptGlobalInstall();
@@ -364,16 +414,26 @@ function normalizeMode(raw: string | undefined): SetupMode {
 
 // ── Step functions ──
 
-function detectProjectState(projectRoot: string, mexDir: string): ProjectState {
-  // Check if scaffold is already partially populated
-  const agentsMd = resolve(mexDir, "AGENTS.md");
-  let scaffoldPopulated = false;
-  if (existsSync(agentsMd)) {
-    const content = readFileSync(agentsMd, "utf-8");
-    if (!content.includes("[Project Name]")) {
-      scaffoldPopulated = true;
-    }
-  }
+export function isScaffoldPopulated(mexDir: string): boolean {
+  const required = [
+    "AGENTS.md",
+    "ROUTER.md",
+    "context/architecture.md",
+    "context/stack.md",
+    "context/conventions.md",
+    "context/decisions.md",
+    "context/setup.md",
+  ];
+  return required.every((file) => {
+    const path = resolve(mexDir, file);
+    if (!existsSync(path)) return false;
+    const content = readFileSync(path, "utf-8");
+    return !content.includes("[Project Name]") && !content.includes("[YYYY-MM-DD]");
+  });
+}
+
+export function detectProjectState(projectRoot: string, mexDir: string): ProjectState {
+  const scaffoldPopulated = isScaffoldPopulated(mexDir);
 
   // Count source files
   const patterns = SOURCE_EXTENSIONS.map(
@@ -388,7 +448,7 @@ function detectProjectState(projectRoot: string, mexDir: string): ProjectState {
 
   if (scaffoldPopulated && sourceFiles.length > 0) {
     return "partial";
-  } else if (sourceFiles.length > 3) {
+  } else if (sourceFiles.length > 0) {
     return "existing";
   } else {
     return "fresh";
@@ -443,7 +503,7 @@ async function selectToolConfig(
 
     if (dryRun) {
       if (existsSync(dest)) {
-        warn(`(dry run) Would overwrite ${config.dest}`);
+        info(`(dry run) Would keep existing ${config.dest}`);
       } else {
         ok(`(dry run) Would copy ${config.dest}`);
       }
@@ -519,6 +579,8 @@ export interface InstallSetupAgentAssetsOptions {
   packagedSkillsRoot?: string;
   /** Injectable only for package-version upgrade tests. */
   packageVersion?: string;
+  /** Agent-memory workspaces may intentionally live outside Git. */
+  checkIgnored?: boolean;
 }
 
 /** The noninteractive installation seam used by the normal setup flow. */
@@ -533,6 +595,7 @@ export function installSetupAgentAssets(
     projectRoot: options.projectRoot,
     packageVersion: options.packageVersion ?? VERSION,
     clients,
+    ...(options.checkIgnored === undefined ? {} : { checkIgnored: options.checkIgnored }),
     ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
     ...(options.packagedSkillsRoot === undefined
       ? {}
@@ -559,56 +622,90 @@ function printPromptForManualPaste(prompt: string): void {
   ok("Paste the prompt above into your agent to populate the scaffold.");
 }
 
-async function confirmAndCaptureGrounding(
-  projectRoot: string,
-  mexDir: string,
-  mode: SetupMode,
-): Promise<void> {
-  if (mode !== "code-repo" || !stdin.isTTY) return;
+async function confirmPopulationFinished(mexDir: string): Promise<boolean> {
+  if (!stdin.isTTY) return false;
   const rl = createInterface({ input: stdin, output: stdout });
   try {
     console.log();
-    info("After the agent finishes populating, return here to capture grounding baselines.");
+    info("After the agent finishes populating, return here to finish setup.");
     const answer = (await rl.question("  Has population finished? [y/N] ")).trim().toLowerCase();
-    if (answer !== "y" && answer !== "yes") return;
-    const result = await captureGroundingBaselines(
-      { projectRoot, scaffoldRoot: mexDir, aiTools: [] },
-      { warn },
-    );
-    if (result.captured > 0) ok(`Captured ${result.captured} grounding baseline(s)`);
-    else warn("No grounding baselines were captured; verify the agent authored grounding.");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    warn(`Grounding baselines unavailable — setup will continue: ${message}`);
+    if (answer !== "y" && answer !== "yes") return false;
+    if (!isScaffoldPopulated(mexDir)) {
+      warn("Required placeholders remain in the .mex scaffold files.");
+      return false;
+    }
+    return true;
   } finally {
     rl.close();
   }
 }
 
-function hasClaudeCli(): boolean {
-  return isCliAvailable("claude");
+async function finalizeCodeRepoSetup(projectRoot: string, mexDir: string): Promise<void> {
+  info("Capturing grounding baselines...");
+  try {
+    const result = await captureGroundingBaselines(
+      { projectRoot, scaffoldRoot: mexDir, aiTools: [] },
+      { warn },
+    );
+    assertGroundingCaptureReady(result);
+    if (result.captured > 0) ok(`Captured ${result.captured} grounding baseline(s)`);
+    else info("No authored grounding baselines needed capture");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Grounding finalization failed: ${message}. Rerun mex setup after fixing it.`);
+  }
+
+  const config = findConfig(projectRoot);
+  const wiki = await finalizeSetupWiki({
+    projectRoot,
+    scaffoldRoot: mexDir,
+    exclude: config.wiki?.exclude,
+    readOnly: config.wiki?.readOnly,
+    onProgress: info,
+    onWarning: warn,
+  });
+  if (!wiki.ready) {
+    const codes = [...new Set(wiki.diagnostics.map((entry) => entry.code))].join(", ");
+    const suffix = codes.length === 0 ? "" : ` (${codes})`;
+    throw new Error(`${wiki.reason ?? "Wiki setup did not finish."}${suffix} Fix the issue and rerun mex setup.`);
+  }
+  ok(`Wiki ready with ${wiki.indexedEntities} indexed entit${wiki.indexedEntities === 1 ? "y" : "ies"}`);
 }
 
-function launchClaude(prompt: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    // cross-spawn resolves the Windows `claude.cmd` wrapper and escapes the
-    // prompt correctly. Plain spawn threw ENOENT on Windows (issue #85).
-    const child = crossSpawn("claude", [prompt], {
-      stdio: "inherit",
-    });
+export function assertGroundingCaptureReady(result: GroundingBaselineCaptureResult): void {
+  if (result.skipped > 0) {
+    throw new Error(
+      `${result.skipped} authored grounding reference${result.skipped === 1 ? "" : "s"} could not be verified against the code graph.`,
+    );
+  }
+}
 
-    child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Claude exited with code ${code}`));
-    });
-
-    child.on("error", (err) => {
-      reject(new Error(`Failed to launch Claude: ${err.message}`));
-    });
-  });
+function printCommitCheckpoint(selectedTools: readonly AiTool[]): void {
+  header("Commit the canonical MEX setup before opening Hub");
+  console.log();
+  info("Review the scoped files, then commit them. MEX will not stage or commit automatically.");
+  console.log("    git status --short");
+  console.log("    git add .mex");
+  if (selectedTools.includes("claude")) {
+    console.log("    git add CLAUDE.md .claude/skills/mex-inbox .claude/skills/mex-relay");
+  }
+  if (selectedTools.includes("codex")) {
+    console.log("    git add AGENTS.md .agents/skills/mex-inbox .agents/skills/mex-relay");
+  }
+  if (selectedTools.includes("cursor")) console.log("    git add .cursorrules");
+  if (selectedTools.includes("windsurf")) console.log("    git add .windsurfrules");
+  if (selectedTools.includes("copilot")) console.log("    git add .github/copilot-instructions.md");
+  if (selectedTools.includes("opencode")) console.log("    git add .opencode/opencode.json");
+  console.log('    git commit -m "chore: initialize MEX"');
+  console.log();
+  info("After that commit, start Hub with `mex hub` (or `npx mex-agent hub`).");
 }
 
 async function promptGlobalInstall(): Promise<void> {
+  if (!stdin.isTTY) {
+    printNextSteps(false);
+    return;
+  }
   const rl = createInterface({ input: stdin, output: stdout });
   try {
     header("One more thing");
@@ -616,9 +713,9 @@ async function promptGlobalInstall(): Promise<void> {
     info("Install mex globally so `mex check` works anywhere?");
     console.log();
 
-    const answer = (await rl.question("  Install mex globally? [Y/n] ")).trim().toLowerCase();
+    const answer = (await rl.question("  Install mex globally? [y/N] ")).trim().toLowerCase();
 
-    if (answer === "" || answer === "y" || answer === "yes") {
+    if (answer === "y" || answer === "yes") {
       console.log();
       info("Installing mex-agent globally...");
       try {

@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-09-01
+last_updated: 2026-09-02
 ---
 
 # Session Bootstrap
@@ -26,6 +26,11 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
+- Fresh-user setup is now a release-complete path: it preserves authored
+  scaffold files, protects disposable Graph/Wiki/local state from Git, launches
+  the first selected available Claude Code or Codex CLI from the repository
+  root, captures grounding, migrates and indexes Wiki content, validates the
+  result, and prints the required canonical commit checkpoint before Hub.
 - MEX v0.7.3 graph extraction and protocol-v3 JSONL behavior, including
   sequential TypeScript programs, compiler crash isolation, explicit WASM tree
   disposal, compact fingerprints/LSH, and bounded repair.

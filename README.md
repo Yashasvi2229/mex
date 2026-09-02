@@ -222,7 +222,7 @@ mex requires Node.js 22.5 or newer. The npm package is named `mex-agent` because
 npx mex-agent setup
 ```
 
-Setup inspects the repository, builds the local code graph, creates the Markdown wiki, asks your coding agent to populate it from graph evidence, installs the right project anchor and official MEX skills, and validates the result.
+Setup protects checkout-local databases from Git, builds the code graph, asks your selected Claude Code or Codex CLI to populate the Markdown scaffold, migrates and indexes the Wiki, installs the project anchor and official MEX skills, and validates the result. It then prints the commit checkpoint required before Hub can start.
 
 ### Official Claude Code and Codex skills
 
@@ -231,7 +231,7 @@ The `mex-agent` npm package ships two official project skills from one canonical
 - `mex-inbox` prepares governed Spec, requirement, constraint, and acceptance-criterion proposals.
 - `mex-relay` prepares durable team handoffs.
 
-The normal `mex setup` flow installs copies for every selected supported agent; no separate plugin or skill installer is required. Claude Code receives `.claude/skills/mex-inbox` and `.claude/skills/mex-relay`, while Codex receives `.agents/skills/mex-inbox` and `.agents/skills/mex-relay`. Selecting both agents installs both sets and updates only the marker-delimited MEX block in `CLAUDE.md` and `AGENTS.md`.
+The normal `mex setup` flow installs copies for every selected supported agent; no separate plugin or skill installer is required. Claude Code receives `.claude/skills/mex-inbox` and `.claude/skills/mex-relay`, while Codex receives `.agents/skills/mex-inbox` and `.agents/skills/mex-relay`. Selecting both agents installs both sets and updates only the marker-delimited MEX block in `CLAUDE.md` and `AGENTS.md`. That managed block also directs every new agent session to read `.mex/AGENTS.md` and `.mex/ROUTER.md` before project work.
 
 Invoke the skills explicitly as `/mex-inbox` and `/mex-relay` in Claude Code, or `$mex-inbox` and `$mex-relay` in Codex. Clear natural-language requests for governed Spec proposals or durable handoffs invoke them automatically as well.
 
@@ -249,10 +249,13 @@ A standalone Codex plugin or marketplace package may be added later, but it is n
 After setup:
 
 ```bash
+git status --short            # Review the canonical MEX files
+git add .mex                  # Local Graph/Wiki databases stay ignored
+git commit -m "chore: initialize MEX"
 mex check                    # Check wiki health and code grounding
 mex sync                     # Repair drift with targeted agent prompts
 mex graph scope "<task>"     # Retrieve compact task context
-mex hub                      # Open the local Project Hub
+mex hub                      # Opens after .mex/config.json is committed at HEAD
 ```
 
 If you skipped global installation, use `npx mex-agent` in place of `mex`. Install globally at any time with:

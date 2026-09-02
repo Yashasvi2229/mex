@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -9,10 +10,11 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -38,6 +40,7 @@ try {
   const packResult = parsePackResult(packOutput);
   const tarball = join(work, basename(packResult.filename));
   verifyPackedSkillTrees(packResult);
+  await verifyFreshCodeRepoSetup(tarball, work, npmCache, packResult.version);
   const project = join(work, "project");
   mkdirSync(join(project, ".mex"), { recursive: true });
   writeFileSync(join(project, "package.json"), "{\n  \"private\": true\n}\n");
@@ -167,6 +170,7 @@ try {
   const setupOutput = await runInteractiveAgentSetup(cli, project, work);
   verifyPackedSetupOutput(setupOutput);
   verifySetupConfig(project);
+  verifySetupIgnoreProtection(project);
   verifyInstalledAgentAssets(project, installed, installedPackageVersion);
   if (
     run("git", ["rev-parse", "HEAD"], project).trim() !== beforeSetupHead
@@ -860,13 +864,200 @@ function parsePackResult(output) {
   return result;
 }
 
+async function verifyFreshCodeRepoSetup(tarball, workRoot, cache, version) {
+  const project = join(workRoot, "fresh-setup-project");
+  mkdirSync(join(project, "src"), { recursive: true });
+  writeFileSync(join(project, "package.json"), "{\n  \"private\": true\n}\n");
+  writeFileSync(join(project, ".gitignore"), "node_modules/\n");
+  writeFileSync(join(project, "src", "index.ts"), [
+    "export function freshSetupValue(): number {",
+    "  return 42;",
+    "}",
+    "",
+  ].join("\n"));
+  run("git", ["init", "--quiet"], project);
+  run("git", ["config", "user.name", "Fresh Setup"], project);
+  run("git", ["config", "user.email", "fresh-setup@example.test"], project);
+  run("git", ["add", ".gitignore", "package.json", "src"], project);
+  run("git", ["commit", "--quiet", "-m", "initial fixture"], project);
+
+  runNpm([
+    "install",
+    tarball,
+    "--no-audit",
+    "--no-fund",
+    "--omit=dev",
+    "--cache",
+    cache,
+  ], project);
+  if (existsSync(join(project, ".mex")) || existsSync(join(project, "AGENTS.md"))) {
+    throw new Error("Plain packed install mutated the fresh setup project.");
+  }
+
+  const installed = join(project, "node_modules", "mex-agent");
+  const installedVersion = JSON.parse(readFileSync(join(installed, "package.json"), "utf8")).version;
+  if (installedVersion !== version) throw new Error("Fresh setup installed the wrong packed version.");
+  const cli = join(installed, "dist", "cli.js");
+  const agentBin = join(workRoot, "fresh-setup-agent-bin");
+  mkdirSync(agentBin, { recursive: true });
+  installFakeCodex(agentBin, workRoot);
+
+  const beforeHead = run("git", ["rev-parse", "HEAD"], project).trim();
+  const output = await runFreshCodeRepoSetup(cli, project, agentBin);
+  const normalized = output.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "");
+  for (const expected of [
+    "Codex finished the population session",
+    "Wiki migration and index are ready.",
+    "Graph and Wiki are ready. Setup is ready to commit.",
+  ]) {
+    if (!normalized.includes(expected)) {
+      throw new Error(`Packed fresh setup omitted: ${expected}\n${normalized}`);
+    }
+  }
+  if (
+    run("git", ["rev-parse", "HEAD"], project).trim() !== beforeHead
+    || run("git", ["diff", "--cached", "--name-only"], project).trim().length !== 0
+  ) {
+    throw new Error("Fresh packed setup staged or committed changes automatically.");
+  }
+
+  const config = JSON.parse(readFileSync(join(project, ".mex", "config.json"), "utf8"));
+  if (JSON.stringify(config.aiTools) !== JSON.stringify(["codex"])) {
+    throw new Error("Fresh packed setup did not persist the selected Codex client.");
+  }
+  for (const file of [
+    "AGENTS.md",
+    "ROUTER.md",
+    "context/architecture.md",
+    "context/stack.md",
+    "context/conventions.md",
+    "context/decisions.md",
+    "context/setup.md",
+  ]) {
+    const content = readFileSync(join(project, ".mex", file), "utf8");
+    if (content.includes("[Project Name]") || content.includes("[YYYY-MM-DD]")) {
+      throw new Error(`Fake Codex population left a required placeholder in ${file}.`);
+    }
+  }
+  for (const database of ["graph.db", "wiki.db"]) {
+    if (!existsSync(join(project, ".mex", database))) {
+      throw new Error(`Fresh packed setup omitted .mex/${database}.`);
+    }
+  }
+  verifySetupIgnoreProtection(project);
+  const wiki = JSON.parse(run(process.execPath, [cli, "wiki", "list", "--json"], project));
+  if (wiki?.ok !== true || !Array.isArray(wiki?.data?.entities) || wiki.data.entities.length === 0) {
+    throw new Error("Fresh packed setup did not publish a readable Wiki index.");
+  }
+
+  run("git", ["add", ".mex", "AGENTS.md", ".agents"], project);
+  const staged = run("git", ["diff", "--cached", "--name-only"], project);
+  if (/\.mex\/(?:graph|wiki)\.db|\.mex\/local\//u.test(staged)) {
+    throw new Error(`Fresh packed setup staged checkout-local state:\n${staged}`);
+  }
+  run("git", ["commit", "--quiet", "-m", "initialize MEX"], project);
+  const committedConfig = run("git", ["show", "HEAD:.mex/config.json"], project);
+  if (committedConfig !== readFileSync(join(project, ".mex", "config.json"), "utf8")) {
+    throw new Error("Fresh packed setup config does not match current HEAD.");
+  }
+  const capabilities = JSON.parse(run(process.execPath, [cli, "capabilities", "--json"], project));
+  for (const id of ["project_hub", "code_graph", "wiki"]) {
+    const capability = capabilities?.data?.capabilities?.find((entry) => entry?.id === id);
+    if (capability?.availability !== "available") {
+      throw new Error(`Fresh packed setup left ${id} unavailable after the canonical commit.`);
+    }
+  }
+}
+
+function installFakeCodex(directory, workRoot) {
+  const script = join(workRoot, "fake-codex-populate.mjs");
+  writeFileSync(script, [
+    'import { readFileSync, readdirSync, writeFileSync } from "node:fs";',
+    'import { join } from "node:path";',
+    'const root = join(process.cwd(), ".mex");',
+    'const visit = (directory) => {',
+    '  for (const entry of readdirSync(directory, { withFileTypes: true })) {',
+    '    const path = join(directory, entry.name);',
+    '    if (entry.isDirectory()) visit(path);',
+    '    else if (entry.isFile() && entry.name.endsWith(".md")) {',
+    '      const content = readFileSync(path, "utf8")',
+    '        .replaceAll("[Project Name]", "Packed First Run")',
+    '        .replaceAll("[YYYY-MM-DD]", "2026-09-02");',
+    '      writeFileSync(path, content, "utf8");',
+    '    }',
+    '  }',
+    '};',
+    'visit(root);',
+    'process.stdout.write("fake Codex populated the scaffold\\n");',
+    '',
+  ].join("\n"), "utf8");
+  if (process.platform === "win32") {
+    writeFileSync(join(directory, "codex.cmd"), `@"${process.execPath}" "${script}" %*\r\n`, "utf8");
+  } else {
+    const command = join(directory, "codex");
+    writeFileSync(command, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`, "utf8");
+    chmodSync(command, 0o755);
+  }
+}
+
+function runFreshCodeRepoSetup(cli, project, agentBin) {
+  const env = {
+    ...process.env,
+    MEX_TELEMETRY: "0",
+    NO_COLOR: "1",
+    PATH: `${agentBin}${delimiter}${process.env.PATH ?? ""}`,
+  };
+  return new Promise((resolveOutput, reject) => {
+    const setup = spawn(process.execPath, [cli, "setup"], {
+      cwd: project,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let selected = false;
+    let settled = false;
+    const finish = (error, output) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolveOutput(output);
+    };
+    const timer = setTimeout(() => {
+      if (setup.exitCode === null) setup.kill("SIGKILL");
+      finish(new Error(`Timed out running packed fresh setup.\n${stdout}\n${stderr}`));
+    }, 120_000);
+    setup.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      if (!selected && stdout.includes("Choice [1-8] (default: 1):")) {
+        selected = true;
+        setup.stdin.end("6\n");
+      }
+    });
+    setup.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    setup.on("error", (error) => finish(error));
+    setup.on("close", (code, signal) => {
+      if (code !== 0 || signal !== null || !selected) {
+        finish(new Error(
+          `Packed fresh setup failed (exit ${String(code)}, signal ${String(signal)}).\n${stdout}\n${stderr}`,
+        ));
+        return;
+      }
+      finish(null, stdout);
+    });
+  });
+}
+
 function runInteractiveAgentSetup(cli, project, workRoot) {
   const emptyPath = join(workRoot, "empty-agent-path");
   mkdirSync(emptyPath, { recursive: true });
+  installGitOnlyPath(emptyPath);
 
   // Keep the packed smoke independent from developer-machine agent installs.
-  // The CLI itself is launched through an absolute Node path, while an empty
-  // PATH makes the setup flow reliably choose its manual-population branch.
+  // The CLI itself is launched through an absolute Node path. PATH contains
+  // only Git, which setup needs for ignore verification, so agent discovery
+  // reliably chooses the manual-population branch.
   const env = { ...process.env, MEX_TELEMETRY: "0", NO_COLOR: "1" };
   for (const key of Object.keys(env)) {
     if (key.toLowerCase() === "path") delete env[key];
@@ -883,7 +1074,6 @@ function runInteractiveAgentSetup(cli, project, workRoot) {
     let stderr = "";
     let choseMultiple = false;
     let choseClients = false;
-    let declinedGlobalInstall = false;
     let settled = false;
 
     const fail = (error) => {
@@ -908,10 +1098,6 @@ function runInteractiveAgentSetup(cli, project, workRoot) {
       if (!choseClients && stdout.includes("Enter tool numbers separated by spaces")) {
         choseClients = true;
         answer("1 6");
-      }
-      if (!declinedGlobalInstall && stdout.includes("Install mex globally? [Y/n]")) {
-        declinedGlobalInstall = true;
-        answer("n");
         setup.stdin.end();
       }
     };
@@ -938,7 +1124,6 @@ function runInteractiveAgentSetup(cli, project, workRoot) {
         || signal !== null
         || !choseMultiple
         || !choseClients
-        || !declinedGlobalInstall
       ) {
         reject(new Error(
           `The packed interactive setup did not complete all expected prompts `
@@ -949,6 +1134,20 @@ function runInteractiveAgentSetup(cli, project, workRoot) {
       resolveOutput(stdout);
     });
   });
+}
+
+function installGitOnlyPath(directory) {
+  const locator = process.platform === "win32" ? "where.exe" : "which";
+  const located = spawnSync(locator, ["git"], { encoding: "utf8" });
+  const executable = located.status === 0
+    ? located.stdout.split(/\r?\n/u).find((line) => line.trim().length > 0)?.trim()
+    : undefined;
+  if (!executable) throw new Error("The packed setup smoke could not locate Git.");
+  if (process.platform === "win32") {
+    writeFileSync(join(directory, "git.cmd"), `@"${executable}" %*\r\n`, "utf8");
+  } else {
+    symlinkSync(executable, join(directory, "git"));
+  }
 }
 
 function verifyPackedSetupOutput(output) {
@@ -984,6 +1183,21 @@ function verifySetupConfig(project) {
     })
   ) {
     throw new Error("The packed interactive setup did not persist both clients without changing existing config.");
+  }
+}
+
+function verifySetupIgnoreProtection(project) {
+  const content = readFileSync(join(project, ".mex", ".gitignore"), "utf8");
+  for (const rule of ["graph.db*", "wiki.db*", "local/"]) {
+    if (!content.split(/\r?\n/u).includes(rule)) {
+      throw new Error(`Packed setup omitted ${rule} from .mex/.gitignore.`);
+    }
+  }
+  for (const path of [".mex/graph.db-wal", ".mex/wiki.db-shm", ".mex/local/team.db"]) {
+    const ignored = spawnSync("git", ["check-ignore", "--no-index", "--quiet", "--", path], {
+      cwd: project,
+    });
+    if (ignored.status !== 0) throw new Error(`Packed setup left ${path} trackable.`);
   }
 }
 
