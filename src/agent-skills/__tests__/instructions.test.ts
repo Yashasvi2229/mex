@@ -15,6 +15,9 @@ describe("managed MEX instruction blocks", () => {
     const codex = renderManagedInstructionBlock("codex");
 
     for (const block of [claude, codex]) {
+      expect(block).toContain(
+        "At the start of every session, read `.mex/AGENTS.md` and `.mex/ROUTER.md`",
+      );
       expect(block).toContain("durable governed Spec proposals");
       expect(block).toContain("durable team handoffs");
       expect(block).toContain("Invoke them automatically when intent clearly matches");

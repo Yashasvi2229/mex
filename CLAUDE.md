@@ -1,5 +1,6 @@
 <!-- mex-agent:skills:start -->
 ## MEX agent skills
+- At the start of every session, read `.mex/AGENTS.md` and `.mex/ROUTER.md` before project work; follow `ROUTER.md` to load only the relevant context.
 - Use `/mex-inbox` for durable governed Spec proposals and `/mex-relay` for durable team handoffs. Invoke them automatically when intent clearly matches; explicit invocation remains available.
 - When MEX context materially influences an answer or implementation, include one concise acknowledgement: `MEX context used: <specific records/files/entities consulted>.`
 - Do not claim an author, date, or historical event unless the retrieved data actually provides it.

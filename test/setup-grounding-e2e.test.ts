@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ import { extractGroundings, findMexAnchors, writeGroundings } from "../src/markd
 import { checkBrokenLinks } from "../src/drift/checkers/broken-link.js";
 import { runDriftCheckWithGraphStatus } from "../src/drift/index.js";
 import { captureGroundingBaselines, loadGroundingRuntime } from "../src/graph/runtime.js";
+import { finalizeSetupWiki } from "../src/setup/wiki-finalize.js";
 
 const roots: string[] = [];
 
@@ -94,6 +95,12 @@ export function calculateCheckoutTotal(items: number[], member: boolean): number
     expect(runtime!.fingerprints.getGroundedSource(".mex/patterns/navigation.md", groundings[0].node))
       .not.toBeNull();
     runtime!.close();
+
+    // Setup then migrates the legacy frontmatter and builds the Wiki index.
+    const finalized = await finalizeSetupWiki({ projectRoot: root, scaffoldRoot: join(root, ".mex") });
+    expect(finalized.ready).toBe(true);
+    expect(existsSync(join(root, ".mex", "wiki.db"))).toBe(true);
+    expect(extractGroundings(readFileSync(pattern, "utf-8"))[0]?.bodyHash).toMatch(/^[0-9a-f]{64}$/u);
 
     writeFileSync(join(sourceDir, "checkout.ts"), readFileSync(join(sourceDir, "checkout.ts"), "utf-8")
       .replace("subtotal >= 100 ? 0 : 12", "subtotal >= 125 ? 0 : 15"));

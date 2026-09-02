@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { resolve, dirname, isAbsolute, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { MexConfig, AiTool, StalenessThresholds, WatchConfig, HeartbeatConfig, ScaffoldIdentity, WikiConfig, WikiSynthesisConfig } from "./types.js";
@@ -346,8 +346,15 @@ function mergeIntoConfig(scaffoldRoot: string, patch: Record<string, unknown>): 
     } catch { /* start fresh */ }
   }
   Object.assign(existing, patch);
-  mkdirSync(dirname(configPath), { recursive: true });
-  writeFileSync(configPath, JSON.stringify(existing, null, 2) + "\n");
+  const configDirectory = dirname(configPath);
+  mkdirSync(configDirectory, { recursive: true });
+  const stagedPath = resolve(configDirectory, `.config.json.mex-stage-${randomUUID()}`);
+  try {
+    writeFileSync(stagedPath, JSON.stringify(existing, null, 2) + "\n", { flag: "wx" });
+    renameSync(stagedPath, configPath);
+  } finally {
+    rmSync(stagedPath, { force: true });
+  }
 }
 
 export function saveAiTools(scaffoldRoot: string, tools: AiTool[]): void {

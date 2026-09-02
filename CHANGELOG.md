@@ -28,6 +28,10 @@ All notable changes to this project will be documented in this file.
   overwriting user instructions, modified managed copies, or unrelated skills.
 
 ### Changed
+- `mex setup` now preserves existing scaffold files, launches the first selected
+  available Claude Code or Codex CLI from the project root, completes Wiki
+  migration/indexing after population, and stops at an explicit Git commit
+  checkpoint before Hub.
 - The integration graph uses schema v4: v0.7.3's compact BLOB fingerprints and
   integer-reference LSH storage combined with subject-generalized Wiki
   grounding. The v0.7.3 sequential compiler, crash isolation, fallback, and
@@ -37,6 +41,19 @@ All notable changes to this project will be documented in this file.
   same-directory candidate instead of mutating the published database in place.
 - Inbox and Relay contracts now support bounded action-scoped discovery while
   preserving the existing complete contract catalogs for compatibility.
+
+### Fixed
+- Fresh setup now installs and verifies ignore protection for Graph/Wiki
+  databases and `.mex/local/`, refuses broad rules that hide canonical config,
+  and no longer overwrites authored files merely because they contain template
+  examples or date placeholders.
+- Setup now refuses malformed or redirected canonical config, publishes config
+  updates atomically, honors Wiki exclude/read-only scope, and blocks readiness
+  when authored grounding cannot be verified.
+- Claude Code and Codex population now uses an ignored prompt file with a short
+  launcher argument, avoiding Windows command-line length limits.
+- New Claude Code and Codex root instructions bootstrap `.mex/AGENTS.md` and
+  `.mex/ROUTER.md` on later sessions instead of installing only skill policy.
 
 ### Compatibility
 - Explicit graph maintenance recognizes v1, v2, released-main v3,

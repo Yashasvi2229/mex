@@ -10,11 +10,14 @@ This scaffold is currently empty. Follow the steps below to populate it for your
 mex setup
 ```
 
-The command handles everything automatically:
-1. Detects your project state (existing codebase, fresh project, or partial)
-2. Asks which AI tool you use and installs the right project instructions
-3. Pre-scans your codebase with `mex init` to build a structured brief (~5-8k tokens vs ~50k from AI exploration)
-4. Builds and runs the population prompt — or prints it for manual paste
+The command handles the setup workflow:
+1. Detects your project state without overwriting existing scaffold files
+2. Protects `.mex/graph.db*`, `.mex/wiki.db*`, and `.mex/local/` from Git
+3. Asks which AI tool you use and installs the right project instructions
+4. Scans the codebase and builds the local code graph
+5. Launches the first selected available Claude Code or Codex CLI, or prints the prompt for manual paste
+6. Captures grounding, migrates the populated Markdown, builds the Wiki index, and validates it
+7. Prints the canonical files to review and commit before running `mex hub`
 
 For Claude Code and Codex, setup also copies the packaged `mex-inbox` and
 `mex-relay` skills into the project. No plugin or separate skill installer is
@@ -222,6 +225,11 @@ Codex uses `$mex-inbox` and `$mex-relay`. Clear natural-language requests work
 too. Commit the project skill copies so teammates receive them; MEX never
 stages, commits, or pushes them automatically.
 
+Setup prints the scoped Git commands for the selected tools. Review those files
+and commit them before running `mex hub`; Hub requires `.mex/config.json` to
+match the version committed at the current Git `HEAD`. The local Graph/Wiki
+databases and `.mex/local/` remain ignored.
+
 **Verify** by starting a fresh session and asking your agent:
 "Read `.mex/ROUTER.md` and tell me what you now know about this project."
 
@@ -236,6 +244,6 @@ A well-populated scaffold should give the agent enough to:
 Once the scaffold is populated, use these to keep it aligned with your codebase:
 
 - **`mex check`** — detect drift (zero tokens, zero AI)
-- **`.mex/sync.sh`** — interactive drift check + targeted or full resync
+- **`mex sync`** — interactive drift check + targeted resync
 - **`mex skills sync`** — safely receive updated official agent skills after a package upgrade
 - **`mex watch`** — auto drift score after every commit

@@ -762,6 +762,8 @@ describe("no unscoped scaffold writes", () => {
       "src/global-config.ts": "writes the global config and telemetry id",
       "src/events.ts": "appends to events/decisions.jsonl",
       "src/pattern/index.ts": "creates a new pattern file from a template",
+      "src/setup/ignore.ts": "creates or appends only the setup-managed .mex/.gitignore rules",
+      "src/setup/population.ts": "writes and removes one ignored private prompt file for the interactive setup session",
       "src/team/artifacts/filesystem.ts": "atomically publishes bounded team-owned canonical artifacts",
       "src/team/local-state/receipt-signer.ts": "atomically provisions the bounded local-only C preview signing credential",
       "src/watch.ts": "installs and removes git hooks",
