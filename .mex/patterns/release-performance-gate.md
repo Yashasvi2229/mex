@@ -12,7 +12,7 @@ edges:
   - target: "patterns/safe-graph-snapshot-evolution.md"
     condition: "when changing Graph maintenance or corpus inspection"
 grounds_to: []
-last_updated: 2026-08-29
+last_updated: 2026-09-02
 ---
 
 # Release Performance Gate
@@ -43,7 +43,9 @@ calibration environment.
    before and after ordinary reads.
 5. Use the first healthy pinned report as characterization. Freeze runtime,
    time, RSS, and heap limits at `ceil(p95 * 1.15)` and built asset limits at
-   `ceil(bytes * 1.05)`, then rerun the same pinned job in enforcement mode.
+   `ceil(bytes * 1.05)`. During CI enforcement, collect a potentially material
+   confirmation in a separately allocated pinned hosted job at the exact same
+   repository HEAD; two child processes on one VM are not independent evidence.
 6. Commit the budget file, its versioned schema/golden, and the retained runner
    identity together. Never copy wall-clock numbers from a local machine.
 7. When a new deterministic team fixture adds canonical and checkout-local
@@ -69,6 +71,10 @@ calibration environment.
 - Corpus byte caps prevent runaway allocation, but maintenance should also
   release source bodies and parser state as each file or bounded compiler batch
   completes.
+- Back-to-back confirmation processes on one hosted VM share CPU steal,
+  throttling, and I/O contention. Keep the raw reports as artifacts, pass only
+  a bounded retry decision between jobs, and make missing or same-allocation
+  confirmation evidence fail operationally.
 - An unavailable-route placeholder can already have a frozen asset or heap
   budget. Replacing it with a real lazy workbench should initially fail only
   that route's owned leaves; do not reinterpret the placeholder budget as a
@@ -89,8 +95,9 @@ calibration environment.
 
 If asset hashes change unexpectedly, inspect the built chunks for React
 development sentinels before recalibrating. If runtime enforcement is noisy,
-confirm the exact OS/architecture/Node patch and fixture digest; do not widen a
-budget until the retained raw samples show a real regression or stable shift.
+confirm the exact OS/architecture/Node patch, fixture digest, repository HEAD,
+and distinct hosted-job allocations; do not widen a budget until the retained
+raw samples show a real regression or stable shift.
 
 ## Update Scaffold
 
