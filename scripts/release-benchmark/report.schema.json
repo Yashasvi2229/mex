@@ -307,7 +307,30 @@
         "secondPassViolations": { "$ref": "#/$defs/violations" },
         "confirmedViolations": { "$ref": "#/$defs/violations" },
         "advisoryAssessments": { "$ref": "#/$defs/advisoryAssessments" },
-        "materialAssessments": { "$ref": "#/$defs/materialAssessments" }
+        "materialAssessments": { "$ref": "#/$defs/materialAssessments" },
+        "runnerAllocations": { "$ref": "#/$defs/runnerAllocations" }
+      }
+    },
+    "runnerAllocations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["first"],
+      "properties": {
+        "first": { "$ref": "#/$defs/runnerAllocation" },
+        "second": { "$ref": "#/$defs/runnerAllocation" }
+      }
+    },
+    "runnerAllocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "runAttempt", "job", "runnerName", "runnerOs", "runnerArch"],
+      "properties": {
+        "runId": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+        "runAttempt": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+        "job": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,128}$" },
+        "runnerName": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\r\\n\\u0000]+$" },
+        "runnerOs": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[^\\r\\n\\u0000]+$" },
+        "runnerArch": { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[^\\r\\n\\u0000]+$" }
       }
     },
     "advisoryAssessments": {

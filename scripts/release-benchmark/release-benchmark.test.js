@@ -193,8 +193,10 @@ describe("release benchmark contract", () => {
     ]);
     expect(reportSchema.$defs.runtimeConfirmation.required).not.toContain("advisoryAssessments");
     expect(reportSchema.$defs.runtimeConfirmation.required).not.toContain("materialAssessments");
+    expect(reportSchema.$defs.runtimeConfirmation.required).not.toContain("runnerAllocations");
     expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("advisoryAssessments");
     expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("materialAssessments");
+    expect(reportSchema.$defs.runtimeConfirmation.properties).toHaveProperty("runnerAllocations");
     expect(reportSchema.$defs.profile.properties.fixture.required).toContain("workstreams");
     expect(reportSchema.$defs.profile.properties.fixture.required).not.toContain("inboxDrafts");
     expect(reportSchema.$defs.profile.properties.fixture.required).not.toContain("inboxProposals");
@@ -343,6 +345,24 @@ describe("release benchmark contract", () => {
         confirmedViolations: [secondAdvisory],
         advisoryAssessments: [advisoryAssessment],
         materialAssessments: [],
+        runnerAllocations: {
+          first: {
+            runId: "12345",
+            runAttempt: "2",
+            job: "release_performance_attempt_1",
+            runnerName: "Hosted Agent 1",
+            runnerOs: "Linux",
+            runnerArch: "X64",
+          },
+          second: {
+            runId: "12345",
+            runAttempt: "2",
+            job: "release_performance_attempt_2",
+            runnerName: "Hosted Agent 2",
+            runnerOs: "Linux",
+            runnerArch: "X64",
+          },
+        },
       },
     });
     expect(validate(advisoryReport), JSON.stringify(validate.errors)).toBe(true);
