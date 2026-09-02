@@ -95,7 +95,7 @@ describe("Members identity and team directory", () => {
 
     await waitFor(() => expect(routeLocation()).toContain(`member=${ADA_ID}`));
     const detail = await screen.findByRole("region", { name: "Selected Member detail" });
-    expect(within(detail).getByRole("heading", { name: "Ada Lovelace" })).toBeVisible();
+    expect(await within(detail).findByRole("heading", { name: "Ada Lovelace" })).toBeVisible();
     expect(within(detail).getByText("You", { selector: "[data-slot='badge']" })).toBeVisible();
     const technical = within(detail).getByRole("button", { name: "Technical details" });
     expect(technical).toHaveAttribute("aria-expanded", "false");
