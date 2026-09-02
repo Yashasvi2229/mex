@@ -4,6 +4,7 @@ import { FolderGit2, GitBranch, GitCommitHorizontal, Menu, X } from "lucide-reac
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import type { CapabilitiesResponse, HomeResponse, OverviewResponse, SessionResponse } from "../api/types";
 import { useHubApi } from "../api/context";
+import { Button } from "../components/primitives/button";
 import { formatTime, StatePanel, StatusPill } from "../components/ui";
 import styles from "../styles/shell.module.css";
 import { JobLifecycleObserver } from "./JobLifecycleObserver";
@@ -84,17 +85,32 @@ function RepositoryBar({ repository, session }: { repository?: HomeResponse["rep
           * itself is `aria-hidden` — without it the link would go nameless at
           * exactly the width where it is hardest to guess.
           */}
-        <a
+        {/*
+          * `role="link"` is set back deliberately. The Hub's `Button` announces
+          * as a button even when it renders an anchor, which is fine for the
+          * in-app navigations that use it — but this one leaves the Hub for
+          * another site, and that is precisely the case where a reader needs to
+          * hear "link" before deciding to follow it.
+          */}
+        <Button
           aria-label="Join MEX Discord"
           className={styles.discordLink}
-          href={DISCORD_INVITE}
-          rel="noopener noreferrer"
-          target="_blank"
-          title="Join MEX Discord"
+          nativeButton={false}
+          render={(
+            <a
+              href={DISCORD_INVITE}
+              rel="noopener noreferrer"
+              target="_blank"
+              title="Join MEX Discord"
+            />
+          )}
+          role="link"
+          size="sm"
+          variant="outline"
         >
           <DiscordMark />
           <span>Join MEX Discord</span>
-        </a>
+        </Button>
         {context?.branch ? (
           <span><GitBranch aria-hidden="true" /> <span>{context.branch}</span></span>
         ) : null}
