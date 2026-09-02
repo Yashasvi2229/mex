@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-02
+
 ### Added
 - A bounded release-performance gate for local Hub startup, idle CPU/RAM,
   browser heap, API latency, maintenance working sets, asset closure, and

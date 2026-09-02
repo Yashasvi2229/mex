@@ -2,7 +2,7 @@
 
 ## Runtime requirement
 
-mex 0.7.x requires Node.js 22.5 or newer. The code graph uses the built-in `node:sqlite` module; older Node releases are unsupported. Users who cannot upgrade Node can remain on mex v0.6.3, which supports Node.js 20 or newer.
+mex 0.8.x requires Node.js 22.5 or newer. The code graph uses the built-in `node:sqlite` module; older Node releases are unsupported. Users who cannot upgrade Node can remain on mex v0.6.3, which supports Node.js 20 or newer.
 
 This document defines `mex-agent`'s public contract: what's stable, what isn't,
 and what counts as a breaking change. It is intended for embedders — tools that
@@ -113,9 +113,13 @@ itself, and some are reserved for embedders.
 - `ROUTER.md`, `AGENTS.md`, `SETUP.md`, `SYNC.md` — top-level scaffold files.
 - `context/*.md` — context documents (scanned by drift checkers).
 - `patterns/*.md` — pattern documents (scanned by drift checkers).
-- `events/decisions.jsonl` — append-only event log.
+- `team/members/**`, `workstreams/**`, `inbox/**`, and `relays/**` — canonical team workflow records.
+- `specs/**`, `topics/**`, and `playbooks/**` — canonical Wiki and shared workflow records.
+- `events/decisions.jsonl`, `events/activity/**`, and `events/operations.jsonl` — canonical event and operation records.
 - `config.json` — persisted scaffold configuration.
-- `graph.db` (plus SQLite sidecar files) — generated code graph, fingerprints, and grounding baselines.
+- `.gitignore` — managed protection for checkout-local state.
+- `graph.db*` and `wiki.db*` — generated Graph and Wiki indexes, including SQLite sidecars.
+- `local/**` — checkout-local drafts, cursors, jobs, and signing state.
 
 Embedders should not write to these paths.
 
@@ -127,9 +131,9 @@ to them. Embedders may use them freely:
 - `.mex/traces/**` — long-form decision traces.
 - `.mex/failures/**` — failure / postmortem records.
 
-Other paths under `.mex/` are unclaimed. If you're an embedder and need a new
-namespace, open an issue first — `mex-agent` may add features later that
-conflict otherwise.
+Other paths under `.mex/` are not part of the embedder contract and may be
+claimed by `mex-agent` in a later release. Open an issue before introducing a
+new namespace.
 
 ## CLI surface
 

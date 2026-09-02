@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "owner": "mex-agent",
   "skill": "mex-inbox",
-  "packageVersion": "0.7.3",
+  "packageVersion": "0.8.0",
   "files": {
     "SKILL.md": "ec0e61b45c9f2e2d70074bd613c0d294dd4d88ec73964e6187f0ac8d51de1505",
     "agents/openai.yaml": "4dbdf205a76ba17d9fd8984c8d546b1d6628f0e135bbaf0c16c773f8fa6fc765",

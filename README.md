@@ -30,7 +30,7 @@ mex maps your code, turns what agents learn into structured Markdown, and keeps 
 
 Every coding session starts with relevant architectural context instead of another full-repository scan.
 
-> **New in v0.7.3:** graph builds hold one compiler program at a time, stores are 36-40% smaller, `mex check` no longer rebuilds the graph, and `mex graph repair` recovers an interrupted store without a rebuild.
+> **New in v0.8.0:** `mex setup` now prepares the Graph and Wiki end to end, installs the official Claude Code and Codex skills, protects local stores from Git, and automatically launches the first available agent you selected.
 
 💬 **Join the mex community on Discord** — discuss ideas, get help, share feedback, and contribute to the project.
 
@@ -390,7 +390,7 @@ The MCP package is not published yet. For local development, build it with:
 npm run build --workspace mex-mcp
 ```
 
-The primary v0.7.3 release remains the `mex-agent` CLI.
+The primary v0.8.0 release remains the `mex-agent` CLI.
 
 ## Agent memory mode
 
