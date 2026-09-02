@@ -97,6 +97,19 @@ bytes respectively. Initial CSS/fonts and every unrelated route/runtime budget
 remain unchanged. A clean pinned enforcing run on the final exact head remains
 required before release.
 
+The fresh-runner confirmation topology was added after PR run
+[`33616707003`](https://github.com/mex-memory/mex/actions/runs/33616707003)
+and integration push run
+[`33619416840`](https://github.com/mex-memory/mex/actions/runs/33619416840)
+produced materially different Graph, Wiki, and Search failure sets for Git
+commits with the same tree SHA
+`950182277ee98719ec6971618cb83b597323e468`. The earlier confirmation logic
+started two child processes back-to-back on one hosted VM, so sustained host
+contention could satisfy both sides of the exact-metric rule. This hardening
+changes only confirmation allocation and provenance: `budgets.json`, sample
+counts, material thresholds, category floors, and calibration formulas remain
+byte-for-byte unchanged.
+
 ## Runner contract
 
 `npm run benchmark:release` builds the package and writes the bounded JSON
@@ -178,18 +191,31 @@ Deterministic failures remain immediate: built-asset bytes, outbound requests,
 database-to-input ratios, and any unknown runtime metric never receive a retry.
 The read and maintenance nonmutation contracts likewise remain ordinary hard
 tests. A first pass containing only wall-clock, RSS, CPU, or browser-heap
-breaches triggers one independent full benchmark pass on the same pinned
-runner and exact repository HEAD only when at least one crossing could still
-become material. A crossing is potentially material when its p95 is strictly
-above the material threshold and at least two of its raw samples are also
-strictly above that threshold. If every first-pass crossing is below the
-threshold or has fewer than two supporting samples, enforcement records the
-advisories and passes without spending another full benchmark run. CI fails a
-noisy metric only when that exact metric breaches again, both p95 measurements
-exceed its material threshold, and both attempts have at least two supporting
-raw samples. This avoids treating the single maximum selected by nearest-rank
-p95 over either ten timing samples or five memory samples as
-distribution-level evidence. The committed p95 budgets remain the raw
+breaches requests one independent full benchmark pass only when at least one
+crossing could still become material. In CI that conditional confirmation runs
+in a separately allocated Ubuntu 24.04 hosted job, not as another process on
+the first job's VM. Both jobs measure the exact same repository HEAD and pinned
+Node version; a final fail-closed aggregation job validates their bounded raw
+reports and runner-allocation records before applying the existing exact-metric
+rule. A missing, malformed, same-runner, or different-HEAD confirmation is an
+operational failure rather than a pass. The local `npm run benchmark:release`
+command remains self-contained and uses its existing in-process orchestration.
+Producer-specific artifact identities allow GitHub's failed-only rerun to reuse
+valid evidence from an earlier attempt of the same workflow run. Aggregation
+accepts only the same run and SHA, nondecreasing producer attempts, and evidence
+no newer than the finalizer attempt.
+
+A crossing is potentially material when its p95 is strictly above the material
+threshold and at least two of its raw samples are also strictly above that
+threshold. If every first-pass crossing is below the threshold or has fewer
+than two supporting samples, enforcement records the advisories and passes
+without allocating a confirmation runner. CI fails a noisy metric only when
+that exact metric breaches on the fresh confirmation runner, both p95
+measurements exceed its material threshold, and both attempts have at least two
+supporting raw samples. This avoids treating the single maximum selected by
+nearest-rank p95 over either ten timing samples or five memory samples as
+distribution-level evidence, while preventing one contended VM from supplying
+both sides of the confirmation. The committed p95 budgets remain the raw
 alert/crossing line and are not recalibrated. For each exact metric key, the
 blocking threshold is
 `budget + max(15% of budget, minimum excess)`:
@@ -217,16 +243,20 @@ inconsistent raw sample evidence, are never retried as budget noise.
 Enforcement exits 0 for a pass, 1 for a budget failure, and 2 when a pass cannot
 produce a valid bounded report.
 
-The dedicated `release-performance` CI job installs Chromium on the pinned
-runner, enforces the budgets, and retains the final report plus both attempt
-reports when confirmation was required. It also retains the first raw attempt
-when advisory sample support makes a second pass unnecessary. Runtime
-candidates in that report are `ceil(p95 * 1.15)` independently for each fixture profile,
-route, read, and maintenance operation. The committed values are copied exactly
-from the first healthy retained pinned report; its enforcing rerun must pass
-before Checkpoint A is considered green. Future recalibration uses the same
-retained-report workflow. Do not derive runtime limits from an unpinned local
-run or collapse fixture profiles into one worst-case envelope.
+The dedicated CI topology uses `release-performance-attempt-1`, a conditional
+`release-performance-attempt-2`, and the final required
+`release-performance` aggregation job. Each measuring job installs Chromium on
+the pinned image and retains its raw report and bounded decision manifest for
+14 days. The final job retains the combined report; it runs even if a producer
+was cancelled or failed so missing evidence cannot silently skip the gate. The
+first raw attempt is still retained when advisory sample support makes a second
+runner unnecessary. Runtime candidates in that report are `ceil(p95 * 1.15)`
+independently for each fixture profile, route, read, and maintenance operation.
+The committed values are copied exactly from the first healthy retained pinned
+report; its enforcing rerun must pass before Checkpoint A is considered green.
+Future recalibration uses the same retained-report workflow. Do not derive
+runtime limits from an unpinned local run or collapse fixture profiles into one
+worst-case envelope.
 
 The report is capped at 2 MiB. Response bodies, child-process diagnostics,
 recorded request paths, asset lists, and violation lists also have explicit
