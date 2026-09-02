@@ -110,6 +110,13 @@
   --danger-soft: color-mix(in oklch, var(--danger) 9%, transparent);
   --danger-border: color-mix(in oklch, var(--danger) 24%, transparent);
   --info: oklch(0.74 0 0);
+  /*
+   * Discord's own blurple, #5865F2, converted rather than approximated. It is a
+   * brand colour and not a semantic one — it means "Discord", never "good" or
+   * "attention" — so it belongs to the one mark that carries it and must not be
+   * reached for as a general accent.
+   */
+  --discord: oklch(0.577 0.209 274);
   --info-soft: color-mix(in oklch, var(--foreground) 6%, transparent);
   --info-border: color-mix(in oklch, var(--foreground) 16%, transparent);
   --focus: var(--ring);

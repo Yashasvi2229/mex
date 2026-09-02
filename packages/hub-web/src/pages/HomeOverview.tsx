@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleDashed,
+  ExternalLink,
   GitBranch,
   Inbox,
   LoaderCircle,
@@ -558,6 +559,58 @@ function ActivityRow({ item }: { item: ActivityItem }) {
   );
 }
 
+/**
+ * Where the signup lives, and why the Hub never sees the address.
+ *
+ * The form is hosted; this card only opens it. That is not a shortcut — the Hub
+ * serves itself under a policy that permits neither an outbound `fetch` nor a
+ * cross-origin form post (`src/hub/app.ts`, `connect-src 'self'`,
+ * `form-action 'self'`), so an input here could not submit anywhere without
+ * loosening the rule that makes "Runs locally" in the sidebar true. Opening a
+ * link is a navigation rather than a connection, so it stays inside the policy.
+ *
+ * The consequence worth stating: **no email address ever passes through mex.**
+ */
+const UPDATES_FORM = "https://tally.so/r/KYjv4k";
+
+/**
+ * The card is permanent and carries no dismissal, which is why it has to stay
+ * quiet. Anything that cannot be put away has to be worth living with on every
+ * visit, so this one states its offer once and never asks twice — no badge, no
+ * count, nothing that reads as unresolved work.
+ */
+function UpdatesSignupCard() {
+  return (
+    <Card className={homeStyles.updatesCard} role="region" aria-labelledby="overview-updates-heading">
+      <CardHeader className={homeStyles.panelHeader}>
+        <div>
+          <CardTitle><h2 id="overview-updates-heading">Help make MEX better</h2></CardTitle>
+        </div>
+      </CardHeader>
+      <CardContent className={homeStyles.updatesContent}>
+        <p className={homeStyles.updatesBody}>
+          A short form about how you&rsquo;re using it. Your answers help shape mex :)
+        </p>
+        <div className={homeStyles.updatesActions}>
+          {/*
+            * The trailing arrow is the only remaining cue that this leaves the
+            * Hub for a new tab, so it stays where the mail glyph did not.
+            */}
+          <Button
+            nativeButton={false}
+            render={<a href={UPDATES_FORM} rel="noopener noreferrer" target="_blank" />}
+            size="sm"
+            variant="outline"
+          >
+            Open the form
+            <ExternalLink aria-hidden="true" data-icon="inline-end" />
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function LatestActivityCard({ activity, onRetry }: { activity: OverviewResponse["activity"]; onRetry: () => void }) {
   return (
     <Card className={homeStyles.activityCard} role="region" aria-labelledby="overview-activity-heading">
@@ -1003,7 +1056,10 @@ export function HomeOverview() {
           <FocusCard data={data} onRetry={() => void refresh()} />
           <ContextReadinessCard context={data.context} onRetry={() => void refresh()} repository={data.shell.repository} />
         </div>
-        <LatestActivityCard activity={data.activity} onRetry={() => void refresh()} />
+        <div className={homeStyles.asideColumn}>
+          <LatestActivityCard activity={data.activity} onRetry={() => void refresh()} />
+          <UpdatesSignupCard />
+        </div>
         <OperationCard operation={data.operation} />
       </div>
     </div>

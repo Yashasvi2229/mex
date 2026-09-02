@@ -424,6 +424,21 @@
   height: 13px;
 }
 
+/*
+ * The one outbound link in the Hub, and the only control in this bar — the
+ * repository facts beside it are readouts. It is the Hub's own outline button
+ * rather than a hand-drawn one, which is both cheaper and more consistent: an
+ * earlier version restyled it from scratch and put 705 bytes into the entry
+ * stylesheet, enough on its own to breach the initial-CSS budget.
+ *
+ * Only the mark's colour is ours. The label stays neutral, because a fully
+ * branded button would outrank the repository state, which is what the bar is
+ * actually for.
+ */
+.discordLink svg {
+  color: var(--discord);
+}
+
 .mono {
   font-family: var(--font-mono);
 }
@@ -554,6 +569,16 @@
 
   .repoFacts > span > span {
     max-width: 170px;
+  }
+
+  /*
+   * The mark alone below this width. The repository facts are what the bar is
+   * for, so the invitation gives up its label first rather than crowding them —
+   * the `title` still names it, and so does the accessible name. The button
+   * keeps its own padding and box, so it still reads as something to press.
+   */
+  .discordLink > span {
+    display: none;
   }
 
   .sessionMeta {
