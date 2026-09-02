@@ -4268,6 +4268,15 @@ export async function createRepositoryTeamWorkflowPort(
     path: ".mex/config.json",
     maxBytes: 64 * 1024,
   });
+  // Byte equality, deliberately: this attests the whole tracked config, not
+  // just its identity, and a local edit to any field means teammates are
+  // reading something this checkout is not.
+  //
+  // It compares cleanly across platforms because `tryReadContainedArtifact`
+  // undoes Git's checkout line-ending conversion — without that, `core.autocrlf`
+  // (true by default on Windows) made the working copy and its blob differ by
+  // one byte per line on a tree `git diff` calls clean, and the Hub refused to
+  // start for everyone who cloned.
   if (
     trackedConfig === null
     || trackedConfig.truncated
@@ -4290,19 +4299,8 @@ export async function createRepositoryTeamWorkflowPort(
   ) {
     throw repositoryChanged();
   }
-  let scaffoldId: unknown;
-  try {
-    const parsed = JSON.parse(Buffer.from(confirmedConfig.bytes).toString("utf8")) as unknown;
-    scaffoldId = isPlainObject(parsed) ? parsed.scaffold_id : undefined;
-  } catch {
-    throw missingScaffoldIdentity();
-  }
-  if (
-    typeof scaffoldId !== "string"
-    || scaffoldId.length === 0
-    || scaffoldId.length > 512
-    || /[\0-\x1f\x7f]/u.test(scaffoldId)
-  ) {
+  const scaffoldId = scaffoldIdentityOf(confirmedConfig.bytes);
+  if (scaffoldId === null) {
     throw missingScaffoldIdentity();
   }
   return new RepositoryTeamWorkflowPort(root.path, {
@@ -6652,6 +6650,32 @@ function repositoryChanged() {
 
 function previewConflict() {
   return artifactError("REVISION_CONFLICT", "Workflow preview is unavailable", "The exact workflow preview is unavailable or no longer matches the approved command.");
+}
+
+/**
+ * The bounded `scaffold_id` in a `.mex/config.json` body, or `null` when the
+ * body is unparseable or the id is absent or malformed.
+ *
+ * One definition, used for both the tracked copy and the working copy, so the
+ * two cannot drift into disagreeing about what a well-formed identity is.
+ */
+function scaffoldIdentityOf(bytes: Uint8Array): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown;
+  } catch {
+    return null;
+  }
+  const value = isPlainObject(parsed) ? parsed.scaffold_id : undefined;
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 512
+    || /[\0-\x1f\x7f]/u.test(value)
+  ) {
+    return null;
+  }
+  return value;
 }
 
 function missingScaffoldIdentity() {

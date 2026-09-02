@@ -52,7 +52,7 @@ afterEach(() => {
 });
 
 describe("RepositoryTeamWorkflowPort", () => {
-  it("derives production composition only from exact tracked scaffold identity bytes", async () => {
+  it("derives production composition only from a committed scaffold identity", async () => {
     const root = temporaryRoot();
     await expect(createRepositoryTeamWorkflowPort(root)).rejects.toThrowError(
       expect.objectContaining({
@@ -87,6 +87,88 @@ describe("RepositoryTeamWorkflowPort", () => {
     await expect(createRepositoryTeamWorkflowPort(root)).rejects.toMatchObject({
       problem: { code: "MIGRATION_REQUIRED" },
     });
+  });
+
+  it("accepts the CRLF working copy Git itself writes on checkout", async () => {
+    // The defect this test exists for. `core.autocrlf` defaults to true on
+    // Windows: Git stores LF and writes CRLF into the working tree, so the
+    // working copy and the blob at HEAD differ by one byte per line on a tree
+    // Git reports as unmodified. The old check compared the two byte for byte,
+    // so the Hub refused to start for **everyone who cloned** — and never for
+    // the person who ran `mex setup`, whose working copy Git never rewrote.
+    //
+    // `git checkout -- <path>` is the one-line way to put a checkout back into
+    // the state a clone produces, and is what makes this testable at all.
+    const root = temporaryRoot();
+    initializeGitFixture(root);
+    git(root, ["config", "core.autocrlf", "true"]);
+    mkdirSync(join(root, ".mex"), { recursive: true });
+    // Multi-line on purpose: a single-line file has no line ending to convert
+    // and the defect does not reproduce.
+    writeFileSync(
+      join(root, ".mex/config.json"),
+      `${JSON.stringify({ scaffold_id: "crlf-checkout-scaffold-identity", version: 1 }, null, 2)}\n`,
+      "utf8",
+    );
+    git(root, ["add", "--", ".mex/config.json"]);
+    git(root, ["commit", "-q", "-m", "track scaffold identity"]);
+
+    // Let Git write the working copy, exactly as a clone would.
+    rmSync(join(root, ".mex/config.json"));
+    git(root, ["checkout", "--", ".mex/config.json"]);
+
+    const working = readFileSync(join(root, ".mex/config.json"));
+    expect(working.includes(Buffer.from("\r\n"))).toBe(true);
+    expect(execFileSync("git", ["diff", "--name-only"], { cwd: root }).toString()).toBe("");
+    // The bytes genuinely differ; this is not a test that passes vacuously.
+    const blob = execFileSync("git", ["cat-file", "blob", "HEAD:.mex/config.json"], { cwd: root });
+    expect(blob.equals(working)).toBe(false);
+
+    expect(await createRepositoryTeamWorkflowPort(root)).toBeInstanceOf(RepositoryTeamWorkflowPort);
+  });
+
+  it("still refuses when the identity is absent, unreadable or malformed on either side", async () => {
+    // Dropping byte equality must not drop the property. Each of these was
+    // rejected before and has to stay rejected.
+    const root = temporaryRoot();
+    initializeGitFixture(root);
+    mkdirSync(join(root, ".mex"), { recursive: true });
+    const configPath = join(root, ".mex/config.json");
+    const rejects = async () => {
+      await expect(createRepositoryTeamWorkflowPort(root)).rejects.toMatchObject({
+        problem: { code: "MIGRATION_REQUIRED" },
+      });
+    };
+
+    // Tracked with no identity at all.
+    writeFileSync(configPath, JSON.stringify({ version: 1 }), "utf8");
+    git(root, ["add", "--", ".mex/config.json"]);
+    git(root, ["commit", "-q", "-m", "no identity"]);
+    await rejects();
+
+    // Tracked identity is not a string.
+    writeFileSync(configPath, JSON.stringify({ scaffold_id: 7 }), "utf8");
+    git(root, ["commit", "-q", "-a", "-m", "numeric identity"]);
+    await rejects();
+
+    // Tracked identity carries a control character.
+    writeFileSync(configPath, JSON.stringify({ scaffold_id: "bad\u0001id" }), "utf8");
+    git(root, ["commit", "-q", "-a", "-m", "control character"]);
+    await rejects();
+
+    // Tracked blob is committed and valid, working copy is unparseable.
+    writeFileSync(configPath, JSON.stringify({ scaffold_id: "good-identity" }), "utf8");
+    git(root, ["commit", "-q", "-a", "-m", "valid identity"]);
+    expect(await createRepositoryTeamWorkflowPort(root)).toBeInstanceOf(RepositoryTeamWorkflowPort);
+    writeFileSync(configPath, "{ not json", "utf8");
+    await rejects();
+
+    // Working copy is valid and committed, but the tracked blob is not JSON.
+    git(root, ["checkout", "--", ".mex/config.json"]);
+    writeFileSync(configPath, "{ not json", "utf8");
+    git(root, ["commit", "-q", "-a", "-m", "unparseable blob"]);
+    writeFileSync(configPath, JSON.stringify({ scaffold_id: "good-identity" }), "utf8");
+    await rejects();
   });
 
   it("captures service-owned actor, time, and repository state in a canonical Workstream and Activity event", async () => {

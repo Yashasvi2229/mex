@@ -270,7 +270,26 @@ export function runValidate(io: CommandIo, flags: CommandFlags): void {
     if (data.groundingsUnverified) {
       // Not a diagnostic: it says how much was checked, not that anything is
       // wrong, and a CI run needs to tell a clean report from an unread one.
-      io.write(chalk.dim("grounding checks did not run — no code graph in this checkout"));
+      //
+      // The flag has two causes and this line used to assert the first of them
+      // unconditionally, so a reader was sent to inspect a code graph nobody
+      // had looked at. Two corrections, and the second is the one that was
+      // costing something:
+      //
+      //  - When a graph *was* supplied and still produced no verdict, the fault
+      //    is in what the groundings committed, and the reader belongs in the
+      //    scaffold rather than in `mex graph`.
+      //  - When none was supplied, "no code graph in this checkout" is a claim
+      //    about the repository that this command never checked. `wiki
+      //    validate` does not load one — `serviceOptions` does not carry it —
+      //    so on the CLI this is always the branch taken, and it read as a
+      //    diagnosis of a fresh 7 MB `graph.db` sitting right there. Say what
+      //    was actually true of the pass, and name the command that does check.
+      io.write(chalk.dim(
+        data.codeGraphAvailable
+          ? "grounding checks did not run — the code graph is present, but no grounding could be compared against it"
+          : "grounding checks did not run — this pass was given no code graph; `mex check` is the grounding check",
+      ));
     }
   });
 }

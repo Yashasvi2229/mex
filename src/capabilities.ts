@@ -2884,29 +2884,24 @@ async function inspectTeamAvailability(
         "Team workflows require .mex/config.json to be tracked at the current repository HEAD.",
       );
     }
+    // Byte equality, deliberately: this attests the **whole** tracked config,
+    // not just its identity. A local edit to any field — `scaffold_name`, say —
+    // means teammates are reading something this checkout is not, and Team
+    // workflows are correctly unavailable until it is committed.
+    //
+    // This compares cleanly across platforms because `tryReadContainedArtifact`
+    // undoes Git's checkout line-ending conversion, so a CRLF working copy and
+    // its LF blob agree here. Comparing `scaffold_id` alone would also have
+    // survived that, and was tried — it silently dropped the attestation above,
+    // which `test/cli.test.ts` asserts and Windows could not have caught.
     if (tracked.truncated || !Buffer.from(tracked.content).equals(Buffer.from(config.bytes))) {
       return fixedReason(
         "TEAM_SCAFFOLD_IDENTITY_CHANGED",
         "Team workflows require the working .mex/config.json to match the current repository HEAD.",
       );
     }
-
-    let scaffoldId: unknown;
-    try {
-      const parsed = JSON.parse(Buffer.from(config.bytes).toString("utf8")) as unknown;
-      scaffoldId = isRecord(parsed) ? parsed.scaffold_id : undefined;
-    } catch {
-      return fixedReason(
-        "TEAM_SCAFFOLD_IDENTITY_MISSING",
-        "Team workflows require one bounded scaffold identity in .mex/config.json.",
-      );
-    }
-    if (
-      typeof scaffoldId !== "string"
-      || scaffoldId.length === 0
-      || scaffoldId.length > 512
-      || /[\0-\x1f\x7f]/u.test(scaffoldId)
-    ) {
+    const scaffoldId = scaffoldIdentityOf(config.bytes);
+    if (scaffoldId === null) {
       return fixedReason(
         "TEAM_SCAFFOLD_IDENTITY_MISSING",
         "Team workflows require one bounded scaffold identity in .mex/config.json.",
@@ -2942,6 +2937,32 @@ async function inspectTeamAvailability(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The bounded `scaffold_id` in a `.mex/config.json` body, or `null` when the
+ * body is unparseable or the id is absent or malformed.
+ *
+ * One definition for the tracked copy and the working copy, so the two cannot
+ * drift into disagreeing about what a well-formed identity is.
+ */
+function scaffoldIdentityOf(bytes: Uint8Array): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown;
+  } catch {
+    return null;
+  }
+  const value = isRecord(parsed) ? parsed.scaffold_id : undefined;
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 512
+    || /[\0-\x1f\x7f]/u.test(value)
+  ) {
+    return null;
+  }
+  return value;
 }
 
 function errorCode(error: unknown): string | undefined {

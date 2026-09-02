@@ -14,7 +14,7 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-08-29
+last_updated: 2026-09-01
 ---
 
 # Session Bootstrap
@@ -49,6 +49,13 @@ Then read this file fully before doing anything else in this session.
   rewriting schema-v1 history.
 - Versioned graph snapshot provenance and read-only freshness inspection gate
   grounding in check, doctor, and dashboard flows without implicit graph sync.
+- Grounding carries its change signal in Markdown: `grounds_to[].bodyHash` is
+  optional and additive, written by the capture and MOVED-repair passes from the
+  graph's own hash, and backfilled for existing scaffolds on the next capture.
+  The `_mex_grounded_source` row remains as a cache of that canonical value. The
+  drift checker prefers the committed hash, falls back to the cache for a
+  grounding authored before the field, and resolves the `grounds_to` key path so
+  migrated scaffolds under `mex.grounds_to` are checked rather than skipped.
 - Explicit graph status, refresh, and isolated rebuild/recovery commands preserve
   the last trustworthy index behind one cross-process maintenance lease.
 - Targeted graph get/query/impact consumers use one provenance-bound immutable
@@ -153,6 +160,10 @@ Then read this file fully before doing anything else in this session.
   appear only when a stable status observation makes the requested operation
   safe; migration-required or unstable Wiki observations never fabricate a
   repair action.
+- The Wiki CLI's `serviceOptions` carries no code graph, so `wiki validate`
+  cannot resolve a grounding and `wiki migrate`'s body-hash backfill never runs.
+  Both degrade silently rather than failing; the validate notice now reports
+  that the pass had no graph instead of asserting the checkout has none.
 
 ## Routing Table
 

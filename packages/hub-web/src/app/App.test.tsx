@@ -315,6 +315,14 @@ describe("Project Hub routes", () => {
     expect(within(repositoryBar).getByText(initialHome.repository.name)).toBeVisible();
     expect(screen.getByLabelText("3 proposals awaiting team review.")).toBeVisible();
 
+    // The Hub's only outbound link. `target="_blank"` without
+    // `rel="noopener noreferrer"` would hand the opened tab a handle on this
+    // one, so the rel is asserted rather than assumed.
+    const discord = within(repositoryBar).getByRole("link", { name: "Join MEX Discord" });
+    expect(discord).toHaveAttribute("href", "https://discord.gg/FEdNsQ4Qt4");
+    expect(discord).toHaveAttribute("target", "_blank");
+    expect(discord).toHaveAttribute("rel", "noopener noreferrer");
+
     await act(async () => {
       await queryClient.invalidateQueries({ queryKey: ["home"] });
     });
