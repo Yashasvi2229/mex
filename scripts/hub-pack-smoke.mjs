@@ -1,6 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -14,6 +16,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const OFFICIAL_SKILLS = ["mex-inbox", "mex-relay"];
 const npmCli = process.env.npm_execpath;
 if (!npmCli) {
   throw new Error("The packed Hub smoke must run through npm so its CLI entry is known.");
@@ -24,23 +27,49 @@ mkdirSync(npmCache, { recursive: true });
 let child;
 
 try {
-  const packed = runNpm([
+  const packOutput = runNpm([
     "pack",
-    "--silent",
+    "--json",
     "--cache",
     npmCache,
     "--pack-destination",
     work,
-  ], root)
-    .trim()
-    .split(/\r?\n/)
-    .at(-1);
-  if (!packed) throw new Error("npm pack did not report a tarball.");
-  const tarball = join(work, basename(packed));
+  ], root);
+  const packResult = parsePackResult(packOutput);
+  const tarball = join(work, basename(packResult.filename));
+  verifyPackedSkillTrees(packResult);
   const project = join(work, "project");
   mkdirSync(join(project, ".mex"), { recursive: true });
   writeFileSync(join(project, "package.json"), "{\n  \"private\": true\n}\n");
   writeFileSync(join(project, ".gitignore"), "node_modules/\n.mex/graph.db*\n.mex/local/\n");
+  writeFileSync(join(project, "CLAUDE.md"), [
+    "# Consumer Claude instructions",
+    "",
+    "Keep this line byte-for-byte.",
+    "",
+  ].join("\n"));
+  writeFileSync(join(project, "AGENTS.md"), [
+    "# Consumer Codex instructions",
+    "",
+    "Keep this line byte-for-byte.",
+    "",
+  ].join("\n"));
+  mkdirSync(join(project, ".claude", "skills", "consumer-owned"), { recursive: true });
+  writeFileSync(join(project, ".claude", "skills", "consumer-owned", "SKILL.md"), [
+    "---",
+    "name: consumer-owned",
+    "description: A consumer-owned Claude skill that MEX must never inspect or rewrite.",
+    "---",
+    "",
+  ].join("\n"));
+  mkdirSync(join(project, ".agents", "skills", "consumer-owned"), { recursive: true });
+  writeFileSync(join(project, ".agents", "skills", "consumer-owned", "SKILL.md"), [
+    "---",
+    "name: consumer-owned",
+    "description: A consumer-owned Codex skill that MEX must never inspect or rewrite.",
+    "---",
+    "",
+  ].join("\n"));
   writeFileSync(join(project, ".mex", "ROUTER.md"), "# Project Router\n");
   writeFileSync(
     join(project, ".mex", "config.json"),
@@ -68,22 +97,51 @@ try {
   run("git", ["init", "--quiet"], project);
   run("git", ["config", "user.name", "Packed Ada"], project);
   run("git", ["config", "user.email", "packed@example.test"], project);
-  run("git", ["add", ".gitignore", "package.json", ".mex", "src"], project);
+  run("git", [
+    "add",
+    ".gitignore",
+    "package.json",
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".claude",
+    ".agents",
+    ".mex",
+    "src",
+  ], project);
   run("git", ["commit", "--quiet", "-m", "test fixture"], project);
+  const beforeInstallAgentSurfaces = snapshotAgentSurfaces(project);
   runNpm([
     "install",
     tarball,
-    "--ignore-scripts",
     "--no-audit",
     "--no-fund",
     "--omit=dev",
     "--cache",
     npmCache,
   ], project);
+  const afterInstallAgentSurfaces = snapshotAgentSurfaces(project);
+  if (
+    JSON.stringify(afterInstallAgentSurfaces) !== JSON.stringify(beforeInstallAgentSurfaces)
+    || [".claude", ".agents"].some((clientRoot) => OFFICIAL_SKILLS.some((skill) => (
+      existsSync(join(project, clientRoot, "skills", skill))
+    )))
+    || ["CLAUDE.md", "AGENTS.md"].some((name) => (
+      readFileSync(join(project, name), "utf8").includes("<!-- mex-agent:skills:start -->")
+    ))
+  ) {
+    throw new Error("Plain npm install mutated project skills or root agent instructions.");
+  }
 
   const installed = join(project, "node_modules", "mex-agent");
   const manifest = join(installed, "dist", "hub", ".vite", "manifest.json");
   if (!existsSync(manifest)) throw new Error("The packed package omitted dist/hub assets.");
+  const installedPackageVersion = JSON.parse(
+    readFileSync(join(installed, "package.json"), "utf8"),
+  ).version;
+  if (installedPackageVersion !== packResult.version) {
+    throw new Error("The installed package version did not match the npm pack result.");
+  }
+  verifyInstalledPackageSkillTrees(installed);
   const declaration = readFileSync(join(installed, "dist", "index.d.ts"), "utf8");
   if (
     /Hub(?:Job|Api|Session|Capabilities|Activity|Wiki)|Activity(?:Request|Response|Item|Diagnostic)|CodeWorkspace|CodeKnowledge(?:Request|Response)|GraphHealthDetails|WikiHealthDetails|WikiEntity(?:List|Detail)(?:Request|Response)|Wiki(?:Relations|Backlinks)(?:Request|Response)|WikiSearchResult|RepositoryGraphPort|RepositoryWiki|createRepositoryWikiPort|runHubCommand|TeamRelay|RelayHandoff/.test(
@@ -94,6 +152,92 @@ try {
   }
 
   const cli = join(installed, "dist", "cli.js");
+  const cliHelp = run(process.execPath, [cli, "--help"], project);
+  const skillSyncHelp = run(process.execPath, [cli, "skills", "sync", "--help"], project);
+  if (
+    !/^\s*skills\s+/mu.test(cliHelp)
+    || !skillSyncHelp.includes("--dry-run")
+    || !skillSyncHelp.includes("--json")
+    || !skillSyncHelp.includes("--tool <tool>")
+  ) {
+    throw new Error("The packed CLI help omitted the official skill sync surface.");
+  }
+
+  const beforeSetupHead = run("git", ["rev-parse", "HEAD"], project).trim();
+  const setupOutput = await runInteractiveAgentSetup(cli, project, work);
+  verifyPackedSetupOutput(setupOutput);
+  verifySetupConfig(project);
+  verifyInstalledAgentAssets(project, installed, installedPackageVersion);
+  if (
+    run("git", ["rev-parse", "HEAD"], project).trim() !== beforeSetupHead
+    || run("git", ["diff", "--cached", "--name-only"], project).trim().length !== 0
+  ) {
+    throw new Error("The packed setup staged or committed project changes automatically.");
+  }
+
+  // Team workflows intentionally require the current config bytes to be
+  // tracked. The product setup must not commit them, so the smoke fixture does
+  // that explicitly before exercising its pre-existing Relay/Hub assertions.
+  run("git", ["add", ".mex/config.json"], project);
+  run("git", ["commit", "--quiet", "-m", "record packed setup selection"], project);
+
+  const afterSetup = snapshotAgentSurfaces(project);
+  const firstSkillSync = parseSkillSyncReport(run(
+    process.execPath,
+    [cli, "skills", "sync", "--json"],
+    project,
+  ), installedPackageVersion, false);
+  if (
+    firstSkillSync.clients.length !== 2
+    || !firstSkillSync.clients.includes("claude")
+    || !firstSkillSync.clients.includes("codex")
+    || firstSkillSync.applied !== true
+    || firstSkillSync.changed !== false
+    || firstSkillSync.conflicted !== false
+    || firstSkillSync.actions.length !== 6
+    || firstSkillSync.actions.some((action) => action.action !== "noop")
+    || JSON.stringify(snapshotAgentSurfaces(project)) !== JSON.stringify(afterSetup)
+  ) {
+    throw new Error("The first packed skill sync was not an idempotent update of setup-installed assets.");
+  }
+
+  const afterFirstSkillSync = snapshotAgentSurfaces(project);
+  const secondSkillSync = parseSkillSyncReport(run(
+    process.execPath,
+    [cli, "skills", "sync", "--json"],
+    project,
+  ), installedPackageVersion, false);
+  const afterSecondSkillSync = snapshotAgentSurfaces(project);
+  if (
+    secondSkillSync.applied !== true
+    || secondSkillSync.changed !== false
+    || secondSkillSync.conflicted !== false
+    || secondSkillSync.actions.length !== 6
+    || secondSkillSync.actions.some((action) => action.action !== "noop")
+    || JSON.stringify(secondSkillSync.warnings) !== JSON.stringify(firstSkillSync.warnings)
+    || JSON.stringify(afterSecondSkillSync) !== JSON.stringify(afterFirstSkillSync)
+  ) {
+    throw new Error("A repeated packed skill sync was not byte- and timestamp-idempotent.");
+  }
+
+  const dryRunSkillSync = parseSkillSyncReport(run(
+    process.execPath,
+    [cli, "skills", "sync", "--dry-run", "--json"],
+    project,
+  ), installedPackageVersion, true);
+  const afterDryRunSkillSync = snapshotAgentSurfaces(project);
+  if (
+    dryRunSkillSync.applied !== false
+    || dryRunSkillSync.changed !== false
+    || dryRunSkillSync.conflicted !== false
+    || dryRunSkillSync.actions.length !== 6
+    || dryRunSkillSync.actions.some((action) => action.action !== "noop")
+    || JSON.stringify(dryRunSkillSync.warnings) !== JSON.stringify(firstSkillSync.warnings)
+    || JSON.stringify(afterDryRunSkillSync) !== JSON.stringify(afterFirstSkillSync)
+  ) {
+    throw new Error("The packed dry-run skill sync wrote to the project or reported a spurious change.");
+  }
+
   const relayContractOutput = run(
     process.execPath,
     [cli, "relay", "contract", "--json"],
@@ -687,10 +831,369 @@ try {
   if (!stoppedAsRequested && !terminatedAsRequestedOnWindows) {
     throw new Error(`The packaged Hub did not stop cleanly (${JSON.stringify(exit)}).`);
   }
-  process.stdout.write("Packed Project Hub smoke test passed.\n");
+  process.stdout.write("Packed Project Hub and official agent-skills smoke test passed.\n");
 } finally {
   if (child && child.exitCode === null) child.kill("SIGKILL");
   rmSync(work, { recursive: true, force: true });
+}
+
+function parsePackResult(output) {
+  let parsed;
+  const trimmed = output.trim();
+  const jsonStart = trimmed.lastIndexOf("\n[");
+  const candidate = jsonStart === -1 ? trimmed : trimmed.slice(jsonStart + 1);
+  try {
+    parsed = JSON.parse(candidate);
+  } catch (error) {
+    throw new Error("npm pack --json did not emit strict JSON.", { cause: error });
+  }
+  const result = Array.isArray(parsed) ? parsed[0] : parsed;
+  if (
+    !result
+    || typeof result.filename !== "string"
+    || result.filename.length === 0
+    || typeof result.version !== "string"
+    || !Array.isArray(result.files)
+  ) {
+    throw new Error("npm pack --json omitted its filename, version, or file inventory.");
+  }
+  return result;
+}
+
+function runInteractiveAgentSetup(cli, project, workRoot) {
+  const emptyPath = join(workRoot, "empty-agent-path");
+  mkdirSync(emptyPath, { recursive: true });
+
+  // Keep the packed smoke independent from developer-machine agent installs.
+  // The CLI itself is launched through an absolute Node path, while an empty
+  // PATH makes the setup flow reliably choose its manual-population branch.
+  const env = { ...process.env, MEX_TELEMETRY: "0", NO_COLOR: "1" };
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === "path") delete env[key];
+  }
+  env.PATH = emptyPath;
+
+  return new Promise((resolveOutput, reject) => {
+    const setup = spawn(process.execPath, [cli, "setup", "--mode", "agent-memory"], {
+      cwd: project,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let choseMultiple = false;
+    let choseClients = false;
+    let declinedGlobalInstall = false;
+    let settled = false;
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (setup.exitCode === null) setup.kill("SIGKILL");
+      reject(error);
+    };
+    const answer = (value) => {
+      if (setup.stdin.destroyed || !setup.stdin.writable) {
+        fail(new Error(`The packed setup closed stdin before all prompts were answered.\n${stderr}`));
+        return;
+      }
+      setup.stdin.write(`${value}\n`);
+    };
+    const drivePrompts = () => {
+      if (!choseMultiple && stdout.includes("Choice [1-8] (default: 1):")) {
+        choseMultiple = true;
+        answer("7");
+      }
+      if (!choseClients && stdout.includes("Enter tool numbers separated by spaces")) {
+        choseClients = true;
+        answer("1 6");
+      }
+      if (!declinedGlobalInstall && stdout.includes("Install mex globally? [Y/n]")) {
+        declinedGlobalInstall = true;
+        answer("n");
+        setup.stdin.end();
+      }
+    };
+    const timer = setTimeout(() => {
+      fail(new Error(`Timed out driving the packed interactive setup.\n${stdout}\n${stderr}`));
+    }, 60_000);
+
+    setup.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      drivePrompts();
+    });
+    setup.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    setup.on("error", (error) => {
+      fail(new Error(`The packed interactive setup could not start: ${error.message}`, {
+        cause: error,
+      }));
+    });
+    setup.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (
+        code !== 0
+        || signal !== null
+        || !choseMultiple
+        || !choseClients
+        || !declinedGlobalInstall
+      ) {
+        reject(new Error(
+          `The packed interactive setup did not complete all expected prompts `
+          + `(exit ${String(code)}, signal ${String(signal)}).\n${stdout}\n${stderr}`,
+        ));
+        return;
+      }
+      resolveOutput(stdout);
+    });
+  });
+}
+
+function verifyPackedSetupOutput(output) {
+  const normalized = output.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "");
+  const expectedActions = [
+    "Install the packaged mex-inbox skill at .claude/skills/mex-inbox.",
+    "Install the packaged mex-relay skill at .claude/skills/mex-relay.",
+    "Append the MEX-managed instruction block to CLAUDE.md without changing its existing bytes.",
+    "Install the packaged mex-inbox skill at .agents/skills/mex-inbox.",
+    "Install the packaged mex-relay skill at .agents/skills/mex-relay.",
+    "Append the MEX-managed instruction block to AGENTS.md without changing its existing bytes.",
+  ];
+  const sessionGuarantee = "Start a new Claude Code and Codex session to guarantee the new skills and project instructions are loaded.";
+  if (
+    !normalized.includes("Choice [1-8] (default: 1):")
+    || !normalized.includes("Enter tool numbers separated by spaces")
+    || !expectedActions.every((message) => normalized.includes(message))
+    || !normalized.includes(sessionGuarantee)
+  ) {
+    throw new Error("The packed interactive setup omitted its two-client install actions or new-session guarantee.");
+  }
+}
+
+function verifySetupConfig(project) {
+  const config = JSON.parse(readFileSync(join(project, ".mex", "config.json"), "utf8"));
+  if (
+    JSON.stringify(config.aiTools) !== JSON.stringify(["claude", "codex"])
+    || config.scaffold_id !== "11111111-1111-4111-8111-111111111111"
+    || config.scaffold_name !== "packed-hub-smoke"
+    || JSON.stringify(config.wiki) !== JSON.stringify({
+      exclude: ["excluded/**"],
+      readOnly: ["context/read-only/**"],
+    })
+  ) {
+    throw new Error("The packed interactive setup did not persist both clients without changing existing config.");
+  }
+}
+
+function verifyPackedSkillTrees(packResult) {
+  const packedFiles = new Set(packResult.files.map((file) => file?.path).filter((path) => (
+    typeof path === "string"
+  )));
+  for (const skill of OFFICIAL_SKILLS) {
+    const source = join(root, "skills", skill);
+    const sourceFiles = collectTreeFiles(source);
+    const expected = sourceFiles.map((file) => `skills/${skill}/${file.path}`);
+    const actual = [...packedFiles]
+      .filter((path) => path.startsWith(`skills/${skill}/`))
+      .sort((left, right) => left.localeCompare(right, "en"));
+    expected.sort((left, right) => left.localeCompare(right, "en"));
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new Error(`The npm pack tarball did not contain the complete ${skill} tree.`);
+    }
+    for (const required of ["SKILL.md", "agents/openai.yaml"]) {
+      if (!sourceFiles.some((file) => file.path === required)) {
+        throw new Error(`The canonical ${skill} source omitted ${required}.`);
+      }
+    }
+    if (!sourceFiles.some((file) => file.path.startsWith("references/"))) {
+      throw new Error(`The canonical ${skill} source omitted its progressive references.`);
+    }
+  }
+}
+
+function verifyInstalledPackageSkillTrees(installed) {
+  for (const skill of OFFICIAL_SKILLS) {
+    assertTreesEqual(
+      join(root, "skills", skill),
+      join(installed, "skills", skill),
+      `installed package ${skill}`,
+    );
+  }
+}
+
+function parseSkillSyncReport(output, packageVersion, dryRun) {
+  let report;
+  try {
+    report = JSON.parse(output.trim());
+  } catch (error) {
+    throw new Error("mex skills sync --json did not emit one strict JSON object.", { cause: error });
+  }
+  if (
+    !report
+    || Array.isArray(report)
+    || report.schemaVersion !== 1
+    || report.packageVersion !== packageVersion
+    || report.dryRun !== dryRun
+    || !Array.isArray(report.clients)
+    || !Array.isArray(report.actions)
+    || !Array.isArray(report.warnings)
+    || typeof report.applied !== "boolean"
+    || typeof report.changed !== "boolean"
+    || typeof report.conflicted !== "boolean"
+  ) {
+    throw new Error("mex skills sync --json emitted an invalid agent-assets report.");
+  }
+  return report;
+}
+
+function verifyInstalledAgentAssets(project, installed, packageVersion) {
+  const clients = [
+    {
+      name: "claude",
+      skillsRoot: join(project, ".claude", "skills"),
+      instructions: join(project, "CLAUDE.md"),
+      originalInstructions: "# Consumer Claude instructions\n\nKeep this line byte-for-byte.\n",
+      explicit: ["/mex-inbox", "/mex-relay"],
+      foreignExplicit: ["$mex-inbox", "$mex-relay"],
+    },
+    {
+      name: "codex",
+      skillsRoot: join(project, ".agents", "skills"),
+      instructions: join(project, "AGENTS.md"),
+      originalInstructions: "# Consumer Codex instructions\n\nKeep this line byte-for-byte.\n",
+      explicit: ["$mex-inbox", "$mex-relay"],
+      foreignExplicit: ["/mex-inbox", "/mex-relay"],
+    },
+  ];
+
+  for (const client of clients) {
+    for (const skill of OFFICIAL_SKILLS) {
+      const source = join(installed, "skills", skill);
+      const destination = join(client.skillsRoot, skill);
+      assertTreesEqual(source, destination, `${client.name} ${skill}`, {
+        ignoredDestinationFiles: new Set([".mex-managed.json"]),
+      });
+      verifyOwnershipSidecar(destination, skill, packageVersion, source);
+    }
+
+    const instructions = readFileSync(client.instructions, "utf8");
+    if (!instructions.startsWith(client.originalInstructions)) {
+      throw new Error(`The ${client.name} setup did not preserve hand-written root instructions byte-for-byte.`);
+    }
+    if (
+      countOccurrences(instructions, "<!-- mex-agent:skills:start -->") !== 1
+      || countOccurrences(instructions, "<!-- mex-agent:skills:end -->") !== 1
+      || !client.explicit.every((invocation) => instructions.includes(invocation))
+      || client.foreignExplicit.some((invocation) => instructions.includes(invocation))
+      || !instructions.includes("MEX context used: <specific records/files/entities consulted>.")
+      || !instructions.includes("Skill activation is not approval for canonical actions.")
+    ) {
+      throw new Error(`The ${client.name} setup instruction block was missing or not client-specific.`);
+    }
+  }
+
+  const expectedConsumerOwned = {
+    claude: "description: A consumer-owned Claude skill that MEX must never inspect or rewrite.",
+    codex: "description: A consumer-owned Codex skill that MEX must never inspect or rewrite.",
+  };
+  for (const [client, expectedLine] of Object.entries(expectedConsumerOwned)) {
+    const rootName = client === "claude" ? ".claude" : ".agents";
+    const bytes = readFileSync(
+      join(project, rootName, "skills", "consumer-owned", "SKILL.md"),
+      "utf8",
+    );
+    if (!bytes.includes(expectedLine)) {
+      throw new Error(`The ${client} setup rewrote an unrelated consumer-owned skill.`);
+    }
+  }
+}
+
+function verifyOwnershipSidecar(destination, skill, packageVersion, source) {
+  const sidecarPath = join(destination, ".mex-managed.json");
+  const bytes = readFileSync(sidecarPath, "utf8");
+  if (!bytes.endsWith("\n")) {
+    throw new Error(`${skill} ownership metadata was not deterministic newline-terminated JSON.`);
+  }
+  const metadata = JSON.parse(bytes);
+  const sourceFiles = collectTreeFiles(source);
+  const expectedFiles = Object.fromEntries(sourceFiles.map((file) => [
+    file.path,
+    createHash("sha256").update(file.bytes).digest("hex"),
+  ]));
+  const recordedPaths = Object.keys(metadata.files ?? {}).sort();
+  const expectedPaths = Object.keys(expectedFiles).sort();
+  if (
+    metadata.schemaVersion !== 1
+    || metadata.owner !== "mex-agent"
+    || metadata.skill !== skill
+    || metadata.packageVersion !== packageVersion
+    || JSON.stringify(recordedPaths) !== JSON.stringify(expectedPaths)
+    || expectedPaths.some((path) => metadata.files[path] !== expectedFiles[path])
+    || JSON.stringify(Object.keys(metadata))
+      !== JSON.stringify(["schemaVersion", "owner", "skill", "packageVersion", "files"])
+  ) {
+    throw new Error(`${skill} ownership metadata did not exactly describe the deployed payload.`);
+  }
+}
+
+function assertTreesEqual(source, destination, label, { ignoredDestinationFiles = new Set() } = {}) {
+  const sourceFiles = collectTreeFiles(source);
+  const destinationFiles = collectTreeFiles(destination).filter((file) => (
+    !ignoredDestinationFiles.has(file.path)
+  ));
+  const sourcePaths = sourceFiles.map((file) => file.path);
+  const destinationPaths = destinationFiles.map((file) => file.path);
+  if (JSON.stringify(destinationPaths) !== JSON.stringify(sourcePaths)) {
+    throw new Error(`The ${label} file inventory did not match its packaged source.`);
+  }
+  for (let index = 0; index < sourceFiles.length; index += 1) {
+    if (!sourceFiles[index].bytes.equals(destinationFiles[index].bytes)) {
+      throw new Error(`The ${label} changed ${sourceFiles[index].path} while copying it.`);
+    }
+  }
+}
+
+function collectTreeFiles(directory, relativeRoot = "") {
+  if (!existsSync(directory)) throw new Error(`Expected directory is missing: ${directory}`);
+  const result = [];
+  for (const name of readdirSync(directory).sort((left, right) => left.localeCompare(right, "en"))) {
+    const absolute = join(directory, name);
+    const relativePath = relativeRoot.length === 0 ? name : `${relativeRoot}/${name}`;
+    const stats = lstatSync(absolute);
+    if (stats.isSymbolicLink()) {
+      throw new Error(`Packaged and managed skill trees must not contain symlinks: ${absolute}`);
+    }
+    if (stats.isDirectory()) {
+      result.push(...collectTreeFiles(absolute, relativePath));
+      continue;
+    }
+    if (!stats.isFile()) {
+      throw new Error(`Packaged and managed skill trees must contain regular files: ${absolute}`);
+    }
+    result.push({ path: relativePath, bytes: readFileSync(absolute) });
+  }
+  return result;
+}
+
+function snapshotAgentSurfaces(project) {
+  const files = [];
+  for (const path of [
+    join(project, "CLAUDE.md"),
+    join(project, "AGENTS.md"),
+    join(project, ".claude"),
+    join(project, ".agents"),
+    join(project, ".mex"),
+  ]) {
+    collectSnapshotFiles(project, path, files);
+  }
+  files.sort((left, right) => left.path.localeCompare(right.path, "en"));
+  return files;
+}
+
+function countOccurrences(value, needle) {
+  return value.split(needle).length - 1;
 }
 
 function writeActivityFixture(project) {

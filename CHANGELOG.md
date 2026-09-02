@@ -23,6 +23,9 @@ All notable changes to this project will be documented in this file.
 - A governed Team Inbox and Spec-authoring workflow for local drafts, portable
   canonical proposals, explicit approval/rejection/withdrawal/repair, and exact
   single-Spec create or update through the real Wiki preview/apply boundary.
+- Official `mex-inbox` and `mex-relay` project skills for Claude Code and Codex,
+  installed by `mex setup` and safely refreshed with `mex skills sync` without
+  overwriting user instructions, modified managed copies, or unrelated skills.
 
 ### Changed
 - The integration graph uses schema v4: v0.7.3's compact BLOB fingerprints and
@@ -32,12 +35,17 @@ All notable changes to this project will be documented in this file.
   publication boundaries.
 - `mex graph repair` now uses the graph maintenance lease and a validated
   same-directory candidate instead of mutating the published database in place.
+- Inbox and Relay contracts now support bounded action-scoped discovery while
+  preserving the existing complete contract catalogs for compatibility.
 
 ### Compatibility
 - Explicit graph maintenance recognizes v1, v2, released-main v3,
   integration-grounding v3, and complete hybrid v3 stores structurally. v2 and
   complete v3 lineages upgrade losslessly to schema v4; v1, partial, or
   ambiguous stores require a safe rebuild. Ordinary reads never migrate.
+- Installing or upgrading the npm package only delivers the skill payload; it
+  does not mutate a repository. Activation remains an explicit `mex setup` or
+  `mex skills sync` action, and no plugin package is required.
 
 ## [0.7.3] - 2026-08-27
 

@@ -15,7 +15,7 @@ import {
 } from "./commands.js";
 import type { InboxMutationCommandName } from "./request-file.js";
 import type { TeamInboxSpecCliServiceFactory } from "./service.js";
-import { runInboxContract } from "./contract.js";
+import { runInboxContract, type InboxContractFlags } from "./contract.js";
 
 export interface InboxCommandBuilderOptions {
   service: TeamInboxSpecCliServiceFactory;
@@ -29,8 +29,9 @@ export function buildInboxCommand(options: InboxCommandBuilderOptions): Command 
 
   inbox.command("contract")
     .description("Resolve the bounded versioned Inbox JSON Schema catalog")
+    .option("--action <command-id>", "Resolve only one supported mutation command contract")
     .option("--json", "Emit the schema v1 Team envelope")
-    .action((flags: TeamOutputFlags) => runInboxContract(flags, options.io));
+    .action((flags: InboxContractFlags) => runInboxContract(flags, options.io));
 
   const draft = inbox.command("draft").description("Manage checkout-local Inbox drafts");
   draft.command("list")

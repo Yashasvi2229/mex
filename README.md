@@ -222,7 +222,29 @@ mex requires Node.js 22.5 or newer. The npm package is named `mex-agent` because
 npx mex-agent setup
 ```
 
-Setup inspects the repository, builds the local code graph, creates the Markdown wiki, asks your coding agent to populate it from graph evidence, installs the right project anchor, and validates the result.
+Setup inspects the repository, builds the local code graph, creates the Markdown wiki, asks your coding agent to populate it from graph evidence, installs the right project anchor and official MEX skills, and validates the result.
+
+### Official Claude Code and Codex skills
+
+The `mex-agent` npm package ships two official project skills from one canonical source:
+
+- `mex-inbox` prepares governed Spec, requirement, constraint, and acceptance-criterion proposals.
+- `mex-relay` prepares durable team handoffs.
+
+The normal `mex setup` flow installs copies for every selected supported agent; no separate plugin or skill installer is required. Claude Code receives `.claude/skills/mex-inbox` and `.claude/skills/mex-relay`, while Codex receives `.agents/skills/mex-inbox` and `.agents/skills/mex-relay`. Selecting both agents installs both sets and updates only the marker-delimited MEX block in `CLAUDE.md` and `AGENTS.md`.
+
+Invoke the skills explicitly as `/mex-inbox` and `/mex-relay` in Claude Code, or `$mex-inbox` and `$mex-relay` in Codex. Clear natural-language requests for governed Spec proposals or durable handoffs invoke them automatically as well.
+
+A plain npm package install only delivers the payload; it never mutates the current repository. After upgrading `mex-agent`, receive newer packaged skill copies with:
+
+```bash
+mex skills sync
+mex skills sync --dry-run
+```
+
+Start a new Claude Code or Codex session after setup or sync so the skills and project instructions are guaranteed to load. Project skill files should normally be committed so teammates receive the same behavior. MEX never stages or commits them automatically. If a project ignores one of the narrow skill paths, sync warns with the exact path and suggested ignore rule instead of exposing other `.claude` or `.agents` files.
+
+A standalone Codex plugin or marketplace package may be added later, but it is not required for this release.
 
 After setup:
 
@@ -260,12 +282,15 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | `mex activity record` | Preview an append-only canonical Activity record |
 | `mex workstream list\|show --json` | Read bounded canonical Workstreams |
 | `mex workstream create\|update\|archive` | Preview a Workstream change; apply only an approved preview envelope |
-| `mex relay contract --json` | Resolve the bounded Relay command, request, and preview contract |
+| `mex inbox contract --action <command-id> --json` | Resolve only the exact Inbox mutation schema needed by an agent |
+| `mex relay contract --action <command-id> --json` | Resolve only the exact Relay mutation schema needed by an agent |
+| `mex inbox\|relay contract --json` | Resolve the backward-compatible complete static contract catalog for diagnosis |
 | `mex relay draft list\|show\|save\|delete` | Read or preview changes to checkout-local handoff drafts |
 | `mex relay list\|show --json` | Read bounded canonical handoffs; the Workstream filter matches legacy Relays only |
 | `mex relay publish\|acknowledge\|close` | Preview a standalone handoff lifecycle action; apply only its exact approved envelope |
 | `mex spec list\|show --json` | Read root Specs and their explicit Wiki hierarchy without maintaining indexes |
 | `mex setup` | Create and populate the living wiki |
+| `mex skills sync [--dry-run] [--json]` | Install or safely update official skills for configured Claude Code/Codex clients |
 | `mex check` | Check wiki health and calculate a drift score |
 | `mex sync` | Repair stale or inconsistent knowledge |
 | `mex graph` | Backward-compatible alias for a safe isolated rebuild |
@@ -339,16 +364,16 @@ See [Code graph support](docs/code-graph-support.md) for the tested language and
 
 ## Supported tools
 
-`mex setup` installs the appropriate project anchor for your coding agent:
+`mex setup` installs the appropriate project anchor and, for Claude Code or Codex, the official project skills:
 
-| Tool | Project anchor |
-|---|---|
-| Claude Code | `CLAUDE.md` |
-| Codex | `AGENTS.md` |
-| Cursor | `.cursorrules` |
-| Windsurf | `.windsurfrules` |
-| GitHub Copilot | `.github/copilot-instructions.md` |
-| OpenCode | `.opencode/opencode.json` |
+| Tool | Project anchor | Official skill directory |
+|---|---|---|
+| Claude Code | `CLAUDE.md` | `.claude/skills/mex-inbox`, `.claude/skills/mex-relay` |
+| Codex | `AGENTS.md` | `.agents/skills/mex-inbox`, `.agents/skills/mex-relay` |
+| Cursor | `.cursorrules` | — |
+| Windsurf | `.windsurfrules` | — |
+| GitHub Copilot | `.github/copilot-instructions.md` | — |
+| OpenCode | `.opencode/opencode.json` | — |
 
 Neovim users can follow [the Neovim integration guide](docs/vim-neovim.md) for Claude Code, Avante.nvim, Copilot.vim, and generic plugin setups.
 

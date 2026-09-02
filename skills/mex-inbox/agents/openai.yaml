@@ -1,0 +1,4 @@
+interface:
+  display_name: "MEX Inbox"
+  short_description: "Draft governed MEX Spec proposals"
+  default_prompt: "Use $mex-inbox to draft this durable requirement for MEX team review."

@@ -89,8 +89,12 @@ Then read this file fully before doing anything else in this session.
   read/record, Graph, and Wiki surfaces, plus only registered structured reads,
   previews, and explicit apply/maintenance commands that are currently safe.
   Team availability requires the exact tracked scaffold identity. Generated
-  agent anchors require discovery first, structured reads, mutation preview,
-  and explicit approval before apply.
+  agent anchors require discovery first and structured reads. An explicit
+  create/save/draft request authorizes preview and apply of that exact
+  checkout-local Inbox or Relay draft; local draft deletion and canonical
+  publish/approve/reject/withdraw/mark-stale/repair/take/acknowledge/close
+  actions require fresh confirmation after semantic preview. Git operations
+  remain separately authorized.
 - Checkpoint B supplies the internal repository-bound `TeamWorkflowPort` and
   consumer-owned real conformance suite. Strict schema-v1 repositories cover
   Workstreams, Inbox proposals, Relays, Playbooks, and manual runs; team-owned
