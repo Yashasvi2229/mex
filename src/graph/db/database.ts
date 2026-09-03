@@ -68,11 +68,18 @@ function configureReadOnlyConnection(db: SqliteDatabase): void {
  * virtual table rather than querying `pragma_module_list`, since that pragma is
  * unavailable on some `node:sqlite` builds too and FTS5 usage is what actually
  * needs to work.
+ *
+ * FTS5 availability is a property of the SQLite build the running Node binary
+ * embeds, not of any particular database file, so the probe runs against a
+ * throwaway `:memory:` connection rather than the caller's real database.
+ * Probing in place (an earlier version of this function took the caller's
+ * `SqliteDatabase`) rewrote the on-disk graph on every successful open, which
+ * broke a read-path non-mutation regression test in CI (PR #168 review).
  */
-export function assertFts5Available(db: SqliteDatabase): void {
+export function assertFts5Available(): void {
+  const probe = openSqlite(":memory:");
   try {
-    db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS __mex_fts5_probe USING fts5(x)");
-    db.exec("DROP TABLE IF EXISTS __mex_fts5_probe");
+    probe.exec("CREATE VIRTUAL TABLE __mex_fts5_probe USING fts5(x)");
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     if (!/fts5/i.test(msg)) throw error; // a different problem; surface it unchanged
@@ -81,6 +88,8 @@ export function assertFts5Available(db: SqliteDatabase): void {
         "requires. Try a different Node build/version - see COMPATIBILITY.md for which versions are " +
         `known to work. Underlying error: ${msg}`,
     );
+  } finally {
+    probe.close();
   }
 }
 
@@ -109,9 +118,9 @@ export function openGraphDatabase(
   }
   const db = openSqlite(dbPath);
   configureConnection(db);
-  assertFts5Available(db);
 
   try {
+    assertFts5Available();
     initializeWritableGraphDatabase(db, readFileSync(schemaPath(), "utf-8"), options);
     return db;
   } catch (error) {
