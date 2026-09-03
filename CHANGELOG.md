@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- `mex graph` now fails with an actionable message naming the running Node version when the built-in `node:sqlite` module lacks FTS5 support, instead of surfacing SQLite's raw `no such module: fts5` on the first schema statement that needs it. FTS5 availability is not guaranteed by every Node build/version inside the documented `engines` range (#110).
+
 ## [0.8.0] - 2026-09-02
 
 ### Added

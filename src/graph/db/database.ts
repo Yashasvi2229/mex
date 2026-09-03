@@ -58,6 +58,42 @@ function configureReadOnlyConnection(db: SqliteDatabase): void {
 }
 
 /**
+ * Probe for FTS5 support and fail fast with an actionable message if it's missing.
+ *
+ * `node:sqlite`'s bundled SQLite is not guaranteed to be built with FTS5 on every
+ * Node build/version, even within the range `package.json`'s `engines` documents
+ * as supported (issue #110). Without this check, the first FTS5 statement in
+ * `schema.sql` throws SQLite's raw `no such module: fts5`, which reads like a mex
+ * bug rather than a Node/SQLite build limitation. Create-and-drop a throwaway
+ * virtual table rather than querying `pragma_module_list`, since that pragma is
+ * unavailable on some `node:sqlite` builds too and FTS5 usage is what actually
+ * needs to work.
+ *
+ * FTS5 availability is a property of the SQLite build the running Node binary
+ * embeds, not of any particular database file, so the probe runs against a
+ * throwaway `:memory:` connection rather than the caller's real database.
+ * Probing in place (an earlier version of this function took the caller's
+ * `SqliteDatabase`) rewrote the on-disk graph on every successful open, which
+ * broke a read-path non-mutation regression test in CI (PR #168 review).
+ */
+export function assertFts5Available(): void {
+  const probe = openSqlite(":memory:");
+  try {
+    probe.exec("CREATE VIRTUAL TABLE __mex_fts5_probe USING fts5(x)");
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (!/fts5/i.test(msg)) throw error; // a different problem; surface it unchanged
+    throw new Error(
+      `Your Node (${process.version}) has SQLite built without FTS5 support, which mex's code graph ` +
+        "requires. Try a different Node build/version - see COMPATIBILITY.md for which versions are " +
+        `known to work. Underlying error: ${msg}`,
+    );
+  } finally {
+    probe.close();
+  }
+}
+
+/**
  * Open the graph DB at `dbPath`, creating the file + parent dir and applying the
  * schema when absent. Idempotent: re-opening an existing DB re-applies PRAGMAs
  * and re-asserts the schema (all statements are `IF NOT EXISTS`).
@@ -84,6 +120,7 @@ export function openGraphDatabase(
   configureConnection(db);
 
   try {
+    assertFts5Available();
     initializeWritableGraphDatabase(db, readFileSync(schemaPath(), "utf-8"), options);
     return db;
   } catch (error) {
