@@ -1,0 +1,748 @@
+import {
+  ActivityResponseSchema,
+  BootstrapResponseSchema,
+  CodeKnowledgeResponseSchema,
+  CodeWorkspaceResponseSchema,
+  GraphSymbolIdSchema,
+  HealthResponseSchema,
+  HomeResponseSchema,
+  HubCapabilitiesSchema,
+  HubJobSnapshotSchema,
+  HubProblemDetailsSchema,
+  InboxDraftDetailSchema,
+  InboxDraftIdSchema,
+  InboxDraftListResponseSchema,
+  InboxOperationApplyResponseSchema,
+  InboxOperationPreviewResponseSchema,
+  InboxProposalDetailSchema,
+  InboxProposalIdSchema,
+  InboxProposalListResponseSchema,
+  JobPageResponseSchema,
+  SearchResponseSchema,
+  SessionResponseSchema,
+  SpecDetailResponseSchema,
+  SpecListResponseSchema,
+  TeamCurrentActorResponseSchema,
+  TeamMemberIdSchema,
+  TeamMemberListResponseSchema,
+  TeamMemberSchema,
+  TeamOperationApplyResponseSchema,
+  TeamOperationPreviewResponseSchema,
+  TeamWorkstreamIdSchema,
+  TeamWorkstreamListResponseSchema,
+  TeamWorkstreamSchema,
+  WikiBacklinksResponseSchema,
+  WikiEntityDetailResponseSchema,
+  WikiEntityIdSchema,
+  WikiEntityListResponseSchema,
+  WikiRelationsResponseSchema,
+} from "@mex/hub-contracts";
+import { createFixtureApi } from "virtual:mex-hub-fixture-api";
+import type {
+  ActivityRequest,
+  ActivityResponse,
+  BootstrapResponse,
+  CapabilitiesResponse,
+  CodeKnowledgeRequest,
+  CodeKnowledgeResponse,
+  CodeWorkspaceRequest,
+  CodeWorkspaceResponse,
+  HealthResponse,
+  HomeResponse,
+  InboxDraftDetail,
+  InboxDraftListRequest,
+  InboxDraftListResponse,
+  InboxOperationApplyRequest,
+  InboxOperationApplyResponse,
+  InboxOperationPreviewRequest,
+  InboxOperationPreviewResponse,
+  InboxProposalDetail,
+  InboxProposalListRequest,
+  InboxProposalListResponse,
+  RelayDetail,
+  RelayDraftDetail,
+  RelayDraftListRequest,
+  RelayDraftListResponse,
+  RelayListRequest,
+  RelayListResponse,
+  RelayOperationApplyRequest,
+  RelayOperationApplyResponse,
+  RelayOperationPreviewRequest,
+  RelayOperationPreviewResponse,
+  JobsResponse,
+  JobSummary,
+  OverviewResponse,
+  ProblemDetails,
+  SearchRequest,
+  SearchResponse,
+  SessionResponse,
+  SpecDetailResponse,
+  SpecListRequest,
+  SpecListResponse,
+  StartJobRequest,
+  TeamCurrentActorResponse,
+  TeamMember,
+  TeamMemberListRequest,
+  TeamMemberListResponse,
+  TeamOperationApplyRequest,
+  TeamOperationApplyResponse,
+  TeamOperationPreviewRequest,
+  TeamOperationPreviewResponse,
+  TeamWorkstream,
+  TeamWorkstreamListRequest,
+  TeamWorkstreamListResponse,
+  WikiBacklinksRequest,
+  WikiBacklinksResponse,
+  WikiEntityDetailResponse,
+  WikiEntityListRequest,
+  WikiEntityListResponse,
+  WikiRelationsRequest,
+  WikiRelationsResponse,
+} from "./types";
+import type { RelayTransport } from "./relay-client";
+
+const API_ROOT = "/api/v1";
+
+interface Parser<T> {
+  safeParse(value: unknown): { success: true; data: T } | { success: false };
+}
+
+export class HubApiError extends Error {
+  readonly problem: ProblemDetails;
+
+  constructor(problem: ProblemDetails) {
+    super(problem.detail);
+    this.name = "HubApiError";
+    this.problem = problem;
+  }
+}
+
+export interface JobSubscription {
+  close(): void;
+}
+
+export type InboxFixtureVariant = "empty" | "unknown" | "partial";
+export type RelayFixtureVariant = "empty" | "closed" | "missing" | "partial" | "legacy";
+export type ActivityFixtureVariant = "empty" | "legacy" | "partial";
+export type MemberFixtureVariant =
+  | "configured"
+  | "git-alias"
+  | "git-fallback"
+  | "unknown"
+  | "stale"
+  | "inactive"
+  | "ambiguous"
+  | "partial";
+export type OverviewFixtureVariant =
+  | "established"
+  | "caught-up"
+  | "pending-review"
+  | "relay-ready"
+  | "relay-in-hand"
+  | "identity-unresolved"
+  | "indexes-stale"
+  | "indexes-degraded"
+  | "indexes-missing"
+  | "job-determinate"
+  | "job-indeterminate"
+  | "failure"
+  | "partial"
+  | "unavailable";
+
+export interface FixtureApiOptions {
+  inboxFixture?: InboxFixtureVariant;
+  relayFixture?: RelayFixtureVariant;
+  activityFixture?: ActivityFixtureVariant;
+  memberFixture?: MemberFixtureVariant;
+  overviewFixture?: OverviewFixtureVariant;
+}
+
+export interface HubApi {
+  bootstrap(token: string): Promise<BootstrapResponse>;
+  getSession(): Promise<SessionResponse>;
+  getCapabilities(): Promise<CapabilitiesResponse>;
+  getHome(): Promise<HomeResponse>;
+  getOverview(): Promise<OverviewResponse>;
+  getMembers(request: TeamMemberListRequest): Promise<TeamMemberListResponse>;
+  getMember(id: string): Promise<TeamMember>;
+  getCurrentActor(): Promise<TeamCurrentActorResponse>;
+  getWorkstreams(request: TeamWorkstreamListRequest): Promise<TeamWorkstreamListResponse>;
+  getWorkstream(id: string): Promise<TeamWorkstream>;
+  getInboxDrafts(request: InboxDraftListRequest): Promise<InboxDraftListResponse>;
+  getInboxDraft(id: string): Promise<InboxDraftDetail>;
+  getInboxProposals(request: InboxProposalListRequest): Promise<InboxProposalListResponse>;
+  getInboxProposal(id: string): Promise<InboxProposalDetail>;
+  previewInboxOperation(request: InboxOperationPreviewRequest): Promise<InboxOperationPreviewResponse>;
+  applyInboxOperation(request: InboxOperationApplyRequest): Promise<InboxOperationApplyResponse>;
+  getRelayDrafts(request: RelayDraftListRequest): Promise<RelayDraftListResponse>;
+  getRelayDraft(id: string): Promise<RelayDraftDetail>;
+  getRelays(request: RelayListRequest): Promise<RelayListResponse>;
+  getRelay(id: string): Promise<RelayDetail>;
+  previewRelayOperation(request: RelayOperationPreviewRequest): Promise<RelayOperationPreviewResponse>;
+  applyRelayOperation(request: RelayOperationApplyRequest): Promise<RelayOperationApplyResponse>;
+  listSpecs(request: SpecListRequest): Promise<SpecListResponse>;
+  getSpec(id: string): Promise<SpecDetailResponse>;
+  previewTeamOperation(request: TeamOperationPreviewRequest): Promise<TeamOperationPreviewResponse>;
+  applyTeamOperation(request: TeamOperationApplyRequest): Promise<TeamOperationApplyResponse>;
+  getActivity(request: ActivityRequest): Promise<ActivityResponse>;
+  search(request: SearchRequest): Promise<SearchResponse>;
+  getCodeSymbol(id: string, request: CodeWorkspaceRequest): Promise<CodeWorkspaceResponse>;
+  listWikiEntities(request: WikiEntityListRequest): Promise<WikiEntityListResponse>;
+  getWikiEntity(id: string): Promise<WikiEntityDetailResponse>;
+  getWikiRelations(id: string, request: WikiRelationsRequest): Promise<WikiRelationsResponse>;
+  getWikiBacklinks(id: string, request: WikiBacklinksRequest): Promise<WikiBacklinksResponse>;
+  getCodeKnowledge(id: string, request: CodeKnowledgeRequest): Promise<CodeKnowledgeResponse>;
+  getHealth(): Promise<HealthResponse>;
+  getJobs(cursor?: string): Promise<JobsResponse>;
+  getJob(id: string): Promise<JobSummary>;
+  startJob(request: StartJobRequest): Promise<JobSummary>;
+  cancelJob(id: string): Promise<JobSummary>;
+  subscribeToJob(id: string, onSnapshot: (job: JobSummary) => void): JobSubscription;
+}
+
+function fallbackProblem(status: number, detail?: string): ProblemDetails {
+  return {
+    type: "about:blank",
+    title: status === 401 ? "Hub session required" : "Hub request failed",
+    status: status >= 400 && status <= 599 ? status : 500,
+    code: status === 401 ? "UNAUTHORIZED" : "INTERNAL_ERROR",
+    detail: detail ?? (status === 401
+      ? "Open a fresh Hub link from the local CLI."
+      : "The response did not match the local Hub contract."),
+    requestId: crypto.randomUUID(),
+  };
+}
+
+async function parseBody<T>(response: Response, schema: Parser<T>): Promise<T> {
+  const contentType = response.headers.get("content-type") ?? "";
+  let body: unknown;
+  try {
+    body = contentType.includes("json") ? await response.json() : undefined;
+  } catch {
+    body = undefined;
+  }
+
+  if (!response.ok) {
+    const problem = HubProblemDetailsSchema.safeParse(body);
+    throw new HubApiError(problem.success ? problem.data : fallbackProblem(response.status));
+  }
+
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(500));
+  }
+  return parsed.data;
+}
+
+function assertSafeIdentifier(value: string): string {
+  const parsed = HubJobSnapshotSchema.shape.id.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The job identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+function assertSafeSymbolId(value: string): string {
+  const parsed = GraphSymbolIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The graph symbol identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+function assertSafeWikiEntityId(value: string): string {
+  const parsed = WikiEntityIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The Wiki entity identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+function assertSafeTeamMemberId(value: string): string {
+  const parsed = TeamMemberIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The member identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+function assertSafeTeamWorkstreamId(value: string): string {
+  const parsed = TeamWorkstreamIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The Workstream identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+function assertSafeInboxDraftId(value: string): string {
+  const parsed = InboxDraftIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The Inbox draft identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+function assertSafeInboxProposalId(value: string): string {
+  const parsed = InboxProposalIdSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new HubApiError(fallbackProblem(400, "The Inbox proposal identifier is invalid."));
+  }
+  return parsed.data;
+}
+
+const loadRelayClient = () => import("./relay-client");
+const loadOverviewContract = () => import("@mex/hub-contracts/overview");
+
+export function readBootstrapToken(hash = window.location.hash): string | null {
+  if (!hash || hash === "#") return null;
+  const fragment = hash.slice(1);
+  const params = new URLSearchParams(fragment);
+  const named = params.get("token") ?? params.get("bootstrap");
+  if (named) return named;
+  return fragment.includes("=") ? null : decodeURIComponent(fragment);
+}
+
+export function clearBootstrapFragment(): void {
+  const clean = `${window.location.pathname}${window.location.search}`;
+  window.history.replaceState(window.history.state, "", clean);
+}
+
+export class HttpHubApi implements HubApi {
+  #csrfToken: string | null = null;
+  #relayTransport: RelayTransport = {
+    request: (path, schema, init, mutation) => this.#request(path, schema, init, mutation),
+    invalidIdentifier: (detail) => {
+      throw new HubApiError(fallbackProblem(400, detail));
+    },
+  };
+  async #request<T>(
+    path: string,
+    schema: Parser<T>,
+    init: RequestInit = {},
+    mutation = false,
+  ): Promise<T> {
+    const headers = new Headers(init.headers);
+    headers.set("Accept", "application/json, application/problem+json");
+    if (mutation) {
+      headers.set("Content-Type", "application/json");
+      if (this.#csrfToken) headers.set("X-MEX-CSRF", this.#csrfToken);
+    }
+
+    const response = await fetch(`${API_ROOT}${path}`, {
+      ...init,
+      headers,
+      credentials: "same-origin",
+      redirect: "error",
+    });
+    return parseBody(response, schema);
+  }
+
+  bootstrap(token: string): Promise<BootstrapResponse> {
+    return this.#request(
+      "/session/bootstrap",
+      BootstrapResponseSchema,
+      { method: "POST", body: JSON.stringify({ token }) },
+      true,
+    );
+  }
+
+  async getSession(): Promise<SessionResponse> {
+    const session = await this.#request("/session", SessionResponseSchema);
+    this.#csrfToken = session.csrfToken;
+    return session;
+  }
+
+  getCapabilities(): Promise<CapabilitiesResponse> {
+    return this.#request("/capabilities", HubCapabilitiesSchema);
+  }
+
+  getHome(): Promise<HomeResponse> {
+    return this.#request("/home", HomeResponseSchema);
+  }
+
+  async getOverview(): Promise<OverviewResponse> {
+    const { OverviewResponseSchema } = await loadOverviewContract();
+    return this.#request("/overview", OverviewResponseSchema);
+  }
+
+  getMembers(request: TeamMemberListRequest): Promise<TeamMemberListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.active !== undefined) params.set("active", String(request.active));
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/members?${params}`, TeamMemberListResponseSchema);
+  }
+
+  async getMember(id: string): Promise<TeamMember> {
+    return await this.#request(
+      `/members/${encodeURIComponent(assertSafeTeamMemberId(id))}`,
+      TeamMemberSchema,
+    );
+  }
+
+  getCurrentActor(): Promise<TeamCurrentActorResponse> {
+    return this.#request("/actor/current", TeamCurrentActorResponseSchema);
+  }
+
+  getWorkstreams(request: TeamWorkstreamListRequest): Promise<TeamWorkstreamListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.state) params.set("state", request.state);
+    if (request.includeArchived !== undefined) {
+      params.set("includeArchived", String(request.includeArchived));
+    }
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/workstreams?${params}`, TeamWorkstreamListResponseSchema);
+  }
+
+  async getWorkstream(id: string): Promise<TeamWorkstream> {
+    return await this.#request(
+      `/workstreams/${encodeURIComponent(assertSafeTeamWorkstreamId(id))}`,
+      TeamWorkstreamSchema,
+    );
+  }
+
+  getInboxDrafts(request: InboxDraftListRequest): Promise<InboxDraftListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/inbox/drafts?${params}`, InboxDraftListResponseSchema);
+  }
+
+  async getInboxDraft(id: string): Promise<InboxDraftDetail> {
+    return await this.#request(
+      `/inbox/drafts/${encodeURIComponent(assertSafeInboxDraftId(id))}`,
+      InboxDraftDetailSchema,
+    );
+  }
+
+  getInboxProposals(request: InboxProposalListRequest): Promise<InboxProposalListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.states?.length) params.set("state", request.states.join(","));
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/inbox/proposals?${params}`, InboxProposalListResponseSchema);
+  }
+
+  async getInboxProposal(id: string): Promise<InboxProposalDetail> {
+    return await this.#request(
+      `/inbox/proposals/${encodeURIComponent(assertSafeInboxProposalId(id))}`,
+      InboxProposalDetailSchema,
+    );
+  }
+
+  previewInboxOperation(
+    request: InboxOperationPreviewRequest,
+  ): Promise<InboxOperationPreviewResponse> {
+    return this.#request(
+      "/inbox/operations/preview",
+      InboxOperationPreviewResponseSchema,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+    );
+  }
+
+  applyInboxOperation(
+    request: InboxOperationApplyRequest,
+  ): Promise<InboxOperationApplyResponse> {
+    return this.#request(
+      "/inbox/operations/apply",
+      InboxOperationApplyResponseSchema,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+    );
+  }
+
+  async getRelayDrafts(request: RelayDraftListRequest): Promise<RelayDraftListResponse> {
+    return await (await loadRelayClient()).getRelayDrafts(this.#relayTransport, request);
+  }
+
+  async getRelayDraft(id: string): Promise<RelayDraftDetail> {
+    return await (await loadRelayClient()).getRelayDraft(this.#relayTransport, id);
+  }
+
+  async getRelays(request: RelayListRequest): Promise<RelayListResponse> {
+    return await (await loadRelayClient()).getRelays(this.#relayTransport, request);
+  }
+
+  async getRelay(id: string): Promise<RelayDetail> {
+    return await (await loadRelayClient()).getRelay(this.#relayTransport, id);
+  }
+
+  async previewRelayOperation(
+    request: RelayOperationPreviewRequest,
+  ): Promise<RelayOperationPreviewResponse> {
+    return await (await loadRelayClient()).previewRelayOperation(this.#relayTransport, request);
+  }
+
+  async applyRelayOperation(
+    request: RelayOperationApplyRequest,
+  ): Promise<RelayOperationApplyResponse> {
+    return await (await loadRelayClient()).applyRelayOperation(this.#relayTransport, request);
+  }
+
+  listSpecs(request: SpecListRequest): Promise<SpecListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.includeArchived !== undefined) {
+      params.set("includeArchived", String(request.includeArchived));
+    }
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    if (request.lifecycleStates?.length) {
+      params.set("lifecycleStates", request.lifecycleStates.join(","));
+    }
+    if (request.groundingHealth?.length) {
+      params.set("groundingHealth", request.groundingHealth.join(","));
+    }
+    if (request.topics?.length) params.set("topics", request.topics.join(","));
+    return this.#request(`/specs?${params}`, SpecListResponseSchema);
+  }
+
+  async getSpec(id: string): Promise<SpecDetailResponse> {
+    return await this.#request(
+      `/specs/${encodeURIComponent(assertSafeWikiEntityId(id))}`,
+      SpecDetailResponseSchema,
+    );
+  }
+
+  previewTeamOperation(
+    request: TeamOperationPreviewRequest,
+  ): Promise<TeamOperationPreviewResponse> {
+    return this.#request(
+      "/team/operations/preview",
+      TeamOperationPreviewResponseSchema,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+    );
+  }
+
+  applyTeamOperation(
+    request: TeamOperationApplyRequest,
+  ): Promise<TeamOperationApplyResponse> {
+    return this.#request(
+      "/team/operations/apply",
+      TeamOperationApplyResponseSchema,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+    );
+  }
+
+  getActivity(request: ActivityRequest): Promise<ActivityResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.source) params.set("source", request.source);
+    if (request.since) params.set("since", request.since);
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/activity?${params}`, ActivityResponseSchema);
+  }
+
+  search(request: SearchRequest): Promise<SearchResponse> {
+    const params = new URLSearchParams({ q: request.q.slice(0, 256), limit: String(request.limit) });
+    if (request.wikiCursor) params.set("wikiCursor", request.wikiCursor.slice(0, 4_096));
+    if (request.symbolCursor) params.set("symbolCursor", request.symbolCursor.slice(0, 4_096));
+    if (request.sourceCursor) params.set("sourceCursor", request.sourceCursor.slice(0, 4_096));
+    return this.#request(`/search?${params}`, SearchResponseSchema);
+  }
+
+  async getCodeSymbol(id: string, request: CodeWorkspaceRequest): Promise<CodeWorkspaceResponse> {
+    const params = new URLSearchParams({ view: request.view });
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    if (request.limit !== undefined) params.set("limit", String(request.limit));
+    if (request.depth !== undefined) params.set("depth", String(request.depth));
+    if (request.sourceCursor) params.set("sourceCursor", request.sourceCursor.slice(0, 4_096));
+    return await this.#request(
+      `/code/symbols/${encodeURIComponent(assertSafeSymbolId(id))}?${params}`,
+      CodeWorkspaceResponseSchema,
+    );
+  }
+
+  listWikiEntities(request: WikiEntityListRequest): Promise<WikiEntityListResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.kind) params.set("kind", request.kind);
+    if (request.topic) params.set("topic", request.topic);
+    if (request.lifecycle) params.set("lifecycle", request.lifecycle);
+    if (request.grounding) params.set("grounding", request.grounding);
+    if (request.sourceType) params.set("sourceType", request.sourceType);
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(`/wiki/entities?${params}`, WikiEntityListResponseSchema);
+  }
+
+  async getWikiEntity(id: string): Promise<WikiEntityDetailResponse> {
+    return await this.#request(
+      `/wiki/entities/${encodeURIComponent(assertSafeWikiEntityId(id))}`,
+      WikiEntityDetailResponseSchema,
+    );
+  }
+
+  getWikiRelations(id: string, request: WikiRelationsRequest): Promise<WikiRelationsResponse> {
+    const params = new URLSearchParams({ direction: request.direction, limit: String(request.limit) });
+    if (request.type) params.set("type", request.type);
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(
+      `/wiki/entities/${encodeURIComponent(assertSafeWikiEntityId(id))}/relations?${params}`,
+      WikiRelationsResponseSchema,
+    );
+  }
+
+  getWikiBacklinks(id: string, request: WikiBacklinksRequest): Promise<WikiBacklinksResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.type) params.set("type", request.type);
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(
+      `/wiki/entities/${encodeURIComponent(assertSafeWikiEntityId(id))}/backlinks?${params}`,
+      WikiBacklinksResponseSchema,
+    );
+  }
+
+  getCodeKnowledge(id: string, request: CodeKnowledgeRequest): Promise<CodeKnowledgeResponse> {
+    const params = new URLSearchParams({ limit: String(request.limit) });
+    if (request.cursor) params.set("cursor", request.cursor.slice(0, 4_096));
+    return this.#request(
+      `/code/symbols/${encodeURIComponent(assertSafeSymbolId(id))}/knowledge?${params}`,
+      CodeKnowledgeResponseSchema,
+    );
+  }
+
+  getHealth(): Promise<HealthResponse> {
+    return this.#request("/health", HealthResponseSchema);
+  }
+
+  getJobs(cursor?: string): Promise<JobsResponse> {
+    const params = new URLSearchParams({ limit: "25" });
+    if (cursor) params.set("cursor", cursor.slice(0, 4096));
+    return this.#request(`/jobs?${params}`, JobPageResponseSchema);
+  }
+
+  async getJob(id: string): Promise<JobSummary> {
+    return await this.#request(
+      `/jobs/${encodeURIComponent(assertSafeIdentifier(id))}`,
+      HubJobSnapshotSchema,
+    );
+  }
+
+  startJob(request: StartJobRequest): Promise<JobSummary> {
+    return this.#request(
+      "/jobs",
+      HubJobSnapshotSchema,
+      { method: "POST", body: JSON.stringify(request) },
+      true,
+    );
+  }
+
+  async cancelJob(id: string): Promise<JobSummary> {
+    return await this.#request(
+      `/jobs/${encodeURIComponent(assertSafeIdentifier(id))}/cancel`,
+      HubJobSnapshotSchema,
+      { method: "POST", body: "{}" },
+      true,
+    );
+  }
+
+  subscribeToJob(id: string, onSnapshot: (job: JobSummary) => void): JobSubscription {
+    const source = new EventSource(
+      `${API_ROOT}/jobs/${encodeURIComponent(assertSafeIdentifier(id))}/events`,
+      { withCredentials: true },
+    );
+    const receive = (event: MessageEvent<string>) => {
+      try {
+        const parsed = HubJobSnapshotSchema.safeParse(JSON.parse(event.data));
+        if (parsed.success) {
+          onSnapshot(parsed.data);
+          if (
+            event.type === "terminal"
+            || parsed.data.state === "succeeded"
+            || parsed.data.state === "failed"
+            || parsed.data.state === "interrupted"
+          ) {
+            source.close();
+          }
+        }
+      } catch {
+        // A malformed event cannot poison the current persisted snapshot.
+      }
+    };
+    source.addEventListener("snapshot", receive as EventListener);
+    source.addEventListener("progress", receive as EventListener);
+    source.addEventListener("terminal", receive as EventListener);
+    source.onmessage = receive;
+    return { close: () => source.close() };
+  }
+}
+
+export function fixturesEnabled(isDevelopment: boolean, search: string): boolean {
+  return isDevelopment && new URLSearchParams(search).get("fixture") === "populated";
+}
+
+export function inboxFixtureVariant(search: string): InboxFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("inboxFixture");
+  return value === "empty" || value === "unknown" || value === "partial"
+    ? value
+    : undefined;
+}
+
+export function relayFixtureVariant(search: string): RelayFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("relayFixture");
+  return value === "empty"
+    || value === "closed"
+    || value === "missing"
+    || value === "partial"
+    || value === "legacy"
+    ? value
+    : undefined;
+}
+
+export function activityFixtureVariant(search: string): ActivityFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("activityFixture");
+  return value === "empty" || value === "legacy" || value === "partial"
+    ? value
+    : undefined;
+}
+
+export function memberFixtureVariant(search: string): MemberFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("memberFixture");
+  return value === "configured"
+    || value === "git-alias"
+    || value === "git-fallback"
+    || value === "unknown"
+    || value === "stale"
+    || value === "inactive"
+    || value === "ambiguous"
+    || value === "partial"
+    ? value
+    : undefined;
+}
+
+export function overviewFixtureVariant(search: string): OverviewFixtureVariant | undefined {
+  const value = new URLSearchParams(search).get("overviewFixture");
+  return value === "established"
+    || value === "caught-up"
+    || value === "pending-review"
+    || value === "relay-ready"
+    || value === "relay-in-hand"
+    || value === "identity-unresolved"
+    || value === "indexes-stale"
+    || value === "indexes-degraded"
+    || value === "indexes-missing"
+    || value === "job-determinate"
+    || value === "job-indeterminate"
+    || value === "failure"
+    || value === "partial"
+    || value === "unavailable"
+    ? value
+    : undefined;
+}
+
+export async function resolveApi(): Promise<HubApi> {
+  if (
+    createFixtureApi !== null
+    && fixturesEnabled(import.meta.env.DEV, window.location.search)
+  ) {
+    const inboxVariant = inboxFixtureVariant(window.location.search);
+    const relayVariant = relayFixtureVariant(window.location.search);
+    const activityVariant = activityFixtureVariant(window.location.search);
+    const memberVariant = memberFixtureVariant(window.location.search);
+    const overviewVariant = overviewFixtureVariant(window.location.search);
+    return createFixtureApi({
+      ...(inboxVariant === undefined ? {} : { inboxFixture: inboxVariant }),
+      ...(relayVariant === undefined ? {} : { relayFixture: relayVariant }),
+      ...(activityVariant === undefined ? {} : { activityFixture: activityVariant }),
+      ...(memberVariant === undefined ? {} : { memberFixture: memberVariant }),
+      ...(overviewVariant === undefined ? {} : { overviewFixture: overviewVariant }),
+    });
+  }
+  return new HttpHubApi();
+}

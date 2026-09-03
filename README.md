@@ -30,7 +30,7 @@ mex maps your code, turns what agents learn into structured Markdown, and keeps 
 
 Every coding session starts with relevant architectural context instead of another full-repository scan.
 
-> **New in v0.7.3:** graph builds hold one compiler program at a time, stores are 36-40% smaller, `mex check` no longer rebuilds the graph, and `mex graph repair` recovers an interrupted store without a rebuild.
+> **New in v0.8.0:** `mex setup` now prepares the Graph and Wiki end to end, installs the official Claude Code and Codex skills, protects local stores from Git, and automatically launches the first available agent you selected.
 
 💬 **Join the mex community on Discord** — discuss ideas, get help, share feedback, and contribute to the project.
 
@@ -76,8 +76,13 @@ The code remains the source of truth. The wiki becomes its maintained explanatio
 mex builds a deterministic local code graph using Tree-sitter and SQLite. It indexes symbols and relationships across TypeScript, TSX, JavaScript, JSX, Python, and Rust, including framework-aware Express route-to-handler relationships.
 
 ```bash
-mex graph
+mex graph rebuild
 ```
+
+Graph reads never rebuild implicitly. Use `mex graph status` for a read-only
+freshness check, `mex graph refresh` to explicitly republish a compatible index,
+and `mex graph rebuild` for an isolated full rebuild. The legacy bare
+`mex graph` command remains a safe rebuild alias.
 
 ### 2. Build the wiki
 
@@ -188,6 +193,8 @@ mex impact requireSession
 ```
 
 Agent-facing graph commands use deterministic JSONL envelopes so tools can reliably distinguish metadata, results, and summaries.
+Targeted `get`, `query`, and `impact` reads abstain when freshness cannot be
+proved; they never combine an older node identity with newer source text.
 
 ## Results
 
@@ -215,14 +222,40 @@ mex requires Node.js 22.5 or newer. The npm package is named `mex-agent` because
 npx mex-agent setup
 ```
 
-Setup inspects the repository, builds the local code graph, creates the Markdown wiki, asks your coding agent to populate it from graph evidence, installs the right project anchor, and validates the result.
+Setup protects checkout-local databases from Git, builds the code graph, asks your selected Claude Code or Codex CLI to populate the Markdown scaffold, migrates and indexes the Wiki, installs the project anchor and official MEX skills, and validates the result. It then prints the commit checkpoint required before Hub can start.
+
+### Official Claude Code and Codex skills
+
+The `mex-agent` npm package ships two official project skills from one canonical source:
+
+- `mex-inbox` prepares governed Spec, requirement, constraint, and acceptance-criterion proposals.
+- `mex-relay` prepares durable team handoffs.
+
+The normal `mex setup` flow installs copies for every selected supported agent; no separate plugin or skill installer is required. Claude Code receives `.claude/skills/mex-inbox` and `.claude/skills/mex-relay`, while Codex receives `.agents/skills/mex-inbox` and `.agents/skills/mex-relay`. Selecting both agents installs both sets and updates only the marker-delimited MEX block in `CLAUDE.md` and `AGENTS.md`. That managed block also directs every new agent session to read `.mex/AGENTS.md` and `.mex/ROUTER.md` before project work.
+
+Invoke the skills explicitly as `/mex-inbox` and `/mex-relay` in Claude Code, or `$mex-inbox` and `$mex-relay` in Codex. Clear natural-language requests for governed Spec proposals or durable handoffs invoke them automatically as well.
+
+A plain npm package install only delivers the payload; it never mutates the current repository. After upgrading `mex-agent`, receive newer packaged skill copies with:
+
+```bash
+mex skills sync
+mex skills sync --dry-run
+```
+
+Start a new Claude Code or Codex session after setup or sync so the skills and project instructions are guaranteed to load. Project skill files should normally be committed so teammates receive the same behavior. MEX never stages or commits them automatically. If a project ignores one of the narrow skill paths, sync warns with the exact path and suggested ignore rule instead of exposing other `.claude` or `.agents` files.
+
+A standalone Codex plugin or marketplace package may be added later, but it is not required for this release.
 
 After setup:
 
 ```bash
+git status --short            # Review the canonical MEX files
+git add .mex                  # Local Graph/Wiki databases stay ignored
+git commit -m "chore: initialize MEX"
 mex check                    # Check wiki health and code grounding
 mex sync                     # Repair drift with targeted agent prompts
 mex graph scope "<task>"     # Retrieve compact task context
+mex hub                      # Opens after .mex/config.json is committed at HEAD
 ```
 
 If you skipped global installation, use `npx mex-agent` in place of `mex`. Install globally at any time with:
@@ -244,10 +277,29 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | Command | What it does |
 |---|---|
 | `mex` / `mex tui` | Open the interactive terminal dashboard |
+| `mex hub [--port <n>] [--no-open]` | Open the secure local Project Hub |
+| `mex capabilities --json` | Discover bounded structured reads, previews, and apply commands |
+| `mex member list\|show\|current --json` | Read canonical members and the effective actor |
+| `mex member add\|update\|deactivate\|select` | Preview a member/selection request; apply only an approved preview envelope |
+| `mex activity list\|show --json` | Read bounded canonical Activity |
+| `mex activity record` | Preview an append-only canonical Activity record |
+| `mex workstream list\|show --json` | Read bounded canonical Workstreams |
+| `mex workstream create\|update\|archive` | Preview a Workstream change; apply only an approved preview envelope |
+| `mex inbox contract --action <command-id> --json` | Resolve only the exact Inbox mutation schema needed by an agent |
+| `mex relay contract --action <command-id> --json` | Resolve only the exact Relay mutation schema needed by an agent |
+| `mex inbox\|relay contract --json` | Resolve the backward-compatible complete static contract catalog for diagnosis |
+| `mex relay draft list\|show\|save\|delete` | Read or preview changes to checkout-local handoff drafts |
+| `mex relay list\|show --json` | Read bounded canonical handoffs; the Workstream filter matches legacy Relays only |
+| `mex relay publish\|acknowledge\|close` | Preview a standalone handoff lifecycle action; apply only its exact approved envelope |
+| `mex spec list\|show --json` | Read root Specs and their explicit Wiki hierarchy without maintaining indexes |
 | `mex setup` | Create and populate the living wiki |
+| `mex skills sync [--dry-run] [--json]` | Install or safely update official skills for configured Claude Code/Codex clients |
 | `mex check` | Check wiki health and calculate a drift score |
 | `mex sync` | Repair stale or inconsistent knowledge |
-| `mex graph` | Build or refresh the local code graph |
+| `mex graph` | Backward-compatible alias for a safe isolated rebuild |
+| `mex graph status` | Inspect graph freshness without writing |
+| `mex graph refresh` | Explicitly refresh a compatible graph index |
+| `mex graph rebuild` | Build and validate an isolated candidate, then publish it atomically |
 | `mex graph scope <task>` | Retrieve compact, task-relevant context |
 | `mex graph get <node-id...>` | Expand exact symbols from a retrieval result |
 | `mex graph query <relation> <symbol>` | Query structural code relationships |
@@ -260,12 +312,50 @@ All commands run from the project root. Replace `mex` with `npx mex-agent` if it
 | `mex completion <shell>` | Print shell completions |
 | `mex commands` | List every command and script |
 
+### Project Hub
+
+`mex hub` starts a desktop-oriented control room on `127.0.0.1` and opens it in
+your browser. The bootstrap link is one-use, ordinary API requests require an
+in-memory session, and mutating requests also require same-origin CSRF proof.
+Use `--no-open` to print the launch URL without opening a browser, or `--port`
+to request a specific loopback port.
+
+The Hub displays repository context, locally persisted job history, canonical
+members and Workstreams, read-only Specs, the effective checkout actor, and the
+read-only Activity timeline. The Members workbench uses explicit
+preview/review/apply for canonical identity changes and keeps member selection
+local. Activity presents immutable MEX records alongside Project
+notes without exposing a manual recorder in the browser. New records retain a
+service-owned workflow/custom origin and an optional human label; older records
+remain byte-preserving and display an unknown origin. The Workstreams
+workbench uses the same exact preview/apply boundary for create, update, and
+one-way archive operations; every successful canonical change emits one
+Activity event. Specs are a fresh-index, read-only view of canonical Wiki Spec
+roots and explicit requirement, constraint, acceptance-criterion, and
+refinement relations. The real Code workspace searches symbols and source,
+inspects callers/callees/impact, reports graph Health, and lets you
+explicitly refresh or rebuild the local graph. Its read-only Knowledge workspace
+browses and searches canonical Wiki entries, shows bounded evidence, provenance,
+relations, backlinks, and current grounding, and links Code to Knowledge only
+through explicit groundings. Wiki Health offers explicit refresh/rebuild jobs
+only when a stable status makes them safe. Reads never maintain either index
+automatically, rankings remain domain-local, and the packaged UI never
+substitutes development fixtures for project data.
+
+Relays are standalone repository-native handoffs. A new handoff needs recipients
+and a summary, not a Workstream. Publication records the observed branch, exact
+HEAD, clean/dirty flag, and observation time without staging, committing,
+pushing, pulling, or capturing dirty source contents. Existing schema-v1/v2
+Relays keep their recorded Workstream and remain actionable. Before a repository
+starts publishing strict schema-v3 Relays, every teammate must update MEX;
+older binaries cannot parse the new format.
+
 ## Existing mex projects
 
 Projects created before mex 0.7 can add graph grounding without regenerating or rewriting their existing documentation:
 
 ```bash
-mex graph
+mex graph rebuild
 mex graph ground
 ```
 
@@ -277,16 +367,16 @@ See [Code graph support](docs/code-graph-support.md) for the tested language and
 
 ## Supported tools
 
-`mex setup` installs the appropriate project anchor for your coding agent:
+`mex setup` installs the appropriate project anchor and, for Claude Code or Codex, the official project skills:
 
-| Tool | Project anchor |
-|---|---|
-| Claude Code | `CLAUDE.md` |
-| Codex | `AGENTS.md` |
-| Cursor | `.cursorrules` |
-| Windsurf | `.windsurfrules` |
-| GitHub Copilot | `.github/copilot-instructions.md` |
-| OpenCode | `.opencode/opencode.json` |
+| Tool | Project anchor | Official skill directory |
+|---|---|---|
+| Claude Code | `CLAUDE.md` | `.claude/skills/mex-inbox`, `.claude/skills/mex-relay` |
+| Codex | `AGENTS.md` | `.agents/skills/mex-inbox`, `.agents/skills/mex-relay` |
+| Cursor | `.cursorrules` | — |
+| Windsurf | `.windsurfrules` | — |
+| GitHub Copilot | `.github/copilot-instructions.md` | — |
+| OpenCode | `.opencode/opencode.json` | — |
 
 Neovim users can follow [the Neovim integration guide](docs/vim-neovim.md) for Claude Code, Avante.nvim, Copilot.vim, and generic plugin setups.
 
@@ -300,7 +390,7 @@ The MCP package is not published yet. For local development, build it with:
 npm run build --workspace mex-mcp
 ```
 
-The primary v0.7.3 release remains the `mex-agent` CLI.
+The primary v0.8.0 release remains the `mex-agent` CLI.
 
 ## Agent memory mode
 

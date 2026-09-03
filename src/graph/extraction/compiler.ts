@@ -12,6 +12,7 @@ import {
   statSync,
 } from "node:fs";
 import {
+  basename,
   dirname,
   extname,
   isAbsolute,
@@ -179,11 +180,36 @@ export interface CompilerExtractionResult {
   extractorVersion: string;
   projects: DiscoveredTypeScriptProject[];
   files: CompilerFileExtraction[];
+  /** Repository inputs whose exact bytes influenced config parsing or compiler facts. */
+  semanticInputs: CompilerSemanticInput[];
+}
+
+export interface CompilerStagedInput {
+  filePath: string;
+  source: string;
+}
+
+export interface CompilerSemanticInput {
+  filePath: string;
+  /** Exact UTF-8 hash, or null when a resolution/config probe observed absence. */
+  contentHash: string | null;
 }
 
 export interface CompilerExtractionOptions {
   /** Additional options used only by the inferred program. */
   inferredCompilerOptions?: ts.CompilerOptions;
+  /**
+   * Immutable repository inputs supplied by the graph staging layer. The
+   * compiler host always prefers these bytes to the live filesystem.
+   * @internal
+   */
+  stagedInputs?: readonly CompilerStagedInput[];
+  /**
+   * Secure reader for repository inputs discovered indirectly (for example an
+   * extended tsconfig). Results are cached for the complete extraction.
+   * @internal
+   */
+  readProjectFile?: (absolutePath: string) => string | undefined;
   /**
    * Run the full per-file semantic type-check and record its diagnostics.
    * Off by default: `parse_status` derives from syntactic diagnostics alone,
@@ -399,8 +425,11 @@ export function buildTypeScriptExtraction(
   options: CompilerExtractionOptions = {},
 ): CompilerExtractionResult {
   const root = resolve(rootDir);
-  const candidates = collectCandidates(root, candidateFiles);
-  const parsedProjects = parseProjects(root, new Set(candidates));
+  const inputs = new CompilerInputLedger(root, options);
+  const candidates = collectCandidates(root, candidateFiles, inputs);
+  inputs.setCandidateFiles(candidates);
+  const candidateSet = new Set(candidates);
+  const parsedProjects = parseProjects(root, candidateSet, inputs);
   const createProgram = options.programFactory ?? ts.createProgram;
   const semanticDiagnostics = options.semanticDiagnostics ?? false;
 
@@ -469,7 +498,7 @@ export function buildTypeScriptExtraction(
       for (const node of context.nodes) nodeById.set(node.id, node);
     }
     for (const context of contexts) {
-      const bindings = captureImportBindings(root, context);
+      const bindings = captureImportBindings(root, context, inputs);
       capturedByFile.set(normalizedAbsolute(context.sourceFile.fileName), {
         filePath: context.filePath,
         language: context.language,
@@ -496,6 +525,7 @@ export function buildTypeScriptExtraction(
         // checker's lazy symbol/type queries, not a full compile.
         options: { ...project.parsed.options, skipLibCheck: true, noEmit: true },
         projectReferences: project.parsed.projectReferences,
+        host: inputs.compilerHost({ ...project.parsed.options, skipLibCheck: true, noEmit: true }),
       });
     } catch {
       crashedProjects.add(project);
@@ -535,7 +565,11 @@ export function buildTypeScriptExtraction(
       ...options.inferredCompilerOptions,
     };
     try {
-      const program = createProgram({ rootNames: uncovered, options: inferredOptions });
+      const program = createProgram({
+        rootNames: uncovered,
+        options: inferredOptions,
+        host: inputs.compilerHost(inferredOptions),
+      });
       inferredProject = {
         id: "inferred",
         configPath: "",
@@ -601,6 +635,7 @@ export function buildTypeScriptExtraction(
     extractorVersion: TYPESCRIPT_COMPILER_EXTRACTOR_VERSION,
     projects: projectSummaries,
     files,
+    semanticInputs: inputs.semanticInputs(),
   };
 }
 
@@ -664,8 +699,298 @@ export function normalizedCompilerTokens(
   }));
 }
 
-function parseProjects(root: string, candidates?: ReadonlySet<string>): ParsedProject[] {
-  const queue = findConfigFiles(root);
+type MatchFiles = (
+  path: string,
+  extensions: readonly string[] | undefined,
+  excludes: readonly string[] | undefined,
+  includes: readonly string[] | undefined,
+  useCaseSensitiveFileNames: boolean,
+  currentDirectory: string,
+  depth: number | undefined,
+  getFileSystemEntries: (path: string) => { files: string[]; directories: string[] },
+  realpath: (path: string) => string,
+) => string[];
+
+/**
+ * One immutable view of repository inputs for the complete compiler pass.
+ * Project files are read at most once; explicitly staged bytes always win.
+ * TypeScript libraries and ignored dependency/build directories retain the
+ * compiler's normal filesystem behavior and do not become graph provenance.
+ */
+class CompilerInputLedger {
+  private readonly root: string;
+  private readonly staged = new Map<string, string>();
+  private readonly cache = new Map<string, string | undefined>();
+  private readonly observed = new Map<string, string | null>();
+  private readonly knownPaths = new Set<string>();
+  private readonly knownDirectories = new Set<string>();
+  private readonly directoryFiles = new Map<string, Set<string>>();
+  private readonly directoryChildren = new Map<string, Set<string>>();
+  private candidates: string[] = [];
+
+  constructor(root: string, private readonly options: CompilerExtractionOptions) {
+    this.root = resolve(root);
+    for (const input of options.stagedInputs ?? []) {
+      const absolute = absoluteCandidate(this.root, input.filePath);
+      if (!withinRoot(this.root, absolute)) {
+        throw new Error(`Compiler staged input escapes the project root: ${input.filePath}`);
+      }
+      const previous = this.staged.get(absolute);
+      if (previous !== undefined && previous !== input.source) {
+        throw new Error(`Compiler staged input has conflicting bytes: ${input.filePath}`);
+      }
+      this.staged.set(absolute, input.source);
+      this.indexKnownFile(absolute);
+    }
+    this.knownDirectories.add(normalizedAbsolute(this.root));
+  }
+
+  hasStagedInput(fileName: string): boolean {
+    return this.staged.has(absoluteCandidate(this.root, fileName));
+  }
+
+  setCandidateFiles(files: readonly string[]): void {
+    this.candidates = [...files].map(normalizedAbsolute).sort(compareCodePoints);
+    for (const file of this.candidates) this.indexKnownFile(file);
+  }
+
+  configFiles(): string[] {
+    if (this.options.stagedInputs === undefined) return findConfigFiles(this.root);
+    return [...this.staged.keys()]
+      .filter((file) => /^tsconfig(?:\.[^.]+)?\.json$/u.test(file.split("/").at(-1) ?? ""))
+      .sort(compareCodePoints);
+  }
+
+  readFile(fileName: string): string | undefined {
+    const absolute = absoluteCandidate(this.root, fileName);
+    const staged = this.staged.get(absolute);
+    if (staged !== undefined) {
+      this.observe(absolute, staged);
+      return staged;
+    }
+    if (!withinRoot(this.root, absolute)) {
+      return isAllowedCompilerDependency(absolute) ? ts.sys.readFile(fileName) : undefined;
+    }
+    if (!this.isProjectInput(absolute)) {
+      return isAllowedCompilerDependency(absolute) ? ts.sys.readFile(fileName) : undefined;
+    }
+    if (this.cache.has(absolute)) return this.cache.get(absolute);
+    const source = this.options.readProjectFile
+      ? this.options.readProjectFile(absolute)
+      : ts.sys.readFile(fileName);
+    this.cache.set(absolute, source);
+    if (source !== undefined) {
+      this.indexKnownFile(absolute);
+      this.observe(absolute, source);
+    }
+    else this.observeMissing(absolute);
+    return source;
+  }
+
+  readConfigFile(fileName: string): string | undefined {
+    const absolute = absoluteCandidate(this.root, fileName);
+    if (!withinRoot(this.root, absolute)) {
+      throw compilerInputContainmentError(`TypeScript config escapes the project root: ${fileName}`);
+    }
+    if (!this.isProjectInput(absolute) && !isAllowedCompilerDependency(absolute)) {
+      throw compilerInputContainmentError(`TypeScript config is outside the supported project corpus: ${fileName}`);
+    }
+    return this.readFile(absolute);
+  }
+
+  configFileExists(fileName: string): boolean {
+    const absolute = absoluteCandidate(this.root, fileName);
+    if (!withinRoot(this.root, absolute)) {
+      throw compilerInputContainmentError(`TypeScript config escapes the project root: ${fileName}`);
+    }
+    if (!this.isProjectInput(absolute) && !isAllowedCompilerDependency(absolute)) {
+      throw compilerInputContainmentError(`TypeScript config is outside the supported project corpus: ${fileName}`);
+    }
+    return this.fileExists(absolute);
+  }
+
+  fileExists(fileName: string): boolean {
+    const absolute = absoluteCandidate(this.root, fileName);
+    if (this.staged.has(absolute)) return true;
+    if (!withinRoot(this.root, absolute)) {
+      return isAllowedCompilerDependency(absolute) && ts.sys.fileExists(fileName);
+    }
+    if (!this.isProjectInput(absolute)) {
+      return isAllowedCompilerDependency(absolute) && ts.sys.fileExists(fileName);
+    }
+    return this.readFile(absolute) !== undefined;
+  }
+
+  directoryExists(directoryName: string): boolean {
+    const absolute = absoluteCandidate(this.root, directoryName);
+    if (!withinRoot(this.root, absolute)) {
+      return isAllowedCompilerDependency(absolute) && ts.sys.directoryExists(absolute);
+    }
+    if (!this.isProjectInput(absolute)) {
+      return isAllowedCompilerDependency(absolute) && ts.sys.directoryExists(absolute);
+    }
+    return this.knownDirectories.has(absolute);
+  }
+
+  getDirectories(directoryName: string): string[] {
+    const absolute = absoluteCandidate(this.root, directoryName);
+    if (!withinRoot(this.root, absolute)) {
+      return isAllowedCompilerDependency(absolute) ? ts.sys.getDirectories(absolute) : [];
+    }
+    if (!this.isProjectInput(absolute)) {
+      return isAllowedCompilerDependency(absolute) ? ts.sys.getDirectories(absolute) : [];
+    }
+    return [...(this.directoryChildren.get(absolute) ?? [])]
+      .map((name) => resolve(absolute, name))
+      .sort(compareCodePoints);
+  }
+
+  readDirectory(
+    rootDir: string,
+    extensions: readonly string[],
+    excludes: readonly string[] | undefined,
+    includes: readonly string[],
+    depth?: number,
+  ): string[] {
+    if (!withinRoot(this.root, absoluteCandidate(this.root, rootDir))) {
+      throw compilerInputContainmentError(`TypeScript config include escapes the project root: ${rootDir}`);
+    }
+    // TypeScript's matcher is intentionally used with a virtual directory tree
+    // built only from the immutable candidate list. This preserves exact
+    // tsconfig include/exclude semantics without consulting a racing checkout.
+    const matchFiles = (ts as unknown as { matchFiles?: MatchFiles }).matchFiles;
+    if (!matchFiles) {
+      throw new Error("The pinned TypeScript compiler does not expose its deterministic file matcher.");
+    }
+    return matchFiles(
+      rootDir,
+      extensions,
+      excludes,
+      includes,
+      ts.sys.useCaseSensitiveFileNames,
+      this.root,
+      depth,
+      (directory) => this.virtualDirectoryEntries(directory),
+      (path) => normalizedAbsolute(path),
+    );
+  }
+
+  compilerHost(options: ts.CompilerOptions): ts.CompilerHost {
+    const base = ts.createCompilerHost(options, true);
+    const getSourceFile: ts.CompilerHost["getSourceFile"] = (
+      fileName,
+      languageVersionOrOptions,
+      onError,
+    ) => {
+      const source = this.readFile(fileName);
+      if (source === undefined) {
+        onError?.(`Could not read compiler input ${fileName}.`);
+        return undefined;
+      }
+      return ts.createSourceFile(
+        fileName,
+        source,
+        languageVersionOrOptions,
+        true,
+        scriptKindForFile(fileName),
+      );
+    };
+    return {
+      ...base,
+      fileExists: (fileName) => this.fileExists(fileName),
+      directoryExists: (directoryName) => this.directoryExists(directoryName),
+      getDirectories: (directoryName) => this.getDirectories(directoryName),
+      readFile: (fileName) => this.readFile(fileName),
+      readDirectory: (rootDir, extensions, excludes, includes, depth) =>
+        this.readDirectory(rootDir, extensions, excludes, includes, depth),
+      getSourceFile,
+      getSourceFileByPath: (fileName, _path, languageVersionOrOptions, onError) =>
+        getSourceFile(fileName, languageVersionOrOptions, onError),
+      realpath: (path) => this.isProjectInput(absoluteCandidate(this.root, path))
+        ? absoluteCandidate(this.root, path)
+        : (base.realpath?.(path) ?? path),
+    };
+  }
+
+  moduleResolutionHost(): ts.ModuleResolutionHost {
+    return {
+      fileExists: (fileName) => this.fileExists(fileName),
+      readFile: (fileName) => this.readFile(fileName),
+      directoryExists: (directoryName) => this.directoryExists(directoryName),
+      getDirectories: (directoryName) => this.getDirectories(directoryName),
+      realpath: (path) => this.isProjectInput(absoluteCandidate(this.root, path))
+        ? absoluteCandidate(this.root, path)
+        : (ts.sys.realpath?.(path) ?? path),
+      useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+    };
+  }
+
+  semanticInputs(): CompilerSemanticInput[] {
+    return [...this.observed.entries()]
+      .map(([file, contentHash]) => ({ filePath: relativePath(this.root, file), contentHash }))
+      .sort((left, right) => compareCodePoints(left.filePath, right.filePath));
+  }
+
+  private observe(absolute: string, source: string): void {
+    const contentHash = sha256(source);
+    const previous = this.observed.get(absolute);
+    if (previous !== undefined && previous !== contentHash) {
+      throw new Error(`Compiler input changed during extraction: ${relativePath(this.root, absolute)}`);
+    }
+    this.observed.set(absolute, contentHash);
+  }
+
+  private observeMissing(absolute: string): void {
+    if (negativeProbeCoveredByCorpusPolicy(absolute)) return;
+    if (!this.observed.has(absolute)) {
+      this.observed.set(absolute, null);
+      return;
+    }
+    if (this.observed.get(absolute) !== null) {
+      throw new Error(`Compiler input changed during extraction: ${relativePath(this.root, absolute)}`);
+    }
+  }
+
+  private isProjectInput(absolute: string): boolean {
+    if (!withinRoot(this.root, absolute)) return false;
+    const parts = relativePath(this.root, absolute).split("/");
+    return !parts.some((part) => IGNORED_DIRECTORIES.has(part));
+  }
+
+  private virtualDirectoryEntries(directory: string): { files: string[]; directories: string[] } {
+    const absoluteDirectory = normalizedAbsolute(directory);
+    return {
+      files: [...(this.directoryFiles.get(absoluteDirectory) ?? [])].sort(compareCodePoints),
+      directories: [...(this.directoryChildren.get(absoluteDirectory) ?? [])].sort(compareCodePoints),
+    };
+  }
+
+  private indexKnownFile(file: string): void {
+    const absolute = normalizedAbsolute(file);
+    if (this.knownPaths.has(absolute)) return;
+    this.knownPaths.add(absolute);
+    let directory = normalizedAbsolute(dirname(absolute));
+    const fileNames = this.directoryFiles.get(directory) ?? new Set<string>();
+    fileNames.add(basename(absolute));
+    this.directoryFiles.set(directory, fileNames);
+    while (withinRoot(this.root, directory)) {
+      this.knownDirectories.add(directory);
+      const parent = normalizedAbsolute(dirname(directory));
+      if (parent === directory || !withinRoot(this.root, parent)) break;
+      const children = this.directoryChildren.get(parent) ?? new Set<string>();
+      children.add(basename(directory));
+      this.directoryChildren.set(parent, children);
+      directory = parent;
+    }
+  }
+}
+
+function parseProjects(
+  root: string,
+  candidates?: ReadonlySet<string>,
+  inputs?: CompilerInputLedger,
+): ParsedProject[] {
+  const queue = inputs?.configFiles() ?? findConfigFiles(root);
   const seen = new Set<string>();
   const projects: ParsedProject[] = [];
   while (queue.length > 0) {
@@ -676,9 +1001,12 @@ function parseProjects(root: string, candidates?: ReadonlySet<string>): ParsedPr
     const host: ts.ParseConfigFileHost = {
       useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
       getCurrentDirectory: () => root,
-      fileExists: ts.sys.fileExists,
-      readDirectory: ts.sys.readDirectory,
-      readFile: ts.sys.readFile,
+      fileExists: inputs ? (fileName) => inputs.configFileExists(fileName) : ts.sys.fileExists,
+      readDirectory: inputs
+        ? (rootDir, extensions, excludes, includes, depth) =>
+          inputs.readDirectory(rootDir, extensions, excludes, includes, depth)
+        : ts.sys.readDirectory,
+      readFile: inputs ? (fileName) => inputs.readConfigFile(fileName) : ts.sys.readFile,
       onUnRecoverableConfigFileDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
     };
     const parsed = ts.getParsedCommandLineOfConfigFile(configPath, {}, host);
@@ -686,7 +1014,10 @@ function parseProjects(root: string, candidates?: ReadonlySet<string>): ParsedPr
     diagnostics.push(...parsed.errors);
     for (const reference of parsed.projectReferences ?? []) {
       const referencePath = normalizedAbsolute(ts.resolveProjectReferencePath(reference));
-      if (withinRoot(root, referencePath) && !seen.has(referencePath)) queue.push(referencePath);
+      if (!withinRoot(root, referencePath)) {
+        throw compilerInputContainmentError(`TypeScript project reference escapes the project root: ${referencePath}`);
+      }
+      if (!seen.has(referencePath)) queue.push(referencePath);
     }
     const includesCandidate = !candidates || parsed.fileNames.some((file) => candidates.has(normalizedAbsolute(file)));
     const isReferenced = projects.some((project) =>
@@ -729,12 +1060,16 @@ function findConfigFiles(root: string): string[] {
   return configs.sort();
 }
 
-function collectCandidates(root: string, supplied?: readonly string[]): string[] {
+function collectCandidates(
+  root: string,
+  supplied?: readonly string[],
+  inputs?: CompilerInputLedger,
+): string[] {
   if (supplied) {
     return [...new Set(supplied
       .map((file) => absoluteCandidate(root, file))
       .filter(isCompilerSourceFile)
-      .filter((file) => existsSync(file) && statSync(file).isFile()))]
+      .filter((file) => inputs?.hasStagedInput(file) || (existsSync(file) && statSync(file).isFile())))]
       .sort();
   }
   const files: string[] = [];
@@ -998,6 +1333,7 @@ function materializeNodes(context: FileContext): CompilerExtractedNode[] {
 function captureImportBindings(
   root: string,
   context: FileContext,
+  inputs: CompilerInputLedger,
 ): DeferredImportBinding[] {
   const bindings: DeferredImportBinding[] = [];
   const checker = context.project.checker;
@@ -1006,7 +1342,12 @@ function captureImportBindings(
     if (!ts.isImportDeclaration(statement) || !ts.isStringLiteralLike(statement.moduleSpecifier)) continue;
     if (!referenceSyntaxIsTrusted(statement, context)) continue;
     const moduleSpecifier = statement.moduleSpecifier.text;
-    const resolution = ts.resolveModuleName(moduleSpecifier, context.sourceFile.fileName, options, ts.sys).resolvedModule;
+    const resolution = ts.resolveModuleName(
+      moduleSpecifier,
+      context.sourceFile.fileName,
+      options,
+      inputs.moduleResolutionHost(),
+    ).resolvedModule;
     const resolvedFilePath = resolution && withinRoot(root, resolution.resolvedFileName)
       ? relativePath(root, resolution.resolvedFileName)
       : undefined;
@@ -1042,7 +1383,7 @@ function captureImportBindings(
     if (clause.name) add(clause.name, "default", { isDefault: true });
     if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
       add(clause.namedBindings.name, "*", { isNamespace: true });
-    } else if (clause.namedBindings) {
+    } else if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
       for (const element of clause.namedBindings.elements) {
         add(element.name, element.propertyName?.text ?? element.name.text, { isTypeOnly: element.isTypeOnly });
       }
@@ -1829,6 +2170,15 @@ function languageForFile(filePath: string): CompilerSourceLanguage {
   return "typescript";
 }
 
+function scriptKindForFile(filePath: string): ts.ScriptKind {
+  const extension = extname(filePath).toLowerCase();
+  if (extension === ".js" || extension === ".mjs" || extension === ".cjs") return ts.ScriptKind.JS;
+  if (extension === ".jsx") return ts.ScriptKind.JSX;
+  if (extension === ".tsx") return ts.ScriptKind.TSX;
+  if (extension === ".json") return ts.ScriptKind.JSON;
+  return ts.ScriptKind.TS;
+}
+
 function isCompilerSourceFile(filePath: string): boolean {
   return SOURCE_EXTENSIONS.has(extname(filePath).toLowerCase());
 }
@@ -1864,4 +2214,25 @@ function withinRoot(root: string, file: string): boolean {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function compilerInputContainmentError(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: "GRAPH_SOURCE_PATH_ESCAPE" });
+}
+
+function isAllowedCompilerDependency(absolutePath: string): boolean {
+  return normalizeRelative(absolutePath).split("/").includes("node_modules");
+}
+
+/** Future appearance of these paths is already detected by corpus/config status. */
+function negativeProbeCoveredByCorpusPolicy(absolutePath: string): boolean {
+  if (isCompilerSourceFile(absolutePath)) return true;
+  const name = basename(absolutePath).toLowerCase();
+  return name === "package.json"
+    || /^tsconfig(?:\.[^.]+)?\.json$/u.test(name)
+    || /^jsconfig(?:\.[^.]+)?\.json$/u.test(name);
 }

@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS schema_versions (
 );
 
 INSERT OR IGNORE INTO schema_versions (version, applied_at, description)
-VALUES (3, strftime('%s', 'now') * 1000, 'Compact fingerprint/LSH encoding: BLOB minhash, int64 band hashes, integer refs');
+VALUES (4, strftime('%s', 'now') * 1000, 'Compact fingerprint/LSH storage with subject-generalized grounding');
 
 -- =============================================================================
 -- Core tables (ported from CodeGraph — kept as-is except node.body_hash)
@@ -283,11 +283,12 @@ CREATE TABLE IF NOT EXISTS project_metadata (
 -- Per-node fingerprint: a MinHash sketch of the node's normalized-AST trigrams
 -- plus its caller/callee neighborhood. Survives rename/move (which the
 -- line-independent id does NOT), enabling reconciliation.
--- Schema v3 re-encode (issue #140 storage follow-up): the v2 encoding stored
+-- Schema v4 retains main-v3's compact re-encode (issue #140 storage
+-- follow-up): the v2 encoding stored
 -- the minhash as a JSON text array (~600 B where 256 B of BLOB suffice) and
 -- 32 LSH rows per node each repeating the full TEXT node id and a 64-char hex
 -- band hash, doubled again by idx_lsh — together ~40-50% of every graph store.
--- v3 stores the sketch as a 256-byte big-endian BLOB, keys LSH rows by a
+-- main-v3 and v4 store the sketch as a 256-byte big-endian BLOB, key LSH rows by a
 -- stable INTEGER ref, truncates band hashes to their first 8 bytes as int64
 -- (collisions merely add an LSH candidate, which full minhash scoring then
 -- rejects), and makes the primary key serve as the only index. The decoded
@@ -315,23 +316,47 @@ CREATE TABLE IF NOT EXISTS lsh_buckets (
 -- Grounding baseline  (NET-NEW — spec §3, §5, §6.  ours.)
 -- =============================================================================
 --
--- Per grounded (scaffold_file, node) pair: the node's source, body_hash and
--- fingerprint AS OF the last time the scaffold was grounded/re-grounded. This
+-- Per grounded (subject, node) pair: the node's source, body_hash and
+-- fingerprint AS OF the last time that subject was grounded/re-grounded. This
 -- snapshot is what "old source" means at drift time — it lets the grounding
 -- checker and `sync` hand the agent an old-vs-new diff without the pre-edit
 -- file content (which is gone after save).
 --
--- Keyed by `scaffold_file` (not the demo's `unit_id`): grounding is authored in
--- frontmatter (`grounds_to`), so a scaffold markdown file is the grounding unit.
+-- SCHEMA v4 RETAINS INTEGRATION-v3'S GENERALIZED SUBJECT KEY.
+--
+-- v2 keyed this by `scaffold_file`, because grounding was authored in scaffold
+-- frontmatter and a markdown file was therefore the grounding unit. The wiki
+-- engine grounds an *entity*, and several entities live in one file, so a
+-- file-keyed baseline cannot hold them apart. `subject_kind` says what
+-- `subject_id` is: 'scaffold' for a scaffold markdown path, 'entity' for a
+-- wiki entity id.
+--
+-- THIS REMAINS THE ONLY BASELINE STORE. The wiki index caches derived
+-- resolution and health, which is disposable; it does not hold a second copy
+-- of source, body_hash or fingerprint. Two stores of the same fact updated by
+-- different code paths will disagree, and then neither is trustworthy.
+--
+-- `scaffold_file` survives as a GENERATED column projecting the scaffold-kind
+-- rows, so every query written against the v2 shape keeps returning exactly
+-- what it returned before, and NULL for the rows it was never meant to see. It
+-- is read-only: writers use `subject_kind` + `subject_id`.
 CREATE TABLE IF NOT EXISTS _mex_grounded_source (
-    scaffold_file TEXT NOT NULL,
+    subject_kind  TEXT NOT NULL DEFAULT 'scaffold',  -- 'scaffold' | 'entity'
+    subject_id    TEXT NOT NULL,                     -- scaffold path, or mx_… entity id
     node_id       TEXT NOT NULL,
     source        TEXT NOT NULL,   -- node body as of last grounding (old side of the diff)
     body_hash     TEXT NOT NULL,
     fingerprint   TEXT NOT NULL,
-    PRIMARY KEY (scaffold_file, node_id)
+    scaffold_file TEXT GENERATED ALWAYS AS (
+        CASE WHEN subject_kind = 'scaffold' THEN subject_id END
+    ) VIRTUAL,
+    PRIMARY KEY (subject_kind, subject_id, node_id)
 );
 
--- Reverse lookup: which scaffold files ground to a given node (drives `mex
--- impact` and the grounding checker's per-node resolution).
+-- Reverse lookup: which subjects ground to a given node (drives `mex impact`,
+-- the grounding checker's per-node resolution, and the wiki's code→knowledge
+-- join).
 CREATE INDEX IF NOT EXISTS idx_grounded_node ON _mex_grounded_source(node_id);
+
+-- Forward lookup: every node one subject grounds to.
+CREATE INDEX IF NOT EXISTS idx_grounded_subject ON _mex_grounded_source(subject_kind, subject_id);
