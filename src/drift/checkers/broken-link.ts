@@ -19,7 +19,7 @@ const COMMENT_CLOSE = "-->";
  * An unterminated comment runs to the end of the file, matching how a renderer
  * treats it: the rest of the document is swallowed rather than shown.
  */
-export function stripHtmlComments(
+function stripHtmlComments(
   line: string,
   inComment: boolean
 ): { text: string; inComment: boolean } {
