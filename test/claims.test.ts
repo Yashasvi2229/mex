@@ -108,6 +108,20 @@ describe("extractClaims — paths", () => {
     expect(paths).toHaveLength(0);
   });
 
+  it("still extracts hidden-directory paths that a dotted key would swallow", () => {
+    const path = writeFixture(
+      "test.md",
+      "# Notes\n\n" +
+        "Ownership lives in `.github/CODEOWNERS` and CI in `.github/workflows`. " +
+        "The scaffold anchor is `.mex/ROUTER.md`."
+    );
+    const claims = extractClaims(path, "test.md");
+    const paths = claims.filter((c) => c.kind === "path").map((c) => c.value);
+    expect(paths).toContain(".github/CODEOWNERS");
+    expect(paths).toContain(".github/workflows");
+    expect(paths).toContain(".mex/ROUTER.md");
+  });
+
   it("extracts bare filenames as path claims", () => {
     const path = writeFixture(
       "test.md",

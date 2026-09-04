@@ -22,8 +22,14 @@ const EXTENSION_ONLY = /^\.[A-Za-z0-9]+$/;
 /** Common shell commands that can contain path-like arguments. */
 const SHELL_COMMAND_PREFIX = /^(?:sudo\s+)?(?:ls|cd|cat|grep|find|kubectl|helm|docker|git)\s+/;
 
-/** Dotted config keys or annotations can contain slashes but are not paths. */
-const DOTTED_KEY_WITH_SLASH = /^[A-Za-z0-9_.-]*\.[A-Za-z0-9_.-]*\/[A-Za-z0-9_.-]+$/;
+/**
+ * Dotted config keys or annotations can contain slashes but are not paths:
+ * `argocd.argoproj.io/sync-wave`, `k8s.io/api`. The dotted segment must start
+ * with a real character -- anchoring it any looser also matches a hidden
+ * directory (`.github/CODEOWNERS`, `.mex/ROUTER.md`), which would drop the
+ * scaffold's own paths out of the check entirely.
+ */
+const DOTTED_KEY_WITH_SLASH = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+\/[A-Za-z0-9_.-]+$/;
 
 /** Things that look like paths but are actually code snippets, URL routes, or other non-path content */
 function isNotAPath(value: string): boolean {
