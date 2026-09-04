@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import {
   MEX_ANCHOR_END,
 } from "../src/setup/anchor.js";
 import { checkAnchorLink } from "../src/drift/checkers/anchor-link.js";
+import { ensureToolAnchors } from "../src/setup/index.js";
 
 // Setup used to skip any tool anchor that already existed, so a repo with a
 // hand-written .cursorrules got a fully populated .mex/ that nothing loaded.
@@ -339,5 +340,126 @@ describe("checkAnchorLink", () => {
     const [issue] = run();
     expect(issue.message).toContain("CLAUDE.md");
     expect(issue.message).toContain(".cursorrules");
+  });
+});
+
+// ── The path setup actually takes ──
+
+describe("ensureToolAnchors", () => {
+  // Everything above tests the writers directly. These test the wiring setup
+  // uses: the tool list in, the console reporting and the sticky notes out.
+  let logs: string[];
+  let templates: string;
+
+  beforeEach(() => {
+    logs = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    });
+    // Mirrors templates/.tool-configs/, which is what TEMPLATES_DIR resolves to.
+    templates = mkdtempSync(join(tmpdir(), "mex-anchor-td-"));
+    mkdirSync(join(templates, ".tool-configs"), { recursive: true });
+    for (const name of [".cursorrules", ".windsurfrules", "copilot-instructions.md"]) {
+      writeFileSync(
+        join(templates, ".tool-configs", name),
+        "<!-- mex-tool-config -->\ntemplate body\n",
+      );
+    }
+    writeFileSync(
+      join(templates, ".tool-configs/opencode.json"),
+      `${JSON.stringify({ instructions: [".mex/AGENTS.md"] }, null, 2)}\n`,
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(templates, { recursive: true, force: true });
+  });
+
+  it("appends a pointer to every selected tool's existing anchor", () => {
+    writeFileSync(join(tmpDir, ".cursorrules"), HAND_WRITTEN);
+    writeFileSync(join(tmpDir, ".windsurfrules"), HAND_WRITTEN);
+
+    const notes = ensureToolAnchors(tmpDir, templates, ["cursor", "windsurf"], false);
+
+    expect(notes).toEqual([]);
+    for (const file of [".cursorrules", ".windsurfrules"]) {
+      const after = readFileSync(join(tmpDir, file), "utf-8");
+      expect(after.startsWith(HAND_WRITTEN)).toBe(true);
+      expect(after).toContain(".mex/ROUTER.md");
+    }
+  });
+
+  it("leaves Claude and Codex to the agent-skills installer", () => {
+    writeFileSync(join(tmpDir, "CLAUDE.md"), HAND_WRITTEN);
+    ensureToolAnchors(tmpDir, templates, ["claude", "codex"], false);
+    // Untouched here: appending twice would duplicate the installer's block.
+    expect(readFileSync(join(tmpDir, "CLAUDE.md"), "utf-8")).toBe(HAND_WRITTEN);
+  });
+
+  it("creates a missing anchor from the template", () => {
+    const notes = ensureToolAnchors(tmpDir, templates, ["copilot"], false);
+    expect(notes).toEqual([]);
+    expect(readFileSync(join(tmpDir, ".github/copilot-instructions.md"), "utf-8"))
+      .toContain("template body");
+  });
+
+  it("links OpenCode's JSON config", () => {
+    mkdirSync(join(tmpDir, ".opencode"), { recursive: true });
+    writeFileSync(join(tmpDir, ".opencode/opencode.json"), JSON.stringify({ theme: "dark" }));
+
+    ensureToolAnchors(tmpDir, templates, ["opencode"], false);
+
+    const parsed = JSON.parse(readFileSync(join(tmpDir, ".opencode/opencode.json"), "utf-8"));
+    expect(parsed.instructions).toEqual([".mex/AGENTS.md"]);
+    expect(parsed.theme).toBe("dark");
+  });
+
+  it("returns a note for an anchor it could not link, so setup can repeat it", () => {
+    const broken = `${HAND_WRITTEN}\n${MEX_ANCHOR_START}\nno end marker\n`;
+    writeFileSync(join(tmpDir, ".cursorrules"), broken);
+
+    const notes = ensureToolAnchors(tmpDir, templates, ["cursor"], false);
+
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(".cursorrules");
+    expect(notes[0]).toContain(".mex/ROUTER.md");
+    expect(readFileSync(join(tmpDir, ".cursorrules"), "utf-8")).toBe(broken);
+  });
+
+  it("writes nothing on a dry run, and says what the real run would do", () => {
+    writeFileSync(join(tmpDir, ".cursorrules"), HAND_WRITTEN);
+
+    ensureToolAnchors(tmpDir, templates, ["cursor"], true);
+
+    // The bug this replaces: --dry-run promised to overwrite while the real
+    // path skipped. Plan and write are now the same function.
+    expect(readFileSync(join(tmpDir, ".cursorrules"), "utf-8")).toBe(HAND_WRITTEN);
+    expect(logs.join("\n")).toContain("(dry run)");
+    expect(logs.join("\n")).toContain(".cursorrules");
+  });
+
+  it("is quiet and idempotent when every anchor is already linked", () => {
+    writeFileSync(join(tmpDir, ".cursorrules"), HAND_WRITTEN);
+    ensureToolAnchors(tmpDir, templates, ["cursor"], false);
+    const once = readFileSync(join(tmpDir, ".cursorrules"), "utf-8");
+
+    const notes = ensureToolAnchors(tmpDir, templates, ["cursor"], false);
+
+    expect(notes).toEqual([]);
+    expect(readFileSync(join(tmpDir, ".cursorrules"), "utf-8")).toBe(once);
+  });
+
+  it("repairs an install the old skip orphaned", () => {
+    // The case that matters: a populated scaffold whose aiTools are already
+    // saved never shows the menu, so linking has to happen on that path too.
+    mkdirSync(join(tmpDir, ".mex"), { recursive: true });
+    writeFileSync(join(tmpDir, ".mex/ROUTER.md"), "# Router\n");
+    writeFileSync(join(tmpDir, ".cursorrules"), HAND_WRITTEN);
+    expect(checkAnchorLink(tmpDir, join(tmpDir, ".mex"))).toHaveLength(1);
+
+    ensureToolAnchors(tmpDir, templates, ["cursor"], false);
+
+    expect(checkAnchorLink(tmpDir, join(tmpDir, ".mex"))).toHaveLength(0);
   });
 });

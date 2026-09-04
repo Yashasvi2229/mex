@@ -114,6 +114,98 @@ const TOOL_CONFIGS: Record<string, { src: string; dest: string }> = {
   "5": { src: ".tool-configs/opencode.json", dest: ".opencode/opencode.json" },
 };
 
+/**
+ * The anchor each non-agent tool loads, and the template to seed it from.
+ *
+ * Keyed by tool rather than by menu number because linking has to happen on
+ * every setup run, not only the one where the menu was shown. Claude Code and
+ * Codex are absent deliberately: the agent-skills installer owns their files
+ * and already runs on every setup.
+ */
+const TOOL_ANCHORS: Partial<Record<AiTool, { src: string; dest: string }>> = {
+  cursor: TOOL_CONFIGS["2"],
+  windsurf: TOOL_CONFIGS["3"],
+  copilot: TOOL_CONFIGS["4"],
+  opencode: TOOL_CONFIGS["5"],
+};
+
+/**
+ * Point every selected tool's anchor at the scaffold.
+ *
+ * Runs on every setup, including one that reuses a saved tool selection and so
+ * never shows the menu. That path is the one that matters: an install
+ * orphaned by the old skip already has a populated scaffold and saved
+ * `aiTools`, so it takes exactly this branch, and linking only from the menu
+ * would have left the people who actually hit the bug unable to fix it by
+ * rerunning setup. See https://github.com/mex-memory/mex/issues/106
+ *
+ * Returns the anchors that could not be linked, for the closing summary.
+ */
+export function ensureToolAnchors(
+  projectRoot: string,
+  templatesDir: string,
+  tools: readonly AiTool[],
+  dryRun: boolean,
+): string[] {
+  const notes: string[] = [];
+
+  for (const tool of new Set(tools)) {
+    const config = TOOL_ANCHORS[tool];
+    if (!config) continue;
+
+    const src = resolve(templatesDir, config.src);
+    const dest = resolve(projectRoot, config.dest);
+    const isJson = config.dest.endsWith(".json");
+
+    let result: AnchorWriteResult;
+    if (dryRun) {
+      if (!existsSync(dest)) {
+        ok(`(dry run) Would copy ${config.dest}`);
+        continue;
+      }
+      result = isJson
+        ? planOpencodeAnchor(readFileSync(dest, "utf-8"))
+        : planAnchorPointer(readFileSync(dest));
+    } else {
+      result = isJson
+        ? ensureOpencodeAnchor(projectRoot, config.dest, src)
+        : ensureMarkdownAnchor(projectRoot, config.dest, src);
+    }
+
+    const note = reportAnchor(config.dest, result, dryRun);
+    if (note) notes.push(note);
+  }
+
+  return notes;
+}
+
+/** Print an anchor outcome; return a note for the ones the user must act on. */
+function reportAnchor(dest: string, result: AnchorWriteResult, dry: boolean): string | null {
+  const prefix = dry ? "(dry run) Would " : "";
+  switch (result.outcome) {
+    case "created":
+      ok(`${prefix}${dry ? "copy" : "Copied"} ${dest}`);
+      return null;
+    case "appended":
+      ok(`${prefix}${dry ? "add" : "Added"} a MEX pointer to your existing ${dest}`);
+      return null;
+    case "updated":
+      ok(`${prefix}${dry ? "refresh" : "Refreshed"} the MEX pointer in ${dest}`);
+      return null;
+    case "already-linked":
+      info(`${dest} already points at .mex/ — left unchanged`);
+      return null;
+    case "conflict": {
+      const note =
+        `${dest} was left untouched because ${result.reason}. `
+        + "Add this line to it by hand so the scaffold is loaded: "
+        + "`At the start of every session, read .mex/AGENTS.md and .mex/ROUTER.md.`";
+      warn(note);
+      return note;
+    }
+  }
+}
+
 // ── Helpers ──
 
 const ok = (msg: string) => console.log(`${chalk.green("✓")} ${msg}`);
@@ -265,6 +357,10 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   const configuredTools = scaffoldPopulatedAtStart ? findConfig(projectRoot).aiTools : [];
   if (configuredTools.length > 0) {
     selectedTools = configuredTools;
+    // A scaffold orphaned by the old skip lands here, not in the menu
+    // branch: it is populated and its aiTools are saved. Link on this path
+    // too, or rerunning setup could never repair the installs that need it.
+    anchorNotes = ensureToolAnchors(projectRoot, TEMPLATES_DIR, selectedTools, dryRun);
     info(`Using configured AI tools: ${selectedTools.map((tool) => AI_TOOLS[tool].name).join(", ")}`);
   } else {
     const rl = createInterface({ input: stdin, output: stdout });
@@ -498,73 +594,11 @@ async function selectToolConfig(
   const choice = (await rl.question("Choice [1-8] (default: 1): ")).trim() || "1";
 
   const selectedTools: AiTool[] = [];
-  const anchorNotes: string[] = [];
 
   const copyConfig = (key: string) => {
     const tool = TOOL_CHOICE_MAP[key];
     if (!tool) return;
     selectedTools.push(tool);
-
-    // Claude Code and Codex receive a short managed instruction block plus
-    // packaged project skills. The reusable agent-assets installer owns those
-    // paths so setup never overwrites a hand-written root instruction file.
-    if (tool === "claude" || tool === "codex") return;
-
-    const config = TOOL_CONFIGS[key];
-    if (!config) return;
-
-    const src = resolve(TEMPLATES_DIR, config.src);
-    const dest = resolve(projectRoot, config.dest);
-    const isJson = config.dest.endsWith(".json");
-
-    // Setup used to skip any anchor that already existed, which left the
-    // scaffold populated but unreferenced -- nothing loads `.mex/` unless an
-    // always-loaded file says to. Append a pointer instead, preserving every
-    // byte the user wrote. See https://github.com/mex-memory/mex/issues/106
-    if (dryRun) {
-      if (!existsSync(dest)) {
-        ok(`(dry run) Would copy ${config.dest}`);
-        return;
-      }
-      const plan: AnchorWriteResult = isJson
-        ? planOpencodeAnchor(readFileSync(dest, "utf-8"))
-        : planAnchorPointer(readFileSync(dest));
-      reportAnchor(config.dest, plan, true);
-      return;
-    }
-
-    const result = isJson
-      ? ensureOpencodeAnchor(projectRoot, config.dest, src)
-      : ensureMarkdownAnchor(projectRoot, config.dest, src);
-    reportAnchor(config.dest, result, false);
-  };
-
-  /** Print an anchor outcome, and remember the ones the user must act on. */
-  const reportAnchor = (dest: string, result: AnchorWriteResult, dry: boolean) => {
-    const prefix = dry ? "(dry run) Would " : "";
-    switch (result.outcome) {
-      case "created":
-        ok(`${prefix}${dry ? "copy" : "Copied"} ${dest}`);
-        return;
-      case "appended":
-        ok(`${prefix}${dry ? "add" : "Added"} a MEX pointer to your existing ${dest}`);
-        return;
-      case "updated":
-        ok(`${prefix}${dry ? "refresh" : "Refreshed"} the MEX pointer in ${dest}`);
-        return;
-      case "already-linked":
-        info(`${dest} already points at .mex/ — left unchanged`);
-        return;
-      case "conflict": {
-        const note =
-          `${dest} was left untouched because ${result.reason}. `
-          + "Add this line to it by hand so the scaffold is loaded: "
-          + "`At the start of every session, read .mex/AGENTS.md and .mex/ROUTER.md.`";
-        warn(note);
-        anchorNotes.push(note);
-        return;
-      }
-    }
   };
 
   switch (choice) {
@@ -590,6 +624,8 @@ async function selectToolConfig(
       warn("Unknown choice, skipping tool config");
       break;
   }
+
+  const anchorNotes = ensureToolAnchors(projectRoot, TEMPLATES_DIR, selectedTools, dryRun);
 
   // Persist tool selection
   if (selectedTools.length > 0 && !dryRun) {
