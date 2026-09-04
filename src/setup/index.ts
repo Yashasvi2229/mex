@@ -400,6 +400,9 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   if (!populationFinished || !isScaffoldPopulated(mexDir)) {
     console.log();
     info("Setup paused at population. After the agent finishes, rerun `mex setup` to finalize Graph and Wiki readiness.");
+    // The anchors were written before population, so an unlinked one is just
+    // as true on this path -- and this is the last output the user sees.
+    printAnchorNotes(anchorNotes);
     return;
   }
 
