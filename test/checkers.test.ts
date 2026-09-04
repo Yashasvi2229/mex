@@ -706,6 +706,52 @@ describe("checkToolConfigSync", () => {
     expect(issues[0].file).toBe(".github/copilot-instructions.md");
   });
 
+  it("does not report the agent-skills block as drift", () => {
+    // CLAUDE.md carries the managed skills block and .cursorrules cannot --
+    // Cursor has no mex skills to invoke. Comparing raw bytes reported an
+    // install of both tools as permanently drifted, with no edit the user
+    // could make to clear it. See https://github.com/mex-memory/mex/issues/106
+    const body = `${marker}shared project anchor\n`;
+    writeFileSync(
+      join(tmpDir, "CLAUDE.md"),
+      `${body}\n<!-- mex-agent:skills:start -->\n## MEX agent skills\n- read .mex/ROUTER.md\n<!-- mex-agent:skills:end -->\n`,
+    );
+    writeFileSync(join(tmpDir, ".cursorrules"), body);
+    expect(checkToolConfigSync(tmpDir)).toHaveLength(0);
+  });
+
+  it("does not report the appended anchor pointer as drift", () => {
+    // Same shape from the other direction: setup appends a pointer block to a
+    // pre-existing .cursorrules, which CLAUDE.md has no reason to carry.
+    const body = `${marker}shared project anchor\n`;
+    writeFileSync(join(tmpDir, "CLAUDE.md"), body);
+    writeFileSync(
+      join(tmpDir, ".cursorrules"),
+      `${body}\n<!-- mex-anchor:start -->\n- read .mex/ROUTER.md\n<!-- mex-anchor:end -->\n`,
+    );
+    expect(checkToolConfigSync(tmpDir)).toHaveLength(0);
+  });
+
+  it("still reports a real edit made outside the managed blocks", () => {
+    const body = `${marker}shared project anchor\n`;
+    writeFileSync(
+      join(tmpDir, "CLAUDE.md"),
+      `${body}\n<!-- mex-agent:skills:start -->\nblock\n<!-- mex-agent:skills:end -->\n`,
+    );
+    writeFileSync(join(tmpDir, ".cursorrules"), `${body}a line only this copy has\n`);
+    const issues = checkToolConfigSync(tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].file).toBe(".cursorrules");
+  });
+
+  it("treats a line-ending difference as a checkout artifact, not drift", () => {
+    // A repo with no `text` attribute hands CRLF to Windows and LF to CI for
+    // the same commit; neither is an edit anyone made.
+    writeFileSync(join(tmpDir, "CLAUDE.md"), `${marker}shared anchor\n`);
+    writeFileSync(join(tmpDir, ".cursorrules"), `${marker}shared anchor\n`.replace(/\n/g, "\r\n"));
+    expect(checkToolConfigSync(tmpDir)).toHaveLength(0);
+  });
+
   it("ignores tool config files that are not scaffold copies", () => {
     // A hand-written CLAUDE.md and a generated AGENTS.md (e.g. a managed skill
     // pack) coexist without ever having been copied from .tool-configs/.
