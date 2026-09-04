@@ -27,6 +27,23 @@ import {
 const FIX_HINT =
   "Add a line naming `.mex/ROUTER.md` to it, or rerun `mex setup` to have one appended.";
 
+/**
+ * Whether the scaffold records an explicit decision to install no tool config.
+ * Absent or malformed config is not a decision, so it does not silence the
+ * check -- only an `aiTools` present and empty does.
+ */
+function optedOutOfToolConfigs(scaffoldRoot: string): boolean {
+  try {
+    const raw = readFileSync(resolve(scaffoldRoot, "config.json"), "utf-8");
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return false;
+    const tools = (parsed as Record<string, unknown>).aiTools;
+    return Array.isArray(tools) && tools.length === 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether one anchor file points at the scaffold. */
 function anchorPointsAtScaffold(projectRoot: string, path: string, format: string): boolean {
   const abs = resolve(projectRoot, path);
@@ -58,6 +75,11 @@ export function checkAnchorLink(projectRoot: string, scaffoldRoot: string): Drif
   // the "scaffold is incomplete" story; this one only asks about reachability.
   if (!existsSync(resolve(scaffoldRoot, "ROUTER.md"))) return [];
 
+  // Setup offers "None / skip", whose whole point is that `.mex/AGENTS.md`
+  // works with any tool that can read files. Someone who chose that made this
+  // trade-off deliberately and does not need it reported back at them.
+  if (optedOutOfToolConfigs(scaffoldRoot)) return [];
+
   const present = ANCHOR_FILES.filter((anchor) =>
     existsSync(resolve(projectRoot, anchor.path)),
   );
@@ -84,20 +106,21 @@ export function checkAnchorLink(projectRoot: string, scaffoldRoot: string): Drif
   // Report against the anchor itself, not the scaffold: that is the file the
   // user has to edit, and `mex check` output is read as a worklist.
   const paths = present.map((anchor) => anchor.path);
+  const subject =
+    paths.length === 1
+      ? `${paths[0]} never mentions \`.mex/\``
+      : `${describe(paths)} exist, but none of them mentions \`.mex/\``;
   return [
     {
       code: "SCAFFOLD_ORPHANED",
       severity: "error",
       file: paths[0]!,
       line: null,
-      message:
-        `${describe(paths)} exist but none of them mentions \`.mex/\`, so the populated scaffold is never loaded. `
-        + FIX_HINT,
+      message: `${subject}, so the populated scaffold is never loaded. ${FIX_HINT}`,
     },
   ];
 }
 
 function describe(paths: readonly string[]): string {
-  if (paths.length === 1) return paths[0]!;
   return `${paths.slice(0, -1).join(", ")} and ${paths[paths.length - 1]}`;
 }

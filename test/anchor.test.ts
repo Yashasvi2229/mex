@@ -247,6 +247,27 @@ describe("checkAnchorLink", () => {
     expect(issues[0].file).toBe("CLAUDE.md");
   });
 
+  it("stays silent when the user chose to install no tool config", () => {
+    // Setup's "None / skip" option says .mex/AGENTS.md works with any tool
+    // that can read files. That is a deliberate trade-off, not drift.
+    scaffold();
+    writeFileSync(join(tmpDir, ".mex/config.json"), JSON.stringify({ aiTools: [] }));
+    expect(run()).toHaveLength(0);
+  });
+
+  it("still reports when a tool was selected but its anchor does not point at the scaffold", () => {
+    scaffold();
+    writeFileSync(join(tmpDir, ".mex/config.json"), JSON.stringify({ aiTools: ["claude"] }));
+    writeFileSync(join(tmpDir, "CLAUDE.md"), HAND_WRITTEN);
+    expect(run()).toHaveLength(1);
+  });
+
+  it("does not treat unreadable config as an opt-out", () => {
+    scaffold();
+    writeFileSync(join(tmpDir, ".mex/config.json"), "{ not json");
+    expect(run()).toHaveLength(1);
+  });
+
   it("flags a scaffold with no tool config at all", () => {
     scaffold();
     const issues = run();
