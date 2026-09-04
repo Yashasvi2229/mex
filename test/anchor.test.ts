@@ -136,6 +136,18 @@ describe("ensureMarkdownAnchor", () => {
     expect(plan.desiredBytes).toBeUndefined();
   });
 
+  it("refuses a destination that is not a known tool config", () => {
+    // This module writes into files a human wrote, so it is one of the few
+    // writers outside the wiki engine. The fixed registry, not the caller,
+    // decides what it may touch -- including that it never touches .mex/.
+    expect(() =>
+      ensureMarkdownAnchor(tmpDir, ".mex/ROUTER.md", join(templateDir, ".cursorrules")),
+    ).toThrow(/not a known AI tool config/);
+    expect(() =>
+      ensureMarkdownAnchor(tmpDir, "../escape.md", join(templateDir, ".cursorrules")),
+    ).toThrow(/not a known AI tool config/);
+  });
+
   it("renders a block that names both scaffold entry points", () => {
     const block = renderAnchorPointerBlock();
     expect(block).toContain(".mex/AGENTS.md");

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from
 import { dirname, resolve } from "node:path";
 import { planManagedBlockEdit } from "../managed-block.js";
 import {
+  ANCHOR_FILES,
   MEX_ANCHOR_END,
   MEX_ANCHOR_START,
   isToolConfigCopy,
@@ -26,6 +27,24 @@ export { MEX_ANCHOR_END, MEX_ANCHOR_START };
 
 /** Matches the agent-skills cap: refuse to preview an unreasonable block. */
 const MAX_ANCHOR_PREVIEW_BYTES = 32 * 1024;
+
+/**
+ * Fail closed on any destination that is not a known root tool config.
+ *
+ * This module writes into files a human wrote, so it is one of the few writers
+ * outside the wiki engine (see the pinned inventory in
+ * test/wiki-architecture.test.ts). It never touches `.mex/`, and this is what
+ * makes that a fact rather than a claim about current call sites: the
+ * destination comes from the fixed registry, not from the caller.
+ */
+function assertAnchorPath(relativePath: string): void {
+  if (!ANCHOR_FILES.some((anchor) => anchor.path === relativePath)) {
+    throw new Error(
+      `Refusing to write ${relativePath}: not a known AI tool config. `
+        + `Expected one of ${ANCHOR_FILES.map((a) => a.path).join(", ")}.`,
+    );
+  }
+}
 
 /** The scaffold file OpenCode is pointed at, matching the shipped template. */
 const OPENCODE_INSTRUCTION = ".mex/AGENTS.md";
@@ -114,6 +133,7 @@ export function ensureMarkdownAnchor(
   relativePath: string,
   templatePath: string,
 ): AnchorWriteResult {
+  assertAnchorPath(relativePath);
   const dest = resolve(projectRoot, relativePath);
 
   if (!existsSync(dest)) {
@@ -162,6 +182,7 @@ export function ensureOpencodeAnchor(
   relativePath: string,
   templatePath: string,
 ): AnchorWriteResult {
+  assertAnchorPath(relativePath);
   const dest = resolve(projectRoot, relativePath);
 
   if (!existsSync(dest)) {
