@@ -223,6 +223,50 @@ describe("checkEdges", () => {
     expect(issues).toHaveLength(0);
   });
 
+  it("resolves an edge target relative to the file that declares it", () => {
+    const mexDir = join(tmpDir, ".mex");
+    mkdirSync(join(mexDir, "context"), { recursive: true });
+    mkdirSync(join(mexDir, "patterns"), { recursive: true });
+    writeFileSync(join(mexDir, "context/architecture.md"), "");
+    const file = join(mexDir, "patterns/durable-change-signal.md");
+    writeFileSync(file, "");
+    const fm: ScaffoldFrontmatter = {
+      edges: [{ target: "../context/architecture.md" }],
+    };
+    const issues = checkEdges(fm, file, ".mex/patterns/durable-change-signal.md", tmpDir, mexDir);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("resolves a sibling edge target from inside patterns/", () => {
+    const mexDir = join(tmpDir, ".mex");
+    mkdirSync(join(mexDir, "patterns"), { recursive: true });
+    writeFileSync(join(mexDir, "patterns/safe-graph-snapshot-evolution.md"), "");
+    const file = join(mexDir, "patterns/durable-change-signal.md");
+    writeFileSync(file, "");
+    const fm: ScaffoldFrontmatter = {
+      edges: [{ target: "safe-graph-snapshot-evolution.md" }],
+    };
+    const issues = checkEdges(fm, file, ".mex/patterns/durable-change-signal.md", tmpDir, mexDir);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("still reports an edge target that resolves nowhere", () => {
+    const mexDir = join(tmpDir, ".mex");
+    mkdirSync(join(mexDir, "patterns"), { recursive: true });
+    const file = join(mexDir, "patterns/example.md");
+    writeFileSync(file, "");
+    const fm: ScaffoldFrontmatter = {
+      edges: [{ target: "../context/nowhere.md" }],
+    };
+    const issues = checkEdges(fm, file, ".mex/patterns/example.md", tmpDir, mexDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      code: "DEAD_EDGE",
+      file: ".mex/patterns/example.md",
+      message: "Frontmatter edge target does not exist: ../context/nowhere.md",
+    });
+  });
+
   it("returns empty for no frontmatter", () => {
     expect(checkEdges(null, "f", "f", tmpDir, tmpDir)).toEqual([]);
   });
