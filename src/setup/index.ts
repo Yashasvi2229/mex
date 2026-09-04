@@ -31,6 +31,13 @@ import {
   verifySetupIgnoreProtection,
 } from "./ignore.js";
 import { finalizeSetupWiki } from "./wiki-finalize.js";
+import {
+  ensureMarkdownAnchor,
+  ensureOpencodeAnchor,
+  planAnchorPointer,
+  planOpencodeAnchor,
+  type AnchorWriteResult,
+} from "./anchor.js";
 
 // ── Constants ──
 
@@ -106,6 +113,98 @@ const TOOL_CONFIGS: Record<string, { src: string; dest: string }> = {
   "4": { src: ".tool-configs/copilot-instructions.md", dest: ".github/copilot-instructions.md" },
   "5": { src: ".tool-configs/opencode.json", dest: ".opencode/opencode.json" },
 };
+
+/**
+ * The anchor each non-agent tool loads, and the template to seed it from.
+ *
+ * Keyed by tool rather than by menu number because linking has to happen on
+ * every setup run, not only the one where the menu was shown. Claude Code and
+ * Codex are absent deliberately: the agent-skills installer owns their files
+ * and already runs on every setup.
+ */
+const TOOL_ANCHORS: Partial<Record<AiTool, { src: string; dest: string }>> = {
+  cursor: TOOL_CONFIGS["2"],
+  windsurf: TOOL_CONFIGS["3"],
+  copilot: TOOL_CONFIGS["4"],
+  opencode: TOOL_CONFIGS["5"],
+};
+
+/**
+ * Point every selected tool's anchor at the scaffold.
+ *
+ * Runs on every setup, including one that reuses a saved tool selection and so
+ * never shows the menu. That path is the one that matters: an install
+ * orphaned by the old skip already has a populated scaffold and saved
+ * `aiTools`, so it takes exactly this branch, and linking only from the menu
+ * would have left the people who actually hit the bug unable to fix it by
+ * rerunning setup. See https://github.com/mex-memory/mex/issues/106
+ *
+ * Returns the anchors that could not be linked, for the closing summary.
+ */
+export function ensureToolAnchors(
+  projectRoot: string,
+  templatesDir: string,
+  tools: readonly AiTool[],
+  dryRun: boolean,
+): string[] {
+  const notes: string[] = [];
+
+  for (const tool of new Set(tools)) {
+    const config = TOOL_ANCHORS[tool];
+    if (!config) continue;
+
+    const src = resolve(templatesDir, config.src);
+    const dest = resolve(projectRoot, config.dest);
+    const isJson = config.dest.endsWith(".json");
+
+    let result: AnchorWriteResult;
+    if (dryRun) {
+      if (!existsSync(dest)) {
+        ok(`(dry run) Would copy ${config.dest}`);
+        continue;
+      }
+      result = isJson
+        ? planOpencodeAnchor(readFileSync(dest, "utf-8"))
+        : planAnchorPointer(readFileSync(dest));
+    } else {
+      result = isJson
+        ? ensureOpencodeAnchor(projectRoot, config.dest, src)
+        : ensureMarkdownAnchor(projectRoot, config.dest, src);
+    }
+
+    const note = reportAnchor(config.dest, result, dryRun);
+    if (note) notes.push(note);
+  }
+
+  return notes;
+}
+
+/** Print an anchor outcome; return a note for the ones the user must act on. */
+function reportAnchor(dest: string, result: AnchorWriteResult, dry: boolean): string | null {
+  const prefix = dry ? "(dry run) Would " : "";
+  switch (result.outcome) {
+    case "created":
+      ok(`${prefix}${dry ? "copy" : "Copied"} ${dest}`);
+      return null;
+    case "appended":
+      ok(`${prefix}${dry ? "add" : "Added"} a MEX pointer to your existing ${dest}`);
+      return null;
+    case "updated":
+      ok(`${prefix}${dry ? "refresh" : "Refreshed"} the MEX pointer in ${dest}`);
+      return null;
+    case "already-linked":
+      info(`${dest} already points at .mex/ — left unchanged`);
+      return null;
+    case "conflict": {
+      const note =
+        `${dest} was left untouched because ${result.reason}. `
+        + "Add this line to it by hand so the scaffold is loaded: "
+        + "`At the start of every session, read .mex/AGENTS.md and .mex/ROUTER.md.`";
+      warn(note);
+      return note;
+    }
+  }
+}
 
 // ── Helpers ──
 
@@ -253,15 +352,22 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   // ── Step 3: Tool config selection ──
 
   let selectedTools: AiTool[] = [];
+  let anchorNotes: string[] = [];
 
   const configuredTools = scaffoldPopulatedAtStart ? findConfig(projectRoot).aiTools : [];
   if (configuredTools.length > 0) {
     selectedTools = configuredTools;
+    // A scaffold orphaned by the old skip lands here, not in the menu
+    // branch: it is populated and its aiTools are saved. Link on this path
+    // too, or rerunning setup could never repair the installs that need it.
+    anchorNotes = ensureToolAnchors(projectRoot, TEMPLATES_DIR, selectedTools, dryRun);
     info(`Using configured AI tools: ${selectedTools.map((tool) => AI_TOOLS[tool].name).join(", ")}`);
   } else {
     const rl = createInterface({ input: stdin, output: stdout });
     try {
-      selectedTools = await selectToolConfig(rl, projectRoot, dryRun);
+      const selection = await selectToolConfig(rl, projectRoot, dryRun);
+      selectedTools = selection.tools;
+      anchorNotes = selection.anchorNotes;
     } finally {
       rl.close();
     }
@@ -390,6 +496,9 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   if (!populationFinished || !isScaffoldPopulated(mexDir)) {
     console.log();
     info("Setup paused at population. After the agent finishes, rerun `mex setup` to finalize Graph and Wiki readiness.");
+    // The anchors were written before population, so an unlinked one is just
+    // as true on this path -- and this is the last output the user sees.
+    printAnchorNotes(anchorNotes);
     return;
   }
 
@@ -403,6 +512,7 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
     ok("Setup complete.");
   }
 
+  printAnchorNotes(anchorNotes);
   await promptGlobalInstall();
 }
 
@@ -468,7 +578,7 @@ async function selectToolConfig(
   rl: ReturnType<typeof createInterface>,
   projectRoot: string,
   dryRun: boolean,
-): Promise<AiTool[]> {
+): Promise<{ tools: AiTool[]; anchorNotes: string[] }> {
   header("Which AI tool do you use?");
   console.log();
   console.log("  1) Claude Code");
@@ -489,37 +599,6 @@ async function selectToolConfig(
     const tool = TOOL_CHOICE_MAP[key];
     if (!tool) return;
     selectedTools.push(tool);
-
-    // Claude Code and Codex receive a short managed instruction block plus
-    // packaged project skills. The reusable agent-assets installer owns those
-    // paths so setup never overwrites a hand-written root instruction file.
-    if (tool === "claude" || tool === "codex") return;
-
-    const config = TOOL_CONFIGS[key];
-    if (!config) return;
-
-    const src = resolve(TEMPLATES_DIR, config.src);
-    const dest = resolve(projectRoot, config.dest);
-
-    if (dryRun) {
-      if (existsSync(dest)) {
-        info(`(dry run) Would keep existing ${config.dest}`);
-      } else {
-        ok(`(dry run) Would copy ${config.dest}`);
-      }
-      return;
-    }
-
-    if (existsSync(dest)) {
-      // Can't ask interactively here since we already have rl,
-      // so just warn and skip
-      warn(`${config.dest} already exists — skipped (delete it first to replace)`);
-      return;
-    }
-
-    mkdirSync(dirname(dest), { recursive: true });
-    copyFileSync(src, dest);
-    ok(`Copied ${config.dest}`);
   };
 
   switch (choice) {
@@ -546,13 +625,15 @@ async function selectToolConfig(
       break;
   }
 
+  const anchorNotes = ensureToolAnchors(projectRoot, TEMPLATES_DIR, selectedTools, dryRun);
+
   // Persist tool selection
   if (selectedTools.length > 0 && !dryRun) {
     const mexDir = resolve(projectRoot, ".mex");
     saveAiTools(mexDir, selectedTools);
   }
 
-  return [...new Set(selectedTools)];
+  return { tools: [...new Set(selectedTools)], anchorNotes };
 }
 
 function renderAgentAssetsReport(report: AgentAssetsReport): void {
@@ -678,6 +759,25 @@ export function assertGroundingCaptureReady(result: GroundingBaselineCaptureResu
       `${result.skipped} authored grounding reference${result.skipped === 1 ? "" : "s"} could not be verified against the code graph.`,
     );
   }
+}
+
+/**
+ * Repeat anchors that could not be linked automatically.
+ *
+ * The warning at the moment of the decision scrolls past behind population
+ * output and the readiness report, and the whole failure mode of #106 is that
+ * the user never learns the scaffold is not being loaded. Saying it again at
+ * the end is the last point where it is still in front of them.
+ */
+function printAnchorNotes(notes: readonly string[]): void {
+  if (notes.length === 0) return;
+  console.log();
+  header("Action needed: these files do not point at the scaffold yet");
+  console.log();
+  for (const note of notes) warn(note);
+  console.log();
+  info("Until one always-loaded file names `.mex/`, your agent will not read the scaffold.");
+  info("Run `mex check` after fixing them to confirm.");
 }
 
 function printCommitCheckpoint(selectedTools: readonly AiTool[]): void {

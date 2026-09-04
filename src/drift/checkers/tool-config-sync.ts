@@ -1,12 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { DriftIssue } from "../../types.js";
+import { MEX_ANCHOR_END, MEX_ANCHOR_START, isToolConfigCopy } from "../../tool-config.js";
+import { MEX_INSTRUCTIONS_END, MEX_INSTRUCTIONS_START } from "../../agent-skills/instructions.js";
 
 /**
- * Files that `setup.sh` may copy with identical content from `.tool-configs/`.
+ * Files that setup may copy with identical content from `.tool-configs/`.
  * If a user installs more than one tool and later edits one of these files in
  * place, the copies can silently drift out of sync. `.opencode/opencode.json`
- * is intentionally excluded -- it's a different format and references
+ * is intentionally excluded -- it is a different format and references
  * `.mex/AGENTS.md` rather than embedding the same text.
  */
 const TOOL_CONFIG_FILES: ReadonlyArray<string> = [
@@ -18,35 +20,33 @@ const TOOL_CONFIG_FILES: ReadonlyArray<string> = [
 ];
 
 /**
- * A file only participates in the sync check when it is actually a copy of the
- * mex tool config -- recognised by the sentinel comment every generated
- * template carries. Repos commonly have a hand-written CLAUDE.md or a
- * generated AGENTS.md that never came from `.tool-configs/`; those may still
- * mention ROUTER.md in ordinary guidance, so only the dedicated sentinel is
- * proof of scaffold origin.
+ * Blocks mex maintains inside an anchor, which are expected to differ between
+ * copies and must not count as drift.
  *
- * Anchored to the start of a line so a file that merely quotes the sentinel in
- * prose is not mistaken for a copy.
+ * `CLAUDE.md` carries the agent-skills policy block and `.cursorrules` cannot
+ * -- Cursor has no mex skills to invoke. Comparing the raw bytes therefore
+ * reported an install of both tools as permanently drifted, with no edit the
+ * user could make to clear it: matching the files would mean deleting a block
+ * the installer rewrites on every sync. Compare what the user owns instead.
  */
-const SCAFFOLD_MARKER = /^<!-- mex-tool-config\b/m;
+const MANAGED_BLOCKS: ReadonlyArray<readonly [string, string]> = [
+	[MEX_INSTRUCTIONS_START, MEX_INSTRUCTIONS_END],
+	[MEX_ANCHOR_START, MEX_ANCHOR_END],
+];
 
-/**
- * Copies installed before the sentinel shipped do not carry it, and nothing
- * rewrites them: `mex setup` skips any destination that already exists, so an
- * installed anchor is never re-copied. Without a second signal the check would
- * go silent for every pre-existing install -- real drift, no warning.
- *
- * This frontmatter line has been byte-stable across every tool config template
- * since the initial commit, so it identifies those copies with no migration
- * step. It is mex's own template prose and does not appear in an independently
- * owned config. Bridge only: drop it at a major version once installs have
- * turned over, leaving the sentinel as the sole contract.
- */
-const LEGACY_MARKER = "Always-loaded project anchor. Read this first.";
-
-/** Whether a file is a copy of the mex tool config, new sentinel or legacy. */
-function isScaffoldCopy(content: string): boolean {
-	return SCAFFOLD_MARKER.test(content) || content.includes(LEGACY_MARKER);
+/** Remove every mex-managed block, leaving the user-owned remainder. */
+function stripManagedBlocks(content: string): string {
+	let result = content;
+	for (const [start, end] of MANAGED_BLOCKS) {
+		const from = result.indexOf(start);
+		if (from === -1) continue;
+		const to = result.indexOf(end, from);
+		if (to === -1) continue;
+		result = result.slice(0, from) + result.slice(to + end.length);
+	}
+	// Line endings are a checkout artifact, not an edit: a repo without a
+	// `text` attribute hands CRLF to Windows and LF to CI for the same commit.
+	return result.replace(/\r\n/g, "\n").trim();
 }
 
 /** One copy differs from what the others agree on. */
@@ -68,8 +68,8 @@ export function checkToolConfigSync(projectRoot: string): DriftIssue[] {
 		if (!existsSync(abs)) continue;
 		try {
 			const content = readFileSync(abs, "utf-8");
-			if (!isScaffoldCopy(content)) continue;
-			present.push({ path: rel, content });
+			if (!isToolConfigCopy(content)) continue;
+			present.push({ path: rel, content: stripManagedBlocks(content) });
 		} catch {
 			// Unreadable file -- ignore rather than reporting a checker-internal error.
 		}
