@@ -228,6 +228,70 @@ describe("extractClaims — dependencies", () => {
     expect(versions.map((v) => v.value)).toContain("Node v20");
   });
 
+  it("claims the packages named in code inside a bold dependency entry", () => {
+    const path = writeFixture(
+      "test.md",
+      "# Key Libraries\n\n" +
+        "- **`@xyflow/react` + `dagre`** — mind-map rendering and auto-layout\n" +
+        "- **Radix UI + `class-variance-authority` + `tailwind-merge`** — primitives"
+    );
+    const claims = extractClaims(path, "test.md");
+    const deps = claims.filter((c) => c.kind === "dependency").map((d) => d.value);
+    expect(deps).toEqual([
+      "@xyflow/react",
+      "dagre",
+      "class-variance-authority",
+      "tailwind-merge",
+    ]);
+  });
+
+  it("does not claim a prose description as a dependency", () => {
+    const path = writeFixture(
+      "test.md",
+      "# Core Technologies\n\n" +
+        "- **Supabase (Postgres + Auth)** — single datastore and identity provider\n" +
+        "- **Express 4.21 on Node** — the API server\n" +
+        "- **GitHub public REST API** — unauthenticated fetches"
+    );
+    const claims = extractClaims(path, "test.md");
+    const deps = claims.filter((c) => c.kind === "dependency");
+    expect(deps).toHaveLength(0);
+  });
+
+  it("ignores bold emphasis inside a list item's prose", () => {
+    const path = writeFixture(
+      "test.md",
+      "# External Dependencies\n\n" +
+        "- **Groq (`groq-sdk`)** — completions; the backend uses the **service-role** key"
+    );
+    const claims = extractClaims(path, "test.md");
+    const deps = claims.filter((c) => c.kind === "dependency").map((d) => d.value);
+    expect(deps).toEqual(["groq-sdk"]);
+  });
+
+  it("does not treat a package named in a dependency entry as a path", () => {
+    const path = writeFixture(
+      "test.md",
+      "# Key Libraries\n\n- **YouTube via `youtubei.js`** — transcript retrieval"
+    );
+    const claims = extractClaims(path, "test.md");
+    expect(claims.filter((c) => c.kind === "path")).toHaveLength(0);
+    expect(claims.filter((c) => c.kind === "dependency").map((d) => d.value)).toEqual([
+      "youtubei.js",
+    ]);
+  });
+
+  it("still claims a real path written in a non-dependency section", () => {
+    const path = writeFixture(
+      "test.md",
+      "# Architecture\n\n- **Entry point** — `src/index.ts` boots the server"
+    );
+    const claims = extractClaims(path, "test.md");
+    expect(claims.filter((c) => c.kind === "path").map((c) => c.value)).toEqual([
+      "src/index.ts",
+    ]);
+  });
+
   it("ignores bold text outside dependency sections", () => {
     const path = writeFixture(
       "test.md",
