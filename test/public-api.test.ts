@@ -284,14 +284,15 @@ describe("public API — runDriftCheck", () => {
   });
 });
 
-describe("public API — runDriftCheck scopes checkPaths to ROUTER.md", () => {
-  it("does not produce MISSING_PATH issues from non-ROUTER.md files", async () => {
+describe("public API — runDriftCheck path claims", () => {
+  it("does not produce MISSING_PATH issues from non-path inline code", async () => {
     mkdirSync(join(tmpDir, ".mex/context"), { recursive: true });
     writeFileSync(
       join(tmpDir, ".mex/ROUTER.md"),
       "---\nedges:\n  - target: context/architecture.md\n---\n# Router\n\nSee [architecture](context/architecture.md).\n",
     );
-    // architecture.md has inline code that looks like paths but isn't real files
+    // architecture.md is checked too, so its inline code must be recognised as
+    // config values rather than files
     writeFileSync(
       join(tmpDir, ".mex/context/architecture.md"),
       "# Architecture\n\nUse `csi.kubeletRootDir: /var/lib/kubelet` and `192.168.5.0/24`.\n",
@@ -313,7 +314,7 @@ describe("public API — runDriftCheck scopes checkPaths to ROUTER.md", () => {
     expect(pathIssues[0].message).toContain("src/totally/missing.ts");
   });
 
-  it("only flags ROUTER.md paths when both ROUTER.md and AGENTS.md have missing paths", async () => {
+  it("flags missing paths in every scaffold file, not only ROUTER.md", async () => {
     writeFileSync(
       join(tmpDir, ".mex/ROUTER.md"),
       "# Router\n\nSee `src/missing.ts`.\n",
@@ -324,9 +325,13 @@ describe("public API — runDriftCheck scopes checkPaths to ROUTER.md", () => {
     );
     const report = await runDriftCheck(config);
     const pathIssues = report.issues.filter((i) => i.code === "MISSING_PATH");
-    // Only the ROUTER.md path should be flagged
-    expect(pathIssues).toHaveLength(1);
-    expect(pathIssues[0].message).toContain("src/missing.ts");
+    // #80 scoped this to ROUTER.md, which left the rest of the scaffold
+    // unchecked. Both files make a path claim, so both are answered for.
+    expect(pathIssues).toHaveLength(2);
+    expect(pathIssues.map((i) => i.file).sort()).toEqual([
+      ".mex/AGENTS.md",
+      ".mex/ROUTER.md",
+    ]);
   });
 });
 

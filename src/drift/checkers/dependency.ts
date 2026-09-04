@@ -1,5 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { globSync } from "glob";
 import type { Claim, DriftIssue } from "../../types.js";
 
 /** Runtimes, platforms, databases, protocols, and architectural terms that appear in stack docs but aren't installable packages */
@@ -32,6 +33,7 @@ const KNOWN_RUNTIMES = new Set([
   "bootstrap", "sass", "less", "postcss",
   "webpack", "vite", "esbuild", "turbopack", "rollup", "parcel",
   "git", "github", "gitlab", "ci/cd", "nginx", "apache", "caddy",
+  "npm", "pnpm", "yarn", "npx", "corepack",
   "linux", "macos", "windows", "wasm", "webassembly",
 ]);
 
@@ -112,6 +114,27 @@ function loadAllDependencies(projectRoot: string): DepEntry[] | null {
   if (existsSync(pkgPath)) {
     try {
       const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+      for (const [name, version] of Object.entries(pkg.dependencies ?? {})) {
+        entries.push({ name, version: String(version) });
+      }
+      for (const [name, version] of Object.entries(pkg.devDependencies ?? {})) {
+        entries.push({ name, version: String(version) });
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  // A repository often keeps a second application in a subdirectory without
+  // declaring workspaces, and that application's packages are declared in its
+  // own manifest. Reading only the root one reported every dependency the
+  // subproject documents as missing.
+  for (const nested of globSync("*/package.json", {
+    cwd: projectRoot,
+    ignore: ["node_modules/**"],
+  })) {
+    try {
+      const pkg = JSON.parse(readFileSync(resolve(projectRoot, nested), "utf-8"));
       for (const [name, version] of Object.entries(pkg.dependencies ?? {})) {
         entries.push({ name, version: String(version) });
       }
