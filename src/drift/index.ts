@@ -16,6 +16,7 @@ import { checkDependencies } from "./checkers/dependency.js";
 import { checkCrossFile } from "./checkers/cross-file.js";
 import { checkScriptCoverage } from "./checkers/script-coverage.js";
 import { checkToolConfigSync } from "./checkers/tool-config-sync.js";
+import { checkAnchorLink } from "./checkers/anchor-link.js";
 import { checkTodoFixme } from "./checkers/todo-fixme.js";
 import { checkBrokenLinks } from "./checkers/broken-link.js";
 import { toPosix } from "../paths.js";
@@ -282,6 +283,10 @@ export async function runDriftCheckWithGraphStatus(
     const scriptCoverageIssues = checkScriptCoverage(scaffoldFiles, projectRoot);
     allIssues.push(...scriptCoverageIssues);
     checkerIssueCounts.push(["script-coverage", scriptCoverageIssues.length]);
+
+    const anchorLinkIssues = checkAnchorLink(projectRoot, scaffoldRoot);
+    allIssues.push(...anchorLinkIssues);
+    checkerIssueCounts.push(["anchor-link", anchorLinkIssues.length]);
 
     const toolConfigSyncIssues = checkToolConfigSync(projectRoot);
     allIssues.push(...toolConfigSyncIssues);

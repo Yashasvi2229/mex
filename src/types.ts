@@ -172,6 +172,9 @@ export type IssueCode =
   | "BROKEN_LINK"
   | "MISSING_FRONTMATTER_FIELD"
   | "STALE_PATTERN"
+  // Populated scaffold that no always-loaded tool config points at, so no
+  // agent ever reads it. See src/drift/checkers/anchor-link.ts and #106.
+  | "SCAFFOLD_ORPHANED"
   // ── Code-graph grounding (checker #12; emitted by src/drift/checkers/grounding.ts) ──
   // Added in Phase 0 so the grounding-checker contract typechecks and Track B
   // never has to reopen this shared union. See src/graph/grounding.ts.
