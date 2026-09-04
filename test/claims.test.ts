@@ -108,6 +108,19 @@ describe("extractClaims — paths", () => {
     expect(paths).toHaveLength(0);
   });
 
+  it("skips runtime, glob, and command-shaped values", () => {
+    const path = writeFixture(
+      "test.md",
+      "# Notes\n\n" +
+        "Transcripts live in `~/.claude/projects`. " +
+        "Backups match `.mex/graph.db*`. " +
+        "Dev runs `nodemon src/index.ts`. " +
+        "A doubled call passes `api/...` to the helper."
+    );
+    const claims = extractClaims(path, "test.md");
+    expect(claims.filter((c) => c.kind === "path")).toHaveLength(0);
+  });
+
   it("still extracts hidden-directory paths that a dotted key would swallow", () => {
     const path = writeFixture(
       "test.md",

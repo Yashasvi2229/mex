@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { resolve, relative, basename } from "node:path";
+import { resolve, relative } from "node:path";
 import { globSync } from "glob";
 import type { MexConfig, DriftReport, DriftIssue, Claim } from "../types.js";
 import { extractClaims } from "./claims.js";
@@ -237,11 +237,23 @@ export async function runDriftCheckWithGraphStatus(
     }
 
     // Run checkers that work on claims
-    // Only check paths in ROUTER.md — other scaffold files use backticks for
-    // non-path content (config values, IPs, annotation keys) that produces
-    // false MISSING_PATH errors. See https://github.com/mex-memory/mex/issues/79
-    const routerClaims = allClaims.filter((c) => basename(c.source) === "ROUTER.md");
-    const pathIssues = checkPaths(routerClaims, projectRoot, scaffoldRoot);
+    // Paths are checked in every scaffold file. #80 narrowed this to ROUTER.md
+    // because non-path inline code produced false MISSING_PATH errors, but that
+    // left the other ten files unchecked -- a path could rot in context/ or
+    // patterns/ and nothing said so. The extraction side now rejects the values
+    // that caused those false positives, so the scope can widen again.
+    // See https://github.com/mex-memory/mex/issues/107
+    //
+    // A token the scaffold documents as a package is not a missing file: mex
+    // must not call `youtubei.js` a dependency in context/stack.md and a broken
+    // path in ROUTER.md.
+    const declaredPackages = new Set(
+      allClaims.filter((c) => c.kind === "dependency").map((c) => c.value)
+    );
+    const pathClaims = allClaims.filter(
+      (c) => c.kind !== "path" || !declaredPackages.has(c.value)
+    );
+    const pathIssues = checkPaths(pathClaims, projectRoot, scaffoldRoot);
     allIssues.push(...pathIssues);
     checkerIssueCounts.push(["paths", pathIssues.length]);
 

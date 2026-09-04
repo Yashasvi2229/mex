@@ -6,6 +6,7 @@ import {
   rmSync,
 } from "node:fs";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { checkPaths } from "../src/drift/checkers/path.js";
 import { checkEdges } from "../src/drift/checkers/edges.js";
@@ -55,6 +56,52 @@ describe("checkPaths", () => {
     const issues = checkPaths(claims, tmpDir, tmpDir);
     expect(issues).toHaveLength(1);
     expect(issues[0].code).toBe("MISSING_PATH");
+  });
+
+  it("skips runtime paths the repository ignores", () => {
+    execFileSync("git", ["init", "-q"], { cwd: tmpDir });
+    writeFileSync(join(tmpDir, ".gitignore"), "generated/\n*.db\n");
+    const claims = [
+      claim({ kind: "path", value: "generated/" }),
+      claim({ kind: "path", value: "graph.db" }),
+    ];
+    expect(checkPaths(claims, tmpDir, tmpDir)).toHaveLength(0);
+  });
+
+  it("finds a scaffold file named from another scaffold file", () => {
+    const mexDir = join(tmpDir, ".mex");
+    mkdirSync(join(mexDir, "patterns"), { recursive: true });
+    writeFileSync(join(mexDir, "patterns/INDEX.md"), "");
+    const claims = [claim({ kind: "path", value: "INDEX.md" })];
+    expect(checkPaths(claims, tmpDir, mexDir)).toHaveLength(0);
+  });
+
+  it("resolves a path written from a subproject's own root", () => {
+    mkdirSync(join(tmpDir, "server/src/routes"), { recursive: true });
+    writeFileSync(join(tmpDir, "server/src/routes/quiz.ts"), "");
+    const claims = [claim({ kind: "path", value: "routes/quiz.ts" })];
+    expect(checkPaths(claims, tmpDir, tmpDir)).toHaveLength(0);
+  });
+
+  it("skips API routes and placeholders whose first segment does not exist", () => {
+    const claims = [
+      claim({ kind: "path", value: "documents/upload" }),
+      claim({ kind: "path", value: "owner/repo" }),
+    ];
+    expect(checkPaths(claims, tmpDir, tmpDir)).toHaveLength(0);
+  });
+
+  it("still reports a missing path under a directory that does exist", () => {
+    mkdirSync(join(tmpDir, "src"), { recursive: true });
+    const claims = [claim({ kind: "path", value: "src/missing.ts" })];
+    const issues = checkPaths(claims, tmpDir, tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].code).toBe("MISSING_PATH");
+  });
+
+  it("skips naming-convention examples", () => {
+    const claims = [claim({ kind: "path", value: "PascalCase.tsx" })];
+    expect(checkPaths(claims, tmpDir, tmpDir)).toHaveLength(0);
   });
 
   it("passes for existing paths", () => {

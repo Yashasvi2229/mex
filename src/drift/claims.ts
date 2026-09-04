@@ -64,8 +64,21 @@ function isNotAPath(value: string): boolean {
   // Quoted strings or attribute assignments: gather.action="...", foo="bar"
   if (/["']/.test(value)) return true;
 
-  // Wildcard prefixes like *_streaming_client.py — patterns, not real paths
-  if (value.startsWith("*")) return true;
+  // Elided paths: `/api/api/...` in a troubleshooting note names a shape, not
+  // a file.
+  if (value.includes("..")) return true;
+
+  // Home-relative runtime locations: ~/.claude/projects, ~/.config/app.toml.
+  // Real at runtime, absent from the repository, and never a project file.
+  if (value.startsWith("~")) return true;
+
+  // Globs anywhere, not just leading: .mex/graph.db*, *_client.py. A pattern
+  // describes a set of files rather than claiming one exists.
+  if (/[*?]/.test(value)) return true;
+
+  // Anything with whitespace is a command or a sentence, not a path:
+  // `nodemon src/index.ts` names a runner and its argument.
+  if (/\s/.test(value)) return true;
 
   return false;
 }
