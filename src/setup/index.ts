@@ -31,6 +31,13 @@ import {
   verifySetupIgnoreProtection,
 } from "./ignore.js";
 import { finalizeSetupWiki } from "./wiki-finalize.js";
+import {
+  ensureMarkdownAnchor,
+  ensureOpencodeAnchor,
+  planAnchorPointer,
+  planOpencodeAnchor,
+  type AnchorWriteResult,
+} from "./anchor.js";
 
 // ── Constants ──
 
@@ -253,6 +260,7 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   // ── Step 3: Tool config selection ──
 
   let selectedTools: AiTool[] = [];
+  let anchorNotes: string[] = [];
 
   const configuredTools = scaffoldPopulatedAtStart ? findConfig(projectRoot).aiTools : [];
   if (configuredTools.length > 0) {
@@ -261,7 +269,9 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   } else {
     const rl = createInterface({ input: stdin, output: stdout });
     try {
-      selectedTools = await selectToolConfig(rl, projectRoot, dryRun);
+      const selection = await selectToolConfig(rl, projectRoot, dryRun);
+      selectedTools = selection.tools;
+      anchorNotes = selection.anchorNotes;
     } finally {
       rl.close();
     }
@@ -403,6 +413,7 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
     ok("Setup complete.");
   }
 
+  printAnchorNotes(anchorNotes);
   await promptGlobalInstall();
 }
 
@@ -468,7 +479,7 @@ async function selectToolConfig(
   rl: ReturnType<typeof createInterface>,
   projectRoot: string,
   dryRun: boolean,
-): Promise<AiTool[]> {
+): Promise<{ tools: AiTool[]; anchorNotes: string[] }> {
   header("Which AI tool do you use?");
   console.log();
   console.log("  1) Claude Code");
@@ -484,6 +495,7 @@ async function selectToolConfig(
   const choice = (await rl.question("Choice [1-8] (default: 1): ")).trim() || "1";
 
   const selectedTools: AiTool[] = [];
+  const anchorNotes: string[] = [];
 
   const copyConfig = (key: string) => {
     const tool = TOOL_CHOICE_MAP[key];
@@ -500,26 +512,56 @@ async function selectToolConfig(
 
     const src = resolve(TEMPLATES_DIR, config.src);
     const dest = resolve(projectRoot, config.dest);
+    const isJson = config.dest.endsWith(".json");
 
+    // Setup used to skip any anchor that already existed, which left the
+    // scaffold populated but unreferenced -- nothing loads `.mex/` unless an
+    // always-loaded file says to. Append a pointer instead, preserving every
+    // byte the user wrote. See https://github.com/mex-memory/mex/issues/106
     if (dryRun) {
-      if (existsSync(dest)) {
-        info(`(dry run) Would keep existing ${config.dest}`);
-      } else {
+      if (!existsSync(dest)) {
         ok(`(dry run) Would copy ${config.dest}`);
+        return;
       }
+      const plan: AnchorWriteResult = isJson
+        ? planOpencodeAnchor(readFileSync(dest, "utf-8"))
+        : planAnchorPointer(readFileSync(dest));
+      reportAnchor(config.dest, plan, true);
       return;
     }
 
-    if (existsSync(dest)) {
-      // Can't ask interactively here since we already have rl,
-      // so just warn and skip
-      warn(`${config.dest} already exists — skipped (delete it first to replace)`);
-      return;
-    }
+    const result = isJson
+      ? ensureOpencodeAnchor(projectRoot, config.dest, src)
+      : ensureMarkdownAnchor(projectRoot, config.dest, src);
+    reportAnchor(config.dest, result, false);
+  };
 
-    mkdirSync(dirname(dest), { recursive: true });
-    copyFileSync(src, dest);
-    ok(`Copied ${config.dest}`);
+  /** Print an anchor outcome, and remember the ones the user must act on. */
+  const reportAnchor = (dest: string, result: AnchorWriteResult, dry: boolean) => {
+    const prefix = dry ? "(dry run) Would " : "";
+    switch (result.outcome) {
+      case "created":
+        ok(`${prefix}${dry ? "copy" : "Copied"} ${dest}`);
+        return;
+      case "appended":
+        ok(`${prefix}${dry ? "add" : "Added"} a MEX pointer to your existing ${dest}`);
+        return;
+      case "updated":
+        ok(`${prefix}${dry ? "refresh" : "Refreshed"} the MEX pointer in ${dest}`);
+        return;
+      case "already-linked":
+        info(`${dest} already points at .mex/ — left unchanged`);
+        return;
+      case "conflict": {
+        const note =
+          `${dest} was left untouched because ${result.reason}. `
+          + "Add this line to it by hand so the scaffold is loaded: "
+          + "`At the start of every session, read .mex/AGENTS.md and .mex/ROUTER.md.`";
+        warn(note);
+        anchorNotes.push(note);
+        return;
+      }
+    }
   };
 
   switch (choice) {
@@ -552,7 +594,7 @@ async function selectToolConfig(
     saveAiTools(mexDir, selectedTools);
   }
 
-  return [...new Set(selectedTools)];
+  return { tools: [...new Set(selectedTools)], anchorNotes };
 }
 
 function renderAgentAssetsReport(report: AgentAssetsReport): void {
@@ -678,6 +720,25 @@ export function assertGroundingCaptureReady(result: GroundingBaselineCaptureResu
       `${result.skipped} authored grounding reference${result.skipped === 1 ? "" : "s"} could not be verified against the code graph.`,
     );
   }
+}
+
+/**
+ * Repeat anchors that could not be linked automatically.
+ *
+ * The warning at the moment of the decision scrolls past behind population
+ * output and the readiness report, and the whole failure mode of #106 is that
+ * the user never learns the scaffold is not being loaded. Saying it again at
+ * the end is the last point where it is still in front of them.
+ */
+function printAnchorNotes(notes: readonly string[]): void {
+  if (notes.length === 0) return;
+  console.log();
+  header("Action needed: these files do not point at the scaffold yet");
+  console.log();
+  for (const note of notes) warn(note);
+  console.log();
+  info("Until one always-loaded file names `.mex/`, your agent will not read the scaffold.");
+  info("Run `mex check` after fixing them to confirm.");
 }
 
 function printCommitCheckpoint(selectedTools: readonly AiTool[]): void {
