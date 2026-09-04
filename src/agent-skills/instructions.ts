@@ -1,9 +1,5 @@
-import { createHash } from "node:crypto";
-import type {
-  AgentAssetActionName,
-  AgentInstructionChange,
-  AgentSkillClient,
-} from "./types.js";
+import { planManagedBlockEdit } from "../managed-block.js";
+import type { AgentInstructionChange, AgentSkillClient } from "./types.js";
 import { AGENT_SKILL_TARGETS } from "./types.js";
 
 export const MEX_INSTRUCTIONS_START = "<!-- mex-agent:skills:start -->";
@@ -28,7 +24,7 @@ export const KNOWN_LEGACY_INSTRUCTION_SHA256: Readonly<
 };
 
 export interface ManagedInstructionEdit {
-  readonly action: Extract<AgentAssetActionName, "create" | "migrate" | "update" | "noop" | "conflict">;
+  readonly action: "create" | "migrate" | "update" | "noop" | "conflict";
   readonly desiredBytes?: Uint8Array;
   readonly instructionChange?: AgentInstructionChange;
   readonly reason:
@@ -72,116 +68,24 @@ export function planManagedInstructionEdit(
   currentBytes: Uint8Array | null,
   additionalLegacyHashes: readonly string[] = [],
 ): ManagedInstructionEdit {
-  if (currentBytes === null) {
-    const after = renderManagedInstructionBlock(client);
-    return {
-      action: "create",
-      desiredBytes: Buffer.from(`${after}\n`, "utf8"),
-      instructionChange: { scope: "create", before: null, after },
-      reason: "absent",
-    };
-  }
+  const edit = planManagedBlockEdit(
+    {
+      start: MEX_INSTRUCTIONS_START,
+      end: MEX_INSTRUCTIONS_END,
+      render: (eol) => renderManagedInstructionBlock(client, eol),
+      maxPreviewBytes: MAX_MANAGED_INSTRUCTION_PREVIEW_BYTES,
+      legacyHashes: new Set([
+        ...KNOWN_LEGACY_INSTRUCTION_SHA256[client],
+        ...additionalLegacyHashes.map((hash) => hash.toLowerCase()),
+      ]),
+    },
+    currentBytes,
+  );
 
-  let current: string;
-  try {
-    // `ignoreBOM: true` counterintuitively means "do not consume the BOM".
-    // Keeping U+FEFF in the decoded string preserves the original BOM bytes.
-    current = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(currentBytes);
-  } catch {
-    return { action: "conflict", reason: "invalid-encoding" };
-  }
-
-  const starts = allIndexesOf(current, MEX_INSTRUCTIONS_START);
-  const ends = allIndexesOf(current, MEX_INSTRUCTIONS_END);
-  if (starts.length === 0 && ends.length === 0) {
-    const currentHash = sha256(currentBytes);
-    const legacyHashes = new Set([
-      ...KNOWN_LEGACY_INSTRUCTION_SHA256[client],
-      ...additionalLegacyHashes.map((hash) => hash.toLowerCase()),
-    ]);
-    if (legacyHashes.has(currentHash)) {
-      const eol = detectEol(current);
-      const after = renderManagedInstructionBlock(client, eol);
-      return {
-        action: "migrate",
-        desiredBytes: Buffer.from(`${after}${eol}`, "utf8"),
-        instructionChange: {
-          scope: "known-legacy-migration",
-          before: null,
-          after,
-        },
-        reason: "legacy",
-      };
-    }
-
-    const eol = detectEol(current);
-    const after = renderManagedInstructionBlock(client, eol);
-    const separator = current.length === 0 ? "" : current.endsWith("\n") ? eol : `${eol}${eol}`;
-    const desired = `${current}${separator}${after}${eol}`;
-    return {
-      action: "update",
-      desiredBytes: Buffer.from(desired, "utf8"),
-      instructionChange: { scope: "append", before: null, after },
-      reason: "append",
-    };
-  }
-
-  if (
-    starts.length !== 1 ||
-    ends.length !== 1 ||
-    starts[0]! >= ends[0]! ||
-    !isStandaloneMarker(current, starts[0]!, MEX_INSTRUCTIONS_START) ||
-    !isStandaloneMarker(current, ends[0]!, MEX_INSTRUCTIONS_END)
-  ) {
-    return { action: "conflict", reason: "malformed-markers" };
-  }
-
-  const eol = detectEol(current);
-  const before = current.slice(starts[0]!, ends[0]! + MEX_INSTRUCTIONS_END.length);
-  if (Buffer.byteLength(before, "utf8") > MAX_MANAGED_INSTRUCTION_PREVIEW_BYTES) {
-    return { action: "conflict", reason: "managed-block-too-large" };
-  }
-  const after = renderManagedInstructionBlock(client, eol);
-  const desired =
-    current.slice(0, starts[0]!) +
-    after +
-    current.slice(ends[0]! + MEX_INSTRUCTIONS_END.length);
-  if (desired === current) {
-    return { action: "noop", reason: "exact" };
-  }
   return {
-    action: "update",
-    desiredBytes: Buffer.from(desired, "utf8"),
-    instructionChange: { scope: "replace", before, after },
-    reason: "replace",
+    action: edit.action,
+    desiredBytes: edit.desiredBytes,
+    instructionChange: edit.change,
+    reason: edit.reason,
   };
-}
-
-function sha256(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
-function detectEol(content: string): "\n" | "\r\n" {
-  return content.includes("\r\n") ? "\r\n" : "\n";
-}
-
-function allIndexesOf(content: string, needle: string): number[] {
-  const indexes: number[] = [];
-  let offset = 0;
-  while (offset <= content.length - needle.length) {
-    const found = content.indexOf(needle, offset);
-    if (found < 0) break;
-    indexes.push(found);
-    offset = found + needle.length;
-  }
-  return indexes;
-}
-
-function isStandaloneMarker(content: string, index: number, marker: string): boolean {
-  const before = index === 0 ? "" : content[index - 1];
-  const afterIndex = index + marker.length;
-  const after = afterIndex === content.length ? "" : content[afterIndex];
-  const beginsLine = before === "" || before === "\n";
-  const endsLine = after === "" || after === "\n" || (after === "\r" && content[afterIndex + 1] === "\n");
-  return beginsLine && endsLine;
 }
