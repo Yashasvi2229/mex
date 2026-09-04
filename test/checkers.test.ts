@@ -223,6 +223,50 @@ describe("checkEdges", () => {
     expect(issues).toHaveLength(0);
   });
 
+  it("resolves an edge target relative to the file that declares it", () => {
+    const mexDir = join(tmpDir, ".mex");
+    mkdirSync(join(mexDir, "context"), { recursive: true });
+    mkdirSync(join(mexDir, "patterns"), { recursive: true });
+    writeFileSync(join(mexDir, "context/architecture.md"), "");
+    const file = join(mexDir, "patterns/durable-change-signal.md");
+    writeFileSync(file, "");
+    const fm: ScaffoldFrontmatter = {
+      edges: [{ target: "../context/architecture.md" }],
+    };
+    const issues = checkEdges(fm, file, ".mex/patterns/durable-change-signal.md", tmpDir, mexDir);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("resolves a sibling edge target from inside patterns/", () => {
+    const mexDir = join(tmpDir, ".mex");
+    mkdirSync(join(mexDir, "patterns"), { recursive: true });
+    writeFileSync(join(mexDir, "patterns/safe-graph-snapshot-evolution.md"), "");
+    const file = join(mexDir, "patterns/durable-change-signal.md");
+    writeFileSync(file, "");
+    const fm: ScaffoldFrontmatter = {
+      edges: [{ target: "safe-graph-snapshot-evolution.md" }],
+    };
+    const issues = checkEdges(fm, file, ".mex/patterns/durable-change-signal.md", tmpDir, mexDir);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("still reports an edge target that resolves nowhere", () => {
+    const mexDir = join(tmpDir, ".mex");
+    mkdirSync(join(mexDir, "patterns"), { recursive: true });
+    const file = join(mexDir, "patterns/example.md");
+    writeFileSync(file, "");
+    const fm: ScaffoldFrontmatter = {
+      edges: [{ target: "../context/nowhere.md" }],
+    };
+    const issues = checkEdges(fm, file, ".mex/patterns/example.md", tmpDir, mexDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      code: "DEAD_EDGE",
+      file: ".mex/patterns/example.md",
+      message: "Frontmatter edge target does not exist: ../context/nowhere.md",
+    });
+  });
+
   it("returns empty for no frontmatter", () => {
     expect(checkEdges(null, "f", "f", tmpDir, tmpDir)).toEqual([]);
   });
@@ -810,6 +854,79 @@ describe("checkBrokenLinks", () => {
     writeFileSync(file, "See [install](./target.md#install).\n");
     const issues = checkBrokenLinks([file], tmpDir, tmpDir);
     expect(issues).toHaveLength(0);
+  });
+
+  it("does not scan links inside a single-line HTML comment", () => {
+    const file = join(tmpDir, "ROUTER.md");
+    writeFileSync(file, "Intro.\n\n<!-- [example](./nowhere.md) -->\n");
+    const issues = checkBrokenLinks([file], tmpDir, tmpDir);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("does not scan links inside a multi-line HTML comment", () => {
+    mkdirSync(join(tmpDir, "patterns"), { recursive: true });
+    const file = join(tmpDir, "patterns/INDEX.md");
+    writeFileSync(
+      file,
+      "# Pattern Index\n\n<!-- This file is populated during setup.\n" +
+      "     | [filename.md](filename.md) | One-line description |\n" +
+      "     | [add-api-client.md](add-api-client.md) | Adding an integration |\n" +
+      "     Keep this table sorted alphabetically. -->\n\n| Pattern | Use when |\n"
+    );
+    const issues = checkBrokenLinks([file], tmpDir, tmpDir);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("still flags a link on the visible side of a same-line comment", () => {
+    mkdirSync(join(tmpDir, "context"), { recursive: true });
+    const file = join(tmpDir, "context/guide.md");
+    writeFileSync(file, "See [real](./missing.md) <!-- [hidden](./hidden.md) -->\n");
+    const issues = checkBrokenLinks([file], tmpDir, tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toBe("Markdown link target does not exist: ./missing.md");
+  });
+
+  it("resumes scanning after a comment closes", () => {
+    mkdirSync(join(tmpDir, "context"), { recursive: true });
+    const file = join(tmpDir, "context/guide.md");
+    writeFileSync(
+      file,
+      "<!-- [hidden](./hidden.md)\nstill hidden -->\n\nSee [real](./missing.md).\n"
+    );
+    const issues = checkBrokenLinks([file], tmpDir, tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      line: 4,
+      message: "Markdown link target does not exist: ./missing.md",
+    });
+  });
+
+  it("treats an unclosed comment as running to the end of the file", () => {
+    const file = join(tmpDir, "SYNC.md");
+    writeFileSync(file, "Intro.\n\n<!-- draft notes\n[never](./nowhere.md)\n");
+    const issues = checkBrokenLinks([file], tmpDir, tmpDir);
+    expect(issues).toHaveLength(0);
+  });
+
+  it("does not open a comment from a marker inside inline code", () => {
+    mkdirSync(join(tmpDir, "context"), { recursive: true });
+    const file = join(tmpDir, "context/guide.md");
+    writeFileSync(file, "Write `<!--` to open one.\n\nSee [real](./missing.md).\n");
+    const issues = checkBrokenLinks([file], tmpDir, tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toBe("Markdown link target does not exist: ./missing.md");
+  });
+
+  it("does not treat a comment marker inside a fence as a comment", () => {
+    mkdirSync(join(tmpDir, "context"), { recursive: true });
+    const file = join(tmpDir, "context/guide.md");
+    writeFileSync(
+      file,
+      "```html\n<!-- how to comment\n```\n\nSee [real](./missing.md).\n"
+    );
+    const issues = checkBrokenLinks([file], tmpDir, tmpDir);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toBe("Markdown link target does not exist: ./missing.md");
   });
 
   it("downgrades broken links in patterns/ to warning", () => {
