@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/mex-memory/mex/v0.8.0/mascot/mex-mascot.svg" alt="MEX 吉祥物" width="112">
-
-# MEX
+<h1 id="mex">
+  <img src="docs/diagrams/readme/banner.svg" alt="MEX" width="1200">
+</h1>
 
 **让工程师与编程智能体共享项目记忆。**
 
