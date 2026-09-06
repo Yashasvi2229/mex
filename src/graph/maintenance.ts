@@ -229,9 +229,20 @@ export function acquireGraphMaintenanceLease(
   options: GraphMaintenanceOptions = {},
 ): GraphMaintenanceLease {
   const internalOptions = options as InternalMaintenanceOptions;
+  const paths = resolveMaintenancePaths(projectRoot, mode === "rebuild");
+  assertMaintenanceDirectoryUnchanged(paths);
+  if (mode !== "rebuild" && !existsSync(paths.database)) {
+    throw new GraphMaintenanceError(
+      "GRAPH_INDEX_MISSING",
+      "The graph index does not exist. Run `mex graph rebuild` first.",
+    );
+  }
+
   // Every graph writer funnels through here, so this is the one place that can
   // guarantee a store is ignored by Git before it exists — including the runs
-  // that never went through `mex setup` (issue #110).
+  // that never went through `mex setup` (issue #110). Deliberately after the
+  // missing-index refusal, so a mistyped `refresh` in an unindexed checkout
+  // leaves nothing behind.
   const protection = tryEnsureSetupIgnoreProtection(projectRoot);
   if (!protection.ok) {
     // Reported, never fatal: the store is still valid, the checkout is merely
@@ -241,14 +252,6 @@ export function acquireGraphMaintenanceLease(
       phase: "discover",
       message: `Could not ignore local MEX data: ${protection.reason}`,
     });
-  }
-  const paths = resolveMaintenancePaths(projectRoot, mode === "rebuild");
-  assertMaintenanceDirectoryUnchanged(paths);
-  if (mode !== "rebuild" && !existsSync(paths.database)) {
-    throw new GraphMaintenanceError(
-      "GRAPH_INDEX_MISSING",
-      "The graph index does not exist. Run `mex graph rebuild` first.",
-    );
   }
   const lock = acquireMaintenanceLock(paths, internalOptions);
   let released = false;
