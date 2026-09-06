@@ -12,10 +12,10 @@ describe("Graph Extraction Regression", () => {
     await loadGrammars(["typescript", "javascript", "tsx", "jsx", "python", "rust"]);
   });
 
-  const extractFixture = (filename: string): FileExtraction => {
+  const extractFixture = (filename: string, sourceFilename = filename): FileExtraction => {
     const path = join(FIXTURES_DIR, filename);
     const source = readFileSync(path, "utf-8");
-    const result = extractFile(`fixtures/${filename}`, source);
+    const result = extractFile(`fixtures/${sourceFilename}`, source);
     expect(result).not.toBeNull();
     return result!;
   };
@@ -75,7 +75,9 @@ describe("Graph Extraction Regression", () => {
   describe("JavaScript Edge Cases", () => {
     let result: FileExtraction;
     beforeAll(() => {
-      result = extractFixture("javascript-edge-cases.js");
+      // Keep intentionally invalid parser input outside the repository's
+      // supported-source corpus while preserving its virtual language path.
+      result = extractFixture("javascript-edge-cases.js.fixture", "javascript-edge-cases.js");
     });
 
     it("detects language correctly", () => {
@@ -105,7 +107,7 @@ describe("Graph Extraction Regression", () => {
   describe("TSX Components", () => {
     let result: FileExtraction;
     beforeAll(() => {
-      result = extractFixture("tsx-component.tsx");
+      result = extractFixture("tsx-component.tsx.fixture", "tsx-component.tsx");
     });
 
     it("detects language correctly", () => {
