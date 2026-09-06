@@ -162,9 +162,11 @@ export function assertFts5Available(open: typeof openSqlite = openSqlite): void 
     const msg = error instanceof Error ? error.message : String(error);
     if (!/fts5/i.test(msg)) throw error; // a different problem; surface it unchanged
     throw new Error(
-      `Your Node (${process.version}) has SQLite built without FTS5 support, which mex's code graph ` +
-        "requires. Try a different Node build/version - see COMPATIBILITY.md for which versions are " +
-        `known to work. Underlying error: ${msg}`,
+      `Your Node (${process.version}) has SQLite built without FTS5 support, which mex's code graph `
+        + "and wiki index require. FTS5 is a compile-time option, so this is a property of the Node "
+        + "build rather than the version number - installing a different build or version of Node is "
+        + "the fix. See the SQLite FTS5 section of COMPATIBILITY.md. "
+        + `Underlying error: ${msg}`,
     );
   } finally {
     probe.close();
