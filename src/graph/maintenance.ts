@@ -36,6 +36,7 @@ import {
   inspectGraphStatus,
 } from "./status.js";
 import { GRAPH_SNAPSHOT_METADATA_KEY } from "./snapshot.js";
+import { tryEnsureSetupIgnoreProtection } from "../setup/ignore.js";
 
 const LOCK_FILE = "graph.db.lock";
 const LOCK_GATE_FILE = "graph.db.lock.gate";
@@ -228,6 +229,19 @@ export function acquireGraphMaintenanceLease(
   options: GraphMaintenanceOptions = {},
 ): GraphMaintenanceLease {
   const internalOptions = options as InternalMaintenanceOptions;
+  // Every graph writer funnels through here, so this is the one place that can
+  // guarantee a store is ignored by Git before it exists — including the runs
+  // that never went through `mex setup` (issue #110).
+  const protection = tryEnsureSetupIgnoreProtection(projectRoot);
+  if (!protection.ok) {
+    // Reported, never fatal: the store is still valid, the checkout is merely
+    // unprotected. Emitted directly rather than through `progress` so it cannot
+    // turn an already-cancelled signal into a throw before the lease exists.
+    options.onProgress?.({
+      phase: "discover",
+      message: `Could not ignore local MEX data: ${protection.reason}`,
+    });
+  }
   const paths = resolveMaintenancePaths(projectRoot, mode === "rebuild");
   assertMaintenanceDirectoryUnchanged(paths);
   if (mode !== "rebuild" && !existsSync(paths.database)) {

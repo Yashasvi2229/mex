@@ -17,7 +17,7 @@
  */
 
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
-import { openSqlite, type SqliteDatabase } from "../../graph/db/sqlite.js";
+import { assertFts5Available, openSqlite, type SqliteDatabase } from "../../graph/db/sqlite.js";
 import { indexExists } from "./dbfile.js";
 import { WIKI_META_KEYS, WIKI_SCHEMA_SQL, WIKI_SCHEMA_VERSION } from "./schema.js";
 
@@ -86,6 +86,31 @@ function configureConnection(db: SqliteDatabase): void {
   db.pragma("busy_timeout = 5000");
 }
 
+/**
+ * The index's `wiki_fts` table needs FTS5, which not every Node build's bundled
+ * SQLite provides (issue #110). Report that plainly rather than as
+ * `WIKI_INDEX_REBUILD_REQUIRED`: rebuilding cannot conjure a SQLite module, so
+ * pointing the user at `mex wiki rebuild-index` would send them in a loop.
+ *
+ * @param probe Injected for the coverage test, which has no FTS5-less Node to
+ *              reproduce this on. Production callers take the default.
+ */
+export function fts5UnavailableDiagnostic(
+  path: string,
+  probe: () => void = assertFts5Available,
+): WikiDiagnostic | null {
+  try {
+    probe();
+    return null;
+  } catch (error) {
+    return diagnostic(
+      "WIKI_INDEX_FTS5_UNAVAILABLE",
+      error instanceof Error ? error.message : String(error),
+      { file: path },
+    );
+  }
+}
+
 export function openWikiIndex(path: string, options: OpenIndexOptions = {}): OpenIndexResult {
   if (!indexExists(path)) {
     return {
@@ -93,6 +118,9 @@ export function openWikiIndex(path: string, options: OpenIndexOptions = {}): Ope
       diagnostic: diagnostic("WIKI_INDEX_MISSING", `No wiki index at ${path}.`, { file: path }),
     };
   }
+
+  const fts5 = fts5UnavailableDiagnostic(path);
+  if (fts5) return { ok: false, diagnostic: fts5 };
 
   let db: SqliteDatabase;
   try {
@@ -151,6 +179,9 @@ export function openWikiIndex(path: string, options: OpenIndexOptions = {}): Ope
  * than seven that could drift apart.
  */
 export function createWikiIndex(path: string): WikiIndexHandle {
+  // Fail before the file is created, so a Node without FTS5 leaves no partial
+  // index behind for the next run to trip over.
+  assertFts5Available();
   const db = openSqlite(path);
   configureConnection(db);
   db.pragma("journal_mode = WAL");
