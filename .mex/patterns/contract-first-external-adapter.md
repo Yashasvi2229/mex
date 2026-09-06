@@ -7,11 +7,22 @@ triggers:
   - "teammate implementation"
   - "consumer port"
 edges:
-  - target: "../context/architecture.md"
+  - target: "context/architecture.md"
     condition: "when deciding dependency direction and ownership boundaries"
-  - target: "../context/decisions.md"
+  - target: "context/decisions.md"
     condition: "when a provisional boundary becomes a durable project decision"
-last_updated: 2026-08-26
+grounds_to: []
+last_updated: 2026-09-03
+mex:
+  id: mx_01M1M0CJHQ2W47KM6K176ZYYPA
+  type: pattern
+  status: promoted
+  revision: 2
+  title: contract-first-external-adapter
+  relations:
+    - type: related_to
+      target: mx_01M1M0CJ5C5XQV0HM5VM787WQS
+      note: when deciding dependency direction and ownership boundaries
 ---
 
 # Contract-First External Adapter

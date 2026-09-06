@@ -1,25 +1,20 @@
 ---
 name: agents
 description: Always-loaded project anchor. Read this first. Contains project identity, non-negotiables, commands, and pointer to ROUTER.md for full context.
-last_updated: "2026-07-12"
+last_updated: "2026-09-06"
 ---
 
 # mex
 
 ## What This Is
-<!-- One sentence. What does this project do?
-     Length: 1 sentence maximum.
-     Not a tagline — a factual description of what the software does.
-     Example: "A REST API for managing inventory across multiple warehouse locations." -->
+A local-first TypeScript CLI and browser Hub that turns repository code and agent knowledge into a tracked Wiki backed by disposable Graph and Wiki indexes.
 
 ## Non-Negotiables
-<!-- Hard rules the agent must never violate. Not preferences — rules.
-     These are the things that, if broken, cause real damage to the codebase.
-     Length: 3-5 items. More than 5 means the list has not been prioritised.
-     Example:
-     - Never write database queries outside of the repository layer
-     - Never commit secrets or API keys
-     - Always handle errors explicitly — no silent failures -->
+- Tracked Markdown is canonical; never commit `.mex/graph.db*`, `.mex/wiki.db*`, or `.mex/local/`.
+- Ordinary reads never repair, migrate, or initialize state; mutations and maintenance must be explicit.
+- Keep the package-root API limited to intentional exports from `src/index.ts`.
+- Never weaken containment, freshness, privacy, or bounded-work checks to make a test pass.
+- MEX never stages, commits, pushes, or pulls on a user's behalf.
 
 ## Commands
 - Dev: `npm run dev`
@@ -29,8 +24,20 @@ last_updated: "2026-07-12"
 
 Use the smallest relevant structured resolver. For Inbox or Relay mutations, resolve only the intended action with `mex inbox contract --action <command-id> --json` or `mex relay contract --action <command-id> --json`; use `mex capabilities --json` only for broader capability discovery. If the user explicitly asks to create, save, or draft a checkout-local Inbox or Relay draft, preview and apply that exact draft without asking for redundant confirmation. Deleting a local draft, or publishing, approving, rejecting, withdrawing, marking stale, repairing, taking or acknowledging, or closing, requires fresh explicit confirmation after semantic preview. Treat Git commit, push, and pull as separate actions requiring their own authorization.
 
+## Code Graph
+The repo is indexed into `.mex/graph.db`. Use it as a bounded discovery tool alongside Grep/Glob.
+- For an exact symbol, use `mex graph query <who-calls|what-calls|where-defined> <symbol>` and `mex graph get <id>`.
+- For an unfamiliar task, start with `mex graph scope "<task>"`; treat its source as already read and inspect its evidence/status before relying on it.
+- Scope matches words rather than meaning. If evidence is insufficient, use Grep/Glob instead of repeatedly rephrasing the same scope.
+- Before editing a symbol, use `mex impact <symbol|file>` to inspect callers and grounded knowledge.
+- Read broad, ground tight: only behavioral claims get exact node fingerprints and useful `mex://<nodeId>` anchors.
+- During `mex sync`, adjudicate ambiguous grounding and verify refreshed grounding is emitted.
+
 ## Scaffold Growth
-After every task: if no pattern exists for the task type you just completed, create one. If a pattern or context file is now out of date, update it. The scaffold grows from real work, not just setup. See the GROW step in `ROUTER.md` for details.
+After meaningful work, run GROW: ground what changed, record state/context updates, orient with a reusable pattern when warranted, and write updated timestamps/rationale. See `ROUTER.md`.
+
+Keep MEX-context acknowledgements concise and natural; name the specific file,
+event log, entity, or Code Graph evidence used.
 
 ## Navigation
 At the start of every session, read `ROUTER.md` before doing anything else.

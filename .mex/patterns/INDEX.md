@@ -11,3 +11,5 @@ Lookup table for project-specific pattern files.
 | [`secure-local-project-hub.md`](secure-local-project-hub.md) | Adding a loopback Hub route, API contract, browser session, or explicit local job |
 | [`safe-graph-snapshot-evolution.md`](safe-graph-snapshot-evolution.md) | Changing graph indexing, freshness inspection, or recovery without publishing mixed or unsafe snapshots |
 | [`durable-change-signal.md`](durable-change-signal.md) | Adding or changing a drift baseline, or any value that answers "has this changed?" |
+| [`dogfood-mex-setup.md`](dogfood-mex-setup.md) | Running, resuming, or validating MEX setup against this repository itself |
+| [`release-readme-visuals.md`](release-readme-visuals.md) | Refreshing the release README, badges, community links, or architecture illustrations |

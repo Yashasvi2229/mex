@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkToolConfigSync } from "../src/drift/checkers/tool-config-sync.js";
-import { extractFrontmatter, findMexAnchors } from "../src/markdown.js";
+import { extractFrontmatter, extractGroundings, findMexAnchors } from "../src/markdown.js";
 import {
   MEX_INSTRUCTIONS_END,
   MEX_INSTRUCTIONS_START,
@@ -42,14 +42,26 @@ const readText = (path: string): string =>
   readFileSync(path, "utf-8").replace(/\r\n/g, "\n");
 
 describe("shipped code-graph agent guidance", () => {
-  it("models grounding slots and inert inline-anchor examples in templates and dogfood", () => {
+  it("keeps shipped grounding examples inert while the populated dogfood grounding stays real", () => {
+    for (const name of ["architecture", "conventions", "decisions", "setup", "stack"]) {
+      const content = readText(join("templates", "context", `${name}.md`));
+      expect(extractFrontmatter(content)?.grounds_to, `templates/${name}`).toEqual([]);
+      expect(content, `templates/${name}`).toContain("[`someFunction()`](mex://function:<tier-1-id>)");
+      expect(findMexAnchors(content), `templates/${name} examples must stay inert`).toEqual([]);
+    }
+
+    const dogfoodPattern = readText(".mex/patterns/dogfood-mex-setup.md");
+    const dogfoodGroundings = extractGroundings(dogfoodPattern);
+    expect(dogfoodGroundings.length).toBeGreaterThan(0);
+    expect(findMexAnchors(dogfoodPattern).map((anchor) => anchor.nodeId))
+      .toEqual(expect.arrayContaining(dogfoodGroundings.map((grounding) => grounding.node)));
+    for (const name of ["architecture", "conventions", "decisions", "setup", "stack"]) {
+      const content = readText(join(".mex/context", `${name}.md`));
+      expect(content, `.mex/${name}`).not.toContain("mex://function:<tier-1-id>");
+      expect(content, `.mex/${name}`).not.toContain("[YYYY-MM-DD]");
+    }
+
     for (const area of ["templates", ".mex"]) {
-      for (const name of ["architecture", "conventions", "decisions", "setup", "stack"]) {
-        const content = readText(join(area, "context", `${name}.md`));
-        expect(extractFrontmatter(content)?.grounds_to, `${area}/${name}`).toEqual([]);
-        expect(content, `${area}/${name}`).toContain("[`someFunction()`](mex://function:<tier-1-id>)");
-        expect(findMexAnchors(content), `${area}/${name} examples must stay inert`).toEqual([]);
-      }
       const patterns = readText(join(area, "patterns/README.md"));
       expect(patterns).toContain("grounds_to:");
       expect(patterns).toContain('fingerprint: "mh:64:<hex-fingerprint>"');

@@ -14,7 +14,9 @@ edges:
     condition: when setting up the dev environment or running the project for the first time
   - target: patterns/INDEX.md
     condition: when starting a task — check the pattern index for a matching pattern file
-last_updated: 2026-09-02
+  - target: patterns/release-readme-visuals.md
+    condition: when refreshing the release README, badges, community links, or architecture illustrations
+last_updated: 2026-09-06
 ---
 
 # Session Bootstrap
@@ -26,6 +28,14 @@ Then read this file fully before doing anything else in this session.
 ## Current Project State
 
 **Working:**
+- The MEX repository now dogfoods the ordinary `mex setup` path. Resumed setup
+  reuses persisted AI-tool selection even while population is incomplete, and
+  existing-codebase prompts merge missing knowledge without replacing authored
+  Router, AGENTS, context, or pattern content.
+- Canonical Team state includes the active Member `theDakshJaitly` and its
+  immutable `member.added` Activity record. These Git-tracked records become
+  visible in collaborators' Hubs after commit, push, and pull; effective Member
+  selection remains checkout-local.
 - Fresh-user setup is now a release-complete path: it preserves authored
   scaffold files, protects disposable Graph/Wiki/local state from Git, launches
   the first selected available Claude Code or Codex CLI from the repository
@@ -159,8 +169,9 @@ Then read this file fully before doing anything else in this session.
 - Public package-root exports for the provisional team contracts.
 
 **Known Issues:**
-- The current scaffold architecture, conventions, decisions, stack, and setup
-  context files are still largely unpopulated placeholders.
+- Graph schema v4 is operational in this checkout, with two partially parsed
+  source files and no failed files. Treat partial graph evidence as degraded and
+  narrow or fall back to source discovery when needed.
 - Development fixtures are never production data. Graph and Wiki repair controls
   appear only when a stable status observation makes the requested operation
   safe; migration-required or unstable Wiki observations never fabricate a
@@ -181,6 +192,7 @@ Load the relevant file based on the current task. Always load `context/architect
 | Writing or reviewing code | `context/conventions.md` |
 | Making a design decision | `context/decisions.md` |
 | Setting up or running the project | `context/setup.md` |
+| Refreshing the release README or visuals | `patterns/release-readme-visuals.md` |
 | Any specific task | Check `patterns/INDEX.md` for a matching pattern |
 
 ## Behavioural Contract

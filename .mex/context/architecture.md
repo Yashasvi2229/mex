@@ -12,57 +12,104 @@ edges:
     condition: when specific technology details are needed
   - target: context/decisions.md
     condition: when understanding why the architecture is structured this way
+  - target: patterns/fresh-graph-hub-integration.md
+    condition: when connecting Graph reads or maintenance to Project Hub
+  - target: patterns/local-first-team-state.md
+    condition: when changing canonical or checkout-local Team state
+  - target: patterns/secure-local-project-hub.md
+    condition: when changing Hub routes, sessions, projections, or jobs
+  - target: patterns/safe-graph-snapshot-evolution.md
+    condition: when changing Graph indexing, freshness, or recovery
 # Broad overview: keep this empty unless a claim depends on a few specific symbols.
 # Entry shape: { node: "function:<tier-1-id>", fingerprint: "mh:64:<hex>" }
 grounds_to: []
-last_updated: [YYYY-MM-DD]
+last_updated: 2026-09-06
+mex:
+  id: mx_01M1M0CJ5C5XQV0HM5VM787WQS
+  type: architecture
+  status: promoted
+  revision: 6
+  title: architecture
+  relations:
+    - type: related_to
+      target: mx_01M1M0CJH1XW1V1FRGAGMWFXD6
+      note: when specific technology details are needed
+    - type: related_to
+      target: mx_01M1M0CJKZF3ABC1PQREMA2HYR
+      note: when connecting Graph reads or maintenance to Project Hub
+    - type: related_to
+      target: mx_01M1M0CJMRWZY5TZCEBSFJPAHT
+      note: when changing canonical or checkout-local Team state
+    - type: related_to
+      target: mx_01M1M0CJQ2BSV71G1C7TXZD9RH
+      note: when changing Hub routes, sessions, projections, or jobs
+    - type: related_to
+      target: mx_01M1M0CJP81C590FCKTSN5HA3Q
+      note: when changing Graph indexing, freshness, or recovery
 ---
 
 # Architecture
 
-<!-- Read broad, ground tight. Architecture usually grounds sparsely. When a
-     specific symbol is worth navigating to, use this inline form:
-```markdown
-[`someFunction()`](mex://function:<tier-1-id>)
-```
+<!-- mex:entity
+id: mx_01M1M0CJ4PS8VVVJJTFA58S3A5
+type: component
+status: promoted
+revision: 1
 -->
-
 ## System Overview
-<!-- Describe how the major pieces connect.
-     Focus on FLOW not technology — how does a request/action move through the system?
-     Use the actual names of components, services, and modules from this codebase.
-     Format: a simple text flow diagram or short prose description.
-     Length: 5-15 lines. Minimum 5 lines. Should be readable in 30 seconds.
-     Example:
-     "Request comes in via Express router → validated by middleware →
-     passed to service layer → service calls repository for data →
-     repository queries PostgreSQL → result returned up the chain →
-     formatted by serializer → sent as JSON response." -->
 
+Repository source and tracked MEX artifacts—primarily Markdown, plus canonical
+JSONL audit/event history—are the durable inputs.
+The CLI resolves the repository/scaffold, validates bounded input, and dispatches
+to Graph, Wiki, drift, Team, or Hub application services. Graph maintenance
+extracts supported source into the disposable `.mex/graph.db`; graph reads adopt
+an immutable, provenance-bound snapshot. Agents use those facts to author or
+repair tracked Markdown and attach tight symbol groundings. Wiki maintenance
+migrates and indexes that Markdown into disposable `.mex/wiki.db`. The local
+Project Hub consumes repository adapters for Graph, Wiki, and Team data through
+private contracts, while explicit jobs own maintenance. Canonical Team records
+remain Git-tracked; per-checkout identity, drafts, cursors, leases, and jobs live
+under `.mex/local/`.
+
+<!-- mex:entity
+id: mx_01M1M0CJ403NMAF19JFEKQ5W29
+type: component
+status: promoted
+revision: 1
+-->
 ## Key Components
-<!-- List the major components, modules, or services in this project.
-     For each: name, what it does, what it depends on.
-     Only include components that are non-obvious or have important constraints.
-     Minimum 3 components. If you cannot identify 3, write "[TO DETERMINE]" as a placeholder.
-     Length: 1-2 lines per component.
-     Example:
-     - **AuthService** — handles all authentication logic, depends on UserRepository and JWTLib
-     - **EventBus** — async communication between services, all side effects go through here -->
 
+- **CLI and setup (`src/cli.ts`, `src/setup/`)** — command dispatch, resumable scaffold creation, agent asset installation, Graph construction, population, grounding capture, and Wiki finalization.
+- **Code Graph (`src/graph/`)** — deterministic extraction, versioned SQLite storage, immutable read sessions, provenance/freshness checks, retrieval, impact, and explicit refresh/rebuild recovery.
+- **Wiki (`src/wiki/`)** — treats repository Markdown as canonical, owns migration/validation/indexing, and exposes bounded query plus repository-adapter services.
+- **Team workflows (`src/team/`)** — canonical Members, Activity, Workstreams, Inbox, and Relay records plus signed preview/apply services and isolated checkout-local state.
+- **Project Hub (`src/hub/`, `packages/hub-contracts`, `packages/hub-web`)** — `runHubCommand()` composes the loopback server, private API contracts, repository adapters, durable local jobs, and route-lazy React workbench.
+- **Drift and agent workflows (`src/drift/`, `src/sync/`, `src/agent-skills/`)** — check grounded knowledge, prepare bounded repair briefs, and install the governed Inbox/Relay integrations.
+
+<!-- mex:entity
+id: mx_01M1M0CJ3B8XKJ8NJGYRMYJ59C
+type: component
+status: promoted
+revision: 1
+-->
 ## External Dependencies
-<!-- Third-party services, APIs, or databases this project connects to.
-     For each: what it is, what we use it for, any important constraints.
-     Minimum 3 items. If you cannot find 3, write "[TO DETERMINE]" as a placeholder.
-     Length: 1-2 lines per dependency.
-     Example:
-     - **PostgreSQL** — primary database, all writes go through the repository layer only
-     - **SendGrid** — transactional email, use the EmailService wrapper, never call directly -->
 
+- **Git** — repository identity, revisions, sharing, and bounded read-only observations; product code never stages, commits, pushes, or pulls.
+- Claude Code or Codex may be launched for setup population; interactive sync
+  can use Claude Code, Codex, or OpenCode, and prompt-only fallback works with
+  any file-reading agent.
+- A local browser connects only to the loopback Project Hub and exchanges a one-use bootstrap token for a private session.
+- **posthog-node** — optional anonymous CLI telemetry; disabled for the development repository and by `DO_NOT_TRACK=1` or `MEX_TELEMETRY=0`.
+
+<!-- mex:entity
+id: mx_01M1M0CJ1E1X7BW1Q7PMGPVCRC
+type: component
+status: promoted
+revision: 1
+-->
 ## What Does NOT Exist Here
-<!-- Explicit boundaries — what is deliberately outside this system.
-     This prevents the agent from building things that belong elsewhere or making wrong assumptions.
-     Minimum 2 items. If you cannot find 2, write "[TO DETERMINE]" as a placeholder.
-     Length: 2-5 items.
-     Example:
-     - No background job processing — that lives in the worker service (separate repo)
-     - No file storage — we use S3 directly, no abstraction layer -->
+
+- No hosted MEX service, remote database, account system, or cloud sync; sharing is ordinary Git-tracked Markdown.
+- No implicit repair on Graph, Wiki, or Team read paths; all maintenance and mutations are explicit operations.
+- No production fixture fallback: unavailable repository capabilities stay visibly unavailable.
+- No public package export for internal Hub or Team workflow contracts unless a separate compatibility change deliberately adds one.
