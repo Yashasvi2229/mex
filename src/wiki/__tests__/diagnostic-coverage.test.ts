@@ -56,7 +56,8 @@ import { entity, grounding, location, ids } from "../model/__tests__/helpers.js"
 import { parseWikiMarkdown } from "../markdown/codec.js";
 import type { ParsedEntity } from "../markdown/contract.js";
 import { detectRangeOverlaps } from "../index/write.js";
-import { fts5UnavailableDiagnostic, openWikiIndex } from "../index/open.js";
+import { openWikiIndex } from "../index/open.js";
+import { fts5UnavailableDiagnostic } from "../index/fts5.js";
 import { assertFts5Available, openSqlite } from "../../graph/db/sqlite.js";
 import { rebuildWikiIndex } from "../index/rebuild.js";
 import { getEntity } from "../query/get.js";

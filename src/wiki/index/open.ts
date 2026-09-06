@@ -18,6 +18,7 @@
 
 import { diagnostic, type WikiDiagnostic } from "../model/diagnostic.js";
 import { assertFts5Available, openSqlite, type SqliteDatabase } from "../../graph/db/sqlite.js";
+import { fts5UnavailableDiagnostic } from "./fts5.js";
 import { indexExists } from "./dbfile.js";
 import { WIKI_META_KEYS, WIKI_SCHEMA_SQL, WIKI_SCHEMA_VERSION } from "./schema.js";
 
@@ -84,31 +85,6 @@ function readSchemaVersion(db: SqliteDatabase): number | null {
  */
 function configureConnection(db: SqliteDatabase): void {
   db.pragma("busy_timeout = 5000");
-}
-
-/**
- * The index's `wiki_fts` table needs FTS5, which not every Node build's bundled
- * SQLite provides (issue #110). Report that plainly rather than as
- * `WIKI_INDEX_REBUILD_REQUIRED`: rebuilding cannot conjure a SQLite module, so
- * pointing the user at `mex wiki rebuild-index` would send them in a loop.
- *
- * @param probe Injected for the coverage test, which has no FTS5-less Node to
- *              reproduce this on. Production callers take the default.
- */
-export function fts5UnavailableDiagnostic(
-  path: string,
-  probe: () => void = assertFts5Available,
-): WikiDiagnostic | null {
-  try {
-    probe();
-    return null;
-  } catch (error) {
-    return diagnostic(
-      "WIKI_INDEX_FTS5_UNAVAILABLE",
-      error instanceof Error ? error.message : String(error),
-      { file: path },
-    );
-  }
 }
 
 export function openWikiIndex(path: string, options: OpenIndexOptions = {}): OpenIndexResult {
