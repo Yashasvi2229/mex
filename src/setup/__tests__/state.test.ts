@@ -9,6 +9,7 @@ import {
   isScaffoldPopulated,
   verifyExistingSetupConfig,
 } from "../index.js";
+import { loadConfiguredAiTools } from "../../config.js";
 
 const roots: string[] = [];
 
@@ -43,6 +44,18 @@ describe("setup state and scaffold ownership", () => {
 
     expect(ensureScaffoldFile(source, destination)).toBe("skip");
     expect(readFileSync(destination, "utf-8")).toBe("authored [YYYY-MM-DD] content\n");
+  });
+
+  it("reuses configured AI tools while scaffold population is incomplete", () => {
+    const root = fixture();
+    const mex = join(root, ".mex");
+    mkdirSync(join(mex, "context"), { recursive: true });
+    writeFileSync(join(mex, "config.json"), JSON.stringify({ aiTools: ["claude", "codex"] }));
+    writeFileSync(join(mex, "context", "setup.md"), "last_updated: [YYYY-MM-DD]\n");
+
+    expect(isScaffoldPopulated(mex)).toBe(false);
+    expect(detectProjectState(root, mex)).toBe("fresh");
+    expect(loadConfiguredAiTools(mex)).toEqual(["claude", "codex"]);
   });
 
   it("refuses malformed canonical config without replacing its bytes", () => {

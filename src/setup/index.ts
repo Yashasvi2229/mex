@@ -11,7 +11,13 @@ import {
   buildExistingWithBriefPrompt,
   buildExistingNoBriefPrompt,
 } from "./prompts.js";
-import { saveAiTools, ensureScaffoldIdentity, findConfig, readScaffoldId } from "../config.js";
+import {
+  saveAiTools,
+  ensureScaffoldIdentity,
+  findConfig,
+  loadConfiguredAiTools,
+  readScaffoldId,
+} from "../config.js";
 import {
   captureGroundingBaselines,
   type GroundingBaselineCaptureResult,
@@ -275,19 +281,6 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
     throw new Error("No Git repository found. Run `git init` first, then rerun mex setup.");
   }
 
-  // Guard: don't run inside the mex repo itself
-  if (existsSync(resolve(projectRoot, "src", "setup", "index.ts"))) {
-    const pkg = resolve(projectRoot, "package.json");
-    if (existsSync(pkg)) {
-      const pkgContent = readFileSync(pkg, "utf-8");
-      if (pkgContent.includes('"promexeus"') || pkgContent.includes('"mex"')) {
-        throw new Error(
-          "You're inside the mex repository itself. Run this from your project root instead."
-        );
-      }
-    }
-  }
-
   // ── Step 1: Detect project state ──
 
   const scaffoldPopulatedAtStart = isScaffoldPopulated(mexDir);
@@ -354,7 +347,10 @@ export async function runSetup(opts: { dryRun?: boolean; mode?: string } = {}): 
   let selectedTools: AiTool[] = [];
   let anchorNotes: string[] = [];
 
-  const configuredTools = scaffoldPopulatedAtStart ? findConfig(projectRoot).aiTools : [];
+  // A persisted selection belongs to the scaffold even when population was
+  // interrupted or the templates gained new required slots. Reuse it instead
+  // of making a resumed setup ask the user the same question again.
+  const configuredTools = loadConfiguredAiTools(mexDir);
   if (configuredTools.length > 0) {
     selectedTools = configuredTools;
     // A scaffold orphaned by the old skip lands here, not in the menu

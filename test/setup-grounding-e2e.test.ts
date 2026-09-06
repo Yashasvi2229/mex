@@ -2,7 +2,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildExistingNoBriefPrompt, buildExistingWithBriefPrompt } from "../src/setup/prompts.js";
+import {
+  buildExistingNoBriefPrompt,
+  buildExistingWithBriefPrompt,
+  buildFreshPrompt,
+} from "../src/setup/prompts.js";
 import { createGraphEngine } from "../src/graph/engine-impl.js";
 import { runGraphScope } from "../src/graph/cli-agent.js";
 import { deserializeFingerprint } from "../src/graph/fingerprint.js";
@@ -28,8 +32,26 @@ describe("setup graph-grounding population", () => {
       expect(prompt).toContain("Never ground every node returned by scope");
       expect(prompt).toContain("architecture/stack/conventions files should ground sparsely");
       expect(prompt).toContain("Pattern files and deep domain files should ground tightly");
+      expect(prompt).toContain("use that exact launcher consistently");
+      expect(prompt).toContain("node dist/cli.js");
+      expect(prompt).toContain("Treat substantive existing content as durable project knowledge");
+      expect(prompt).toContain("managed instruction blocks");
+      expect(prompt).toMatch(/every existing project pattern/iu);
+      expect(prompt).toMatch(/do not\s+duplicate, delete, or rename a pattern/iu);
+      expect(prompt).toContain("Edge targets are relative to the .mex/ scaffold root");
       expect(prompt).not.toContain("Read 2-3 representative files");
     }
+  });
+
+  it("preserves authored scaffold content when a fresh project resumes setup", () => {
+    const prompt = buildFreshPrompt();
+    expect(prompt).toContain("Treat substantive existing content as durable project knowledge");
+    expect(prompt).toContain("managed instruction blocks");
+    expect(prompt).toMatch(/every existing project pattern/iu);
+    expect(prompt).toMatch(/never duplicate,\s+delete, or rename a pattern/iu);
+    expect(prompt).toContain("If no\nproject-specific patterns exist, generate 2-3 starter patterns");
+    expect(prompt).toContain("Edge targets are relative to the .mex/ scaffold root");
+    expect(prompt).toContain("fill only incomplete .mex/context/ slots");
   });
 
   it("produces a grounded and anchored scaffold from real setup graph facts", async () => {

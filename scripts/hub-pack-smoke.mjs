@@ -866,12 +866,25 @@ function parsePackResult(output) {
 
 async function verifyFreshCodeRepoSetup(tarball, workRoot, cache, version) {
   const project = join(workRoot, "fresh-setup-project");
-  mkdirSync(join(project, "src"), { recursive: true });
-  writeFileSync(join(project, "package.json"), "{\n  \"private\": true\n}\n");
+  mkdirSync(join(project, "src", "setup"), { recursive: true });
+  writeFileSync(join(project, "package.json"), [
+    "{",
+    '  "name": "mex-agent",',
+    '  "private": true,',
+    '  "bin": { "mex": "src/index.ts" }',
+    "}",
+    "",
+  ].join("\n"));
   writeFileSync(join(project, ".gitignore"), "node_modules/\n");
   writeFileSync(join(project, "src", "index.ts"), [
     "export function freshSetupValue(): number {",
     "  return 42;",
+    "}",
+    "",
+  ].join("\n"));
+  writeFileSync(join(project, "src", "setup", "index.ts"), [
+    "export function setupFixtureValue(): number {",
+    "  return 8;",
     "}",
     "",
   ].join("\n"));

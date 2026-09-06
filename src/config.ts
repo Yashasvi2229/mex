@@ -130,6 +130,11 @@ function loadAiTools(raw: MexPersistedConfig | null): AiTool[] {
   return arr.filter((v): v is AiTool => typeof v === "string" && VALID_AI_TOOLS.has(v));
 }
 
+/** Read an existing setup tool selection without requiring a complete scaffold. */
+export function loadConfiguredAiTools(scaffoldRoot: string): AiTool[] {
+  return loadAiTools(loadPersistedConfig(scaffoldRoot));
+}
+
 function loadStalenessThresholds(scaffoldRoot: string, raw: MexPersistedConfig | null): StalenessThresholds | undefined {
   const configPath = resolve(scaffoldRoot, CONFIG_FILE);
   if (!raw) return undefined;
