@@ -91,7 +91,7 @@ describe("openGraphDatabase FTS5 preflight", () => {
     }
   });
 
-  it("closes the database handle when the FTS5 preflight fails, instead of leaking it open", async () => {
+  it("never opens the store at all when the FTS5 preflight fails, so no handle can leak", async () => {
     const root = mkdtempSync(join(tmpdir(), "mex-database-fts5-close-"));
     roots.push(root);
 
@@ -130,6 +130,35 @@ describe("openGraphDatabase FTS5 preflight", () => {
     };
 
     expect(() => fresh.openGraphDatabase(join(root, "graph.db"))).toThrow(/FTS5/);
-    expect(sqliteMock.__getRealGraphDb()?.open).toBe(false);
+    // The preflight runs before the store is opened, so there is no handle to
+    // close — strictly better than opening one and closing it on the way out.
+    expect(sqliteMock.__getRealGraphDb()).toBeUndefined();
+  });
+
+  it("preflights read-only opens too, so a store copied from an FTS5 machine fails legibly", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mex-database-fts5-readonly-"));
+    roots.push(root);
+    const dbPath = join(root, "graph.db");
+    openGraphDatabase(dbPath).close();
+
+    vi.resetModules();
+    vi.doMock("../db/sqlite.js", async () => {
+      const actual = await vi.importActual<typeof import("../db/sqlite.js")>("../db/sqlite.js");
+      return {
+        ...actual,
+        openSqlite: (path: string, options?: { readOnly?: boolean; immutable?: boolean }) => (
+          path === ":memory:"
+            ? fakeDb(() => {
+              throw new Error("no such module: fts5");
+            })
+            : actual.openSqlite(path, options)
+        ),
+      };
+    });
+
+    const fresh = await import("../db/database.js");
+    for (const options of [{ readOnly: true }, { readOnly: true, immutable: true }]) {
+      expect(() => fresh.openGraphDatabase(dbPath, options)).toThrow(/FTS5/);
+    }
   });
 });

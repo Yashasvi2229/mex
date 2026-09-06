@@ -111,6 +111,13 @@ export function openGraphDatabase(
     mkdirSync(dir, { recursive: true });
   }
 
+  // Every graph open needs FTS5: writers apply `schema.sql`'s virtual tables,
+  // and readers query `nodes_fts` / `source_chunks_fts` (search, scope, impact,
+  // and the grounding checker). A store built on an FTS5-capable machine and
+  // copied to one without it fails on read, not on build, so the read-only and
+  // immutable paths need this preflight just as much as the writable one.
+  assertFts5Available();
+
   if (options.readOnly) {
     return options.immutable
       ? openImmutableGraphDatabase(dbPath)
@@ -120,7 +127,6 @@ export function openGraphDatabase(
   configureConnection(db);
 
   try {
-    assertFts5Available();
     initializeWritableGraphDatabase(db, readFileSync(schemaPath(), "utf-8"), options);
     return db;
   } catch (error) {
