@@ -17,6 +17,7 @@ import { migrationOpId, opIdForCandidate, anchorOf } from "../ids.js";
 import { classifyFile, orderForAdoption } from "../classify.js";
 import { parseWikiMarkdown } from "../../markdown/codec.js";
 import { readAuditLog, acceptedOperations, operationLogPath } from "../../operations/audit.js";
+import { applyOperation } from "../../operations/apply.js";
 import { isEntityId } from "../../model/ids.js";
 
 /**
@@ -365,5 +366,88 @@ describe("a file that already carries ids", () => {
       .files.flatMap((file) => file.parsed.entities.map((entry) => entry.entity.id))
       .sort();
     expect(idsSecond).toEqual(idsFirst);
+  });
+
+  it("treats a related_to pair authored under a non-migration opId as already converted", () => {
+    const root = mkdtempSync(join(tmpdir(), "mig-existing-edge-"));
+    const source = "mx_01K4FAM7W8N9R3T5Y6Q2ZBCHJD";
+    const target = "mx_01BX5ZZKBKACTAV9WEVGEMMVRZ";
+    mkdirSync(join(root, "patterns"), { recursive: true });
+    writeFileSync(
+      join(root, "patterns", "a.md"),
+      [
+        "---",
+        "name: a",
+        "edges:",
+        "  - target: patterns/b.md",
+        "    condition: legacy navigation note",
+        "mex:",
+        `  id: ${source}`,
+        "  type: pattern",
+        "  status: promoted",
+        "  revision: 1",
+        "  title: a",
+        "---",
+        "",
+        "# A",
+        "",
+        "Source prose.",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(root, "patterns", "b.md"),
+      [
+        "---",
+        "name: b",
+        "mex:",
+        `  id: ${target}`,
+        "  type: pattern",
+        "  status: promoted",
+        "  revision: 1",
+        "  title: b",
+        "---",
+        "",
+        "# B",
+        "",
+        "Target prose.",
+        "",
+      ].join("\n"),
+    );
+
+    const initialSource = readFileSync(join(root, "patterns", "a.md"), "utf-8");
+    const sourceEntity = parseWikiMarkdown({ path: "patterns/a.md", text: initialSource }).entities[0]!.entity;
+    const authored = applyOperation(
+      {
+        opId: "agent-authored-related-to",
+        type: "add-relation",
+        entityId: source,
+        baseRevision: sourceEntity.revision,
+        baseContentHash: sourceEntity.location.entityContentHash,
+        actor: { kind: "agent", id: "migration-test" },
+        timestamp: "2026-09-06T00:00:00.000Z",
+        payload: {
+          relation: {
+            type: "related_to",
+            target,
+            note: "manually authored note",
+          },
+        },
+      },
+      { scaffoldRoot: root },
+    );
+    expect(authored.ok).toBe(true);
+
+    const sourceBefore = readFileSync(join(root, "patterns", "a.md"), "utf-8");
+    expect(planMigration({ scaffoldRoot: root }).edgesConverted).toBe(0);
+
+    const report = migrateScaffold({ scaffoldRoot: root });
+    expect(report.edgesConverted).toBe(0);
+    expect(report.diagnostics.filter((entry) => entry.code === "DUPLICATE_RELATION")).toEqual([]);
+    expect(readFileSync(join(root, "patterns", "a.md"), "utf-8")).toBe(sourceBefore);
+    expect(acceptedOperations(readAuditLog(root)).map((entry) => entry.opId)).toEqual([
+      "agent-authored-related-to",
+    ]);
+    rmSync(root, { recursive: true, force: true });
   });
 });

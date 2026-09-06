@@ -121,6 +121,7 @@ export function planLegacyEdges(
       );
       continue;
     }
+    const existingRelations = file.parsed.entities.find((entry) => entry.entity.id === source)?.entity.relations ?? [];
 
     edges.forEach((edge, index) => {
       const target = resolveEdgeTarget(outcomes, edge.target);
@@ -136,6 +137,11 @@ export function planLegacyEdges(
         return;
       }
       if (target === source) return;
+      // An operation-id replay is not the only way this conversion can already
+      // be settled: a human or agent may have authored the same canonical pair.
+      // Relation identity is type + target, so preserve its existing note and
+      // metadata rather than retrying under migration's different operation id.
+      if (existingRelations.some((relation) => relation.type === "related_to" && relation.target === target)) return;
       converted.push({
         sourceFile: file.path,
         sourceEntity: source,

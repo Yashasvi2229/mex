@@ -512,16 +512,22 @@ arrives together and the recovering service falls over a second time.
     const project = legacyProject();
     const engine = engineFor(project);
     const plan = await engine.planMigration();
+    // Ambiguity is surfaced as an outcome rather than swallowed. Either a
+    // conversion is planned or an abstention says why not; silence is the failure.
+    expect(
+      plan.data.report.edgesConverted
+        + plan.data.report.edgesAmbiguous
+        + plan.data.report.abstentions.length,
+    ).toBeGreaterThan(0);
     await engine.applyMigration(plan.data);
 
     // The legacy key survives — it is shipped navigation and a shipped drift
     // check reads it — and the relation is additive.
     expect(readFileSync(join(project.scaffoldRoot, "context", "architecture.md"), "utf-8")).toContain("edges:");
 
-    const report = (await engine.planMigration()).data.report;
-    // Ambiguity is surfaced as an outcome rather than swallowed. Either a
-    // conversion happened or an abstention says why not; silence is the failure.
-    expect(report.edgesConverted + report.edgesAmbiguous + report.abstentions.length).toBeGreaterThan(0);
+    // Once the canonical relation exists, a second plan is a genuine no-op
+    // rather than another conversion hidden behind operation-id replay.
+    expect((await engine.planMigration()).data.report.edgesConverted).toBe(0);
   });
 
   it("is idempotent", async () => {

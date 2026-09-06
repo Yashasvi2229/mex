@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { copyFileSync, readdirSync, renameSync, symlinkSync, truncateSync } from "node:fs";
 import { join } from "node:path";
+import { createFingerprint, serializeFingerprint } from "../../../graph/fingerprint.js";
 import { rebuildWikiIndex } from "../../index/rebuild.js";
 import { openWikiIndex } from "../../index/open.js";
 import { WIKI_CORPUS_LIMITS } from "../../index/corpus-policy.js";
@@ -535,6 +536,43 @@ describe("Wiki contract read session", () => {
     future.index.db.pragma("wal_checkpoint(TRUNCATE)");
     future.index.close();
     expect(inspectWikiContractIndex({ scaffoldRoot: scaffold.root, indexPath }).state).toBe("migration_required");
+  });
+
+  it("accepts a graph-produced grounding fingerprint larger than 4 KiB", () => {
+    scaffold = createScaffold();
+    const neighbours = Array.from(
+      { length: 48 },
+      (_, index) => `function:${index.toString(16).padStart(32, "0")}`,
+    );
+    const fingerprint = serializeFingerprint(createFingerprint(
+      ["Identifier", "OpenParenToken", "CloseParenToken"],
+      neighbours,
+    ));
+    expect(Buffer.byteLength(fingerprint, "utf8")).toBeGreaterThan(4_096);
+    scaffold.write("context/wiki.md", fixture().replace("mh:64:9f2a4c6e", fingerprint));
+    const indexPath = join(scaffold.root, "wiki.db");
+    rebuildWikiIndex({
+      scaffoldRoot: scaffold.root,
+      indexPath,
+      now: steppingClock(),
+      resolveGrounding: (grounding) => ({
+        state: "unresolved",
+        health: "ambiguous",
+        node: grounding.node,
+        candidates: ["function:bbbbbbbbbbbbbbbb", "function:cccccccccccccccc"],
+        reason: "Two candidates have equal confidence.",
+      }),
+    });
+
+    expect(inspectWikiContractIndex({ scaffoldRoot: scaffold.root, indexPath })).toMatchObject({
+      state: "fresh",
+    });
+    const session = openWikiContractReadSession({ scaffoldRoot: scaffold.root, indexPath });
+    try {
+      expect(session.get(SOURCE)?.groundings[0]?.fingerprint).toBe(fingerprint);
+    } finally {
+      session.close();
+    }
   });
 
   it("refuses an oversized disposable index before hashing or SQLite materialization", () => {
